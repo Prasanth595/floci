@@ -2,10 +2,13 @@ package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -1310,5 +1313,45 @@ class ElbV2IntegrationTest {
             .then()
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("SubnetNotFound"));
+    }
+
+    /**
+     * Every type takes Subnets or SubnetMappings, so CreateLoadBalancer with neither is refused with
+     * the ValidationError AWS gives for the type, and no load balancer is created.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', nullValues = "NONE", value = {
+        "NONE|At least two subnets in two different Availability Zones must be specified",
+        "application|At least two subnets in two different Availability Zones must be specified",
+        "network|At least one subnet must be specified",
+        "gateway|At least one subnet must be specified"
+    })
+    @Order(76)
+    void createLoadBalancerWithNeitherSubnetsNorSubnetMappingsIsRefused(String type, String message) {
+        String name = "no-subnets-" + (type == null ? "default" : type);
+        RequestSpecification request = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", name)
+                .header("Authorization", AUTH);
+        if (type != null) {
+            request.formParam("Type", type);
+        }
+        request
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo(message));
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("Names.member.1", name)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("LoadBalancerNotFound"));
     }
 }

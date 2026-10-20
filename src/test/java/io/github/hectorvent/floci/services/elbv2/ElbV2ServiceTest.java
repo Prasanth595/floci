@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -34,6 +35,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -97,6 +99,42 @@ class ElbV2ServiceTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.ec2Service = ec2Service;
         stubAlbSubnets(ec2Service);
+    }
+
+    /**
+     * Every type takes Subnets or SubnetMappings, so a balancer with neither is refused with the
+     * message AWS gives for its type, before a subnet is looked up or anything is stored.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', nullValues = "NONE", value = {
+        "NONE|At least two subnets in two different Availability Zones must be specified",
+        "application|At least two subnets in two different Availability Zones must be specified",
+        "network|At least one subnet must be specified",
+        "gateway|At least one subnet must be specified"
+    })
+    void createLoadBalancerWithoutSubnetsIsRefused(String type, String message) {
+        for (List<String> subnets : Arrays.<List<String>>asList(null, List.of())) {
+            AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
+                    "no-subnets", null, type, null, subnets, List.of(), Map.of()));
+            assertEquals("ValidationError", refusal.getErrorCode());
+            assertEquals(message, refusal.getMessage());
+            assertEquals(400, refusal.getHttpStatus());
+        }
+        assertTrue(service.describeLoadBalancers(REGION, null, null, null, null).isEmpty());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
+    }
+
+    /**
+     * A taken name is reported before missing subnets: a CloudFormation stack update finds the
+     * balancer it keeps through DuplicateLoadBalancerName, whatever subnets its template names.
+     */
+    @Test
+    void aTakenNameIsReportedBeforeMissingSubnets() {
+        service.createLoadBalancer(REGION, "taken", "internal", "application", "ipv4", ALB_SUBNETS, List.of(),
+                Map.of());
+        AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
+                "taken", "internal", "application", "ipv4", List.of(), List.of(), Map.of()));
+        assertEquals("DuplicateLoadBalancerName", refusal.getErrorCode());
     }
 
     @ParameterizedTest

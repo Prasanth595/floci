@@ -242,6 +242,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         String id = randomHex16();
         String arn = AwsArnUtils.Arn.of("elasticloadbalancing", region, regionResolver.getAccountId(), "loadbalancer/" + typePrefix + "/" + name + "/" + id).toString();
         String dnsName = name + "-" + id + ".elb." + loadBalancerDnsSuffix();
+        requireSubnets(lbType, subnets);
         String vpcId = resolveSubnetVpcId(region, lbType, subnets);
 
         LoadBalancer lb = new LoadBalancer();
@@ -256,7 +257,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         lb.setType(lbType);
         lb.setIpAddressType(ipType);
         lb.setRegion(region);
-        if (subnets != null) lb.setAvailabilityZones(resolveAvailabilityZones(region, subnets));
+        lb.setAvailabilityZones(resolveAvailabilityZones(region, subnets));
         if (securityGroups != null) lb.setSecurityGroups(new ArrayList<>(securityGroups));
 
         regionLbs.put(arn, lb);
@@ -266,6 +267,20 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             tags.put(arn, new LinkedHashMap<>(initialTags));
         }
         return lb;
+    }
+
+    /**
+     * Every load balancer type takes {@code Subnets} or {@code SubnetMappings}, so a request with
+     * neither is refused before anything is created, with the message AWS gives for the type. This
+     * runs after the duplicate-name check, because a CloudFormation stack update finds the balancer
+     * it keeps through DuplicateLoadBalancerName, whatever subnets its template names.
+     */
+    private static void requireSubnets(String lbType, List<String> subnets) {
+        if (subnets == null || subnets.isEmpty()) {
+            throw new AwsException("ValidationError", "application".equals(lbType)
+                    ? "At least two subnets in two different Availability Zones must be specified"
+                    : "At least one subnet must be specified", 400);
+        }
     }
 
     /**
