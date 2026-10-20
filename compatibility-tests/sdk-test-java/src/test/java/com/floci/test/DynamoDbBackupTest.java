@@ -38,12 +38,16 @@ class DynamoDbBackupTest {
         for (String table : new String[] {TABLE_NAME, RESTORED_TABLE_NAME}) {
             try {
                 ddb.deleteTable(DeleteTableRequest.builder().tableName(table).build());
-            } catch (Exception ignored) {}
+            } catch (ResourceNotFoundException ignored) {
+                // The restore test did not run.
+            }
         }
         if (backupArn != null) {
             try {
                 ddb.deleteBackup(DeleteBackupRequest.builder().backupArn(backupArn).build());
-            } catch (Exception ignored) {}
+            } catch (BackupNotFoundException ignored) {
+                // The delete test removed it before it failed.
+            }
         }
         if (ddb != null) {
             ddb.close();
