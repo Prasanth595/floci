@@ -172,4 +172,6 @@ account, region or partition is `ResourceNotFoundException` even when its id mat
 resource. Rule associations carry no ARN and the AWS-managed firewall domain lists are not
 stored, so neither is taggable here. A tag outside the modelled `Tag` shape (key 1-128
 characters, value 0-256) is `InvalidTagException` on `TagResource`, and the create
-operation's own parameter error on create. Per-resource tag-count limits are not enforced.
+operation's own parameter error on create. A request carrying more than the modelled 200
+tags or tag keys is `InvalidParameterException` (`ValidationException` on
+`CreateFirewallDomainList`). A per-resource total is not modelled, so none is enforced.

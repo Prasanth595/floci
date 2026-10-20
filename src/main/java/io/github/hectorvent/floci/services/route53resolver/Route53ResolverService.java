@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -480,6 +482,7 @@ public class Route53ResolverService {
         if (tags == null || tags.isNull()) {
             throw new AwsException(INVALID_PARAMETER, "Tags is required", 400);
         }
+        requireAtMostPerRequest(tags, "Tags", INVALID_PARAMETER);
         JsonNode validated = validatedTags(tags, "InvalidTagException");
         putTags(requireTaggable(arn, region, accountId), validated);
     }
@@ -488,6 +491,7 @@ public class Route53ResolverService {
         if (tagKeys == null || !tagKeys.isArray()) {
             throw new AwsException(INVALID_PARAMETER, "TagKeys is required", 400);
         }
+        requireAtMostPerRequest(tagKeys, "TagKeys", INVALID_PARAMETER);
         for (JsonNode key : tagKeys) {
             if (!key.isTextual()) {
                 throw new AwsException(INVALID_PARAMETER, "TagKeys must be a list of strings", 400);
@@ -503,8 +507,10 @@ public class Route53ResolverService {
     }
 
     /**
-     * One page of a resource's tags as modeled {@code Tag} entries. {@code NextToken} is the
-     * offset of the next tag; {@code MaxResults} defaults to the modeled 100.
+     * One page of a resource's tags as modeled {@code Tag} entries, paged by
+     * {@link Pagination#paginate} on the tag key; {@code MaxResults} defaults to the modeled 100.
+     * {@code MaxResults} arrives as a JSON value, so it is type-checked here rather than parsed
+     * from a string: {@code 1.5}, {@code true} and {@code "1"} are not the modeled integer.
      *
      * <p>The stored tag node is copied under the monitor {@link #tagResource} and
      * {@link #untagResource} mutate it under, so a concurrent tag change can neither break the
@@ -513,12 +519,9 @@ public class Route53ResolverService {
     public ObjectNode listTagsForResource(String arn, JsonNode maxResults, String nextToken,
                                           String region, String accountId) {
         boolean absent = maxResults == null || maxResults.isNull();
-        if (!absent && (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt())) {
+        if (!absent && (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt()
+                || maxResults.intValue() < 1 || maxResults.intValue() > 100)) {
             throw new AwsException(INVALID_PARAMETER, "MaxResults must be an integer between 1 and 100", 400);
-        }
-        int limit = absent ? 100 : maxResults.intValue();
-        if (limit < 1 || limit > 100) {
-            throw new AwsException(INVALID_PARAMETER, "MaxResults must be between 1 and 100", 400);
         }
         ObjectNode snapshot;
         synchronized (this) {
@@ -529,25 +532,16 @@ public class Route53ResolverService {
         if (snapshot != null) {
             snapshot.fields().forEachRemaining(all::add);
         }
-        int start = 0;
-        if (nextToken != null) {
-            try {
-                start = Integer.parseInt(nextToken);
-            } catch (NumberFormatException e) {
-                start = -1;
-            }
-            if (start < 0 || start > all.size()) {
-                throw new AwsException("InvalidNextTokenException", "Invalid NextToken: " + nextToken, 400);
-            }
-        }
-        int end = Math.min(all.size(), start + limit);
+        PaginatedResult<Map.Entry<String, JsonNode>> paged = Pagination.paginate(all, Map.Entry::getKey,
+                absent ? 100 : maxResults.intValue(), nextToken, "tags",
+                token -> new AwsException("InvalidNextTokenException", "Invalid NextToken: " + token, 400));
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode page = result.putArray("Tags");
-        for (Map.Entry<String, JsonNode> tag : all.subList(start, end)) {
+        for (Map.Entry<String, JsonNode> tag : paged.items()) {
             page.addObject().put("Key", tag.getKey()).set("Value", tag.getValue());
         }
-        if (end < all.size()) {
-            result.put("NextToken", String.valueOf(end));
+        if (paged.nextToken() != null) {
+            result.put("NextToken", paged.nextToken());
         }
         return result;
     }
@@ -614,6 +608,7 @@ public class Route53ResolverService {
         if (!tags.isArray()) {
             throw new AwsException(errorCode, "Tags must be a list", 400);
         }
+        requireAtMostPerRequest(tags, "Tags", errorCode);
         for (JsonNode tag : tags) {
             if (!tag.path("Key").isTextual() || !tag.path("Value").isTextual()) {
                 throw new AwsException(errorCode, "Each tag needs a string Key and a string Value.", 400);
@@ -626,6 +621,17 @@ public class Route53ResolverService {
             }
         }
         return tags;
+    }
+
+    /**
+     * The model caps {@code TagList} and {@code TagKeyList} at 200 entries per request. That is
+     * the only tag-count limit the model states; a per-resource total is not modeled, so none
+     * is enforced.
+     */
+    private static void requireAtMostPerRequest(JsonNode list, String name, String errorCode) {
+        if (list.isArray() && list.size() > 200) {
+            throw new AwsException(errorCode, name + " must contain at most 200 entries", 400);
+        }
     }
 
     private void putTags(ObjectNode resource, JsonNode tags) {

@@ -6,6 +6,9 @@ import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
@@ -146,9 +149,54 @@ class Route53ResolverTaggingIntegrationTest {
                 .body("__type", equalTo("InvalidParameterException"));
         }
 
-        call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\",\"NextToken\":\"bogus\"}")
+        // The token is an opaque cursor, not an offset a caller can forge.
+        for (String forged : new String[] {"bogus", "1", "0"}) {
+            call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\",\"NextToken\":\"" + forged + "\"}")
+                .statusCode(400)
+                .body("__type", equalTo("InvalidNextTokenException"));
+        }
+    }
+
+    @Test
+    void tagListsAreCappedAt200EntriesPerRequest() {
+        String arn = createEndpoint("[]");
+        call("TagResource", "{\"ResourceArn\":\"" + arn + "\",\"Tags\":" + tags(200) + "}").statusCode(200);
+        call("TagResource", "{\"ResourceArn\":\"" + arn + "\",\"Tags\":" + tags(201) + "}")
             .statusCode(400)
-            .body("__type", equalTo("InvalidNextTokenException"));
+            .body("__type", equalTo("InvalidParameterException"));
+        call("UntagResource", "{\"ResourceArn\":\"" + arn + "\",\"TagKeys\":" + keys(201) + "}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
+        listTags(arn).statusCode(200).body("Tags", hasSize(100));
+        call("UntagResource", "{\"ResourceArn\":\"" + arn + "\",\"TagKeys\":" + keys(200) + "}").statusCode(200);
+        listTags(arn).statusCode(200).body("Tags", empty());
+
+        createEndpoint(tags(200));
+        call("CreateResolverEndpoint", """
+                {"Name":"over","Direction":"OUTBOUND","SecurityGroupIds":["sg-1"],
+                 "IpAddresses":[{"SubnetId":"subnet-a"},{"SubnetId":"subnet-b"}],"Tags":%s}""".formatted(tags(201)))
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
+        call("CreateResolverRule", """
+                {"Name":"ok","RuleType":"SYSTEM","DomainName":"ok.example","Tags":%s}""".formatted(tags(200)))
+            .statusCode(200);
+        call("CreateResolverRule", """
+                {"Name":"over","RuleType":"SYSTEM","DomainName":"over.example","Tags":%s}""".formatted(tags(201)))
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
+        call("CreateFirewallDomainList", "{\"Name\":\"ok\",\"Tags\":" + tags(200) + "}").statusCode(200);
+        call("CreateFirewallDomainList", "{\"Name\":\"over\",\"Tags\":" + tags(201) + "}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    private static String tags(int n) {
+        return IntStream.range(0, n).mapToObj(i -> "{\"Key\":\"k" + i + "\",\"Value\":\"v\"}")
+            .collect(Collectors.joining(",", "[", "]"));
+    }
+
+    private static String keys(int n) {
+        return IntStream.range(0, n).mapToObj(i -> "\"k" + i + "\"").collect(Collectors.joining(",", "[", "]"));
     }
 
     @Test
