@@ -39,7 +39,33 @@ class RdsStorageTypeTest {
                         .dbInstance().storageType()).isEqualTo("gp2");
                 assertThat(rds.describeValidDBInstanceModifications(r -> r.dbInstanceIdentifier(id))
                         .validDBInstanceModificationsMessage().storage())
-                        .extracting(option -> option.storageType()).containsExactly("gp2", "gp3");
+                        .extracting(option -> option.storageType()).containsExactly("gp2", "gp3", "io1", "io2");
+            } finally {
+                remove(rds, id);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"io1", "io2"})
+    void provisionedTypesRoundTripWithoutIops(String storageType) {
+        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Disposable emulator storage metadata fixtures");
+        String id = TestFixtures.uniqueName("rds-provisioned");
+        try (RdsClient rds = TestFixtures.rdsClient()) {
+            try {
+                DBInstance created = rds.createDBInstance(r -> r.dbInstanceIdentifier(id).engine("postgres")
+                        .dbInstanceClass("db.t3.micro").masterUsername("admin").masterUserPassword("password123")
+                        .allocatedStorage(100).storageType(storageType)).dbInstance();
+                assertThat(created.storageType()).isEqualTo(storageType);
+                assertThat(created.iops()).isNull();
+                assertThat(rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id).storageType("gp3"))
+                        .dbInstance().storageType()).isEqualTo("gp3");
+                assertThat(rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id).storageType(storageType))
+                        .dbInstance().storageType()).isEqualTo(storageType);
+                DBInstance retained = rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id).backupRetentionPeriod(2))
+                        .dbInstance();
+                assertThat(retained.storageType()).isEqualTo(storageType);
+                assertThat(retained.iops()).isNull();
             } finally {
                 remove(rds, id);
             }

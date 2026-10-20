@@ -3413,7 +3413,8 @@ public class RdsService implements Resettable, ResourceProvider {
         List<SizeRange> sizes = smallestIncrease <= maximum
                 ? List.of(new SizeRange(current, current), new SizeRange(smallestIncrease, maximum))
                 : List.of(new SizeRange(current, current));
-        return List.of(new StorageModification("gp2", sizes), new StorageModification("gp3", sizes));
+        return List.of(new StorageModification("gp2", sizes), new StorageModification("gp3", sizes),
+                new StorageModification("io1", sizes), new StorageModification("io2", sizes));
     }
 
     // ── Stop, start and reboot ────────────────────────────────────────────────

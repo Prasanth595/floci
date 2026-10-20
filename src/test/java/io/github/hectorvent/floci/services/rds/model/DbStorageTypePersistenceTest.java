@@ -39,15 +39,17 @@ class DbStorageTypePersistenceTest {
                 new TypeReference<Map<String, DbInstance>>() {});
         StorageBackend<String, DbSnapshot> snapshots = first.create("rds", "rds-snapshots.json",
                 new TypeReference<Map<String, DbSnapshot>>() {});
-        DbInstance instance = new DbInstance();
-        instance.setDbInstanceIdentifier("storage-db");
-        instance.setStorageType("gp3");
-        DbSnapshot snapshot = new DbSnapshot();
-        snapshot.setDbSnapshotIdentifier("storage-snapshot");
-        snapshot.setStorageType("gp3");
         try {
-            instances.put("us-east-1/storage-db", instance);
-            snapshots.put("us-east-1/storage-snapshot", snapshot);
+            for (String storageType : new String[]{"gp3", "io1", "io2"}) {
+                DbInstance instance = new DbInstance();
+                instance.setDbInstanceIdentifier("storage-db-" + storageType);
+                instance.setStorageType(storageType);
+                DbSnapshot snapshot = new DbSnapshot();
+                snapshot.setDbSnapshotIdentifier("storage-snapshot-" + storageType);
+                snapshot.setStorageType(storageType);
+                instances.put("us-east-1/storage-db-" + storageType, instance);
+                snapshots.put("us-east-1/storage-snapshot-" + storageType, snapshot);
+            }
         } finally {
             first.shutdownAll();
         }
@@ -57,8 +59,12 @@ class DbStorageTypePersistenceTest {
                     new TypeReference<Map<String, DbInstance>>() {});
             StorageBackend<String, DbSnapshot> restoredSnapshots = second.create("rds", "rds-snapshots.json",
                     new TypeReference<Map<String, DbSnapshot>>() {});
-            assertEquals("gp3", restoredInstances.get("us-east-1/storage-db").orElseThrow().getStorageType());
-            assertEquals("gp3", restoredSnapshots.get("us-east-1/storage-snapshot").orElseThrow().getStorageType());
+            for (String storageType : new String[]{"gp3", "io1", "io2"}) {
+                assertEquals(storageType, restoredInstances.get("us-east-1/storage-db-" + storageType)
+                        .orElseThrow().getStorageType());
+                assertEquals(storageType, restoredSnapshots.get("us-east-1/storage-snapshot-" + storageType)
+                        .orElseThrow().getStorageType());
+            }
         } finally {
             second.shutdownAll();
         }

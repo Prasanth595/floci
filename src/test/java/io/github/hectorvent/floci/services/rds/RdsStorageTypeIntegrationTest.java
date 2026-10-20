@@ -15,6 +15,7 @@ import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
@@ -48,6 +49,36 @@ class RdsStorageTypeIntegrationTest {
     private static void delete(String id) {
         query("DeleteDBInstance").formParam("DBInstanceIdentifier", id)
                 .formParam("SkipFinalSnapshot", "true").post("/");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"io1", "io2"})
+    void provisionedTypesRoundTripOnCreateAndModifyWithoutIops(String storageType) {
+        String createdId = "storage-provisioned-new-" + storageType;
+        String changedId = "storage-provisioned-change-" + storageType;
+        try {
+            create(changedId).formParam("StorageType", "gp2").post("/").then().statusCode(200);
+            Response created = create(createdId).formParam("StorageType", storageType).post("/");
+            Response changed = query("ModifyDBInstance").formParam("DBInstanceIdentifier", changedId)
+                    .formParam("StorageType", storageType).post("/");
+            assertAll(() -> assertEquals(200, created.statusCode(), created.asString()),
+                    () -> assertEquals(storageType, type(created, "CreateDBInstance")),
+                    () -> assertEquals(200, changed.statusCode(), changed.asString()),
+                    () -> assertEquals(storageType, type(changed, "ModifyDBInstance")));
+            Response omitted = query("ModifyDBInstance").formParam("DBInstanceIdentifier", changedId)
+                    .formParam("BackupRetentionPeriod", "3").post("/");
+            assertEquals(storageType, type(omitted, "ModifyDBInstance"));
+            for (String id : List.of(createdId, changedId)) {
+                Response read = query("DescribeDBInstances").formParam("DBInstanceIdentifier", id).post("/");
+                String path = "DescribeDBInstancesResponse.DescribeDBInstancesResult.DBInstances.DBInstance.";
+                assertEquals(200, read.statusCode());
+                assertEquals(storageType, read.xmlPath().getString(path + "StorageType"));
+                assertTrue(read.xmlPath().getList(path + "Iops").isEmpty());
+            }
+        } finally {
+            delete(createdId);
+            delete(changedId);
+        }
     }
 
     @Test
@@ -107,8 +138,9 @@ class RdsStorageTypeIntegrationTest {
             delete(existing);
         }
     }
-    @Test
-    void snapshotsCopiesAndDerivedInstancesKeepTheirStorageMetadata() {
+    @ParameterizedTest
+    @ValueSource(strings = {"gp3", "io1", "io2"})
+    void snapshotsCopiesAndDerivedInstancesKeepTheirStorageMetadata(String storageType) {
         String source = "storage-type-source";
         String snapshot = "storage-type-snapshot";
         String copied = "storage-type-snapshot-copy";
@@ -116,31 +148,31 @@ class RdsStorageTypeIntegrationTest {
         String replica = "storage-type-replica";
         String pitr = "storage-type-pitr";
         try {
-            create(source).formParam("StorageType", "gp3").formParam("BackupRetentionPeriod", "2")
+            create(source).formParam("StorageType", storageType).formParam("BackupRetentionPeriod", "2")
                     .post("/").then().statusCode(200);
             Response taken = query("CreateDBSnapshot").formParam("DBSnapshotIdentifier", snapshot)
                     .formParam("DBInstanceIdentifier", source).post("/");
-            assertEquals("gp3", taken.xmlPath().getString(
+            assertEquals(storageType, taken.xmlPath().getString(
                     "CreateDBSnapshotResponse.CreateDBSnapshotResult.DBSnapshot.StorageType"));
             Response copy = query("CopyDBSnapshot").formParam("SourceDBSnapshotIdentifier", snapshot)
                     .formParam("TargetDBSnapshotIdentifier", copied).post("/");
-            assertEquals("gp3", copy.xmlPath().getString(
+            assertEquals(storageType, copy.xmlPath().getString(
                     "CopyDBSnapshotResponse.CopyDBSnapshotResult.DBSnapshot.StorageType"));
             Response restore = query("RestoreDBInstanceFromDBSnapshot").formParam("DBSnapshotIdentifier", copied)
                     .formParam("DBInstanceIdentifier", restored).post("/");
             assertEquals(200, restore.statusCode());
-            assertEquals("gp3", type(restore, "RestoreDBInstanceFromDBSnapshot"));
+            assertEquals(storageType, type(restore, "RestoreDBInstanceFromDBSnapshot"));
             Response readReplica = query("CreateDBInstanceReadReplica").formParam("SourceDBInstanceIdentifier", source)
                     .formParam("DBInstanceIdentifier", replica).post("/");
             assertEquals(200, readReplica.statusCode());
-            assertEquals("gp3", type(readReplica, "CreateDBInstanceReadReplica"));
+            assertEquals(storageType, type(readReplica, "CreateDBInstanceReadReplica"));
             Response point = query("RestoreDBInstanceToPointInTime").formParam("SourceDBInstanceIdentifier", source)
                     .formParam("TargetDBInstanceIdentifier", pitr).formParam("UseLatestRestorableTime", "true").post("/");
             assertEquals(200, point.statusCode());
-            assertEquals("gp3", type(point, "RestoreDBInstanceToPointInTime"));
+            assertEquals(storageType, type(point, "RestoreDBInstanceToPointInTime"));
             Response options = query("DescribeValidDBInstanceModifications")
                     .formParam("DBInstanceIdentifier", source).post("/");
-            assertEquals(List.of("gp2", "gp3"), options.xmlPath().getList(
+            assertEquals(List.of("gp2", "gp3", "io1", "io2"), options.xmlPath().getList(
                     "DescribeValidDBInstanceModificationsResponse.DescribeValidDBInstanceModificationsResult."
                     + "ValidDBInstanceModificationsMessage.Storage.ValidStorageOptions.StorageType"));
         } finally {
@@ -159,7 +191,7 @@ class RdsStorageTypeIntegrationTest {
         try {
             Response created = create(id).post("/");
             assertEquals("gp2", type(created, "CreateDBInstance"));
-            for (String invalid : List.of("", "GP3", "io1", "io2", "standard")) {
+            for (String invalid : List.of("", "GP3", "standard")) {
                 Response refused = query("ModifyDBInstance").formParam("DBInstanceIdentifier", id)
                         .formParam("StorageType", invalid).formParam("BackupRetentionPeriod", "9").post("/");
                 assertEquals(400, refused.statusCode(), invalid);
@@ -195,8 +227,9 @@ class RdsStorageTypeIntegrationTest {
         }
     }
 
-    @Test
-    void explicitTypesOverrideDerivedInstanceDefaults() {
+    @ParameterizedTest
+    @ValueSource(strings = {"gp2", "io1", "io2"})
+    void explicitTypesOverrideDerivedInstanceDefaults(String storageType) {
         String source = "storage-override-source";
         String snapshot = "storage-override-snapshot";
         String restore = "storage-override-restored";
@@ -208,18 +241,18 @@ class RdsStorageTypeIntegrationTest {
             query("CreateDBSnapshot").formParam("DBSnapshotIdentifier", snapshot)
                     .formParam("DBInstanceIdentifier", source).post("/").then().statusCode(200);
             Response restored = query("RestoreDBInstanceFromDBSnapshot").formParam("DBSnapshotIdentifier", snapshot)
-                    .formParam("DBInstanceIdentifier", restore).formParam("StorageType", "gp2").post("/");
+                    .formParam("DBInstanceIdentifier", restore).formParam("StorageType", storageType).post("/");
             Response replicated = query("CreateDBInstanceReadReplica").formParam("SourceDBInstanceIdentifier", source)
-                    .formParam("DBInstanceIdentifier", replica).formParam("StorageType", "gp2").post("/");
+                    .formParam("DBInstanceIdentifier", replica).formParam("StorageType", storageType).post("/");
             Response point = query("RestoreDBInstanceToPointInTime").formParam("SourceDBInstanceIdentifier", source)
                     .formParam("TargetDBInstanceIdentifier", pitr).formParam("UseLatestRestorableTime", "true")
-                    .formParam("StorageType", "gp2").post("/");
+                    .formParam("StorageType", storageType).post("/");
             assertAll(() -> assertEquals(200, restored.statusCode()),
-                    () -> assertEquals("gp2", type(restored, "RestoreDBInstanceFromDBSnapshot")),
+                    () -> assertEquals(storageType, type(restored, "RestoreDBInstanceFromDBSnapshot")),
                     () -> assertEquals(200, replicated.statusCode()),
-                    () -> assertEquals("gp2", type(replicated, "CreateDBInstanceReadReplica")),
+                    () -> assertEquals(storageType, type(replicated, "CreateDBInstanceReadReplica")),
                     () -> assertEquals(200, point.statusCode()),
-                    () -> assertEquals("gp2", type(point, "RestoreDBInstanceToPointInTime")));
+                    () -> assertEquals(storageType, type(point, "RestoreDBInstanceToPointInTime")));
         } finally {
             delete(pitr);
             delete(replica);

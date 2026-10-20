@@ -207,9 +207,9 @@ public record DbInstanceSettings(Boolean storageEncrypted,
     }
 
     public void validateStorageType() {
-        if (storageType != null && !Set.of("gp2", "gp3").contains(storageType)) {
+        if (storageType != null && !Set.of("gp2", "gp3", "io1", "io2").contains(storageType)) {
             throw new AwsException("StorageTypeNotSupported",
-                    "Floci supports the gp2 and gp3 storage types for DB instances.", 400);
+                    "Floci supports the gp2, gp3, io1 and io2 storage types for DB instances.", 400);
         }
     }
 
