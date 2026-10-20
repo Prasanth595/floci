@@ -297,7 +297,9 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
      * An update that changes the instance's MetadataOptions in place, then fails on a later
      * resource, rolls the instance back; the stack ends rolled back, not stuck. That holds both for
      * an update that turns the token requirement off and for one that only declares the default
-     * the instance already has, which changes no EC2 setting.
+     * the instance already has, which changes no EC2 setting. For that second row the options are
+     * {@code optional} either way; what tells a working rollback apart is the stack ending
+     * {@code UPDATE_ROLLBACK_COMPLETE} rather than {@code UPDATE_ROLLBACK_FAILED}.
      */
     @ParameterizedTest
     @CsvSource({"required,optional,required", "'',optional,optional"})
