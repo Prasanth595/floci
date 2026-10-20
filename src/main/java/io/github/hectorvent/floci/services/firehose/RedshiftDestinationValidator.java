@@ -121,7 +121,7 @@ final class RedshiftDestinationValidator {
                 checkLength(copy.getCopyOptions(), 0, 10240, shape, "copyCommand.copyOptions", violations);
                 if (RedshiftCopySql.hasStatementSeparator(copy.getCopyOptions())) {
                     violations.add(violation(shape, "copyCommand.copyOptions",
-                            "Member must not contain a statement separator outside a quoted value"));
+                            "Member must not contain ';', '$', '--' or '/*' outside a quoted value"));
                 }
             }
             if (copy.getDataTableColumns() != null) {

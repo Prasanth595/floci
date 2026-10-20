@@ -137,8 +137,9 @@ model: required members, length and pattern limits, and the rule that `SNAPPY` a
 intermediate S3 location. `S3BackupMode` can be switched on after creation but not off again.
 
 `DataTableName` and `DataTableColumns` must be identifiers Redshift would read as such: a table name with an optional
-schema, and a comma-separated list of column names. `CopyOptions` must not carry a second statement, so a `;` outside a
-quoted value is refused, except one closing `;` at the very end (the API reference's own example,
+schema, and a comma-separated list of column names. `CopyOptions` must not carry a second statement, so outside a
+quoted value a `;`, a `$` (dollar quoting is never needed) and the comment markers `--` and `/*` are refused, as is an
+unterminated quote. One closing `;` at the very end is the exception (the API reference's own example,
 `delimiter '\t' lzop;`, is accepted). Create and update reject anything else.
 
 This release accepts and stores the destination and stages each batch in the intermediate S3 location, like an

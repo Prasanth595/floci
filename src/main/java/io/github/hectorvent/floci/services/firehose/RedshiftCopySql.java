@@ -6,8 +6,8 @@ import java.util.regex.Pattern;
  * Rules for the {@code DataTableName}, {@code DataTableColumns} and {@code CopyOptions} members of a Redshift
  * destination's {@code CopyCommand}. AWS pastes these members into the {@code COPY} statement as given, so Floci
  * does the same and lets Redshift's own identifier folding apply: an unquoted name is lowercased, a quoted one is
- * kept. Instead of quoting, it refuses names that are not identifiers and any statement separator outside a quoted
- * literal, which is what keeps the text from carrying a second statement. The separator scan follows PostgreSQL's own
+ * kept. Instead of quoting, it refuses names that are not identifiers and any {@code ;}, {@code $} or comment marker
+ * outside a quoted literal, which is what keeps the text from carrying a second statement. The separator scan follows PostgreSQL's own
  * quoting rules rather than a simplified one, because the statement is later run in simple query mode, where
  * PostgreSQL executes every {@code ;}-separated statement it receives.
  */
