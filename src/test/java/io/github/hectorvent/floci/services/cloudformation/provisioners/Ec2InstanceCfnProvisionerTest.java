@@ -778,7 +778,7 @@ class Ec2InstanceCfnProvisionerTest {
         assertEquals(1, restored.getHttpPutResponseHopLimit());
         assertEquals(i1.effectiveMetadataOptions().getHttpEndpoint(), restored.getHttpEndpoint());
         assertEquals(declared, declarations(r));
-        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        assertFalse(r.getAttributes().containsKey("__FlociPriorInPlaceUpdate"));
     }
 
     /**
@@ -804,7 +804,7 @@ class Ec2InstanceCfnProvisionerTest {
                 ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
         verify(ec2, times(2)).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), applied.capture());
         assertEquals("required", applied.getAllValues().get(1).getHttpTokens());
-        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        assertFalse(r.getAttributes().containsKey("__FlociPriorInPlaceUpdate"));
     }
 
     /** A tag change in the same update has no rollback either, so the options go back and the rollback reports it. */
@@ -850,21 +850,45 @@ class Ec2InstanceCfnProvisionerTest {
         verify(ec2, never()).modifyInstanceMetadataOptions(any(), any(), any());
     }
 
-    /** An update that leaves the options as they are saves nothing to put back. */
+    /**
+     * An update that declares an option the instance already has changes no EC2 setting, only the
+     * declaration record. A rollback puts the record back and reports the update undone, without
+     * touching the instance.
+     */
     @Test
-    void anInPlaceUpdateThatKeepsTheMetadataOptionsSavesNoCopy() throws Exception {
+    void aRolledBackUpdateThatOnlyDeclaresTheCurrentOptionsPutsTheRecordBack() throws Exception {
         launchRequiringTokens();
         StackResource r = resource("Server");
-        String template = """
+        provisioner.provision(r, props("""
                 {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
-                """;
-        provisioner.provision(r, props(template), ctx(null));
+                """), ctx(null));
+        Map<String, String> declared = declarations(r);
 
-        provisioner.provision(r, props(template), ctx("i-1"));
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required", "HttpPutResponseHopLimit": 1}}
+                """), ctx("i-1"));
+        assertTrue(provisioner.rollbackUpdate(r));
 
-        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
-        assertFalse(provisioner.rollbackUpdate(r));
+        assertEquals(declared, declarations(r));
+        assertFalse(r.getAttributes().containsKey("__FlociPriorInPlaceUpdate"));
         verify(ec2, never()).modifyInstanceMetadataOptions(any(), any(), any());
+    }
+
+    /**
+     * A MetadataOptions member given as an empty string is a value, not an omission, and EC2 refuses
+     * it, as it refuses any value outside the allowed set.
+     */
+    @Test
+    void aBlankMetadataOptionFailsBeforeTheInstanceLaunches() throws Exception {
+        StackResource r = resource("Server");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": ""}}
+                """), ctx(null)));
+
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        verify(ec2, never()).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any());
     }
 
     @Test
@@ -879,15 +903,15 @@ class Ec2InstanceCfnProvisionerTest {
                 """;
 
         provisioner.provision(r, props(optional), ctx("i-1"));
-        assertTrue(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        assertTrue(r.getAttributes().containsKey("__FlociPriorInPlaceUpdate"));
         provisioner.completeUpdate(r);
-        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        assertFalse(r.getAttributes().containsKey("__FlociPriorInPlaceUpdate"));
         i1.getMetadataOptions().setHttpTokens("optional");
 
         provisioner.provision(r, props(optional.replace("optional", "required")), ctx("i-1"));
-        assertTrue(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        assertTrue(r.getAttributes().containsKey("__FlociPriorInPlaceUpdate"));
         provisioner.clearUpdate(r);
-        assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
+        assertFalse(r.getAttributes().containsKey("__FlociPriorInPlaceUpdate"));
     }
 
     /**

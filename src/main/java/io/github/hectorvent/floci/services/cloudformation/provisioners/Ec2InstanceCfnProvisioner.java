@@ -49,10 +49,11 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     // The __FlociDeclared records as they stood before a replacing update, for rollbackUpdate to put
     // back with the instance it restores; ReplacementCleanup leaves __Floci attributes alone.
     private static final String PRIOR_DECLARATIONS_ATTR = "__FlociPriorDeclarations";
-    // What an update that kept the instance changed its MetadataOptions from: the options it had,
-    // its region, its __FlociDeclared records, and whether that update also changed something with
-    // no rollback here (type, groups, user data, profile, tags), for rollbackUpdate to put back.
-    private static final String PRIOR_METADATA_OPTIONS_ATTR = "__FlociPriorMetadataOptions";
+    // What an update that kept the instance changed it from: its region, its MetadataOptions if the
+    // update changed them, its __FlociDeclared records, and whether the update also changed
+    // something with no rollback here (type, groups, user data, profile, tags), for rollbackUpdate
+    // to put back.
+    private static final String PRIOR_IN_PLACE_ATTR = "__FlociPriorInPlaceUpdate";
     private static final String DECLARED_PREFIX = "__FlociDeclared";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -151,12 +152,13 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             boolean otherChange = reconcileMutableProperties(region, prior, instanceType, securityGroupIds,
                     userData, iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
             boolean tagsChanged = Ec2Tags.reconcile(ec2Service, region, prior.getInstanceId(), desiredTags);
-            r.getAttributes().remove(PRIOR_METADATA_OPTIONS_ATTR);
+            // Saved on every update that keeps the instance, also one that changes no EC2 setting but
+            // only what is declared, so a rollback can always put the declarations back.
+            r.getAttributes().put(PRIOR_IN_PLACE_ATTR, priorInPlaceUpdate(region,
+                    metadataOptionsChange ? optionsBefore : null, attributesBefore, otherChange || tagsChanged));
             if (metadataOptionsChange) {
                 // The last change the step makes: when an earlier one fails, the engine restores the
                 // resource as it was, without this copy, so the options must not have changed yet.
-                r.getAttributes().put(PRIOR_METADATA_OPTIONS_ATTR,
-                        priorMetadataOptions(region, optionsBefore, attributesBefore, otherChange || tagsChanged));
                 ec2Service.modifyInstanceMetadataOptions(region, prior.getInstanceId(), metadataOptionsToApply);
             }
             Instance reconciled = findInstance(region, prior.getInstanceId());
@@ -183,7 +185,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        r.getAttributes().remove(PRIOR_METADATA_OPTIONS_ATTR);
+        r.getAttributes().remove(PRIOR_IN_PLACE_ATTR);
         if (ctx.isUpdate()) {
             r.getAttributes().put(PRIOR_DECLARATIONS_ATTR, declarations(attributesBefore));
         }
@@ -446,14 +448,14 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         resource.getAttributes().remove(PRIOR_DECLARATIONS_ATTR);
-        resource.getAttributes().remove(PRIOR_METADATA_OPTIONS_ATTR);
+        resource.getAttributes().remove(PRIOR_IN_PLACE_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(PRIOR_DECLARATIONS_ATTR);
-        resource.getAttributes().remove(PRIOR_METADATA_OPTIONS_ATTR);
+        resource.getAttributes().remove(PRIOR_IN_PLACE_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
@@ -482,20 +484,22 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         }
         if (replaced) {
             restoreSavedDeclarations(resource);
-            resource.getAttributes().remove(PRIOR_METADATA_OPTIONS_ATTR);
+            resource.getAttributes().remove(PRIOR_IN_PLACE_ATTR);
         }
         resource.getAttributes().remove(PRIOR_DECLARATIONS_ATTR);
-        return replaced || restoreMetadataOptions(resource);
+        return replaced || restoreInPlaceUpdate(resource);
     }
 
     /**
-     * Puts back the MetadataOptions an update that kept the instance changed, and their record, so
-     * a stack rollback does not leave the instance with options the stack no longer declares. The
-     * rollback counts as done only when nothing else changed in that update: the instance type,
-     * groups, user data, profile and tags have no rollback here, and the stack says so for them.
+     * Undoes an update that kept the instance: puts back the MetadataOptions it changed, if it
+     * changed any, and the instance's {@code __FlociDeclared} records, so a stack rollback leaves
+     * neither options nor declarations the stack no longer has. The rollback counts as done only
+     * when nothing else changed in that update: the instance type, groups, user data, profile and
+     * tags have no rollback here, and the stack says so for them. An update that changed no EC2
+     * setting at all, only what is declared, is undone in full.
      */
-    private boolean restoreMetadataOptions(StackResource resource) {
-        String saved = resource.getAttributes().get(PRIOR_METADATA_OPTIONS_ATTR);
+    private boolean restoreInPlaceUpdate(StackResource resource) {
+        String saved = resource.getAttributes().get(PRIOR_IN_PLACE_ATTR);
         if (saved == null) {
             return false;
         }
@@ -503,36 +507,43 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         try {
             prior = MAPPER.readTree(saved);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Could not read the saved metadata options of " + resource.getLogicalId(), e);
+            throw new IllegalStateException("Could not read the saved in-place update of " + resource.getLogicalId(), e);
         }
         JsonNode options = prior.path("options");
-        LaunchTemplateData.MetadataOptions restored = new LaunchTemplateData.MetadataOptions();
-        restored.setHttpTokens(options.path("HttpTokens").asText(null));
-        restored.setHttpEndpoint(options.path("HttpEndpoint").asText(null));
-        restored.setHttpProtocolIpv6(options.path("HttpProtocolIpv6").asText(null));
-        restored.setInstanceMetadataTags(options.path("InstanceMetadataTags").asText(null));
-        if (options.path("HttpPutResponseHopLimit").isInt()) {
-            restored.setHttpPutResponseHopLimit(options.path("HttpPutResponseHopLimit").intValue());
+        if (options.isObject()) {
+            LaunchTemplateData.MetadataOptions restored = new LaunchTemplateData.MetadataOptions();
+            restored.setHttpTokens(options.path("HttpTokens").asText(null));
+            restored.setHttpEndpoint(options.path("HttpEndpoint").asText(null));
+            restored.setHttpProtocolIpv6(options.path("HttpProtocolIpv6").asText(null));
+            restored.setInstanceMetadataTags(options.path("InstanceMetadataTags").asText(null));
+            if (options.path("HttpPutResponseHopLimit").isInt()) {
+                restored.setHttpPutResponseHopLimit(options.path("HttpPutResponseHopLimit").intValue());
+            }
+            ec2Service.modifyInstanceMetadataOptions(prior.path("region").asText(), resource.getPhysicalId(), restored);
         }
-        ec2Service.modifyInstanceMetadataOptions(prior.path("region").asText(), resource.getPhysicalId(), restored);
         resource.getAttributes().keySet().removeIf(key -> key.startsWith(DECLARED_PREFIX));
         prior.path("declarations").fields()
                 .forEachRemaining(e -> resource.getAttributes().put(e.getKey(), e.getValue().asText()));
-        resource.getAttributes().remove(PRIOR_METADATA_OPTIONS_ATTR);
+        resource.getAttributes().remove(PRIOR_IN_PLACE_ATTR);
         return !prior.path("otherChanges").asBoolean(true);
     }
 
-    /** What {@link #restoreMetadataOptions} needs, as a JSON object. */
-    private static String priorMetadataOptions(String region, LaunchTemplateData.MetadataOptions options,
-                                               Map<String, String> attributesBefore, boolean otherChanges) {
+    /**
+     * What {@link #restoreInPlaceUpdate} needs, as a JSON object: {@code options} is the instance's
+     * MetadataOptions before the update, or null when the update left them as they were.
+     */
+    private static String priorInPlaceUpdate(String region, LaunchTemplateData.MetadataOptions options,
+                                             Map<String, String> attributesBefore, boolean otherChanges) {
         ObjectNode saved = MAPPER.createObjectNode();
         saved.put("region", region);
-        ObjectNode members = saved.putObject("options");
-        members.put("HttpTokens", options.getHttpTokens());
-        members.put("HttpPutResponseHopLimit", options.getHttpPutResponseHopLimit());
-        members.put("HttpEndpoint", options.getHttpEndpoint());
-        members.put("HttpProtocolIpv6", options.getHttpProtocolIpv6());
-        members.put("InstanceMetadataTags", options.getInstanceMetadataTags());
+        if (options != null) {
+            ObjectNode members = saved.putObject("options");
+            members.put("HttpTokens", options.getHttpTokens());
+            members.put("HttpPutResponseHopLimit", options.getHttpPutResponseHopLimit());
+            members.put("HttpEndpoint", options.getHttpEndpoint());
+            members.put("HttpProtocolIpv6", options.getHttpProtocolIpv6());
+            members.put("InstanceMetadataTags", options.getInstanceMetadataTags());
+        }
         ObjectNode declared = saved.putObject("declarations");
         attributesBefore.forEach((key, value) -> {
             if (key.startsWith(DECLARED_PREFIX) && value != null) {

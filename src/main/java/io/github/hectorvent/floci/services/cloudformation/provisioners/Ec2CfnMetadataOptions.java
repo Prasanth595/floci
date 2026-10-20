@@ -35,7 +35,9 @@ final class Ec2CfnMetadataOptions {
 
     /**
      * The options the block {@code raw}, at {@code path} in the resource's properties, names, with
-     * absent or blank members left null, or null when there is no block. It is read against the
+     * absent members left null, or null when there is no block. A member's text is kept as written,
+     * so an empty or padded value reaches EC2's checks and is refused, as EC2 refuses it, rather
+     * than reading as absent. {@code AWS::NoValue} is what leaves a member out. It is read against the
      * schema shape {@code shape}, as {@code AWS::AutoScaling::LaunchConfiguration}'s is: a block or
      * member of the wrong type, such as {@code HttpTokens: [required]}, fails the resource rather
      * than reading as absent, which would leave tokens optional. A null member takes the launch
@@ -153,7 +155,6 @@ final class Ec2CfnMetadataOptions {
         if (value == null || value.isNull()) {
             return null;
         }
-        String text = value.asText().trim();
-        return text.isEmpty() ? null : text;
+        return value.asText();
     }
 }
