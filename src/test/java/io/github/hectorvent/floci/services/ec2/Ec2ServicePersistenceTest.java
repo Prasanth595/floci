@@ -41,7 +41,6 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -200,8 +199,7 @@ class Ec2ServicePersistenceTest {
         assertEquals(captured.getImageId(), restoredCopy.getCreationSourceImageId());
         assertEquals(REGION, restoredCopy.getCreationSourceImageRegion());
         assertNull(restoredCopy.getCreationSourceInstanceId());
-        assertEquals(copied.getSourceImageId(), restoredCopy.getSourceImageId());
-        assertNotEquals(restoredCopy.getCreationSourceImageId(), restoredCopy.getSourceImageId());
+        assertEquals("ami-0abcdef1234567890", restoredCopy.getSourceImageId());
     }
 
     /**

@@ -37,9 +37,8 @@ public class Image {
     /**
      * What DescribeImages reports as SourceImageId, SourceImageRegion and SourceInstanceId: the AMI
      * a CreateImage or CopyImage image was made from, that AMI's region, and the instance a
-     * CreateImage image captured. Kept apart from {@link #sourceImageId}, which is flattened to the
-     * launchable ancestor, and null for RegisterImage and catalog images and for images saved
-     * before these were kept.
+     * CreateImage image captured. Null for RegisterImage and catalog images, and for images saved
+     * before Floci kept them.
      */
     private String creationSourceImageId;
     private String creationSourceImageRegion;

@@ -23,9 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Creation provenance through the public EC2 Query protocol: the {@code sourceImageId},
  * {@code sourceImageRegion} and {@code sourceInstanceId} DescribeImages reports, and the three
  * filters on them.
- *
- * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_Image.html">Image</a>
- * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/identify-source-ami-used-to-create-new-ami.html">Identify the source AMI</a>
  */
 @QuarkusTest
 class Ec2ImageCreationProvenanceIntegrationTest {
@@ -39,14 +36,18 @@ class Ec2ImageCreationProvenanceIntegrationTest {
     private final List<OwnedResource> images = new ArrayList<>();
     private final List<OwnedResource> instances = new ArrayList<>();
 
+    /**
+     * Each step stands alone and checks no status, so one that fails cannot leave the rest behind in
+     * the emulator every test class shares.
+     */
     @AfterEach
     void cleanCreatedResources() {
         for (OwnedResource instance : instances) {
-            query(instance.region(), "TerminateInstances", "InstanceId.1", instance.id());
+            request(instance.region(), "TerminateInstances", "InstanceId.1", instance.id()).post("/");
         }
         for (OwnedResource image : images.reversed()) {
-            query(image.region(), "DeregisterImage", "ImageId", image.id(),
-                    "DeleteAssociatedSnapshots", "true");
+            request(image.region(), "DeregisterImage", "ImageId", image.id(),
+                    "DeleteAssociatedSnapshots", "true").post("/");
         }
     }
 
@@ -78,8 +79,6 @@ class Ec2ImageCreationProvenanceIntegrationTest {
         assertProvenance(describe(EAST, first), CATALOG, EAST, null);
         Image stored = service.describeImages(WEST, List.of(second), List.of()).getFirst();
         assertEquals(CATALOG, stored.getSourceImageId());
-        assertEquals(first, stored.getCreationSourceImageId());
-        assertEquals(EAST, stored.getCreationSourceImageRegion());
     }
 
     @Test
@@ -91,7 +90,6 @@ class Ec2ImageCreationProvenanceIntegrationTest {
         assertProvenance(describe(WEST, captured), copied, WEST, instance);
         Image stored = service.describeImages(WEST, List.of(captured), List.of()).getFirst();
         assertEquals(CATALOG, stored.getSourceImageId());
-        assertEquals(copied, stored.getCreationSourceImageId());
     }
 
     @Test
@@ -109,17 +107,28 @@ class Ec2ImageCreationProvenanceIntegrationTest {
         String copied = copy(EAST, EAST, "ami-amazonlinux2");
 
         assertProvenance(describe(EAST, copied), CATALOG, EAST, null);
+        assertTrue(filteredImageIds(EAST, "source-image-id", "ami-amazonlinux2").contains(copied));
     }
 
+    /**
+     * The instance keeps the alias as its ImageId, so filtering on that ImageId finds the capture,
+     * as it would on AWS, where the two are always the same id.
+     */
     @Test
     void aCaptureOfAnInstanceLaunchedByAliasRecordsTheAmiIdItNames() {
         String instance = launch(EAST, "ami-amazonlinux2");
         String captured = capture(EAST, instance);
 
         assertProvenance(describe(EAST, captured), CATALOG, EAST, instance);
+        assertTrue(filteredImageIds(EAST, "source-image-id", "ami-amazonlinux2").contains(captured));
+        assertTrue(filteredImageIds(EAST, "source-image-id", CATALOG).contains(captured));
+        assertFalse(filteredImageIds(EAST, "source-image-id", "ami-ubuntu2204").contains(captured));
     }
 
-    /** "The source AMI information is preserved when ... Source AMIs are deregistered (deleted)." */
+    /**
+     * The EC2 user guide: "The source AMI information is preserved when ... Source AMIs are
+     * deregistered (deleted)."
+     */
     @Test
     void aCopyStillNamesItsSourceAfterTheSourceIsDeregistered() {
         String registered = rememberImage(EAST, query(EAST, "RegisterImage", "Name", uniqueName()));
@@ -141,6 +150,7 @@ class Ec2ImageCreationProvenanceIntegrationTest {
         assertEquals(List.of(captured), filteredImageIds(EAST, "source-instance-id", instance));
         assertEquals(List.of(copied), filteredImageIds(WEST, "source-image-id", captured));
         assertTrue(filteredImageIds(WEST, "source-image-region", EAST).contains(copied));
+        assertFalse(filteredImageIds(WEST, "source-image-region", EAST).contains(CATALOG));
         assertFalse(filteredImageIds(WEST, "source-image-region", WEST).contains(copied));
         assertEquals(List.of(), filteredImageIds(EAST, "source-image-id", "ami-0000000000000none"));
         assertEquals(List.of(captured), filteredImageIds(EAST, "source-instance-id",
@@ -209,13 +219,17 @@ class Ec2ImageCreationProvenanceIntegrationTest {
     }
 
     private String query(String region, String action, String... parameters) {
+        return request(region, action, parameters).post("/").then().statusCode(200).extract().asString();
+    }
+
+    private static RequestSpecification request(String region, String action, String... parameters) {
         RequestSpecification request = given().formParam("Action", action)
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20261008/"
                         + region + "/ec2/aws4_request");
         for (int i = 0; i < parameters.length; i += 2) {
             request.formParam(parameters[i], parameters[i + 1]);
         }
-        return request.post("/").then().statusCode(200).extract().asString();
+        return request;
     }
 
     private static void assertProvenance(String xml, String image, String region, String instance) {

@@ -8412,7 +8412,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "owner-id" -> matchesFilterValue(values, image.getOwnerId());
             case "root-device-name" -> matchesFilterValue(values, image.getRootDeviceName());
             case "root-device-type" -> matchesFilterValue(values, image.getRootDeviceType());
-            case "source-image-id" -> matchesFilterValue(values, image.getCreationSourceImageId());
+            case "source-image-id" -> matchesSourceImageId(values, image.getCreationSourceImageId());
             case "source-image-region" -> matchesFilterValue(values, image.getCreationSourceImageRegion());
             case "source-instance-id" -> matchesFilterValue(values, image.getCreationSourceInstanceId());
             case "state" -> matchesFilterValue(values, image.getState());
@@ -8497,13 +8497,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "owner-id" -> matchesFilterValue(values, image.getOwnerId());
             case "root-device-name" -> matchesFilterValue(values, image.getRootDeviceName());
             case "root-device-type" -> matchesFilterValue(values, image.getRootDeviceType());
-            case "source-image-id" -> matchesFilterValue(values, image.getCreationSourceImageId());
+            case "source-image-id" -> matchesSourceImageId(values, image.getCreationSourceImageId());
             case "source-image-region" -> matchesFilterValue(values, image.getCreationSourceImageRegion());
             case "source-instance-id" -> matchesFilterValue(values, image.getCreationSourceInstanceId());
             case "state" -> matchesFilterValue(values, image.getState());
             case "virtualization-type" -> matchesFilterValue(values, image.getVirtualizationType());
             default -> true;
         };
+    }
+
+    /**
+     * A catalog source is recorded by its AMI id, but an instance launched by one of its aliases
+     * reports the alias as its ImageId, so the filter takes either, as image-id does.
+     */
+    private boolean matchesSourceImageId(List<String> values, String sourceImageId) {
+        if (sourceImageId == null) {
+            return matchesFilterValue(values, null);
+        }
+        return imageCatalog.findByIdOrAlias(sourceImageId)
+                .map(Ec2ImageCatalog.CatalogImage::idsAndAliases)
+                .orElse(List.of(sourceImageId))
+                .stream()
+                .anyMatch(id -> matchesFilterValue(values, id));
     }
 
     private Image withCurrentImageTags(Image image) {

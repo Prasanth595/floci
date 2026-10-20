@@ -33,7 +33,8 @@ class Ec2ImageProvenanceTest {
                     assertThat(ec2.describeImages(r -> r.imageIds(sourceId)).images().get(0).sourceImageId())
                             .isNull();
                 } finally {
-                    ec2.deregisterImage(r -> r.imageId(copyId));
+                    // The copy gets its own root snapshot, which deregistering alone would leave behind.
+                    ec2.deregisterImage(r -> r.imageId(copyId).deleteAssociatedSnapshots(true));
                 }
             } finally {
                 ec2.deregisterImage(r -> r.imageId(sourceId));

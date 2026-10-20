@@ -7115,6 +7115,9 @@ class Ec2ServiceTest {
             copy.setCreationDate(source.getCreationDate());
             copy.setRegion(source.getRegion());
             copy.setSourceImageId(source.getSourceImageId());
+            copy.setCreationSourceImageId(source.getCreationSourceImageId());
+            copy.setCreationSourceImageRegion(source.getCreationSourceImageRegion());
+            copy.setCreationSourceInstanceId(source.getCreationSourceInstanceId());
             copy.setDockerImage(source.getDockerImage());
             copy.setBlockDeviceMappings(source.getBlockDeviceMappings() == null
                     ? List.of() : new java.util.ArrayList<>(source.getBlockDeviceMappings()));

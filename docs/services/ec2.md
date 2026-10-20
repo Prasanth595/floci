@@ -285,6 +285,8 @@ private gateway lifecycles are not modelled.
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
+| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. |
+| DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account
 [STS](sts.md) reports for those credentials, and that account is what `ownerId` and the resource ARN
@@ -294,13 +296,15 @@ registered, and `--owners self` resolves to the same account. This is what lets 
 `000000000000`. The `amazon` and `aws-marketplace` aliases still resolve to the AWS-owned accounts
 that publish those images.
 
-`DescribeImages` reports where an AMI came from. An AMI made by `CreateImage` reports
-`SourceInstanceId`, the instance it captured, and as `SourceImageId` and `SourceImageRegion` the AMI
-that instance was launched from. An AMI made by `CopyImage` reports the AMI it copied and that
-AMI's region, and no instance. Each names its immediate source by AMI ID, even when the request
-used a catalog alias such as `ami-amazonlinux2`, and keeps naming it after the source is
-deregistered. Registered and catalog AMIs, and AMIs saved by an earlier Floci version, report none.
-The `source-image-id`, `source-image-region` and `source-instance-id` filters match these fields.
+`DescribeImages` reports where an AMI came from. An AMI made by `CreateImage` reports the instance
+it captured as `SourceInstanceId`, and the AMI that instance was launched from, with its region, as
+`SourceImageId` and `SourceImageRegion`. An AMI made by `CopyImage` reports the AMI it copied and
+that AMI's region, and no instance. Each names its immediate source by AMI ID, even when the
+instance was launched, or the copy requested, with a catalog alias such as `ami-amazonlinux2`, and
+keeps naming it after the source is deregistered. AMIs made by `RegisterImage`, catalog AMIs and
+AMIs saved by an earlier Floci version report none. The `source-image-id`, `source-image-region` and
+`source-instance-id` filters match these fields, and `source-image-id` also takes a catalog alias,
+as `image-id` does.
 
 ### Tags
 
