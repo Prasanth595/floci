@@ -294,6 +294,14 @@ registered, and `--owners self` resolves to the same account. This is what lets 
 `000000000000`. The `amazon` and `aws-marketplace` aliases still resolve to the AWS-owned accounts
 that publish those images.
 
+`DescribeImages` reports where an AMI came from. An AMI made by `CreateImage` reports
+`SourceInstanceId`, the instance it captured, and as `SourceImageId` and `SourceImageRegion` the AMI
+that instance was launched from. An AMI made by `CopyImage` reports the AMI it copied and that
+AMI's region, and no instance. Each names its immediate source by AMI ID, even when the request
+used a catalog alias such as `ami-amazonlinux2`, and keeps naming it after the source is
+deregistered. Registered and catalog AMIs, and AMIs saved by an earlier Floci version, report none.
+The `source-image-id`, `source-image-region` and `source-instance-id` filters match these fields.
+
 ### Tags
 
 | Action | Description |
