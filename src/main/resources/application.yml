@@ -35,8 +35,10 @@ quarkus:
       require-localhost: false
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
-      # Lambda Web Functions accept a request head of up to 128 KiB and answer 431 past it.
-      max-header-size: 128K
+      # The server reads heads past the Lambda Web limits so their own 431 and 414 can answer them.
+      # LambdaWebDataPlane keeps these two at the Quarkus defaults for every other host.
+      max-header-size: 256K
+      max-initial-line-length: 262144
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
@@ -536,6 +538,9 @@ floci:
       enabled: true
       transaction-ttl-seconds: 180
       database-resuming-exception-enabled: false # FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED
+    dsql:
+      enabled: true
+      endpoint-suffix: localhost.floci.io         # FLOCI_SERVICES_DSQL_ENDPOINT_SUFFIX; endpoints are <id>.dsql.<region>.<suffix>
     redshift-data:
       enabled: true
       result-ttl-hours: 24

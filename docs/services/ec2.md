@@ -145,6 +145,8 @@ EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_END
 
 CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and update, including parameter references. Omission, a selected `AWS::NoValue` branch, or `not-specified` uses the default `ipv4`; an explicitly empty value is rejected. Updates retain the existing replacement behavior; synthetic interfaces remain IPv4-only.
 
+CloudFormation `AWS::EC2::LaunchTemplate` stores `LaunchTemplateData.MetadataOptions`, and `AWS::EC2::Instance` launches with its own `MetadataOptions` over those of the launch template it names, as `RunInstances` merges them, so CDK's `requireImdsv2` sets `HttpTokens=required`. A block or member of the wrong type, such as `HttpTokens: [required]`, fails the resource with CloudFormation's type error, a member given as an empty or padded string fails an instance with `InvalidParameterValue` (a launch template stores it unchecked, as `CreateLaunchTemplate` does, and the instances launched from it fail), and `AWS::NoValue` leaves a member or the whole block out. A stack update checks the options before it changes anything, applies changed ones in place, returns options it no longer declares to their defaults, and puts them back if the stack update rolls back. An update that kept the instance and changed no EC2 setting, such as one that only declares the options the instance already has, rolls back in full. When the same update also changed the instance's type, security groups, user data, profile or tags, which have no in-place rollback, the options still go back but the stack ends `UPDATE_ROLLBACK_FAILED` for the instance ("Rollback is not implemented"). The options handling includes an update that changes or drops the instance's `LaunchTemplate` (another template or version, as `Fn::GetAtt LatestVersionNumber` gives after the template changes): AWS replaces the instance then, as `LaunchTemplate` is a replacement property, but Floci keeps it and applies what the new template declares, unless the `ImageId` or `KeyName` the template supplies changed, which replaces it. A change set still previews a literal `LaunchTemplate` change as a replacement.
+
 ## Instance Metadata Service (IMDS)
 
 Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launched container receives the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` pointing to this server.
@@ -1135,6 +1137,25 @@ Synthesised addresses come from the subnet's own CIDR block, skipping the first 
 and the last one as AWS reserves them, and skipping every address a persisted instance, network
 interface or NAT gateway in the subnet still holds, so a restart does not hand one out twice. A
 subnet with no free address left fails the request with `InsufficientFreeAddressesInSubnet`.
+
+`RunInstances` with `PrivateIpAddress`, or `NetworkInterface.1.PrivateIpAddress` (the shape
+Terraform's `aws_instance` sends for `private_ip` with a `subnet_id`), gives the instance and its
+primary network interface that address instead of the next free one. So does the
+`NetworkInterface.1.PrivateIpAddresses` entry marked `Primary`, the shape the AWS CLI sends for
+`--private-ip-address` together with `--associate-public-ip-address` or the secondary-address
+options, and the `PrivateIpAddress` of a launch template's primary interface. Secondary addresses,
+from `PrivateIpAddresses` entries not marked `Primary` or from `SecondaryPrivateIpAddressCount`, are
+not applied. An address outside the subnet's CIDR, or one of the five AWS reserves, fails with
+`InvalidParameterValue`, and one that an instance, network interface, NAT gateway or interface
+endpoint already holds fails with `InvalidIPAddress.InUse`. In a Docker-backed default subnet, whose
+network every account shares, that includes an address another account's instance, network interface
+or NAT gateway holds. As on AWS it applies only to a single instance that creates its own primary
+interface: with more than one instance, or with `NetworkInterface.1.NetworkInterfaceId`, the call
+fails with `InvalidParameterCombination`, and so does a top-level `PrivateIpAddress` sent with
+network interfaces, from the request or the launch template. In a Docker-backed subnet the container
+joins the VPC network at that address. In a subnet whose CIDR was substituted the address lies
+outside the network's range, so the container cannot hold it, and the instance reports its bridge
+address unless `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` is true, as for a synthesised address.
 
 `CreateSubnet` derives `AvailableIpAddressCount` from the IPv4 CIDR, excluding the
 five AWS-reserved addresses. `DescribeSubnets` subtracts addresses currently held

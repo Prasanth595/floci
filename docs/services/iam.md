@@ -1495,6 +1495,10 @@ for `DATA_PROTECTION_POLICY`, `logs:PutSubscriptionFilter` for `SUBSCRIPTION_FIL
 `logs:PutMetricExtractionPolicy` for `METRIC_EXTRACTION_POLICY`. Without it the request is refused with
 `AccessDeniedException` and no policy is stored. The `iam:PassRole` a subscription filter policy with a
 `RoleArn` also needs is not checked.
+`DescribeAccountPolicies` likewise needs the read action for the type it lists:
+`logs:GetDataProtectionPolicy`, `logs:DescribeSubscriptionFilters`, `logs:GetTransformer` or
+`logs:DescribeIndexPolicies`. Its reference names none for `METRIC_EXTRACTION_POLICY`, which needs only
+`logs:DescribeAccountPolicies`.
 
 **Secrets Manager secrets.** A request that names a secret by its name, or by a partial ARN without
 the random suffix, is evaluated against the stored secret's full ARN, suffix included, so a

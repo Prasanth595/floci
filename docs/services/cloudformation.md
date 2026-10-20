@@ -24,7 +24,7 @@
 | `ListStackResources` | List resource summaries |
 | `GetTemplate` | Retrieve the template body |
 | `GetTemplateSummary` | Summarize a template's Parameters, Resources and Transform sections, by StackName, TemplateBody or TemplateURL |
-| `ValidateTemplate` | Accepted; returns success without validating (stub) |
+| `ValidateTemplate` | Refuses a template holding a `null` value (see [Null values](#null-values)); otherwise returns success without validating further |
 | `ListStacks` | List stacks by status |
 | `ListExports` | - |
 | `SetStackPolicy` | Accepted; no-op (stub — stack policies are not enforced) |
@@ -185,6 +185,7 @@ cross-resource references.
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
+| Aurora DSQL | `Cluster` |
 | ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
 | Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model) |
 | Redshift Serverless | `Namespace` (ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
@@ -629,6 +630,29 @@ intrinsic's reference page:
   Output O is malformed.  The Name field of Export must not depend on any resources, imported values,
   or Fn::GetAZs.` In a nested stack's template the same rules fail the child's resource with the
   same message when the child is created, and the parent rolls back.
+
+## Null values
+
+As on AWS, a template holding a `null` anywhere (JSON `null`, YAML `~` or a key with no value) is
+refused when `ValidateTemplate`, `CreateStack`, `UpdateStack` or `CreateChangeSet` is requested,
+before anything is created, with `ValidationError` `[<path>] 'null' values are not allowed in
+templates`. The path names the first `null` in document order, as AWS's does: below a resource's
+`Properties` it says `Type` where `Properties` would be (`[/Resources/Queue/Type/QueueName]`), a
+`null` `Properties` is `[/Resources/Queue/Properties]`, list entries are numbered from 0, and an
+intrinsic's arguments are part of the path (`[/Resources/Queue/Type/QueueName/Fn::Join/1/1]`).
+A template that is null as a whole (`null`, `~`) is refused with `Template format error: At least
+one Resources member must be defined.` `CreateStackSet` and `UpdateStackSet` refuse a template
+holding a `null` before the stack set keeps it, with the same message followed by the service
+exception's details, as on AWS.
+
+## Template URLs
+
+A `TemplateURL` names an object in Floci's S3, virtual-hosted or path-style. As on AWS, one whose
+bucket or object does not exist is refused by `ValidateTemplate`, `CreateStack` and
+`GetTemplateSummary` alike, with `ValidationError` `S3 error: The specified bucket does not exist`
+or `S3 object does not exist. Bucket: <bucket>, Key: <key>. Error: NoSuchKey`. AWS also refuses a
+URL that is not an S3 one (`TemplateURL must be a supported URL.`); Floci reads any host as S3, so
+the URL can name Floci by whatever host reaches it.
 
 ## Template Parameters
 

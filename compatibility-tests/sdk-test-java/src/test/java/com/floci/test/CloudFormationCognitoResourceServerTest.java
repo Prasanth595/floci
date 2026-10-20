@@ -274,18 +274,21 @@ class CloudFormationCognitoResourceServerTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    @DisplayName("Explicit and resolved null Scopes fail without clearing the existing server")
+    @DisplayName("Explicit and resolved null Scopes are refused without touching the existing server")
     void nullScopesUpdatesPreserveTheExistingConfiguration(boolean conditional) throws Exception {
         String identifier = stackName + "-api";
         List<Parameter> original = parameters(identifier, p1, "Original API", "read", "Read access", true, false, false);
         createStack(original);
         String invalidTemplate = nullScopesTemplate(conditional);
+        String path = conditional ? "/Resources/Server/Type/Scopes/Fn::If/1" : "/Resources/Server/Type/Scopes";
 
-        cfn.updateStack(r -> r.stackName(stackName).templateBody(invalidTemplate)
-                .parameters(parameters(identifier, p1, "Changed API", "write", "Write access", true, false, false)));
-        awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+        // As on AWS, a template holding a null is refused when the update is requested.
+        assertThatThrownBy(() -> cfn.updateStack(r -> r.stackName(stackName).templateBody(invalidTemplate)
+                .parameters(parameters(identifier, p1, "Changed API", "write", "Write access", true, false, false))))
+                .isInstanceOfSatisfying(CloudFormationException.class, e -> assertThat(e.awsErrorDetails().errorMessage())
+                        .isEqualTo("[" + path + "] 'null' values are not allowed in templates"));
+        awaitStatus("CREATE_COMPLETE");
 
-        assertThat(failedEvents()).contains("Scopes must be a list");
         assertIdentity(identifier);
         assertServer(p1, identifier, "Original API", "read", "Read access");
         updateStack(parameters(identifier, p1, "Recovered API", "write", "Write access", true, false, false),

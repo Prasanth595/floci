@@ -22,6 +22,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -300,13 +301,31 @@ public class EmrHandler {
         EmrCluster cluster = service.getClusterForInstances(text(request, "ClusterId"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Instances");
+        boolean terminated = "TERMINATED".equals(cluster.getState());
+        List<String> states = stringList(request.path("InstanceStates"));
+        if ((!states.isEmpty() && !states.contains(terminated ? "TERMINATED" : "RUNNING"))
+                || (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now()))) {
+            return Response.ok(response).build();
+        }
         int n = 1;
         for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
-            for (int i = 0; i < group.getRunningInstanceCount(); i++) {
-                arr.add(syntheticInstanceNode(cluster, group, n++));
+            int count = listedInstanceCount(group, terminated);
+            for (int i = 0; i < count; i++) {
+                arr.add(syntheticInstanceNode(cluster, group, n++, terminated));
             }
         }
         return Response.ok(response).build();
+    }
+
+    static boolean withinTerminatedInstanceRetention(Instant endedAt, Instant now) {
+        return endedAt != null && !endedAt.isBefore(now.minus(30, ChronoUnit.DAYS));
+    }
+
+    static int listedInstanceCount(EmrInstanceGroup group, boolean terminated) {
+        if (terminated && group.getTerminatedInstanceCount() > 0) {
+            return group.getTerminatedInstanceCount();
+        }
+        return group.getRunningInstanceCount();
     }
 
     // ──────────────────────────── Security configurations ────────────────────────────
@@ -697,7 +716,8 @@ public class EmrHandler {
         return node;
     }
 
-    private ObjectNode syntheticInstanceNode(EmrCluster cluster, EmrInstanceGroup group, int index) {
+    private ObjectNode syntheticInstanceNode(EmrCluster cluster, EmrInstanceGroup group, int index,
+                                             boolean terminated) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", "ci-" + index + cluster.getId());
         node.put("Ec2InstanceId", "i-" + String.format("%017d", index));
@@ -710,7 +730,7 @@ public class EmrHandler {
             node.put("Market", group.getMarket());
         }
         node.put("InstanceType", group.getInstanceType());
-        node.putObject("Status").put("State", "RUNNING");
+        node.putObject("Status").put("State", terminated ? "TERMINATED" : "RUNNING");
         return node;
     }
 
