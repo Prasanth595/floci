@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.rds.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -12,7 +13,8 @@ import java.util.Map;
  * A DB proxy endpoint as DescribeDBProxyEndpoints reports it. Endpoints a caller creates are
  * stored; a proxy's default endpoint is built from the proxy when described and carries no ARN.
  * Every endpoint reports the proxy's own host, so a connection through it reaches the proxy's
- * listener and the proxy's one target, whatever its target role.
+ * listener and the proxy's one target, whatever its target role. The host is not stored: a restored
+ * proxy can come back on a new one, so each response reads it from the proxy.
  */
 @RegisterForReflection
 public class DbProxyEndpoint {
@@ -24,6 +26,8 @@ public class DbProxyEndpoint {
     private String vpcId;
     private List<String> vpcSubnetIds = new ArrayList<>();
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
+    /** The owning proxy's host, filled in for each response. */
+    @JsonIgnore
     private String endpoint;
     private Instant createdDate;
     /** READ_WRITE or READ_ONLY. */

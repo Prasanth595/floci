@@ -10410,6 +10410,68 @@ class RdsServiceTest {
         assertEquals("DBProxyEndpointNotFoundFault", gone.getErrorCode());
     }
 
+    /**
+     * A restore can bring a proxy back on a new host. Every endpoint follows it, not only the
+     * default one built from the proxy.
+     */
+    @Test
+    void proxyEndpointsReportTheProxysHostAfterARestoreMovesIt() {
+        InMemoryStorage<String, DbProxy> proxies = new InMemoryStorage<>();
+        RdsService service = proxyStoreService(regionResolver, config, proxies, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN, PROXY_SUBNET_IDS,
+                List.of(), PROXY_AUTH, Map.of());
+        service.createDbProxyEndpoint("us-east-1", "app-proxy", "reader", PROXY_SUBNET_IDS, List.of(),
+                "READ_ONLY", null, Map.of());
+
+        // Each step moves the proxy to a new host first, so no answer can carry an earlier one.
+        moveProxyHost(proxies, "us-east-1::app-proxy", "proxy-restored-1.internal");
+        RdsService.ProxyEndpointPage page = service.describeDbProxyEndpoints("us-east-1", "app-proxy", null,
+                null, null);
+        assertEquals(List.of("proxy-restored-1.internal", "proxy-restored-1.internal"),
+                page.endpoints().stream().map(DbProxyEndpoint::getEndpoint).toList());
+        moveProxyHost(proxies, "us-east-1::app-proxy", "proxy-restored-2.internal");
+        assertEquals("proxy-restored-2.internal", service.modifyDbProxyEndpoint("us-east-1", "reader", null, null)
+                .getEndpoint());
+        moveProxyHost(proxies, "us-east-1::app-proxy", "proxy-restored-3.internal");
+        assertEquals("proxy-restored-3.internal", service.deleteDbProxyEndpoint("us-east-1", "reader").getEndpoint());
+    }
+
+    private static void moveProxyHost(InMemoryStorage<String, DbProxy> proxies, String key, String host) {
+        DbProxy restored = proxies.get(key).orElseThrow();
+        restored.setEndpointHost(host);
+        proxies.put(key, restored);
+    }
+
+    /** A missing required member is MissingParameter, checked before any lookup, and changes nothing. */
+    @Test
+    void proxyEndpointRequiredMembersAreMissingParameter() {
+        proxyForEndpoints("app-proxy", "POSTGRESQL");
+        addProxyEndpoint("app-proxy", "kept", null);
+
+        List<Map.Entry<String, org.junit.jupiter.api.function.Executable>> missing = List.of(
+                Map.entry("DBProxyName", () -> rdsService.createDbProxyEndpoint("us-east-1", null, "ep",
+                        PROXY_SUBNET_IDS, List.of(), null, null, Map.of())),
+                Map.entry("DBProxyEndpointName", () -> rdsService.createDbProxyEndpoint("us-east-1", "app-proxy",
+                        "", PROXY_SUBNET_IDS, List.of(), null, null, Map.of())),
+                Map.entry("VpcSubnetIds", () -> rdsService.createDbProxyEndpoint("us-east-1", "app-proxy", "ep",
+                        List.of(), List.of(), null, null, Map.of())),
+                // Reported as missing before the unknown proxy is looked up.
+                Map.entry("VpcSubnetIds", () -> rdsService.createDbProxyEndpoint("us-east-1", "absent", "ep",
+                        null, List.of(), null, null, Map.of())),
+                Map.entry("DBProxyEndpointName", () -> rdsService.modifyDbProxyEndpoint("us-east-1", null,
+                        "renamed", List.of("sg-x"))),
+                Map.entry("DBProxyEndpointName", () -> rdsService.deleteDbProxyEndpoint("us-east-1", " ")));
+        for (Map.Entry<String, org.junit.jupiter.api.function.Executable> c : missing) {
+            AwsException e = assertThrows(AwsException.class, c.getValue(), c.getKey());
+            assertEquals("MissingParameter", e.getErrorCode(), c.getKey());
+            assertEquals("The request must contain the parameter " + c.getKey() + ".", e.getMessage());
+            assertEquals(400, e.getHttpStatus());
+        }
+        assertEquals(List.of("default", "kept"), endpointNames(
+                rdsService.describeDbProxyEndpoints("us-east-1", "app-proxy", null, null, null)));
+    }
+
     @Test
     void proxyEndpointRequestsAreCheckedAgainstTheModel() {
         proxyForEndpoints("app-proxy", "POSTGRESQL");
@@ -10433,9 +10495,7 @@ class RdsServiceTest {
                 () -> addProxyEndpoint("app-proxy", "ep", "WRITER"),
                 // The default VPC carries no IPv6 block, so an IPv6 endpoint cannot be placed in it.
                 () -> rdsService.createDbProxyEndpoint("us-east-1", "app-proxy", "ep", PROXY_SUBNET_IDS,
-                        List.of(), null, "IPV6", Map.of()),
-                () -> rdsService.createDbProxyEndpoint("us-east-1", "app-proxy", "ep", List.of(),
-                        List.of(), null, null, Map.of()))) {
+                        List.of(), null, "IPV6", Map.of()))) {
             assertEquals("InvalidParameterValue", assertThrows(AwsException.class, invalid).getErrorCode());
         }
         // An unknown network type is refused for what it is, before any VPC check.

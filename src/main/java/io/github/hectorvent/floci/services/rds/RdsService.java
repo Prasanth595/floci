@@ -6362,8 +6362,12 @@ public class RdsService implements Resettable, ResourceProvider {
                                                               List<String> vpcSecurityGroupIds, String targetRole,
                                                               String endpointNetworkType, Map<String, String> tags) {
         String effectiveRegion = effectiveRegion(region);
-        DbProxy proxy = getDbProxy(dbProxyName, effectiveRegion);
+        requireParameter(dbProxyName, "DBProxyName");
         String name = requireProxyEndpointName(endpointName, "DBProxyEndpointName");
+        if (vpcSubnetIds == null || vpcSubnetIds.isEmpty()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter VpcSubnetIds.", 400);
+        }
+        DbProxy proxy = getDbProxy(dbProxyName, effectiveRegion);
         String role = isBlank(targetRole) ? "READ_WRITE" : targetRole;
         if (!PROXY_ENDPOINT_TARGET_ROLES.contains(role)) {
             throw new AwsException("InvalidParameterValue", "TargetRole must be READ_WRITE or READ_ONLY.", 400);
@@ -6375,9 +6379,6 @@ public class RdsService implements Resettable, ResourceProvider {
         String networkType = isBlank(endpointNetworkType) ? "IPV4" : endpointNetworkType;
         if (!PROXY_ENDPOINT_NETWORK_TYPES.contains(networkType)) {
             throw new AwsException("InvalidParameterValue", "EndpointNetworkType must be IPV4, IPV6, or DUAL.", 400);
-        }
-        if (vpcSubnetIds == null || vpcSubnetIds.isEmpty()) {
-            throw new AwsException("InvalidParameterValue", "VpcSubnetIds is required.", 400);
         }
         if (!"available".equals(proxy.getStatus())) {
             throw new AwsException("InvalidDBProxyStateFault",
@@ -6409,13 +6410,12 @@ public class RdsService implements Resettable, ResourceProvider {
         endpoint.setVpcSubnetIds(vpcSubnetIds);
         endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()
                 ? defaultSecurityGroupOf(vpcId, effectiveRegion) : vpcSecurityGroupIds);
-        endpoint.setEndpoint(proxy.getEndpoint());
         endpoint.setCreatedDate(Instant.now());
         endpoint.setTargetRole(role);
         endpoint.setEndpointNetworkType(networkType);
         endpoint.setTags(tags);
         proxyEndpoints.put(key, endpoint);
-        return endpoint;
+        return withProxyHost(endpoint, proxy);
     }
 
     /**
@@ -6437,6 +6437,7 @@ public class RdsService implements Resettable, ResourceProvider {
             all.add(defaultProxyEndpoint(proxy));
             proxyEndpointsOf(effectiveRegion, proxy.getDbProxyName()).stream()
                     .sorted(Comparator.comparing(DbProxyEndpoint::getDbProxyEndpointName))
+                    .map(endpoint -> withProxyHost(endpoint, proxy))
                     .forEach(all::add);
         }
         List<DbProxyEndpoint> matching = all.stream()
@@ -6476,7 +6477,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (renamed) {
             proxyEndpoints.delete(oldKey);
         }
-        return endpoint;
+        return withProxyHost(endpoint, proxy);
     }
 
     /** Deletes an endpoint; the response reports it as {@code deleting}. */
@@ -6485,7 +6486,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbProxyEndpoint endpoint = requireProxyEndpoint(effectiveRegion, endpointName);
         proxyEndpoints.delete(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()));
         endpoint.setStatus("deleting");
-        return endpoint;
+        return withProxyHost(endpoint, getDbProxy(endpoint.getDbProxyName(), effectiveRegion));
     }
 
     /** A stored endpoint by name; the default endpoint is in a state no change can be made in. */
@@ -6499,14 +6500,18 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private static String requireProxyEndpointName(String name, String parameter) {
-        if (isBlank(name)) {
-            throw new AwsException("InvalidParameterValue", parameter + " is required.", 400);
-        }
+        requireParameter(name, parameter);
         if (name.length() > 63 || !DB_PROXY_NAME_PATTERN.matcher(name).matches()) {
             throw new AwsException("InvalidParameterValue", parameter + " must be 1-63 characters, begin with a "
                     + "letter, and contain only letters, digits, and single hyphens.", 400);
         }
         return name;
+    }
+
+    /** Reports the proxy's current host, which a restore can change after the endpoint was created. */
+    private static DbProxyEndpoint withProxyHost(DbProxyEndpoint endpoint, DbProxy proxy) {
+        endpoint.setEndpoint(proxy.getEndpoint());
+        return endpoint;
     }
 
     private static AwsException proxyEndpointNotFound(String name) {

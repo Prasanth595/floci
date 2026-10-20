@@ -345,7 +345,8 @@ services:
     `VpcSubnetIds` already carry an associated IPv6 CIDR block, matching AWS's own network
     prerequisites for RDS Proxy.
     Proxy endpoints report the proxy's own host, so a client connects through one as through the
-    proxy, and an IAM token signed for that host verifies there. `TargetRole` is recorded: Floci
+    proxy, and an IAM token signed for that host verifies there. The host is read from the proxy
+    for each response, so when a restore gives the proxy a new host every endpoint reports it. `TargetRole` is recorded: Floci
     proxies have one target, so a `READ_ONLY` endpoint reaches the same target as the proxy rather
     than an Aurora reader. Each proxy's default endpoint (`default`, `IsDefault` true, `READ_WRITE`)
     is built from the proxy, has no ARN, and cannot be modified or deleted

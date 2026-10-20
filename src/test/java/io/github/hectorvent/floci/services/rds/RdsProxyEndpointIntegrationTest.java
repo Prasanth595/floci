@@ -146,6 +146,20 @@ class RdsProxyEndpointIntegrationTest {
                 .formParam("VpcSubnetIds.member.1", Ec2Service.defaultSubnetId(REGION, "a"))
                 .when().post("/").then().statusCode(400)
                 .body(containsString("<Code>InvalidSubnet</Code>"));
+        withSubnets(query("CreateDBProxyEndpoint")).formParam("DBProxyEndpointName", "orphan")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>MissingParameter</Code>"))
+                .body(containsString("The request must contain the parameter DBProxyName."));
+        withSubnets(query("CreateDBProxyEndpoint")).formParam("DBProxyName", PROXY)
+                .when().post("/").then().statusCode(400)
+                .body(containsString("The request must contain the parameter DBProxyEndpointName."));
+        query("CreateDBProxyEndpoint")
+                .formParam("DBProxyName", PROXY).formParam("DBProxyEndpointName", "nowhere")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("The request must contain the parameter VpcSubnetIds."));
+        query("DeleteDBProxyEndpoint")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>MissingParameter</Code>"));
         query("ModifyDBProxyEndpoint").formParam("DBProxyEndpointName", "default")
                 .formParam("NewDBProxyEndpointName", "renamed")
                 .when().post("/").then().statusCode(400)
