@@ -5,7 +5,9 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.function.Function;
@@ -307,6 +309,18 @@ class IamListPaginationIntegrationTest {
         } finally {
             remaining.forEach(IamListPaginationIntegrationTest::deleteRole);
         }
+    }
+
+    /** A marker shaped like an issued one but never issued is refused, as any other unissued marker is. */
+    @Test
+    void listRolesRejectsAnAnchoredMarkerItDidNotIssue() {
+        String forged = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString("after:pg-anchor-forged".getBytes(StandardCharsets.UTF_8));
+
+        iam("ListRoles").formParam("Marker", forged)
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
     }
 
     private static List<String> roleNames(String tag, int count) {
