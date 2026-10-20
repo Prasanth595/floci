@@ -284,9 +284,11 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     /**
      * Every load balancer type takes {@code Subnets} or {@code SubnetMappings}, so a request with
-     * neither is refused before anything is created, with the message AWS gives for the type. This
-     * runs after the duplicate-name check, because a CloudFormation stack update finds the balancer
-     * it keeps through DuplicateLoadBalancerName, whatever subnets its template names.
+     * neither is refused before anything is created, with the message AWS gives an Application or a
+     * Network Load Balancer. A Gateway Load Balancer, which takes subnets the way a Network Load
+     * Balancer does, gets the Network one. This runs after the duplicate-name check, because a
+     * CloudFormation stack update finds the balancer it keeps through DuplicateLoadBalancerName,
+     * whatever subnets its template names.
      */
     private static void requireSubnets(String lbType, List<String> subnets) {
         if (subnets == null || subnets.isEmpty()) {
