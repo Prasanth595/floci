@@ -129,6 +129,10 @@ class CloudFrontServiceTest {
 
     /** A null {@code domainSuffix} is {@code floci.services.cloudfront.domain-suffix} left unset. */
     private CloudFrontService serviceWithDomainSuffix(String domainSuffix, String region) {
+        return serviceWithDomainSuffix(domainSuffix, region, "http://localhost:4566");
+    }
+
+    private CloudFrontService serviceWithDomainSuffix(String domainSuffix, String region, String baseUrl) {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
                 .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
@@ -140,7 +144,7 @@ class CloudFrontServiceTest {
 
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
         when(config.hostname()).thenReturn(Optional.empty());
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         when(config.dns()).thenReturn(dnsConfig);
         when(dnsConfig.extraSuffixes()).thenReturn(Optional.empty());
         when(config.services()).thenReturn(servicesConfig);
@@ -660,6 +664,17 @@ class CloudFrontServiceTest {
         }
         for (String webFunction : List.of("ABC.lambda-web.us-east-1.on.aws", "a.b.c.lambda-web.us-east-1.on.aws",
                 "abc.lambda-web.xx-fake-9.on.aws", "abcdefghijklmnop.001.lambda-web.us-east-1.localhost")) {
+            assertOriginAccessControlRefused(service, webFunction, "sigv4a", "always-amz-auth", "lambda",
+                    "SigV4a signing protocol is not compatible with this origin domain.");
+        }
+    }
+
+    @Test
+    void aFlociHostWithAnUnderscoreNamesLambdaOriginsToo() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net", "us-east-1", "http://floci_host:4566");
+
+        for (String webFunction : List.of("abcdefghijklmnop.001.lambda-web.us-east-1.floci_host:4566",
+                "abcdefghijklmnop.001.lambda-web.us-east-1.floci_host")) {
             assertOriginAccessControlRefused(service, webFunction, "sigv4a", "always-amz-auth", "lambda",
                     "SigV4a signing protocol is not compatible with this origin domain.");
         }

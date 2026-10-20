@@ -1297,7 +1297,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
      * Floci end in its own host instead of {@code on.aws}.
      */
     private static Pattern lambdaOriginHost(EmulatorConfig config) {
-        String flociHost = Pattern.quote(URI.create(config.effectiveBaseUrl()).getHost()) + "(?::\\d+)?";
+        String authority = URI.create(config.effectiveBaseUrl()).getAuthority();
+        String flociHost = Pattern.quote(authority.replaceFirst(":\\d+$", "")) + "(?::\\d+)?";
         return Pattern.compile(".+\\.(lambda-web|lambda-url)\\.(global|[a-z]{2,4}-[a-z-]+-\\d+)\\.(?:on\\.aws|"
                 + flociHost + ")");
     }
