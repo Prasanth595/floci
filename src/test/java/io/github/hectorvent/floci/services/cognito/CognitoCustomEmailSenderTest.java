@@ -304,6 +304,38 @@ class CognitoCustomEmailSenderTest {
         verify(lambda, never()).invoke(anyString(), anyString(), any(byte[].class), any());
     }
 
+    /**
+     * Measured (eu-west-1, 2026-10-20): Cognito hands out a code again at once, on a healthy pool
+     * and once a key that could not encrypt is enabled again. The code a failed delivery issued is
+     * withdrawn, so it does not hold back a resend, a password reset or an attribute code asked for
+     * right after, and each delivers a code that works.
+     */
+    @Test
+    void anUndeliveredCodeDoesNotHoldBackTheNextOne() throws Exception {
+        UserPool pool = pool(Map.of("KMSKeyID", keyArn, "CustomEmailSender", sender()), List.of("email"));
+        UserPoolClient client = client(pool);
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com", "email_verified", "true"), null);
+        service.adminSetUserPassword(pool.getId(), "bob", "Passw0rd!", true);
+        String bobToken = signIn(client, "bob", "Passw0rd!");
+        kms.disableKey(keyArn, REGION);
+        assertThrows(AwsException.class, () -> service.signUp(client.getClientId(), "alice", "Passw0rd!",
+                Map.of("email", "alice@example.com"), Map.of(), Map.of()));
+        assertThrows(AwsException.class, () -> service.forgotPassword(client.getClientId(), "bob"));
+        assertThrows(AwsException.class, () -> service.getUserAttributeVerificationCode(bobToken, "email"));
+        kms.enableKey(keyArn, REGION);
+
+        service.resendConfirmationCode(client.getClientId(), "alice");
+        Map<String, Object> resent = senderEvent();
+        assertEquals("CustomEmailSender_ResendCode", resent.get("triggerSource"));
+        service.confirmSignUp(client.getClientId(), "alice", decrypt(request(resent)).plaintext());
+        service.forgotPassword(client.getClientId(), "bob");
+        Map<String, Object> forgot = senderEvent();
+        assertEquals("CustomEmailSender_ForgotPassword", forgot.get("triggerSource"));
+        service.confirmForgotPassword(client.getClientId(), "bob", decrypt(request(forgot)).plaintext(), "N3w-Passw0rd!");
+        service.getUserAttributeVerificationCode(bobToken, "email");
+        assertEquals("CustomEmailSender_VerifyUserAttribute", senderEvent().get("triggerSource"));
+    }
+
     @Test
     void aFunctionThatCannotBeInvokedFailsTheDelivery() {
         UserPool pool = pool(Map.of("KMSKeyID", keyArn, "CustomEmailSender", sender()), List.of());
