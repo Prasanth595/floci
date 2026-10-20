@@ -390,6 +390,14 @@ not model is tagged as given. A resource takes at most 50 user tags (`TagLimitEx
 the `aws:` prefix do not count), keys up to 128 and values up to 256 Unicode characters
 (`InvalidParameterValue`). A request that fails changes no resource's tags.
 
+`DescribeTags` takes the `key`, `value`, `resource-id`, `resource-type` and `tag:<key>` filters.
+`tag:Owner` with the value `TeamA` is the same as a `key` filter of `Owner` and a `value` filter
+of `TeamA`, so it lists that one tag. Filter values take the `*` and `?` wildcards, the values of
+one filter are ORed, and separate filters, including two with the same name, are ANDed. An
+unknown filter name is ignored. `MaxResults` (5 to 1000, `InvalidMaxResults` otherwise) pages the
+result with `NextToken`, which is absent on the last page; the AWS SDK paginators work as is.
+Results are ordered by resource id, so pages stay stable while no tags change.
+
 Public tag mutations reject keys beginning with `aws:` regardless of ASCII case.
 An empty `DeleteTags` tag list removes user tags and preserves AWS-managed tags.
 CloudFormation tag updates and rollbacks likewise leave AWS-managed tags intact.
