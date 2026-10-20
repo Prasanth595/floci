@@ -12,18 +12,14 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
-import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -45,6 +41,7 @@ public class RedshiftContainerManager {
     private final ContainerLogStreamer logStreamer;
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
+    private final long retryBackoffMillis;
     private final Map<String, RedshiftContainerHandle> containers = new ConcurrentHashMap<>();
 
     @Inject
@@ -53,11 +50,21 @@ public class RedshiftContainerManager {
                                     ContainerLogStreamer logStreamer,
                                     ContainerDetector containerDetector,
                                     EmulatorConfig config) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
+
+    RedshiftContainerManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerLogStreamer logStreamer,
+                             ContainerDetector containerDetector,
+                             EmulatorConfig config, long retryBackoffMillis) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.containerDetector = containerDetector;
         this.config = config;
+        this.retryBackoffMillis = retryBackoffMillis;
     }
 
     public RedshiftContainerHandle start(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
@@ -328,10 +335,8 @@ public class RedshiftContainerManager {
         String fileName = sqlDumpFile.getFileName().toString();
 
         try {
-            lifecycleManager.getDockerClient().copyArchiveToContainerCmd(handle.getContainerId())
-                    .withHostResource(sqlDumpFile.toString())
-                    .withRemotePath("/tmp")
-                    .exec();
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), handle.getContainerId(),
+                    "/tmp", sqlDumpFile.toString(), RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, retryBackoffMillis);
 
             String[] cmd = stopOnError
                     ? new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-v", "ON_ERROR_STOP=1",
@@ -399,19 +404,6 @@ public class RedshiftContainerManager {
         return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds);
     }
 
-    private byte[] buildSingleFileTar(String filename, byte[] content, int mode) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
-            tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
-            TarArchiveEntry entry = new TarArchiveEntry(filename);
-            entry.setSize(content.length);
-            entry.setMode(mode);
-            tar.putArchiveEntry(entry);
-            tar.write(content);
-            tar.closeArchiveEntry();
-        }
-        return bos.toByteArray();
-    }
     private void waitForReady(String containerName, String containerId, String username, String dbName) {
         String effectiveUser = userOrDefault(username);
         String[] cmd = {
@@ -461,11 +453,9 @@ public class RedshiftContainerManager {
                 return;
             }
             byte[] sqlBytes = in.readAllBytes();
-            byte[] tarBytes = buildSingleFileTar("bootstrap-catalog.sql", sqlBytes, 0644);
-            lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(tarBytes))
-                    .withRemotePath("/tmp")
-                    .exec();
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/tmp",
+                    "bootstrap-catalog.sql", sqlBytes, 0644,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, retryBackoffMillis);
 
             List<String> targetDbs = effectiveDb.equals("template1")
                     ? List.of("template1")
