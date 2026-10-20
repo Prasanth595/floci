@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
@@ -39,6 +40,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.mockito.MockMakers;
+import org.mockito.MockedStatic;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -63,9 +66,11 @@ import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 class EcsContainerManagerFirelensTest {
 
@@ -398,6 +403,24 @@ class EcsContainerManagerFirelensTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"true,500", "false,0", "false,13"})
+    void firelensUploadUsesTheSelectedBackoffAndSharedRetryBudget(boolean productionDefaults, long backoffMillis) {
+        try (MockedStatic<RetryingTarCopier> copies = mockStatic(RetryingTarCopier.class,
+                withSettings().mockMaker(MockMakers.INLINE))) {
+            TaskDefinition definition = retryTaskDefinition("fluentbit", false, "");
+            if (productionDefaults) {
+                manager.startTask(task(), definition, null, "us-east-1");
+            } else {
+                manager.startTask(task(), definition, null, "us-east-1", backoffMillis);
+            }
+
+            copies.verify(() -> RetryingTarCopier.copyArchive(eq(dockerClient), eq("router-id"),
+                    eq("/fluent-bit/etc"), eq("firelens-config"), any(byte[].class),
+                    eq(6), eq(backoffMillis)));
+        }
+    }
+
+    @ParameterizedTest
     @CsvSource({"fluentbit,false", "fluentbit,true", "fluentd,false", "fluentd,true"})
     void uploadsConfigFromMemoryWithoutAStreamingPipe(String type, boolean external) {
         manager.startTask(task(), retryTaskDefinition(type, external, "# external config\n"), null, "us-east-1");
@@ -419,7 +442,7 @@ class EcsContainerManagerFirelensTest {
         uploads.failure = new RuntimeException(new IOException("Connection reset"));
         String extra = "# café ../not-an-entry\n".repeat(1024);
 
-        EcsTaskHandle handle = manager.startTask(task(), retryTaskDefinition(type, external, extra), null, "us-east-1");
+        EcsTaskHandle handle = manager.startTask(task(), retryTaskDefinition(type, external, extra), null, "us-east-1", 0L);
 
         assertEquals(List.of("log_router", "app"), handle.getContainerIds().keySet().stream().toList());
         assertEquals(2, uploads.commands.size());
@@ -451,7 +474,7 @@ class EcsContainerManagerFirelensTest {
         DockerArchiveUploadFixture uploads = failingUploads();
 
         RuntimeException failure = assertThrows(RuntimeException.class, () -> manager.startTask(
-                task(), retryTaskDefinition("fluentbit", true, "# external config\n"), null, "us-east-1"));
+                task(), retryTaskDefinition("fluentbit", true, "# external config\n"), null, "us-east-1", 0L));
 
         assertSame(uploads.failure, failure.getCause());
         assertEquals(6, uploads.commands.size());
