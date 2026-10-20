@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -115,16 +116,39 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
                 && !declaredCreateOnlyChanged(attributesBefore, privateIpAddress, availabilityZone)) {
             // A reused instance still has its mutable properties reconciled to the template rather
             // than left at their prior values; re-read it so the published attributes reflect them.
-            reconcileMutableProperties(region, prior, instanceType, securityGroupIds, userData,
-                    iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
-            Instance reconciled = findInstance(region, prior.getInstanceId());
-            Instance current = reconciled != null ? reconciled : prior;
-            r.setPhysicalId(current.getInstanceId());
-            publishInstanceAttributes(r, current);
-            storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
-            putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
-            Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), desiredTags);
-            ReplacementCleanup.record(r, ctx, attributesBefore);
+            String originalState = prior.getState() == null ? null : prior.getState().getName();
+            String originalType = prior.getInstanceType();
+            String originalUserData = prior.getUserData();
+            try {
+                reconcileMutableProperties(region, prior, instanceType, securityGroupIds, userData,
+                        iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
+                Instance reconciled = findInstance(region, prior.getInstanceId());
+                Instance current = reconciled != null ? reconciled : prior;
+                r.setPhysicalId(current.getInstanceId());
+                publishInstanceAttributes(r, current);
+                storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
+                putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
+                Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), desiredTags);
+                ReplacementCleanup.record(r, ctx, attributesBefore);
+            } catch (RuntimeException failure) {
+                Instance current = null;
+                try {
+                    current = findInstance(region, prior.getInstanceId());
+                } catch (RuntimeException inspectionFailure) {
+                    failure.addSuppressed(inspectionFailure);
+                }
+                String currentState = current == null || current.getState() == null
+                        ? null : current.getState().getName();
+                if (current == null || !Objects.equals(originalState, currentState)
+                        || !Objects.equals(originalType, current.getInstanceType())
+                        || !Objects.equals(originalUserData, current.getUserData())) {
+                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                            "EC2 instance " + prior.getInstanceId()
+                                    + " could not complete its in-place update; physical state was not restored: "
+                                    + failure.getMessage());
+                }
+                throw failure;
+            }
             return;
         }
 

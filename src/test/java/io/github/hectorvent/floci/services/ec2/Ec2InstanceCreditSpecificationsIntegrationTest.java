@@ -348,6 +348,12 @@ class Ec2InstanceCreditSpecificationsIntegrationTest {
     }
 
     private void resize(String instanceId, String instanceType) {
+        given().header("Authorization", AUTH_HEADER).formParams("Action", "StopInstances", "InstanceId.1", instanceId)
+                .post("/").then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER).formParams("Action", "DescribeInstances", "InstanceId.1", instanceId)
+                .post("/").then().statusCode(200)
+                .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name",
+                        equalTo("stopped"));
         given()
                 .formParam("Action", "ModifyInstanceAttribute")
                 .formParam("InstanceId", instanceId)

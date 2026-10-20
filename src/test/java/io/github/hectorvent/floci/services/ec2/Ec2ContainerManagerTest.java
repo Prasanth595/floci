@@ -26,6 +26,7 @@ import com.github.dockerjava.api.model.NetworkSettings;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -36,6 +37,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
@@ -83,6 +85,7 @@ import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -1404,6 +1407,75 @@ class Ec2ContainerManagerTest {
         } finally {
             worker.shutdownNow();
             assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"persistent", "hybrid", "wal"})
+    void processShutdownSettlesAQueuedRestartBeforeItsWorkerIsDiscarded(String mode, @TempDir Path directory)
+            throws Exception {
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        LaunchHarness harness = launchHarness(worker, Duration.ofSeconds(1));
+        CountDownLatch occupied = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        worker.submit(() -> {
+            occupied.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertTrue(occupied.await(2, TimeUnit.SECONDS));
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.defaultAccountId()).thenReturn("000000000000");
+        when(config.storage().persistentPath()).thenReturn(directory.toString());
+        when(config.storage().wal().compactionIntervalMs()).thenReturn(60000L);
+        when(config.services().servicequotas().standardOnDemandVcpus()).thenReturn(2);
+        ServiceConfigAccess access = mock(ServiceConfigAccess.class);
+        when(access.storageMode("ec2")).thenReturn(mode);
+        when(access.storageFlushInterval("ec2")).thenReturn(60000L);
+        StorageFactory storage = new StorageFactory(config, access);
+        try {
+            Ec2Service service = new Ec2Service(config, harness.manager, harness.portForwardManager,
+                    mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(), storage);
+            Instance instance = instance("i-queued-exit");
+            instance.setInstanceType("t3.micro");
+            instance.setRegion("us-east-1");
+            instance.setOwnerId("000000000000");
+            instance.setState(InstanceState.stopped());
+            instance.setDockerContainerId(TEST_CONTAINER_ID);
+            service.putInstanceForTest(instance);
+            StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+            when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
+            service.startInstances("us-east-1", List.of(instance.getInstanceId()));
+            assertEquals("pending", instance.getState().getName());
+            service.stopManagedContainersForShutdown();
+            worker.shutdownNow();
+            release.countDown();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+            assertEquals("stopped", instance.getState().getName());
+            verify(stop).exec();
+            verify(harness.dockerClient, never()).startContainerCmd(anyString());
+        } finally {
+            release.countDown();
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+            storage.shutdownAll();
+        }
+        StorageFactory reloaded = new StorageFactory(config, access);
+        try {
+            Ec2ContainerManager nextManager = mock(Ec2ContainerManager.class);
+            Ec2Service next = new Ec2Service(config, nextManager, harness.portForwardManager,
+                    mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(), reloaded);
+            Instance restored = next.describeInstances("us-east-1", List.of("i-queued-exit"), Map.of())
+                    .getFirst().getInstances().getFirst();
+            assertEquals("stopped", restored.getState().getName());
+            assertEquals(TEST_CONTAINER_ID, restored.getDockerContainerId());
+            next.startInstances("us-east-1", List.of("i-queued-exit"));
+            verify(nextManager).start(eq(restored), any(), anyLong());
+        } finally {
+            reloaded.shutdownAll();
         }
     }
 

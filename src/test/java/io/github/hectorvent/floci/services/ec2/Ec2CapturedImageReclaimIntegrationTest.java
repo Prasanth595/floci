@@ -89,6 +89,14 @@ class Ec2CapturedImageReclaimIntegrationTest {
     void resolveEveryAmiToABaseImage() {
         when(amiImageResolver.resolveImage(anyString())).thenReturn(BASE_IMAGE);
         when(containerManager.removeCommittedImage(anyString())).thenReturn(true);
+        doAnswer(invocation -> {
+            Instance instance = invocation.getArgument(0);
+            long transition = instance.stateTransition();
+            instance.completeStateTransition(transition, InstanceState.running());
+            instance.completeInitialSetup(transition);
+            return null;
+        }).when(containerManager).launch(any(Instance.class), any(ResolvedAmiImage.class), any(), anyString(),
+                any(), any(), any());
     }
 
     /**

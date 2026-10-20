@@ -37,7 +37,9 @@ Admission uses each type's default vCPU count, independently of Docker CPU
 clamping or custom CPU options. A batch launch may return fewer than `MaxCount`
 when capacity permits at least `MinCount`; otherwise it returns
 `VcpuLimitExceeded` before publishing the batch. A refused start leaves stopped
-instances unchanged. Spot instances and dedicated hosts do not consume this
+instances unchanged. Spot requests through `RunInstances`, including inherited launch-template
+market options, retain their Spot classification; explicit request market options override
+the template. Spot instances and dedicated hosts do not consume this
 Standard bucket; other instance families retain their separate bucket semantics.
 
 Floci reserves capacity while a launch or start is pending. It also retains
@@ -48,7 +50,14 @@ and reservation so a later teardown can retry safely. Process exit uses one
 five-second budget for initial-setup and physical-gate waiting, retaining an
 unfinished stopping hold when it expires. This does not bound Docker transport
 latency or total shutdown time. State reset retains the draining teardown path
-before clearing its tracking data.
+before clearing its tracking data. An interrupted teardown can be retried with
+`StopInstances` or `TerminateInstances`; once stopped, `StartInstances` can retry a
+start. Startup does not automatically complete every interrupted lifecycle operation.
+
+CloudFormation type and user-data updates stop a previously active instance before
+modification and restart it through normal quota admission. If that restart is refused,
+the changed instance remains stopped. The stack reports `UPDATE_ROLLBACK_FAILED`
+when the prior physical state was not restored.
 
 The separate `ec2/instance-type-vcpus.yaml` resource supplements the full
 network/architecture catalog for quota accounting only. It contains explicit

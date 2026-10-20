@@ -850,12 +850,28 @@ class Ec2InstanceCfnProvisionerTest {
         }).when(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.small");
         doThrow(new AwsException("VcpuLimitExceeded", "quota refused", 400))
                 .when(ec2).startInstances("us-east-1", List.of("i-1"));
-        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource("Server"),
+        StackResource resource = resource("Server");
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource,
                 props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
         assertEquals("VcpuLimitExceeded", failure.getErrorCode());
+        assertTrue(resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR).contains("not restored"));
         assertEquals("stopped", instance.getState().getName());
         assertEquals("t3.small", instance.getInstanceType());
         verify(ec2, never()).awaitContainerLaunch(any());
+    }
+
+    @Test
+    void aRefusedStopThatChangedNothingDoesNotClaimPhysicalRollbackFailed() throws Exception {
+        Instance instance = reusable("i-1");
+        StackResource resource = resource("Server");
+        doThrow(new AwsException("OperationNotPermitted", "stop refused", 400))
+                .when(ec2).stopInstances("us-east-1", List.of("i-1"));
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource,
+                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
+        assertEquals("OperationNotPermitted", failure.getErrorCode());
+        assertEquals("running", instance.getState().getName());
+        assertFalse(resource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        verifyNoStoppedMutationOrStart();
     }
 
     @Test

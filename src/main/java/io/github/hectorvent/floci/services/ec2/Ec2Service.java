@@ -4555,9 +4555,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
             Instance inst = entry.value();
-            if (inst == null || inst.getState() == null
-                    || !inst.initialSetupPending() && (inst.getDockerContainerId() == null
-                    || !"running".equals(inst.getState().getName()))) {
+            if (inst == null || inst.getState() == null) {
+                continue;
+            }
+            String state = inst.getState().getName();
+            boolean needsPhysicalStop = inst.getDockerContainerId() != null
+                    && ("running".equals(state) || "pending".equals(state) || "stopping".equals(state));
+            if (!inst.initialSetupPending() && !needsPhysicalStop) {
                 continue;
             }
             try {

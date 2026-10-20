@@ -74,7 +74,28 @@ class Ec2VcpuAdmissionTest {
                 templateId = ec2.createLaunchTemplate(r -> r.launchTemplateName("quota-" + UUID.randomUUID())
                         .launchTemplateData(d -> d.imageId("ami-0abcdef1234567890")
                                 .instanceType(InstanceType.T3_MICRO))).launchTemplate().launchTemplateId();
+                String directSpot = ec2.runInstances(r -> r.imageId("ami-0abcdef1234567890")
+                        .instanceType(InstanceType.T3_MICRO).minCount(1).maxCount(1)
+                        .instanceMarketOptions(m -> m.marketType("spot"))).instances().get(0).instanceId();
+                ids.add(directSpot);
+                assertThat(ec2.describeInstances(r -> r.instanceIds(directSpot)).reservations().get(0)
+                        .instances().get(0).instanceLifecycleAsString()).isEqualTo("spot");
+                ec2.stopInstances(r -> r.instanceIds(directSpot));
+                ec2.startInstances(r -> r.instanceIds(directSpot));
+                assertThat(ec2.describeInstances(r -> r.instanceIds(directSpot)).reservations().get(0)
+                        .instances().get(0).instanceLifecycleAsString()).isEqualTo("spot");
                 String template = templateId;
+                ec2.createLaunchTemplateVersion(r -> r.launchTemplateId(template)
+                        .launchTemplateData(d -> d.imageId("ami-0abcdef1234567890")
+                                .instanceType(InstanceType.T3_MICRO).instanceMarketOptions(m -> m.marketType("spot"))));
+                RunInstancesResponse templateSpot = ec2.runInstances(r -> r.minCount(1).maxCount(1)
+                        .launchTemplate(t -> t.launchTemplateId(template).version("$Latest")));
+                ids.add(templateSpot.instances().get(0).instanceId());
+                assertThat(templateSpot.instances().get(0).instanceLifecycleAsString()).isEqualTo("spot");
+                assertThat(assertThrows(Ec2Exception.class, () -> ec2.runInstances(r -> r.minCount(1).maxCount(1)
+                        .launchTemplate(t -> t.launchTemplateId(template).version("$Latest"))
+                        .instanceMarketOptions(m -> m.marketType("on-demand"))))
+                        .awsErrorDetails().errorCode()).isEqualTo("VcpuLimitExceeded");
                 CreateFleetResponse fleet = ec2.createFleet(r -> r.type("instant").launchTemplateConfigs(c ->
                                 c.launchTemplateSpecification(t -> t.launchTemplateId(template).version("$Latest")))
                         .targetCapacitySpecification(t -> t.totalTargetCapacity(1).defaultTargetCapacityType("spot")));

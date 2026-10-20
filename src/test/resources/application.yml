@@ -549,7 +549,8 @@ floci:
       enabled: true
     servicequotas:
       enabled: true
-      standard-on-demand-vcpus: 5
+      # Shared protocol fixtures retain guests across test classes. Quota tests use explicit small profiles.
+      standard-on-demand-vcpus: 1000
     verifiedpermissions:
       enabled: true
     ram:
