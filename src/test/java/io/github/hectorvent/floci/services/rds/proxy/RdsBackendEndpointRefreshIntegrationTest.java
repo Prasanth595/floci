@@ -257,14 +257,11 @@ class RdsBackendEndpointRefreshIntegrationTest {
 
     private void waitForPostgres(String containerId) {
         String[] command = {"pg_isready", "-U", USER, "-d", DATABASE};
+        ContainerExec.Result lastResult = null;
         for (int attempt = 0; attempt < 60; attempt++) {
-            try {
-                ContainerExec.Result result = ContainerExec.run(dockerClient, containerId, command, 5);
-                if (result.exitCode() == 0) {
-                    return;
-                }
-            } catch (RuntimeException ignored) {
-                // not ready yet
+            lastResult = ContainerExec.run(dockerClient, containerId, command, 5);
+            if (lastResult.exitCode() == 0) {
+                return;
             }
             try {
                 Thread.sleep(500);
@@ -273,7 +270,10 @@ class RdsBackendEndpointRefreshIntegrationTest {
                 throw new IllegalStateException("Interrupted waiting for PostgreSQL", e);
             }
         }
-        throw new IllegalStateException("PostgreSQL did not become ready in container " + containerId);
+        throw new IllegalStateException(
+                "PostgreSQL did not become ready in container " + containerId
+                        + "; last pg_isready exit=" + lastResult.exitCode()
+                        + ", stderr=" + lastResult.stderr());
     }
 
     private static boolean canConnectEventually(String host, int port) {
