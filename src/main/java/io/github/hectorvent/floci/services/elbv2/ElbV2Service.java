@@ -288,8 +288,10 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
      * the message AWS gives an Application or a Network Load Balancer. A Gateway Load Balancer, which
      * takes subnets the way a Network Load Balancer does, gets the Network one. AWS counts before it
      * looks a subnet up, so one subnet that does not exist gets this error too, not SubnetNotFound.
-     * This runs after the duplicate-name check, because a CloudFormation stack update finds the
-     * balancer it keeps through DuplicateLoadBalancerName, whatever subnets its template names.
+     * On create this runs after the duplicate-name check, because a CloudFormation stack update finds
+     * the balancer it keeps through DuplicateLoadBalancerName, whatever subnets its template names.
+     * {@link #setSubnets} runs it too on a list that names subnets, once it has the balancer's type, as
+     * the SetSubnets reference states the same rule.
      */
     private static void requireSubnets(String lbType, List<String> subnets) {
         int count = subnets == null ? 0 : subnets.size();
@@ -415,6 +417,11 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     public void setSubnets(String region, String arn, List<String> subnets) {
         ec2Service.runWithSubnetReferencesHeld(region, () -> {
             LoadBalancer lb = requireLoadBalancer(region, arn);
+            // Counted as on create, before any subnet is looked up. An empty list is left alone: a
+            // CloudFormation rollback moves a balancer saved without subnets back onto none.
+            if (subnets != null && !subnets.isEmpty()) {
+                requireSubnets(lb.getType(), subnets);
+            }
             String vpcId = resolveSubnetVpcId(region, lb.getType(), subnets);
             if (vpcId != null && lb.getVpcId() != null && !lb.getVpcId().equals(vpcId)) {
                 throw new AwsException("InvalidConfigurationRequest",
@@ -1403,11 +1410,6 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         Map<String, Subnet> subnetsById = resolveSubnetsById(region, subnetIds);
 
         if ("application".equals(lbType)) {
-            if (subnetIds.size() < 2) {
-                throw new AwsException("InvalidConfigurationRequest",
-                        "Application Load Balancers must be attached to subnets in at least two Availability Zones.", 400);
-            }
-
             long distinctAvailabilityZones = subnetIds.stream()
                     .map(subnetsById::get)
                     .map(Subnet::getAvailabilityZone)
