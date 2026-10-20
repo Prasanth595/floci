@@ -4344,8 +4344,10 @@ class Ec2ServiceTest {
         assertEquals("The filter 'owner-id' is invalid", error.getMessage());
 
         // Filter.N in request order: a repeated name is ANDed with the earlier filter, not replacing it.
+        // Each filter alone matches two key pairs, so keeping either one instead gives a longer list.
         List<Map.Entry<String, List<String>>> repeated = List.of(
-                Map.entry("key-name", List.of("*-rsa")), Map.entry("key-name", List.of("g*")));
+                Map.entry("key-name", List.of("alpha-rsa", "gamma-rsa")),
+                Map.entry("key-name", List.of("beta-ed25519", "gamma-rsa")));
         assertEquals(List.of("gamma-rsa"), service.describeKeyPairs("us-east-1", List.of(), List.of(), repeated)
                 .stream().map(KeyPair::getKeyName).toList());
         AwsException repeatedUnknown = assertThrows(AwsException.class, () -> service.describeKeyPairs("us-east-1",
