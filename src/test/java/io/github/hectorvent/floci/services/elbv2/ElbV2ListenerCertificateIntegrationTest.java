@@ -242,6 +242,11 @@ class ElbV2ListenerCertificateIntegrationTest {
     }
 
     @Test
+    void anHttpListenerStillNeedsNoCertificate() {
+        createListener("HTTP", null).statusCode(200);
+    }
+
+    @Test
     void aTlsListenerIsHeldToTheSameCheckAsAnHttpsOne() {
         // The reference brackets the member for HTTPS and TLS, so both, not HTTPS alone.
         createListener("TLS", MISSING_IAM_CERTIFICATE)

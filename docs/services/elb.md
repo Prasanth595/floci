@@ -2,7 +2,7 @@
 
 **Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
-Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB) through the ELBv2 management API. The control plane is AWS SDK / CLI / Terraform compatible, and HTTP listeners can forward to registered instance targets using the target's reachable local address.
+Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB) through the ELBv2 management API. The control plane is AWS SDK / CLI / Terraform compatible, and HTTP and HTTPS listeners can forward to registered instance targets using the target's reachable local address.
 
 > Classic (v1) Elastic Load Balancing is a **different API** served from the same endpoint host —
 > see [ELB Classic (v1)](elb-classic.md). Requests are routed by their `Version` parameter:
@@ -86,6 +86,10 @@ HTTPS listeners require a default certificate. Supply one when creating a listen
 
 ## Behavior Notes
 
+- HTTPS listeners terminate TLS using the configured ACM or IAM server certificates, with SNI certificate selection. When several load balancers share one local HTTPS port, clients must send SNI to identify the certificate they need; a connection without SNI cannot identify a particular load balancer before the TLS handshake.
+- ACM certificates must be issued before attaching them. Reimporting an attached ACM certificate refreshes subsequent TLS connections; existing connections keep their negotiated certificate. ACM deletion is refused while a listener still references the certificate.
+- Unusable saved listeners are retained for correction and logged individually so other saved listeners can start.
+- Listeners sharing a local port must use the same protocol. Requests select a load balancer by its DNS name, a hostname declared by its rules, or a certificate hostname; ambiguous hostnames return 502.
 - Load balancer, target group, listener, rule, and tag state is persisted through Floci storage and rebuilt on service startup.
 - Load balancers are created in `active` state.
 - EC2 refuses deletion of subnets and VPCs still referenced by load balancers with `DependencyViolation`. These account- and region-scoped dependencies follow persisted load balancer state; changing subnets or deleting the load balancer releases its old references. A CloudFormation update that changes `Subnets` or `SubnetMappings` moves the load balancer the way `SetSubnets` does, and a rolled-back update moves it back. An independent target group does not prevent subnet or VPC deletion.
@@ -96,7 +100,7 @@ HTTPS listeners require a default certificate. Supply one when creating a listen
 - Each `CreateListener` automatically creates an immutable default rule (`priority=default`, `isDefault=true`). This rule cannot be deleted; use `ModifyListener` to change its action.
 - Rule priorities are unique per listener: `CreateRule` and `SetRulePriorities` only reject a priority held by another rule on the same listener. `SetRulePriorities` is atomic: all priority assignments are validated before any change is committed.
 - `DeleteTargetGroup` is rejected with `ResourceInUse` while the target group is referenced by any listener or rule.
-- An HTTPS or TLS listener's certificates must name existing certificates: an IAM server certificate ARN or an ACM certificate ARN. `CreateListener`, `ModifyListener` and `AddListenerCertificates` reject a missing or empty one with `CertificateNotFound`, the three operations the API reference models it on, and a `ModifyListener` that turns a listener into an HTTPS or TLS one is held to the same check over the certificates it already carried. An IAM server certificate a listener references cannot be deleted: `DeleteServerCertificate` returns `DeleteConflict` until the certificate is removed from the listener. A write that records one runs while IAM holds its certificate lock, so a certificate cannot be deleted between the check and the write, and a `ModifyListener` refused by that check leaves the listener on the port, protocol, policy and certificates it already had.
+- HTTPS and TLS certificate ARNs must refer to existing IAM server certificates or ACM certificates. `CreateListener`, `ModifyListener` and `AddListenerCertificates` reject a blank or unknown ARN with `CertificateNotFound`. When `ModifyListener` changes the protocol to HTTPS or TLS, it checks any inherited certificate ARNs too. An HTTPS listener also needs a default certificate: `CreateListener` and `ModifyListener` reject an absent or empty effective certificate list with `InvalidConfigurationRequest`. A referenced IAM server certificate cannot be deleted: `DeleteServerCertificate` returns `DeleteConflict` until the certificate is removed from the listener. Writes recording a new IAM certificate reference hold IAM's certificate lock, so the certificate cannot be deleted between the check and the write. A refused change preserves the listener's previous port, protocol, policy and certificates.
 - `RemoveListenerCertificates` refuses removal of an HTTPS or TLS listener's default certificate with `OperationNotPermitted` (400) and preserves the certificate list. Use `ModifyListener` to replace the default certificate. Additional certificates can still be removed.
 - `DeleteRule` is rejected with `OperationNotPermitted` for the default rule.
 - `DescribeSSLPolicies` returns a pre-seeded list of standard AWS SSL policies (`ELBSecurityPolicy-*`).

@@ -158,6 +158,35 @@ class ElbV2DefaultAttributesIntegrationTest {
     }
 
     @Test
+    void aGatewayListenerRetainsItsControlPlaneWithoutAPort() {
+        String arn = createLoadBalancer("attrs-gwlb-listener", "gateway", "10.120.");
+        try {
+            String listener = given().header("Authorization", AUTH).formParam("Action", "CreateListener")
+                    .formParam("LoadBalancerArn", arn).formParam("Protocol", "GENEVE")
+                    .formParam("DefaultActions.member.1.Type", "fixed-response")
+                    .formParam("DefaultActions.member.1.FixedResponseConfig.StatusCode", "200")
+                    .when().post("/").then().statusCode(200).extract()
+                    .path("CreateListenerResponse.CreateListenerResult.Listeners.member.ListenerArn");
+            given().header("Authorization", AUTH).formParam("Action", "ModifyListener")
+                    .formParam("ListenerArn", listener)
+                    .formParam("DefaultActions.member.1.Type", "fixed-response")
+                    .formParam("DefaultActions.member.1.FixedResponseConfig.StatusCode", "201")
+                    .when().post("/").then().statusCode(200);
+            given().header("Authorization", AUTH).formParam("Action", "DescribeListeners")
+                    .formParam("ListenerArns.member.1", listener).when().post("/").then().statusCode(200)
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.Protocol", equalTo("GENEVE"))
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.Port.text()", equalTo(""))
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.DefaultActions.member.FixedResponseConfig.StatusCode",
+                            equalTo("201"));
+            given().header("Authorization", AUTH).formParam("Action", "DeleteListener")
+                    .formParam("ListenerArn", listener).when().post("/").then().statusCode(200);
+        } finally {
+            given().header("Authorization", AUTH).formParam("Action", "DeleteLoadBalancer")
+                    .formParam("LoadBalancerArn", arn).when().post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
     void aModifiedAttributeWinsOverItsDefaultAndTheRestStillReport() {
         String arn = createLoadBalancer("attrs-modified", "application", "10.99.");
 

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -12,12 +13,15 @@ import io.github.hectorvent.floci.services.acm.model.CertificateType;
 import io.github.hectorvent.floci.services.acm.model.DomainValidation;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.acm.model.ValidationMethod;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -28,18 +32,23 @@ import java.security.cert.TrustAnchor;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPublicKey;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -111,6 +120,129 @@ class AcmServiceTest {
         assertEquals(existing.getArn(), retry.getArn());
         assertEquals(replacement.certificatePem(), service.getCertificate(existing.getArn(), REGION).getCertificateBody());
         assertEquals(replacement.privateKeyPem(), service.getCertificate(existing.getArn(), REGION).getPrivateKey());
+    }
+
+    @Test
+    void pendingAcmExistsButCannotSupplyAnElbCertificate() {
+        AcmService pending = newService(3600);
+        Certificate certificate = pending.requestCertificate("pending.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, null, Map.of(), REGION);
+        CertificateReferenceResolver resolver = new CertificateReferenceResolver(null, pending);
+        assertTrue(resolver.exists(REGION, certificate.getArn()));
+        assertEquals(false, resolver.isUsableAcmCertificate(REGION, certificate.getArn()));
+        String owner = "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/test/one/two";
+        AwsException failure = assertThrows(AwsException.class,
+                () -> resolver.publishedMaterial(owner, REGION, certificate.getArn()));
+        assertEquals("CertificateNotFound", failure.getErrorCode());
+        assertEquals(CertificateStatus.PENDING_VALIDATION, pending.getCertificate(certificate.getArn(), REGION).getStatus());
+    }
+
+    @Test
+    void capturedCertificateSummarySurvivesDeletion() {
+        Certificate certificate = service.requestCertificate("list.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, null, Map.of(), REGION);
+        service.deleteCertificate(certificate.getArn(), REGION);
+        assertEquals(List.of(), service.certificateInUseBy(certificate));
+    }
+
+    @Test
+    void anOlderImportNotificationReadsTheNewestCommittedMaterial() throws Exception {
+        CertificateGenerator.GeneratedCertificate original = ca.issueServerCertificate(
+                "rotation.example.test", List.of(), KeyAlgorithm.RSA_2048, null);
+        Certificate certificate = service.importCertificate(original.certificatePem(), original.privateKeyPem(),
+                ca.caPem(), null, Map.of(), REGION);
+        CertificateGenerator.GeneratedCertificate first = ca.issueServerCertificate(
+                "rotation.example.test", List.of(), KeyAlgorithm.RSA_2048, null);
+        CertificateGenerator.GeneratedCertificate second = ca.issueServerCertificate(
+                "rotation.example.test", List.of(), KeyAlgorithm.RSA_2048, null);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean pause = new AtomicBoolean(true);
+        List<String> material = new CopyOnWriteArrayList<>();
+        AcmCertificateReferenceProvider consumer = new AcmCertificateReferenceProvider() {
+            @Override
+            public List<CertificateReference> acmCertificateReferences() { return List.of(); }
+
+            @Override
+            public void certificateReimported(String arn, String region) {
+                if (pause.getAndSet(false)) {
+                    entered.countDown();
+                    try {
+                        assertTrue(release.await(10, TimeUnit.SECONDS));
+                    } catch (InterruptedException failure) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(failure);
+                    }
+                }
+                material.add(service.supplyWithCertificatesHeld(() -> service.getCertificate(arn, region).getCertificateBody()));
+            }
+        };
+        Instance<AcmCertificateReferenceProvider> providers = mock();
+        when(providers.iterator()).thenAnswer(call -> List.of(consumer).iterator());
+        service.referenceProviders = providers;
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<Certificate> older = worker.submit(() -> service.importCertificate(first.certificatePem(),
+                    first.privateKeyPem(), ca.caPem(), certificate.getArn(), Map.of(), REGION));
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            service.importCertificate(second.certificatePem(), second.privateKeyPem(), ca.caPem(),
+                    certificate.getArn(), Map.of(), REGION);
+            release.countDown();
+            older.get(10, TimeUnit.SECONDS);
+            assertEquals(List.of(second.certificatePem(), second.certificatePem()), material);
+        } finally {
+            release.countDown();
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void aDeleteWaitsForReferencePublicationThenObservesTheConsumer() throws Exception {
+        Certificate certificate = service.requestCertificate("delete.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, null, Map.of(), REGION);
+        String consumer = "arn:aws:cognito-idp:us-east-1:000000000000:userpool/guarded";
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch deleting = new CountDownLatch(1);
+        AtomicLong holder = new AtomicLong();
+        AtomicLong waiter = new AtomicLong();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> publication = workers.submit(() -> service.supplyWithCertificatesHeld(() -> {
+                holder.set(Thread.currentThread().threadId());
+                held.countDown();
+                try {
+                    assertTrue(release.await(10, TimeUnit.SECONDS));
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(failure);
+                }
+                service.addInUseBy(certificate.getArn(), consumer, REGION);
+                return null;
+            }));
+            assertTrue(held.await(5, TimeUnit.SECONDS));
+            Future<AwsException> deletion = workers.submit(() -> {
+                waiter.set(Thread.currentThread().threadId());
+                deleting.countDown();
+                return assertThrows(AwsException.class, () -> service.deleteCertificate(certificate.getArn(), REGION));
+            });
+            assertTrue(deleting.await(5, TimeUnit.SECONDS));
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+                ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(waiter.get());
+                assertEquals(Thread.State.BLOCKED, info.getThreadState());
+                assertEquals(holder.get(), info.getLockOwnerId());
+            });
+            release.countDown();
+            publication.get(10, TimeUnit.SECONDS);
+            assertEquals("ResourceInUseException", deletion.get(10, TimeUnit.SECONDS).getErrorCode());
+            service.removeInUseBy(certificate.getArn(), consumer, REGION);
+            service.deleteCertificate(certificate.getArn(), REGION);
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
     }
 
     private AcmService newService(int validationWaitSeconds) {
