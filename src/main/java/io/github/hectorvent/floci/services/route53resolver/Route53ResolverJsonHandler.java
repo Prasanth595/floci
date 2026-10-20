@@ -74,16 +74,16 @@ public class Route53ResolverJsonHandler {
                 case "ListResolverRuleAssociations" -> handleListResolverRuleAssociations();
 
                 case "TagResource" -> {
-                    service.tagResource(text(request, "ResourceArn"), request.get("Tags"));
+                    service.tagResource(text(request, "ResourceArn"), request.get("Tags"), region, accountId);
                     yield Response.ok(objectMapper.createObjectNode()).build();
                 }
                 case "UntagResource" -> {
-                    service.untagResource(text(request, "ResourceArn"), request.get("TagKeys"));
+                    service.untagResource(text(request, "ResourceArn"), request.get("TagKeys"), region, accountId);
                     yield Response.ok(objectMapper.createObjectNode()).build();
                 }
                 case "ListTagsForResource" -> Response.ok(service.listTagsForResource(
                         text(request, "ResourceArn"), request.get("MaxResults"),
-                        text(request, "NextToken"))).build();
+                        text(request, "NextToken"), region, accountId)).build();
 
                 default -> Response.status(400)
                         .entity(new AwsErrorResponse("UnknownOperationException",

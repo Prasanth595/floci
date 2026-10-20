@@ -140,6 +140,12 @@ class Route53ResolverTaggingIntegrationTest {
             .body("Tags", hasSize(1))
             .body("NextToken", nullValue());
 
+        for (String malformed : new String[] {"1.5", "true", "\"1\"", "0", "101"}) {
+            call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\",\"MaxResults\":" + malformed + "}")
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"));
+        }
+
         call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\",\"NextToken\":\"bogus\"}")
             .statusCode(400)
             .body("__type", equalTo("InvalidNextTokenException"));
@@ -194,6 +200,16 @@ class Route53ResolverTaggingIntegrationTest {
         call("TagResource", "{\"ResourceArn\":\"" + arn + "\",\"Tags\":[{\"Key\":\"k\"}]}")
             .statusCode(400)
             .body("__type", equalTo("InvalidTagException"));
+        for (String malformed : new String[] {
+                "{\"Key\":123,\"Value\":\"v\"}", "{\"Key\":\"k\",\"Value\":true}",
+                "{\"Key\":\"k\",\"Value\":{\"x\":1}}", "{\"Key\":[\"k\"],\"Value\":\"v\"}"}) {
+            call("TagResource", "{\"ResourceArn\":\"" + arn + "\",\"Tags\":[" + malformed + "]}")
+                .statusCode(400)
+                .body("__type", equalTo("InvalidTagException"));
+        }
+        call("UntagResource", "{\"ResourceArn\":\"" + arn + "\",\"TagKeys\":[123]}")
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
         call("TagResource", "{\"ResourceArn\":\"" + arn + "\"}")
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterException"));

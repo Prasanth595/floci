@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /**
  * Route 53 Resolver: DNS Firewall (managed + custom domain lists), resolver
@@ -475,19 +476,24 @@ public class Route53ResolverService {
 
     // ---------- Tagging ----------
 
-    public synchronized void tagResource(String arn, JsonNode tags) {
+    public synchronized void tagResource(String arn, JsonNode tags, String region, String accountId) {
         if (tags == null || tags.isNull()) {
             throw new AwsException(INVALID_PARAMETER, "Tags is required", 400);
         }
         JsonNode validated = validatedTags(tags, "InvalidTagException");
-        putTags(requireTaggable(arn), validated);
+        putTags(requireTaggable(arn, region, accountId), validated);
     }
 
-    public synchronized void untagResource(String arn, JsonNode tagKeys) {
+    public synchronized void untagResource(String arn, JsonNode tagKeys, String region, String accountId) {
         if (tagKeys == null || !tagKeys.isArray()) {
             throw new AwsException(INVALID_PARAMETER, "TagKeys is required", 400);
         }
-        requireTaggable(arn);
+        for (JsonNode key : tagKeys) {
+            if (!key.isTextual()) {
+                throw new AwsException(INVALID_PARAMETER, "TagKeys must be a list of strings", 400);
+            }
+        }
+        requireTaggable(arn, region, accountId);
         ObjectNode stored = tagStore.get(arn).orElse(null);
         if (stored == null) {
             return;
@@ -499,15 +505,30 @@ public class Route53ResolverService {
     /**
      * One page of a resource's tags as modeled {@code Tag} entries. {@code NextToken} is the
      * offset of the next tag; {@code MaxResults} defaults to the modeled 100.
+     *
+     * <p>The stored tag node is copied under the monitor {@link #tagResource} and
+     * {@link #untagResource} mutate it under, so a concurrent tag change can neither break the
+     * iteration nor show a half-applied page.</p>
      */
-    public ObjectNode listTagsForResource(String arn, JsonNode maxResults, String nextToken) {
-        requireTaggable(arn);
-        int limit = maxResults == null || maxResults.isNull() ? 100 : maxResults.asInt();
+    public ObjectNode listTagsForResource(String arn, JsonNode maxResults, String nextToken,
+                                          String region, String accountId) {
+        boolean absent = maxResults == null || maxResults.isNull();
+        if (!absent && (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt())) {
+            throw new AwsException(INVALID_PARAMETER, "MaxResults must be an integer between 1 and 100", 400);
+        }
+        int limit = absent ? 100 : maxResults.intValue();
         if (limit < 1 || limit > 100) {
             throw new AwsException(INVALID_PARAMETER, "MaxResults must be between 1 and 100", 400);
         }
+        ObjectNode snapshot;
+        synchronized (this) {
+            requireTaggable(arn, region, accountId);
+            snapshot = tagStore.get(arn).map(ObjectNode::deepCopy).orElse(null);
+        }
         List<Map.Entry<String, JsonNode>> all = new ArrayList<>();
-        tagStore.get(arn).ifPresent(stored -> stored.fields().forEachRemaining(all::add));
+        if (snapshot != null) {
+            snapshot.fields().forEachRemaining(all::add);
+        }
         int start = 0;
         if (nextToken != null) {
             try {
@@ -532,17 +553,22 @@ public class Route53ResolverService {
     }
 
     /**
-     * The stored resource an ARN names. The id is looked up in the caller's own account
-     * partition and the stored resource's ARN must match the request exactly, so an ARN naming
-     * another account, region or partition is not found rather than resolved to a local
-     * resource that happens to share its id. AWS-managed firewall domain lists are not stored
-     * and so are not taggable here.
+     * The stored resource an ARN names. The ARN must name the caller's own partition, region and
+     * account before anything is read, the id is looked up in the caller's account partition,
+     * and the stored resource's ARN must match the request exactly; anything else is not found
+     * rather than resolved to a resource that happens to share its id. A pre-multi-account
+     * (unprefixed) entry is migrated into the caller's partition only once its own ARN proves
+     * the caller owns it, so another account cannot claim it by naming its ARN. AWS-managed
+     * firewall domain lists are not stored and so are not taggable here.
      */
-    private ObjectNode requireTaggable(String arn) {
+    private ObjectNode requireTaggable(String arn, String region, String accountId) {
         if (arn == null || arn.isBlank()) {
             throw new AwsException(INVALID_PARAMETER, "ResourceArn is required", 400);
         }
-        String resource = AwsArnUtils.resourceIfArnFor(arn, "route53resolver").orElse("");
+        String callerPrefix = "arn:" + AwsRegions.partitionFor(region) + ":route53resolver:" + region + ":"
+                + accountId + ":";
+        String resource = arn.startsWith(callerPrefix)
+                ? AwsArnUtils.resourceIfArnFor(arn, "route53resolver").orElse("") : "";
         int slash = resource.indexOf('/');
         StorageBackend<String, ObjectNode> store = slash < 0 ? null : switch (resource.substring(0, slash)) {
             case "resolver-endpoint" -> endpointStore;
@@ -551,10 +577,26 @@ public class Route53ResolverService {
             default -> null;
         };
         return Optional.ofNullable(store)
-                .flatMap(s -> s.get(resource.substring(slash + 1)))
-                .filter(stored -> arn.equals(text(stored, "Arn")))
+                .flatMap(s -> ownedBy(s, accountId, resource.substring(slash + 1),
+                        stored -> arn.equals(text(stored, "Arn"))))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource not found: " + arn, 400));
+    }
+
+    /**
+     * The caller's resource by id. Unlike {@link StorageBackend#get}, which migrates an unprefixed
+     * legacy entry into whichever account reads it first, a legacy entry moves only when
+     * {@code owner} accepts it.
+     */
+    private static Optional<ObjectNode> ownedBy(StorageBackend<String, ObjectNode> store, String accountId,
+                                                String id, Predicate<ObjectNode> owner) {
+        if (store instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<ObjectNode> accountAware =
+                    (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
+            return accountAware.getForAccountMigratingLegacy(accountId, id, owner);
+        }
+        return store.get(id).filter(owner);
     }
 
     /**
@@ -573,6 +615,9 @@ public class Route53ResolverService {
             throw new AwsException(errorCode, "Tags must be a list", 400);
         }
         for (JsonNode tag : tags) {
+            if (!tag.path("Key").isTextual() || !tag.path("Value").isTextual()) {
+                throw new AwsException(errorCode, "Each tag needs a string Key and a string Value.", 400);
+            }
             String key = text(tag, "Key");
             String value = text(tag, "Value");
             if (key == null || key.isEmpty() || key.length() > 128 || value == null || value.length() > 256) {
