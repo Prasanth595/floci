@@ -30,6 +30,11 @@
 | `ListTagsOfResource` | List tags |
 | `DescribeContinuousBackups` | Get PITR backup configuration |
 | `UpdateContinuousBackups` | Enable/disable PITR |
+| `CreateBackup` | Take an on-demand backup of a table |
+| `DescribeBackup` | Get a backup and the table it was taken from |
+| `ListBackups` | List backups by table, type and creation time |
+| `DeleteBackup` | Delete a backup |
+| `RestoreTableFromBackup` | Create a new table from a backup |
 | `DescribeKinesisStreamingDestination` | List Kinesis streaming destinations |
 | `EnableKinesisStreamingDestination` | Enable Kinesis streaming for a table |
 | `DisableKinesisStreamingDestination` | Disable Kinesis streaming for a table |
@@ -446,6 +451,22 @@ aws dynamodb list-imports --endpoint-url $AWS_ENDPOINT_URL
 The import reads every object under the key prefix. Point it at the `data/` prefix of an export with `--input-compression-type GZIP` to load an export back. Floci does not evaluate bucket policies, so an `S3BucketOwner` that is not the caller's account fails the import with `S3AccessDenied`, as AWS does without a policy grant. The table stays in `CREATING` until the import finishes, then becomes `ACTIVE`. `DeleteTable` and `UpdateTable` return `ResourceInUseException` while the table is `CREATING`. Item calls such as `GetItem`, `PutItem`, `Query` and `Scan` return `ResourceNotFoundException` until the table is `ACTIVE`, as on AWS. A line that is not valid DynamoDB JSON or does not match the key schema is skipped and counted in `ErrorCount`. An object that cannot be read, for example a plain file under a `GZIP` import, is skipped and counted as one error. A missing bucket or an empty prefix ends the import as `FAILED` with a `FailureCode`. A reused `ClientToken` with different parameters returns `ImportConflictException`.
 
 Deviations from AWS: only `InputFormat` `DYNAMODB_JSON` with `InputCompressionType` `NONE` or `GZIP` is accepted. `CSV`, `ION` and `ZSTD` are rejected with a `ValidationException`.
+
+## On-demand backups
+
+`CreateBackup` copies the items and settings of a table at the time of the call. The answer says `CREATING`, and the backup is `AVAILABLE` at once. A backup outlives its table. `ListBackups` returns backups in creation order and sets `LastEvaluatedBackupArn` only when more backups remain.
+
+```bash
+BACKUP_ARN=$(aws dynamodb create-backup --table-name Users --backup-name nightly \
+  --query BackupDetails.BackupArn --output text --endpoint-url $AWS_ENDPOINT_URL)
+
+aws dynamodb restore-table-from-backup --backup-arn $BACKUP_ARN \
+  --target-table-name UsersRestored --endpoint-url $AWS_ENDPOINT_URL
+```
+
+`RestoreTableFromBackup` creates a new table with the keys, indexes, billing mode, throughput and encryption of the backup. As on AWS, the new table has no stream, TTL, point-in-time recovery, tags or deletion protection, and its table class is `STANDARD`. The overrides follow AWS. A GSI or LSI override must match a source index by key schema and projection, and a vector index override must match one by name. `BillingModeOverride` `PROVISIONED` needs throughput for the table and for every GSI that is kept.
+
+Deviations from AWS: a restore is done before the response is sent. The response still says `CREATING` with `RestoreInProgress: true`, as on AWS, but the table is `ACTIVE` right away. So `BackupInUseException` and `TableInUseException` for a restore in progress never happen. `BackupSizeBytes` is always 0. Backups made by AWS Backup (`BackupType` `AWS_BACKUP`) are not emulated.
 
 
 ## Kinesis change data capture (CDC)

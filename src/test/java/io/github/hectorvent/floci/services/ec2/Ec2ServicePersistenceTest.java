@@ -175,6 +175,129 @@ class Ec2ServicePersistenceTest {
         assertEquals(12, snapshots.getFirst().getVolumeSize());
     }
 
+    /**
+     * Creation provenance is stored beside the runtime ancestor rather than derived from it, so a
+     * restart reads both back from the image files and a copy still names its immediate source.
+     */
+    @Test
+    void imageCreationProvenanceSurvivesRestartApartFromTheRuntimeAncestor(@TempDir Path dir) {
+        Ec2Service first = newService(dir);
+        String instanceId = first.runInstances(REGION, "ami-0abcdef1234567890", "t3.micro", 1, 1, null,
+                List.of(), null, null, List.of(), null, null).getInstances().getFirst().getInstanceId();
+        Image captured = first.createImage(REGION, instanceId, "provenance-capture", null, true);
+        Image copied = first.copyImage("us-west-2", REGION, captured.getImageId(), "provenance-copy", null);
+
+        Ec2Service restarted = newService(dir);
+
+        Image restoredCapture = restarted.describeImages(REGION, List.of(captured.getImageId()), List.of(), Map.of())
+                .getFirst();
+        assertEquals("ami-0abcdef1234567890", restoredCapture.getCreationSourceImageId());
+        assertEquals(REGION, restoredCapture.getCreationSourceImageRegion());
+        assertEquals(instanceId, restoredCapture.getCreationSourceInstanceId());
+        Image restoredCopy = restarted.describeImages("us-west-2", List.of(copied.getImageId()), List.of(), Map.of())
+                .getFirst();
+        assertEquals(captured.getImageId(), restoredCopy.getCreationSourceImageId());
+        assertEquals(REGION, restoredCopy.getCreationSourceImageRegion());
+        assertNull(restoredCopy.getCreationSourceInstanceId());
+        assertEquals("ami-0abcdef1234567890", restoredCopy.getSourceImageId());
+    }
+
+    /**
+     * An image store as Floci wrote it before creation provenance was kept: a CreateImage AMI and its
+     * cross-region copy, each holding only its launchable ancestor, the catalog AMI, under
+     * {@code sourceImageId}. Both load and report no provenance, rather than passing that ancestor
+     * off as the image they were made from, and a copy made after the upgrade names its source.
+     */
+    @Test
+    void imagesSavedBeforeCreationProvenanceWasKeptLoadWithoutIt(@TempDir Path dir) throws IOException {
+        String capture = "ami-d62643c08afd5b4dd";
+        String copy = "ami-a6f93de002cd6d39b";
+        String legacyJson = """
+                {
+                  "us-west-2::%2$s" : {
+                    "imageId" : "%2$s",
+                    "name" : "legacy-copy",
+                    "description" : "legacy-copy",
+                    "state" : "available",
+                    "ownerId" : "000000000000",
+                    "architecture" : "x86_64",
+                    "rootDeviceType" : "ebs",
+                    "rootDeviceName" : "/dev/xvda",
+                    "virtualizationType" : "hvm",
+                    "hypervisor" : "xen",
+                    "platform" : null,
+                    "imageOwnerAlias" : null,
+                    "creationDate" : "2026-10-20T01:38:17.112Z",
+                    "region" : "us-west-2",
+                    "sourceImageId" : "ami-0abcdef1234567890",
+                    "dockerImage" : null,
+                    "blockDeviceMappings" : [ {
+                      "deviceName" : "/dev/xvda",
+                      "ebs" : {
+                        "snapshotId" : "snap-551e5e74928952115",
+                        "volumeSize" : 8,
+                        "volumeType" : "gp2",
+                        "deleteOnTermination" : true,
+                        "encrypted" : null
+                      }
+                    } ],
+                    "tags" : [ ],
+                    "public" : false
+                  },
+                  "us-east-1::%1$s" : {
+                    "imageId" : "%1$s",
+                    "name" : "legacy-capture",
+                    "description" : "legacy-capture",
+                    "state" : "available",
+                    "ownerId" : "000000000000",
+                    "architecture" : "x86_64",
+                    "rootDeviceType" : "ebs",
+                    "rootDeviceName" : "/dev/xvda",
+                    "virtualizationType" : "hvm",
+                    "hypervisor" : "xen",
+                    "platform" : null,
+                    "imageOwnerAlias" : null,
+                    "creationDate" : "2026-10-20T01:38:17.105Z",
+                    "region" : "us-east-1",
+                    "sourceImageId" : "ami-0abcdef1234567890",
+                    "dockerImage" : null,
+                    "blockDeviceMappings" : [ {
+                      "deviceName" : "/dev/xvda",
+                      "ebs" : {
+                        "snapshotId" : "snap-932ddc3942d093a00",
+                        "volumeSize" : 8,
+                        "volumeType" : "gp2",
+                        "deleteOnTermination" : true,
+                        "encrypted" : null
+                      }
+                    } ],
+                    "tags" : [ ],
+                    "public" : false
+                  }
+                }
+                """.formatted(capture, copy);
+        Files.writeString(dir.resolve("ec2-registered-images.json"), legacyJson);
+
+        Ec2Service restarted = newService(dir);
+
+        Image restoredCapture = restarted.describeImages(REGION, List.of(capture), List.of(), Map.of()).getFirst();
+        Image restoredCopy = restarted.describeImages("us-west-2", List.of(copy), List.of(), Map.of()).getFirst();
+        assertEquals("legacy-capture", restoredCapture.getName());
+        assertEquals("ami-0abcdef1234567890", restoredCopy.getSourceImageId());
+        for (Image restored : List.of(restoredCapture, restoredCopy)) {
+            assertNull(restored.getCreationSourceImageId());
+            assertNull(restored.getCreationSourceImageRegion());
+            assertNull(restored.getCreationSourceInstanceId());
+        }
+        assertTrue(restarted.describeImages("us-west-2", List.of(), List.of(),
+                Map.of("source-image-id", List.of("*"))).isEmpty());
+
+        Image copiedNow = restarted.copyImage("us-west-2", REGION, capture, "copied-after-upgrade", null);
+        assertEquals(capture, copiedNow.getCreationSourceImageId());
+        assertEquals(REGION, copiedNow.getCreationSourceImageRegion());
+        assertEquals("ami-0abcdef1234567890", copiedNow.getSourceImageId());
+    }
+
     @Test
     void managedPrefixListAndItsVersionHistorySurviveRestart(@TempDir Path dir) {
         Ec2Service first = newService(dir);

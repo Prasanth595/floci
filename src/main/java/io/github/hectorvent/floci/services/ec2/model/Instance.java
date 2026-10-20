@@ -18,6 +18,7 @@ public class Instance {
     private volatile InstanceState state;
     private String stateTransitionReason;
     private String instanceType;
+    private boolean spot;
     private Placement placement;
     private String subnetId;
     private String vpcId;
@@ -109,6 +110,9 @@ public class Instance {
 
     public String getStateTransitionReason() { return stateTransitionReason; }
     public void setStateTransitionReason(String stateTransitionReason) { this.stateTransitionReason = stateTransitionReason; }
+
+    public boolean isSpot() { return spot; }
+    public void setSpot(boolean spot) { this.spot = spot; }
 
     public String getInstanceType() { return instanceType; }
     public void setInstanceType(String instanceType) { this.instanceType = instanceType; }

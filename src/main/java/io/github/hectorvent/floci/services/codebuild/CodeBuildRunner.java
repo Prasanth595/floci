@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -39,6 +40,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -257,7 +259,13 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
 
             // Copy downloaded source files into the container (no-op for NO_SOURCE builds)
-            copySourceToContainer(containerId, workspace, containerSrcDir);
+            try {
+                copySourceToContainer(containerId, workspace, containerSrcDir);
+            } catch (RuntimeException e) {
+                if (stopFlag.get()) { finishStopped(build); return; }
+                completePhaseWithError(build, "DOWNLOAD_SOURCE", "FAILED", e.getMessage());
+                throw e;
+            }
 
             // INSTALL
             if (stopFlag.get()) { finishStopped(build); return; }
@@ -500,24 +508,21 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     // Copies files from the local workspace into the container's working directory.
     // Skips silently when the workspace is empty (e.g. NO_SOURCE builds).
-    private void copySourceToContainer(String containerId, Path sourceDir, String remotePath) {
-        try {
-            if (!Files.exists(sourceDir)) return;
-            boolean hasFiles;
-            try (Stream<Path> ls = Files.list(sourceDir)) {
-                hasFiles = ls.findAny().isPresent();
-            }
-            if (!hasFiles) return;
+    void copySourceToContainer(String containerId, Path sourceDir, String remotePath) {
+        copySourceToContainer(containerId, sourceDir, remotePath, RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
 
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            createTarFromDir(sourceDir, bos);
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath(remotePath)
-                    .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
-                    .exec();
-        } catch (Exception e) {
-            LOG.warnv("Could not copy source to container {0}: {1}", containerId, e.getMessage());
+    void copySourceToContainer(String containerId, Path sourceDir, String remotePath, long backoffMillis) {
+        if (!Files.exists(sourceDir)) return;
+        try (Stream<Path> ls = Files.list(sourceDir)) {
+            if (ls.findAny().isEmpty()) return;
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not inspect CodeBuild source directory " + sourceDir, e);
         }
+
+        RetryingTarCopier.copyStreamed(dockerClient, containerId, remotePath,
+                "codebuild-source", out -> createTarFromDir(sourceDir, out),
+                RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, backoffMillis);
     }
 
     // Pulls the container's working directory back into the local workspace so
@@ -564,7 +569,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    private void createTarFromDir(Path dir, ByteArrayOutputStream out) throws IOException {
+    private void createTarFromDir(Path dir, OutputStream out) throws IOException {
         try (TarArchiveOutputStream tar = newTarStream(out);
              Stream<Path> stream = Files.walk(dir)) {
             for (Path path : (Iterable<Path>) stream::iterator) {
@@ -588,7 +593,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    private static TarArchiveOutputStream newTarStream(ByteArrayOutputStream out) {
+    private static TarArchiveOutputStream newTarStream(OutputStream out) {
         TarArchiveOutputStream tar = new TarArchiveOutputStream(out);
         tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
         tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_STAR);

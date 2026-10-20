@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshift;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -48,24 +49,27 @@ public class RedshiftQueryHandler {
     private final RedshiftIamDbUserResolver iamDbUserResolver;
     private final RegionResolver regionResolver;
     private final RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer;
+    private final IamEnforcementFilter iamEnforcementFilter;
 
     @Inject
     public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                                 EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                                 RegionResolver regionResolver,
-                                RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer) {
+                                RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer,
+                                IamEnforcementFilter iamEnforcementFilter) {
         this.service = service;
         this.credentialBroker = credentialBroker;
         this.config = config;
         this.iamDbUserResolver = iamDbUserResolver;
         this.regionResolver = regionResolver;
         this.zeroEtlConsumer = zeroEtlConsumer;
+        this.iamEnforcementFilter = iamEnforcementFilter;
     }
 
     RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                          EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                          RegionResolver regionResolver) {
-        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null);
+        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -764,13 +768,14 @@ public class RedshiftQueryHandler {
         case "GetClusterCredentials" -> {
             String clusterId = requireParam(params, "ClusterIdentifier");
             String dbUser = requireParam(params, "DbUser");
+            boolean autoCreate = Boolean.parseBoolean(params.getFirst("AutoCreate"));
+            List<String> dbGroups = memberList(params, "DbGroups");
+            authorizeCredentialOptions(authorizationHeader, clusterId, dbUser, autoCreate, dbGroups);
             // describeClusters throws ClusterNotFound (404) for an unknown id.
             service.describeClusters(clusterId);
             // AWS prefixes the returned name IAMA: when AutoCreate is true, IAM: when it is false.
-            boolean autoCreate = Boolean.parseBoolean(params.getFirst("AutoCreate"));
             String effectiveDbUser = (autoCreate ? "IAMA:" : "IAM:") + dbUser;
             int duration = resolveDurationSeconds(params);
-            List<String> dbGroups = memberList(params, "DbGroups");
 
             TempCredential credential = credentialBroker.issue(
                     regionResolver.getAccountId(), clusterId, effectiveDbUser, dbGroups, duration);
@@ -790,6 +795,28 @@ public class RedshiftQueryHandler {
                     .type(MediaType.APPLICATION_XML).build();
         }
         default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
+        }
+    }
+
+    /**
+     * Authorizes the actions GetClusterCredentials needs besides redshift:GetClusterCredentials, which
+     * the API reference lists for its options: redshift:JoinGroup on each group in {@code DbGroups},
+     * and redshift:CreateClusterUser on the database user when {@code AutoCreate} is true. It runs
+     * before the cluster lookup, so a denied caller learns nothing about the cluster.
+     */
+    private void authorizeCredentialOptions(String authorizationHeader, String clusterId, String dbUser,
+                                            boolean autoCreate, List<String> dbGroups) {
+        if (iamEnforcementFilter == null) {
+            return;
+        }
+        String region = regionResolver.resolveRegionFromAuth(authorizationHeader);
+        for (String dbGroup : dbGroups) {
+            iamEnforcementFilter.authorizeAdditionalResource(authorizationHeader, "redshift:JoinGroup",
+                    regionResolver.buildArn("redshift", region, "dbgroup:" + clusterId + "/" + dbGroup));
+        }
+        if (autoCreate) {
+            iamEnforcementFilter.authorizeAdditionalResource(authorizationHeader, "redshift:CreateClusterUser",
+                    regionResolver.buildArn("redshift", region, "dbuser:" + clusterId + "/" + dbUser));
         }
     }
 

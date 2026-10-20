@@ -22,6 +22,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -148,7 +149,7 @@ public class EmrHandler {
         cluster.setEc2Attributes(buildEc2Attributes(instances));
         cluster.setInstanceGroups(parseInstanceGroups(instances.path("InstanceGroups")));
         cluster.setInstanceFleets(parseInstanceFleets(instances.path("InstanceFleets")));
-        cluster.setSteps(parseSteps(request.path("Steps")));
+        cluster.setSteps(parseSteps(request.path("Steps"), text(request, "StepExecutionRoleArn")));
 
         EmrCluster created = service.runJobFlow(cluster, region);
         ObjectNode response = objectMapper.createObjectNode();
@@ -212,7 +213,8 @@ public class EmrHandler {
     // ──────────────────────────── Steps ────────────────────────────
 
     private Response handleAddJobFlowSteps(JsonNode request) {
-        List<String> ids = service.addJobFlowSteps(text(request, "JobFlowId"), parseSteps(request.path("Steps")));
+        List<String> ids = service.addJobFlowSteps(text(request, "JobFlowId"),
+                parseSteps(request.path("Steps"), text(request, "ExecutionRoleArn")));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("StepIds");
         ids.forEach(arr::add);
@@ -222,7 +224,7 @@ public class EmrHandler {
     private Response handleDescribeStep(JsonNode request) {
         EmrStep step = service.describeStep(text(request, "ClusterId"), text(request, "StepId"));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Step", stepNode(step));
+        response.set("Step", stepNode(step, true));
         return Response.ok(response).build();
     }
 
@@ -232,7 +234,7 @@ public class EmrHandler {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Steps");
         for (EmrStep step : steps) {
-            arr.add(stepNode(step));
+            arr.add(stepNode(step, false));
         }
         return Response.ok(response).build();
     }
@@ -299,13 +301,31 @@ public class EmrHandler {
         EmrCluster cluster = service.getClusterForInstances(text(request, "ClusterId"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Instances");
+        boolean terminated = "TERMINATED".equals(cluster.getState());
+        List<String> states = stringList(request.path("InstanceStates"));
+        if ((!states.isEmpty() && !states.contains(terminated ? "TERMINATED" : "RUNNING"))
+                || (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now()))) {
+            return Response.ok(response).build();
+        }
         int n = 1;
         for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
-            for (int i = 0; i < group.getRunningInstanceCount(); i++) {
-                arr.add(syntheticInstanceNode(cluster, group, n++));
+            int count = listedInstanceCount(group, terminated);
+            for (int i = 0; i < count; i++) {
+                arr.add(syntheticInstanceNode(cluster, group, n++, terminated));
             }
         }
         return Response.ok(response).build();
+    }
+
+    static boolean withinTerminatedInstanceRetention(Instant endedAt, Instant now) {
+        return endedAt != null && !endedAt.isBefore(now.minus(30, ChronoUnit.DAYS));
+    }
+
+    static int listedInstanceCount(EmrInstanceGroup group, boolean terminated) {
+        if (terminated && group.getTerminatedInstanceCount() > 0) {
+            return group.getTerminatedInstanceCount();
+        }
+        return group.getRunningInstanceCount();
     }
 
     // ──────────────────────────── Security configurations ────────────────────────────
@@ -606,7 +626,7 @@ public class EmrHandler {
         return status;
     }
 
-    private ObjectNode stepNode(EmrStep step) {
+    private ObjectNode stepNode(EmrStep step, boolean includeExecutionRole) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", step.getId());
         node.put("Name", step.getName());
@@ -622,6 +642,9 @@ public class EmrHandler {
         ObjectNode props = config.putObject("Properties");
         step.getProperties().forEach(props::put);
         node.put("ActionOnFailure", step.getActionOnFailure());
+        if (includeExecutionRole && step.getExecutionRoleArn() != null) {
+            node.put("ExecutionRoleArn", step.getExecutionRoleArn());
+        }
         ObjectNode status = node.putObject("Status");
         status.put("State", step.getState());
         if (step.getStateChangeReason() != null) {
@@ -693,7 +716,8 @@ public class EmrHandler {
         return node;
     }
 
-    private ObjectNode syntheticInstanceNode(EmrCluster cluster, EmrInstanceGroup group, int index) {
+    private ObjectNode syntheticInstanceNode(EmrCluster cluster, EmrInstanceGroup group, int index,
+                                             boolean terminated) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", "ci-" + index + cluster.getId());
         node.put("Ec2InstanceId", "i-" + String.format("%017d", index));
@@ -706,7 +730,7 @@ public class EmrHandler {
             node.put("Market", group.getMarket());
         }
         node.put("InstanceType", group.getInstanceType());
-        node.putObject("Status").put("State", "RUNNING");
+        node.putObject("Status").put("State", terminated ? "TERMINATED" : "RUNNING");
         return node;
     }
 
@@ -723,7 +747,7 @@ public class EmrHandler {
 
     // ──────────────────────────── Parsing ────────────────────────────
 
-    private List<EmrStep> parseSteps(JsonNode stepsNode) {
+    private List<EmrStep> parseSteps(JsonNode stepsNode, String executionRoleArn) {
         List<EmrStep> steps = new ArrayList<>();
         if (!stepsNode.isArray()) {
             return steps;
@@ -732,7 +756,7 @@ public class EmrHandler {
             EmrStep step = new EmrStep();
             step.setName(s.path("Name").asText(null));
             step.setActionOnFailure(s.path("ActionOnFailure").asText(null));
-            step.setExecutionRoleArn(s.path("ExecutionRoleArn").asText(null));
+            step.setExecutionRoleArn(executionRoleArn);
             JsonNode jar = s.path("HadoopJarStep");
             step.setJar(jar.path("Jar").asText(null));
             step.setMainClass(jar.path("MainClass").asText(null));

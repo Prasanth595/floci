@@ -536,6 +536,7 @@ These services spawn Docker containers. They require access to the Docker socket
 
 | Variable | Default | Description |
 |---|---|---|
+| `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS` | `false` | Opt in to EC2 Run/Start admission against current running Standard On-Demand vCPU usage |
 | `FLOCI_SERVICES_EC2_ENABLED` | `true` | Enable the EC2 service |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | When `true`, instances are registered in state but no containers are spawned |
 | `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` | `none` | Automatic public IPv4 address of a mock instance: `none`, `documentation` (from `203.0.113.0/24`) or `fixed` (`FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS`) |
@@ -610,6 +611,7 @@ See [Web Console](../ui/index.md) for running the console and swapping in a thir
 | `FLOCI_SERVICES_CODEPIPELINE_SOURCE_POLL_INTERVAL_MS` | `500` | How often (ms) the CodePipeline S3 source poller checks a configured `S3Bucket`/`S3ObjectKey` for a new object revision |
 | `FLOCI_SERVICES_NETWORKFIREWALL_ENABLED` | `true` | Enable the AWS Network Firewall service |
 | `FLOCI_SERVICES_SERVICEQUOTAS_ENABLED` | `true` | Enable the Service Quotas service |
+| `FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` | `5` | Non-negative applied Standard On-Demand vCPU quota reported per account and region; EC2 checks current running usage against it only when `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS` is `true` |
 | `FLOCI_SERVICES_RAM_ENABLED` | `true` | Enable the AWS RAM service |
 | `FLOCI_SERVICES_BACKUP_ENABLED` | `true` | Enable the AWS Backup service |
 | `FLOCI_SERVICES_BACKUP_JOB_COMPLETION_DELAY_SECONDS` | `3` | Simulated delay before backup jobs transition to `COMPLETED` |

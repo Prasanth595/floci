@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebIamAuth;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
 import io.github.hectorvent.floci.services.s3.ByteRange;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -109,6 +110,7 @@ public class CloudFrontServingController {
     private final CloudFrontService service;
     private final S3Service s3Service;
     private final LambdaWebService lambdaWebService;
+    private final LambdaWebIamAuth lambdaWebIamAuth;
     private final CurrentVertxRequest currentVertxRequest;
     private final HttpServer httpServer;
     private final CloudFrontOriginHttpClient httpClient;
@@ -116,11 +118,13 @@ public class CloudFrontServingController {
 
     @Inject
     public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
-                                       LambdaWebService lambdaWebService, EmulatorConfig emulatorConfig,
-                                       CurrentVertxRequest currentVertxRequest, HttpServer httpServer) {
+                                       LambdaWebService lambdaWebService, LambdaWebIamAuth lambdaWebIamAuth,
+                                       EmulatorConfig emulatorConfig, CurrentVertxRequest currentVertxRequest,
+                                       HttpServer httpServer) {
         this.service = service;
         this.s3Service = s3Service;
         this.lambdaWebService = lambdaWebService;
+        this.lambdaWebIamAuth = lambdaWebIamAuth;
         this.currentVertxRequest = currentVertxRequest;
         this.httpServer = httpServer;
         this.httpClient = new CloudFrontOriginHttpClient(
@@ -496,7 +500,7 @@ public class CloudFrontServingController {
                 CloudFrontOriginRequestBuilder.build(viewerRequest(method, viewerScheme),
                         forwarding(config, normalized), distribution.getDomainName());
         return fetchFromCustomOrigin(
-                origin, forwardUri, originRequest, viewerScheme, method, viewerBody);
+                distribution, origin, forwardUri, originRequest, viewerScheme, method, viewerBody);
     }
 
     /** The live viewer request, with CloudFront's signing parameters removed from its query. */
@@ -763,7 +767,7 @@ public class CloudFrontServingController {
      * Fetches from a custom (non-S3) origin. {@code forwardUri} already includes the origin path;
      * {@code originRequest} carries the forwarded query and headers.
      */
-    private OriginResponse fetchFromCustomOrigin(Origin origin, String forwardUri,
+    private OriginResponse fetchFromCustomOrigin(Distribution distribution, Origin origin, String forwardUri,
                                                  CloudFrontOriginRequestBuilder.OriginRequest originRequest,
                                                  String viewerScheme, String method, ViewerBody viewerBody) {
         boolean includeBody = !"HEAD".equals(method);
@@ -797,6 +801,9 @@ public class CloudFrontServingController {
             }
             if (webEndpoint != null) {
                 originHeaders.put("Host", webEndpoint);
+                if (alwaysAmzAuth(origin)) {
+                    originHeaders.putAll(lambdaWebIamAuth.cloudFrontSignature(distribution.getArn()));
+                }
             }
             rb.method(method, HttpRequest.BodyPublishers.noBody());
             // Both bodies are streamed, so neither has to fit in memory: the viewer's goes out with its
@@ -827,6 +834,13 @@ public class CloudFrontServingController {
                     safeOriginName(origin), e.getClass().getSimpleName());
             return OriginResponse.error(502, "Bad Gateway.");
         }
+    }
+
+    /** Whether the origin's access control is always-amz-auth, the one a Web Function origin is signed under. */
+    private boolean alwaysAmzAuth(Origin origin) {
+        String oacId = origin.getOriginAccessControlId();
+        return oacId != null && !oacId.isBlank()
+                && "always-amz-auth".equals(service.getOriginAccessControl(oacId).getSigningBehavior());
     }
 
     private String webFunctionEndpoint(Origin origin) {
@@ -1056,7 +1070,7 @@ public class CloudFrontServingController {
         } else {
             String forwardUri = CloudFrontRequestRouter.resolveForwardUri(errOrigin.getOriginPath(), errNormalized, null);
             page = fetchFromCustomOrigin(
-                    errOrigin, forwardUri, CloudFrontOriginRequestBuilder.OriginRequest.empty(),
+                    distribution, errOrigin, forwardUri, CloudFrontOriginRequestBuilder.OriginRequest.empty(),
                     viewerScheme, includeBody ? "GET" : "HEAD", null);
         }
         if (page.status() >= 400) {

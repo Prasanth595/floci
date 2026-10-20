@@ -7,6 +7,8 @@ quarkus:
     host: 0.0.0.0
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
+      max-header-size: 256K
+      max-initial-line-length: 262144
   # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
   # Loaded parent-first they live in the shared system classloader, so they cannot pin a
   # per-profile application classloader across the many app restarts of a test run.
@@ -227,6 +229,8 @@ floci:
       enabled: true
       transaction-ttl-seconds: 180
       database-resuming-exception-enabled: false
+    dsql:
+      enabled: true
     redshift-data:
       enabled: true
       result-ttl-hours: 24
@@ -308,6 +312,8 @@ floci:
       proxy-base-port: 9400
       proxy-max-port: 9499
     ec2:
+      # Opt-in Standard On-Demand vCPU admission. FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS
+      enforce-vcpu-quotas: false
       # Optional complete catalog override for locally built guest images.
       image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
       enabled: true

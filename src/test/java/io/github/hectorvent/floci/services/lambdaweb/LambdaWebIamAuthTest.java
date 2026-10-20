@@ -20,7 +20,9 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +45,7 @@ class LambdaWebIamAuthTest {
     private static final String USER_KEY = "AKIAUSERKEY000000001";
     private static final String USER_SECRET = "user-secret";
     private static final String SESSION_KEY = "ASIASESSIONKEY000001";
+    private static final String DISTRIBUTION_ARN = "arn:aws:cloudfront::" + ACCOUNT + ":distribution/E2EXAMPLE";
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final IamService iamService = mock(IamService.class);
@@ -220,6 +223,59 @@ class LambdaWebIamAuthTest {
     void theTestKeyIsNotEvaluated() {
         enforceFor(ACCOUNT);
         assertTrue(allows(signer().sign("GET", HOST, "/")));
+    }
+
+    @Test
+    void cloudFrontSignsWithTheKeyOfThisProcess() {
+        assertTrue(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
+
+        Map<String, String> forged = new HashMap<>(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN));
+        forged.put("lambda-web-cloudfront-key", "0".repeat(64));
+        assertFalse(allowsCloudFront(forged));
+        LambdaWebIamAuth another = new LambdaWebIamAuth(config, iamService, new IamPolicyEvaluator(new ObjectMapper()),
+                scpProvider);
+        assertFalse(allowsCloudFront(another.cloudFrontSignature(DISTRIBUTION_ARN)));
+        assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature("E2EXAMPLE")));
+    }
+
+    @Test
+    void underEnforcementTheFunctionPolicyMustAllowCloudFrontForTheDistribution() {
+        when(config.services().iam().enforcementEnabled()).thenReturn(true);
+        assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)), "no policy denies");
+
+        function.policy = cloudFrontPolicy(cloudFrontStatement("Allow", "aws:SourceArn", DISTRIBUTION_ARN));
+        assertTrue(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
+        assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(
+                "arn:aws:cloudfront::" + ACCOUNT + ":distribution/E3OTHER")));
+
+        function.policy = cloudFrontPolicy(cloudFrontStatement("Allow", "aws:SourceAccount", ACCOUNT));
+        assertTrue(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
+        assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(
+                "arn:aws:cloudfront::" + OTHER_ACCOUNT + ":distribution/E2EXAMPLE")));
+
+        String allowIamAuth = cloudFrontStatement("Allow", "lambda:Resource/WebFunctionAuthType", "IamAuth");
+        function.policy = cloudFrontPolicy(allowIamAuth);
+        assertTrue(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
+        function.policy = cloudFrontPolicy(allowIamAuth, cloudFrontStatement("Deny", "aws:SourceArn", DISTRIBUTION_ARN));
+        assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
+    }
+
+    private boolean allowsCloudFront(Map<String, String> signature) {
+        MultiMap headers = MultiMap.caseInsensitiveMultiMap().add("Host", HOST).addAll(signature);
+        return iamAuth.allows(new Inbound("POST", "/", null, headers, MultiMap.caseInsensitiveMultiMap()),
+                new WebFunctionTarget(ACCOUNT, "us-east-1", function, endpoint));
+    }
+
+    private static String cloudFrontPolicy(String... statements) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[" + String.join(",", statements) + "]}";
+    }
+
+    private static String cloudFrontStatement(String effect, String conditionKey, String conditionValue) {
+        return """
+                {"Effect":"%s","Principal":{"Service":"cloudfront.amazonaws.com"},
+                 "Action":"lambda:InvokeWebFunctionEndpoint","Resource":"%s",
+                 "Condition":{"StringEquals":{"%s":"%s"}}}"""
+                .formatted(effect, ENDPOINT_ARN, conditionKey, conditionValue);
     }
 
     private void enforceFor(String callerAccount) {

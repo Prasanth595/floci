@@ -736,6 +736,11 @@ public class RdsService implements Resettable, ResourceProvider {
         // resolved with the other validations, before a port is taken or a container started
         DbInstanceSettings resolvedSettings = withEffectiveWindows(settings, null)
                 .withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
+        if (isBlank(dbClusterIdentifier) && !isAuroraEngine(engineParam)) {
+            resolvedSettings.validateStorageType();
+        } else {
+            resolvedSettings = resolvedSettings.withStorageType(null);
+        }
         DbInstanceSettings.validateMonitoringPairOnCreate(
                 settings.monitoringInterval(), settings.monitoringRoleArn());
         boolean mock = config.services().rds().mock();
@@ -961,6 +966,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 instance.getMasterUsername(), instance.getMasterPassword(), instance.getAvailabilityZone(), instance.getVpcId(),
                 instance.getCreatedAt(), instance.getEndpoint() != null ? instance.getEndpoint().port() : instance.getProxyPort(),
                 instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId(), instance.getDbInstanceClass());
+        snapshot.setStorageType(instance.getStorageType());
         snapshot.setDbName(instance.getDbName());
         snapshot.setSnapshotType("manual");
         snapshot.setOptionGroupName(instance.getOptionGroupName());
@@ -1111,6 +1117,7 @@ public class RdsService implements Resettable, ResourceProvider {
         copy.setEngine(source.getEngine());
         copy.setEngineVersion(source.getEngineVersion());
         copy.setAllocatedStorage(source.getAllocatedStorage());
+        copy.setStorageType(source.getStorageType());
         copy.setStatus(source.getStatus());
         copy.setMasterUsername(source.getMasterUsername());
         copy.setMasterPassword(source.getMasterPassword());
@@ -1220,6 +1227,15 @@ public class RdsService implements Resettable, ResourceProvider {
                                                        List<String> vpcSecurityGroupIds,
                                                        Map<String, String> tags, String region,
                                                        Integer requestedPort, Boolean iamEnabled) {
+        return restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone,
+                multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags, region, requestedPort, iamEnabled, null);
+    }
+
+    public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass,
+                                                       String availabilityZone, boolean multiAz, String dbSubnetGroupName,
+                                                       List<String> vpcSecurityGroupIds,
+                                                       Map<String, String> tags, String region,
+                                                       Integer requestedPort, Boolean iamEnabled, String storageType) {
         String effectiveRegion = effectiveRegion(region);
         DbSnapshot snapshot = Optional.ofNullable(findSnapshotForScope(currentAccountId(), effectiveRegion, snapshotId))
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
@@ -1233,7 +1249,8 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         // Use the parameters from the snapshot
         DbInstanceSettings restoreSettings = new DbInstanceSettings(
-                snapshot.isStorageEncrypted(), snapshot.getKmsKeyId(), null, null, null, null);
+                snapshot.isStorageEncrypted(), snapshot.getKmsKeyId(), null, null, null, null)
+                .withStorageType(storageType != null ? storageType : snapshot.getStorageType());
         DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 snapshot.getDbName(), targetClass, snapshot.getAllocatedStorage(), Boolean.TRUE.equals(iamEnabled),
@@ -1334,7 +1351,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 source.isStorageEncrypted() ? Boolean.TRUE : null,
                 source.isStorageEncrypted() ? source.getKmsKeyId() : null,
                 request.backupRetentionPeriod(), request.preferredBackupWindow(), null,
-                request.copyTagsToSnapshot());
+                request.copyTagsToSnapshot()).withStorageType(
+                        request.storageType() != null ? request.storageType() : source.getStorageType());
         DbInstance instance = createDbInstance(targetId, engineParam, source.getEngineVersion(),
                 source.getMasterUsername(), source.getMasterPassword(), dbName,
                 firstNonBlank(request.dbInstanceClass(), source.getDbInstanceClass()),
@@ -1541,7 +1559,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 source.isStorageEncrypted() ? Boolean.TRUE : null,
                 source.isStorageEncrypted() && sameRegion ? source.getKmsKeyId() : null,
                 0, source.getPreferredBackupWindow(), source.getPreferredMaintenanceWindow(),
-                copyTagsToSnapshot);
+                copyTagsToSnapshot).withStorageType(
+                        request.storageType() != null ? request.storageType() : source.getStorageType());
         Map<String, String> tags = request.tags() != null ? request.tags() : Map.of();
 
         DbInstance replica = createDbInstance(id, engineParam, source.getEngineVersion(),
@@ -3096,6 +3115,11 @@ public class RdsService implements Resettable, ResourceProvider {
         // current size and engine version: a refusal here must leave the whole request unapplied.
         DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
+        if (isBlank(instance.getDbClusterIdentifier()) && !isAuroraEngine(engineName(instance))) {
+            effective.validateStorageType();
+        } else {
+            effective = effective.withStorageType(null);
+        }
         validateAutoscalingMinimum(instance, effective.maxAllocatedStorage());
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (optionGroupName != null && !optionGroupName.isBlank()) {
@@ -3404,7 +3428,8 @@ public class RdsService implements Resettable, ResourceProvider {
         List<SizeRange> sizes = smallestIncrease <= maximum
                 ? List.of(new SizeRange(current, current), new SizeRange(smallestIncrease, maximum))
                 : List.of(new SizeRange(current, current));
-        return List.of(new StorageModification(DbInstance.DEFAULT_STORAGE_TYPE, sizes));
+        return List.of(new StorageModification("gp2", sizes), new StorageModification("gp3", sizes),
+                new StorageModification("io1", sizes), new StorageModification("io2", sizes));
     }
 
     // ── Stop, start and reboot ────────────────────────────────────────────────

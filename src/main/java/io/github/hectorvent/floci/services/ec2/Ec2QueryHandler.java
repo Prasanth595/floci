@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ec2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -769,6 +770,18 @@ public class Ec2QueryHandler {
         if (subnetId == null) {
             subnetId = p.getFirst("NetworkInterface.1.SubnetId");
         }
+        // The primary private address arrives in three shapes. Terraform's aws_instance moves
+        // private_ip onto the interface spec whenever it sends one, and the AWS CLI moves
+        // --private-ip-address there too, as the primary PrivateIpAddresses entry, once an
+        // interface-only option such as --associate-public-ip-address builds the spec. The
+        // top-level form together with any interface spec is refused below.
+        String privateIpAddress = p.getFirst("NetworkInterface.1.PrivateIpAddress");
+        if (!isSet(privateIpAddress)) {
+            privateIpAddress = primaryPrivateIpAddress(p, "NetworkInterface.1");
+        }
+        if (!isSet(privateIpAddress)) {
+            privateIpAddress = p.getFirst("PrivateIpAddress");
+        }
         // floci-kt9: override-default-eni hands RunInstances a pre-existing standalone ENI as
         // the instance's primary interface (network_interface { network_interface_id = ... }).
         String networkInterfaceId = p.getFirst("NetworkInterface.1.NetworkInterfaceId");
@@ -795,6 +808,7 @@ public class Ec2QueryHandler {
         // Absent fields stay null so the launch default, or the launch template's value, applies.
         LaunchTemplateData.MetadataOptions metadataOptions = parseMetadataOptions(p, "MetadataOptions.");
         String creditSpecificationCpuCredits = p.getFirst("CreditSpecification.CpuCredits");
+        String marketType = p.getFirst("InstanceMarketOptions.MarketType");
 
         List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings =
                 parseLaunchTemplateBlockDeviceMappings(p, "");
@@ -802,20 +816,29 @@ public class Ec2QueryHandler {
         LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(
                 p, region, userDataEncoded == null || userDataEncoded.isBlank());
         boolean suppliedInterfaces = p.keySet().stream().anyMatch(name -> name.startsWith("NetworkInterface."));
-        if (p.getFirst("SubnetId") != null && (suppliedInterfaces
-                || launchTemplateData != null && !launchTemplateData.getNetworkInterfaces().isEmpty())) {
+        boolean anyInterfaces = suppliedInterfaces
+                || launchTemplateData != null && !launchTemplateData.getNetworkInterfaces().isEmpty();
+        if (p.getFirst("SubnetId") != null && anyInterfaces) {
             throw new AwsException("InvalidParameterCombination",
                     "Network interfaces and an instance-level subnet ID may not be specified on the same request", 400);
         }
+        if (p.getFirst("PrivateIpAddress") != null && anyInterfaces) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Network interfaces and an instance-level private IP address may not be specified on the same request", 400);
+        }
         if (launchTemplateData != null) {
+            if (marketType == null && launchTemplateData.getInstanceMarketOptions() != null) {
+                marketType = launchTemplateData.getInstanceMarketOptions().getMarketType();
+            }
             blockDeviceMappings = LaunchTemplateData.BlockDeviceMapping.merge(
                     launchTemplateData.getBlockDeviceMappings(), blockDeviceMappings);
             if (!suppliedInterfaces) {
-                // With neither request interfaces nor, after the check above, a request SubnetId,
-                // the template's primary interface places the launch.
+                // With neither request interfaces nor, after the checks above, a request SubnetId
+                // or PrivateIpAddress, the template's primary interface places the launch.
                 LaunchTemplateData.NetworkInterface primary = launchTemplateData.primaryNetworkInterface();
                 if (primary != null) {
                     subnetId = primary.getSubnetId();
+                    privateIpAddress = primary.getPrivateIpAddress();
                     if (associatePublicIp == null) {
                         associatePublicIp = primary.getAssociatePublicIpAddress();
                     }
@@ -860,7 +883,8 @@ public class Ec2QueryHandler {
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
-                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings);
+                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
+                "spot".equals(marketType), privateIpAddress);
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -901,6 +925,23 @@ public class Ec2QueryHandler {
             // Malformed and non-positive counts share the same EC2 validation error.
         }
         throw new AwsException("InvalidParameterValue", name + " must be a positive integer", 400);
+    }
+
+    /**
+     * The address of the {@code PrivateIpAddresses} entry an interface spec marks {@code Primary},
+     * or null when it marks none. Secondary entries are not applied.
+     */
+    private static String primaryPrivateIpAddress(MultivaluedMap<String, String> p, String interfacePrefix) {
+        for (int i = 1; ; i++) {
+            String entry = interfacePrefix + ".PrivateIpAddresses." + i;
+            String address = p.getFirst(entry + ".PrivateIpAddress");
+            if (address == null) {
+                return null;
+            }
+            if (Boolean.parseBoolean(p.getFirst(entry + ".Primary"))) {
+                return address;
+            }
+        }
     }
 
     private LaunchTemplateData resolveRunInstancesLaunchTemplateData(MultivaluedMap<String, String> p, String region,
@@ -987,7 +1028,7 @@ public class Ec2QueryHandler {
                         null,
                         0,
                         launch.availabilityZone(), launch.metadataOptions(), null, launch.encodedUserData(), false,
-                        null, null, launch.blockDeviceMappings());
+                        null, null, launch.blockDeviceMappings(), "spot".equals(capacityType));
                 Instance instance = reservation.getInstances().get(0);
                 launchedInstanceIds.add(instance.getInstanceId());
                 results.add(new FleetLaunchResult(instance, launch));
@@ -3391,6 +3432,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeKeyPairs(MultivaluedMap<String, String> p, String region) {
+        boolean includePublicKey = Boolean.parseBoolean(p.getFirst("IncludePublicKey"));
         List<String> keyNames = getList(p, "KeyName");
         List<String> keyPairIds = getList(p, "KeyPairId");
         List<KeyPair> kps = service.describeKeyPairs(region, keyNames, keyPairIds);
@@ -3402,12 +3444,44 @@ public class Ec2QueryHandler {
             xml.start("item")
                     .elem("keyPairId", kp.getKeyPairId())
                     .elem("keyName", kp.getKeyName())
-                    .elem("keyFingerprint", kp.getKeyFingerprint())
-                    .raw(tagSetXml(kp.getTags()))
-                    .end("item");
+                    .elem("keyFingerprint", kp.getKeyFingerprint());
+            if (includePublicKey) {
+                xml.elem("publicKey", openSshPublicKeyNamedFor(kp));
+            }
+            xml.raw(tagSetXml(kp.getTags())).end("item");
         }
         xml.end("keySet").end("DescribeKeyPairsResponse");
         return xmlResponse(xml.build());
+    }
+
+    /**
+     * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
+     * DescribeKeyPairs reports for created and imported keys alike. ImportKeyPair keeps what it was
+     * given, so this is null unless the material is a single OpenSSH line whose blob is a whole key
+     * of the type the line names: a partial blob, a line labelled with another type and material of
+     * more than one line are not one key to report. PEM, DER and RFC 4716 bodies are not converted,
+     * since ImportKeyPair does not read those formats yet. The line is rebuilt from the blob's type,
+     * the blob and the name rather than copied, so no character of the stored text, such as a NUL
+     * that XML cannot carry, reaches the response.
+     */
+    private static String openSshPublicKeyNamedFor(KeyPair kp) {
+        String material = kp.getPublicKey();
+        byte[] blob = SshPublicKeys.decodeBlob(material);
+        if (!SshPublicKeys.carriesAKey(blob)) {
+            return null;
+        }
+        String line = material.trim();
+        // decodeBlob took the blob from the second field; the first has to name the same type. More
+        // than one line is not taken apart: authorized_keys reads each line as a key of its own.
+        String type = SshPublicKeys.keyType(blob);
+        if (line.indexOf('\n') >= 0 || !type.equals(line.split("\\s+", 2)[0])) {
+            return null;
+        }
+        // A key pair stored before KeyName was required has no name, and a name holding a control
+        // character, such as a line break that would split this line in two, is no comment either.
+        String name = kp.getKeyName();
+        boolean nameIsAComment = name != null && !name.isBlank() && name.chars().noneMatch(Character::isISOControl);
+        return type + " " + Base64.getEncoder().encodeToString(blob) + (nameIsAComment ? " " + name : "");
     }
 
     private Response handleDeleteKeyPair(MultivaluedMap<String, String> p, String region) {
@@ -3506,6 +3580,9 @@ public class Ec2QueryHandler {
                     .elem("hypervisor", img.getHypervisor())
                     .elem("imageOwnerAlias", img.getImageOwnerAlias())
                     .elem("creationDate", img.getCreationDate())
+                    .elem("sourceImageId", img.getCreationSourceImageId())
+                    .elem("sourceImageRegion", img.getCreationSourceImageRegion())
+                    .elem("sourceInstanceId", img.getCreationSourceInstanceId())
                     .raw(blockDeviceMappingXml(img.getBlockDeviceMappings()))
                     .raw(tagSetXml(img.getTags()))
                     .end("item");
@@ -4841,6 +4918,10 @@ public class Ec2QueryHandler {
                 .elem("amiLaunchIndex", String.valueOf(inst.getAmiLaunchIndex()))
                 .elem("instanceType", inst.getInstanceType())
                 .elem("launchTime", inst.getLaunchTime() != null ? ISO_FMT.format(inst.getLaunchTime()) : "");
+
+        if (inst.isSpot()) {
+            xml.elem("instanceLifecycle", "spot");
+        }
 
         if (inst.getPlacement() != null) {
             xml.start("placement")

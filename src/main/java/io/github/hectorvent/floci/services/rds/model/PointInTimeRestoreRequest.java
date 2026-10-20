@@ -35,5 +35,37 @@ public record PointInTimeRestoreRequest(String targetDbInstanceIdentifier,
                                         Integer backupRetentionPeriod,
                                         String preferredBackupWindow,
                                         Boolean deletionProtection,
-                                        Map<String, String> tags) {
+                                        Map<String, String> tags,
+                                 String storageType) {
+
+    public PointInTimeRestoreRequest(String targetDbInstanceIdentifier,
+            String sourceDbInstanceIdentifier,
+            String sourceDbiResourceId,
+            String sourceDbInstanceAutomatedBackupsArn,
+            Instant restoreTime,
+            Boolean useLatestRestorableTime,
+            String dbInstanceClass,
+            Integer port,
+            String availabilityZone,
+            Boolean multiAz,
+            Boolean autoMinorVersionUpgrade,
+            String dbName,
+            String optionGroupName,
+            String dbParameterGroupName,
+            Boolean publiclyAccessible,
+            String dbSubnetGroupName,
+            List<String> vpcSecurityGroupIds,
+            Boolean copyTagsToSnapshot,
+            Boolean iamDatabaseAuthenticationEnabled,
+            Integer backupRetentionPeriod,
+            String preferredBackupWindow,
+            Boolean deletionProtection,
+            Map<String, String> tags) {
+        this(targetDbInstanceIdentifier, sourceDbInstanceIdentifier, sourceDbiResourceId,
+                sourceDbInstanceAutomatedBackupsArn, restoreTime, useLatestRestorableTime, dbInstanceClass,
+                port, availabilityZone, multiAz, autoMinorVersionUpgrade, dbName, optionGroupName,
+                dbParameterGroupName, publiclyAccessible, dbSubnetGroupName, vpcSecurityGroupIds,
+                copyTagsToSnapshot, iamDatabaseAuthenticationEnabled, backupRetentionPeriod,
+                preferredBackupWindow, deletionProtection, tags, null);
+    }
 }

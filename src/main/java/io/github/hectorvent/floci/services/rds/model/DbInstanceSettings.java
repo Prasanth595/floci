@@ -26,7 +26,20 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                                  String engineLifecycleSupport,
                                  List<String> enabledCloudwatchLogsExports,
                                  LogExportChanges logExportChanges,
-                                 Integer maxAllocatedStorage) {
+                                 Integer maxAllocatedStorage,
+                                 String storageType) {
+
+    public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
+                              String preferredBackupWindow, String preferredMaintenanceWindow,
+                              Boolean copyTagsToSnapshot, Integer monitoringInterval, String monitoringRoleArn,
+                              Boolean performanceInsightsEnabled, Integer performanceInsightsRetentionPeriod,
+                              String engineLifecycleSupport, List<String> enabledCloudwatchLogsExports,
+                              LogExportChanges logExportChanges, Integer maxAllocatedStorage) {
+        this(storageEncrypted, kmsKeyId, backupRetentionPeriod, preferredBackupWindow,
+                preferredMaintenanceWindow, copyTagsToSnapshot, monitoringInterval, monitoringRoleArn,
+                performanceInsightsEnabled, performanceInsightsRetentionPeriod, engineLifecycleSupport,
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, null);
+    }
 
     /** The settings a caller that touches none of the monitoring members gives. */
     public DbInstanceSettings(Boolean storageEncrypted,
@@ -174,7 +187,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 backupWindow, maintenanceWindow, copyTagsToSnapshot,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
-                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage);
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType);
     }
 
     public DbInstanceSettings withKmsKeyId(String resolvedKmsKeyId) {
@@ -182,7 +195,22 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
-                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage);
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType);
+    }
+
+    public DbInstanceSettings withStorageType(String resolvedStorageType) {
+        return new DbInstanceSettings(storageEncrypted, kmsKeyId, backupRetentionPeriod,
+                preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot,
+                monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
+                performanceInsightsRetentionPeriod, engineLifecycleSupport,
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, resolvedStorageType);
+    }
+
+    public void validateStorageType() {
+        if (storageType != null && !Set.of("gp2", "gp3", "io1", "io2").contains(storageType)) {
+            throw new AwsException("StorageTypeNotSupported",
+                    "Floci supports the gp2, gp3, io1 and io2 storage types for DB instances.", 400);
+        }
     }
 
     public void applyTo(DbInstance instance) {
@@ -226,6 +254,9 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         if (logExportChanges != null) {
             instance.setEnabledCloudwatchLogsExports(
                     logExportChanges.applyTo(instance.getEnabledCloudwatchLogsExports()));
+        }
+        if (storageType != null) {
+            instance.setStorageType(storageType);
         }
         if (maxAllocatedStorage != null) {
             instance.setMaxAllocatedStorage(maxAllocatedStorage);

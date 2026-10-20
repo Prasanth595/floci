@@ -75,6 +75,39 @@ class Ec2InstanceTypeCatalogTest {
     }
 
     @Test
+    void defaultCpuSnapshotDoesNotInventOtherDescribeMetadata() {
+        assertEquals(Optional.of(2), instanceTypeCatalog.defaultVcpus("t3.large"));
+        assertEquals(Optional.of(144), instanceTypeCatalog.defaultVcpus("p6e-gb200.36xlarge"));
+        assertEquals(Optional.of(2), instanceTypeCatalog.defaultVcpus("cc1.4xlarge"));
+        assertTrue(instanceTypeCatalog.find("t3.large").isEmpty());
+        assertTrue(instanceTypeCatalog.find("p6e-gb200.36xlarge").isEmpty());
+        assertTrue(instanceTypeCatalog.defaultVcpus("m9g.metal-24xl").isEmpty());
+        assertTrue(instanceTypeCatalog.defaultVcpus("m9gd.metal-24xl").isEmpty());
+        assertTrue(instanceTypeCatalog.defaultVcpus(null).isEmpty());
+        assertTrue(instanceTypeCatalog.defaultVcpus("").isEmpty());
+    }
+
+    @Test
+    void anExplicitFullCatalogEntryTakesPrecedenceOverTheCpuOnlySnapshot() {
+        Ec2InstanceTypeCatalog.CatalogInstanceType configured =
+                instanceTypeCatalog.find("t3.micro").orElseThrow();
+        Ec2InstanceTypeCatalog.Catalog catalog = new Ec2InstanceTypeCatalog.Catalog();
+        // Make a detached entry so this test cannot alter the injected application catalog.
+        Ec2InstanceTypeCatalog.CatalogInstanceType override = new Ec2InstanceTypeCatalog.CatalogInstanceType();
+        override.instanceType = configured.instanceType;
+        override.vcpu = 3;
+        override.memoryMib = configured.memoryMib;
+        override.supportedArchitectures = configured.supportedArchitectures;
+        override.encryptionInTransitSupported = configured.encryptionInTransitSupported;
+        override.defaultNetworkCardIndex = configured.defaultNetworkCardIndex;
+        override.ipv4AddressesPerInterface = configured.ipv4AddressesPerInterface;
+        override.networkCards = configured.networkCards;
+        catalog.instanceTypes = List.of(override);
+        assertEquals(Optional.of(3), new Ec2InstanceTypeCatalog(catalog).defaultVcpus("t3.micro"));
+        assertEquals(2, configured.vcpu);
+    }
+
+    @Test
     void catalogEntriesIncludeNetworkCompatibilityMetadata() {
         instanceTypeCatalog.instanceTypes().forEach(instanceType ->
                 assertNotNull(instanceType.encryptionInTransitSupported, instanceType.instanceType));

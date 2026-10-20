@@ -799,6 +799,26 @@ Service integration resources carry the partition of the state machine's region
 in every partition. State machine and execution ARNs follow the region they are created in. See
 [AWS Partitions](../configuration/partitions.md).
 
+## API Gateway tasks
+
+`arn:...:states:::apigateway:invoke` supports regional, same-account REST APIs with `POST`,
+`IAM_ROLE`, a named stage and resource path, and an object request body without null values.
+Headers accept multiple string values and HTTP token names. AWS-reserved headers are rejected.
+Literal reserved names, including `Expect`, `Upgrade`, `Authorization` and `Host`, and the
+`X-Amz-`, `X-Amzn-` and `X-Forwarded-` prefixes are rejected case-insensitively when a
+definition is created, updated or validated, including JSONata arguments and nested workflows.
+An explicit `Content-Length` must equal the serialized body size; the HTTP client writes that header.
+Private endpoints, resource-policy authentication, query parameters and `AllowNullValues` remain unsupported.
+
+With IAM enforcement enabled, the execution role must trust Step Functions. The task uses its
+`Credentials.RoleArn` when supplied, including assume-role authorization, identity policies,
+permissions boundaries and SCPs. With enforcement disabled, missing roles and absent policies do not
+block execution. Temporary signing credentials are revoked after each request.
+
+Successful responses preserve their headers and status. JSON response text is parsed regardless of
+its content type, matching the live AWS integration; other text remains a string. Non-2xx responses
+raise catchable `ApiGateway.<status>` failures.
+
 ## Configuration
 
 | Variable | Default | Description |

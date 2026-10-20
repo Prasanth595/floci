@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -12,6 +13,7 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
@@ -258,6 +260,34 @@ class Ec2QueryHandlerTest {
 
         assertTrue(xml.contains("<regionEndpoint>ec2.us-gov-west-1.amazonaws.com</regionEndpoint>"), xml);
         assertFalse(xml.contains("cn-north-1"), xml);
+    }
+
+    /**
+     * The key-pair name becomes the comment only when it can be one. A key pair stored before
+     * KeyName was required has no name, which would otherwise read {@code null}, and a name with a
+     * line break would split the key into lines an authorized_keys file reads as further keys (XML
+     * turns a carriage return into a line feed on the way), so a name holding any control
+     * character, a tab included, is left off.
+     */
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"two\nlines", "carriage\rreturn", "a\ttab"})
+    void describeKeyPairsGivesTheKeyNoCommentWhenTheNameCannotBeOne(String name) {
+        String line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIj7azlDjVHAsSxgcpCRZ3oWnTm0nAFM64y9jd22ioI/";
+        KeyPair keyPair = new KeyPair();
+        keyPair.setKeyPairId("key-0123456789abcdef0");
+        keyPair.setKeyName(name);
+        keyPair.setPublicKey(line + " imported-comment");
+        Ec2Service service = mock(Ec2Service.class);
+        when(service.describeKeyPairs(eq("us-east-1"), anyList(), anyList())).thenReturn(List.of(keyPair));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("IncludePublicKey", "true");
+
+        Response response = handler(service).handle("DescribeKeyPairs", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<publicKey>" + line + "</publicKey>"), xml);
     }
 
     private String describeRegions(RegionResolver regionResolver, String region) {

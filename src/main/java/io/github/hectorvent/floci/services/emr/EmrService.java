@@ -34,8 +34,9 @@ import java.util.function.Function;
 
 /**
  * EMR management-plane business logic. Cluster and step lifecycles are simulated
- * through immediate state transitions (no Hadoop runs): clusters land in WAITING and
- * initial steps in COMPLETED. The {@code clusterStartupDelaySeconds} config exists for
+ * through immediate state transitions (no Hadoop runs): steps complete immediately,
+ * leaving persistent clusters WAITING and transient clusters with steps TERMINATED.
+ * The {@code clusterStartupDelaySeconds} config exists for
  * future deferred transitions; Phase 1 advances synchronously for deterministic tests.
  */
 @ApplicationScoped
@@ -111,6 +112,7 @@ public class EmrService {
             completeStep(step);
         }
         advanceToWaiting(cluster);
+        terminateAfterCompletedSteps(cluster);
         clusterStore.put(id, cluster);
         return cluster;
     }
@@ -147,14 +149,15 @@ public class EmrService {
             if (cluster == null) {
                 continue;
             }
+            if ("TERMINATED".equals(cluster.getState())) {
+                continue;
+            }
             if (cluster.isTerminationProtected()) {
                 anyProtected = true;
                 continue;
             }
-            if ("TERMINATED".equals(cluster.getState())) {
-                continue;
-            }
             cluster.setState("TERMINATED");
+            releaseInstanceCapacity(cluster);
             cluster.setStateChangeReasonCode("USER_REQUEST");
             cluster.setStateChangeMessage("Terminated by user request");
             cluster.setEndDateTime(Instant.now());
@@ -204,6 +207,9 @@ public class EmrService {
             completeStep(step);
             cluster.getSteps().add(step);
             ids.add(step.getId());
+        }
+        if (!steps.isEmpty()) {
+            terminateAfterCompletedSteps(cluster);
         }
         clusterStore.put(clusterId, cluster);
         return ids;
@@ -263,6 +269,7 @@ public class EmrService {
 
     public synchronized List<String> addInstanceGroups(String clusterId, List<EmrInstanceGroup> groups) {
         EmrCluster cluster = requireCluster(clusterId);
+        rejectTerminatedCluster(cluster);
         List<String> ids = new ArrayList<>();
         for (EmrInstanceGroup group : groups) {
             group.setId("ig-" + randomId(13));
@@ -292,6 +299,7 @@ public class EmrService {
         List<EmrInstanceGroup> groups = new ArrayList<>();
         for (InstanceGroupModification mod : modifications) {
             EmrCluster found = clusterId != null ? requireCluster(clusterId) : clusterOwning(region, mod.instanceGroupId());
+            rejectTerminatedCluster(found);
             // One copy per cluster, so two groups of the same cluster are changed and stored together.
             EmrCluster cluster = touched.computeIfAbsent(found.getId(), id -> found);
             EmrInstanceGroup group = requireInstanceGroup(cluster, mod.instanceGroupId());
@@ -327,6 +335,7 @@ public class EmrService {
 
     public synchronized String addInstanceFleet(String clusterId, EmrInstanceFleet fleet) {
         EmrCluster cluster = requireCluster(clusterId);
+        rejectTerminatedCluster(cluster);
         fleet.setId("if-" + randomId(13));
         fleet.setProvisionedOnDemandCapacity(fleet.getTargetOnDemandCapacity());
         fleet.setProvisionedSpotCapacity(fleet.getTargetSpotCapacity());
@@ -343,6 +352,7 @@ public class EmrService {
         if (instanceFleetId == null) {
             throw invalid("InstanceFleetId is required.");
         }
+        rejectTerminatedCluster(cluster);
         EmrInstanceFleet fleet = cluster.getInstanceFleets().stream()
                 .filter(f -> instanceFleetId.equals(f.getId()))
                 .findFirst()
@@ -737,6 +747,12 @@ public class EmrService {
         return new AwsException("InvalidRequestException", message, 400);
     }
 
+    private static void rejectTerminatedCluster(EmrCluster cluster) {
+        if ("TERMINATED".equals(cluster.getState())) {
+            throw invalid("Cluster " + cluster.getId() + " is terminated.");
+        }
+    }
+
     private static EmrInstanceGroup requireInstanceGroup(EmrCluster cluster, String instanceGroupId) {
         if (instanceGroupId == null) {
             throw invalid("InstanceGroupId is required.");
@@ -778,6 +794,31 @@ public class EmrService {
         cluster.setStateChangeReasonCode(cluster.getSteps().isEmpty() ? null : "ALL_STEPS_COMPLETED");
         cluster.setStateChangeMessage("Cluster ready to run steps.");
         cluster.setReadyDateTime(Instant.now());
+    }
+
+    private void terminateAfterCompletedSteps(EmrCluster cluster) {
+        if (cluster.getSteps().isEmpty() || !cluster.isAutoTerminate()
+                || "TERMINATED".equals(cluster.getState())) {
+            return;
+        }
+        cluster.setState("TERMINATED");
+        releaseInstanceCapacity(cluster);
+        cluster.setStateChangeReasonCode("ALL_STEPS_COMPLETED");
+        cluster.setStateChangeMessage("All steps completed.");
+        cluster.setEndDateTime(Instant.now());
+    }
+
+    private void releaseInstanceCapacity(EmrCluster cluster) {
+        for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
+            group.setState("TERMINATED");
+            group.setTerminatedInstanceCount(group.getRunningInstanceCount());
+            group.setRunningInstanceCount(0);
+        }
+        for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
+            fleet.setState("TERMINATED");
+            fleet.setProvisionedOnDemandCapacity(0);
+            fleet.setProvisionedSpotCapacity(0);
+        }
     }
 
     private void initStep(EmrStep step) {

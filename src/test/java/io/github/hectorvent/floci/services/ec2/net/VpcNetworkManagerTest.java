@@ -328,6 +328,37 @@ class VpcNetworkManagerTest {
                 "a terminated restored instance's address must return to circulation");
     }
 
+    // ─── Launch: an address RunInstances names for itself ────────────────────
+
+    @Test
+    void aClaimedAddressIsNeverHandedOutAndLeavesTheAllocationOrderAlone() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+
+        assertTrue(manager.claimPrivateIp(REGION, "subnet-a", "10.0.1.250"));
+
+        assertEquals("10.0.1.10", manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow(),
+                "a claimed address must not move the cursor past it");
+        List<String> allocated = new ArrayList<>();
+        Optional<String> next;
+        while ((next = manager.allocatePrivateIp(REGION, "subnet-a")).isPresent()) {
+            allocated.add(next.get());
+        }
+        assertFalse(allocated.contains("10.0.1.250"), "the claimed address must never be handed out");
+        assertTrue(allocated.contains("10.0.1.254"), "the addresses after it are still handed out");
+    }
+
+    @Test
+    void claimingALeasedOrOutOfRangeAddressRefusesWithoutThrowing() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String leased = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+
+        assertFalse(manager.claimPrivateIp(REGION, "subnet-a", leased));
+        assertFalse(manager.claimPrivateIp(REGION, "subnet-a", "172.31.4.9"));
+        assertFalse(manager.claimPrivateIp(REGION, "subnet-unknown", "10.0.1.20"));
+    }
+
     @Test
     void subnetsInTheSameVpcGetDisjointRangesOnOneNetwork() {
         manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");

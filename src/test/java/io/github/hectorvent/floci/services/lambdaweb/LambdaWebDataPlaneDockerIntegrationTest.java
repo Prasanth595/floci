@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
+import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager.Environment;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -47,6 +48,7 @@ import java.util.zip.ZipOutputStream;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
@@ -222,26 +224,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     @Timeout(180)
     void aCloudFrontDistributionReachesTheEndpointAsItsOrigin() throws Exception {
         String domain = createFunction(30);
-        Origin origin = new Origin();
-        origin.setId("web");
-        origin.setDomainName(domain.substring(0, domain.lastIndexOf(':')));
-        Map<String, Object> customOriginConfig = new LinkedHashMap<>();
-        customOriginConfig.put("HTTPPort", "80");
-        customOriginConfig.put("HTTPSPort", "443");
-        customOriginConfig.put("OriginProtocolPolicy", "https-only");
-        origin.setCustomOriginConfig(customOriginConfig);
-        DefaultCacheBehavior behavior = new DefaultCacheBehavior();
-        behavior.setTargetOriginId("web");
-        behavior.setViewerProtocolPolicy("allow-all");
-        behavior.setCachePolicyId("4135ea2d-6df8-44a3-9df3-4b5a84be39ad");
-        behavior.setOriginRequestPolicyId("b689b0a8-53d0-40ab-baf2-68738e2966ac");
-        DistributionConfig config = new DistributionConfig();
-        config.setEnabled(true);
-        config.setOrigins(List.of(origin));
-        config.setDefaultCacheBehavior(behavior);
-        Distribution distribution = new Distribution();
-        distribution.setConfig(config);
-        Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
+        Distribution created = distributionInFrontOf(domain, null);
         try {
             given().header("Host", created.getDomainName()).header("x-custom", "1").when().get("/a/b?x=1")
                     .then().statusCode(200)
@@ -256,6 +239,58 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         } finally {
             cloudFrontService.removeDistribution(created.getId());
         }
+    }
+
+    @Test
+    @Timeout(180)
+    void anAlwaysAmzAuthOriginAccessControlSignsForTheViewerInFrontOfAnIamAuthEndpoint() throws Exception {
+        String domain = createFunction(30, 64, "INFO", "serve", "IamAuth");
+        OriginAccessControl oac = new OriginAccessControl();
+        oac.setName(functionName);
+        oac.setSigningProtocol("sigv4");
+        oac.setSigningBehavior("always-amz-auth");
+        oac.setOriginAccessControlOriginType("lambda");
+        OriginAccessControl createdOac = cloudFrontService.createOriginAccessControl(oac);
+        Distribution created = distributionInFrontOf(domain, createdOac.getId());
+        try {
+            given().header("Host", domain).when().get("/").then().statusCode(403);
+            given().header("Host", created.getDomainName()).header("Authorization", "Bearer app-token")
+                    .body("{}").when().post("/a")
+                    .then().statusCode(200)
+                    .body("method", equalTo("POST"))
+                    .body("headers.authorization", equalTo("Bearer app-token"))
+                    .body("headers", not(hasKey("lambda-web-cloudfront-key")))
+                    .body("headers", not(hasKey("lambda-web-cloudfront-source-arn")));
+        } finally {
+            cloudFrontService.removeDistribution(created.getId());
+            cloudFrontService.deleteOriginAccessControl(createdOac.getId(), createdOac.getEtag());
+        }
+    }
+
+    /** The endpoint behind a distribution, named as on AWS: its host without a port, over HTTPS on 443. */
+    private Distribution distributionInFrontOf(String domain, String originAccessControlId) {
+        Origin origin = new Origin();
+        origin.setId("web");
+        origin.setDomainName(domain.substring(0, domain.lastIndexOf(':')));
+        origin.setOriginAccessControlId(originAccessControlId);
+        Map<String, Object> customOriginConfig = new LinkedHashMap<>();
+        customOriginConfig.put("HTTPPort", "80");
+        customOriginConfig.put("HTTPSPort", "443");
+        customOriginConfig.put("OriginProtocolPolicy", "https-only");
+        origin.setCustomOriginConfig(customOriginConfig);
+        DefaultCacheBehavior behavior = new DefaultCacheBehavior();
+        behavior.setTargetOriginId("web");
+        behavior.setViewerProtocolPolicy("allow-all");
+        behavior.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS", "PUT", "PATCH", "POST", "DELETE"));
+        behavior.setCachePolicyId("4135ea2d-6df8-44a3-9df3-4b5a84be39ad");
+        behavior.setOriginRequestPolicyId("b689b0a8-53d0-40ab-baf2-68738e2966ac");
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setOrigins(List.of(origin));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution = new Distribution();
+        distribution.setConfig(config);
+        return cloudFrontService.createDistribution(distribution, Map.of());
     }
 
     @Test
@@ -474,6 +509,11 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
     private String createFunction(int timeoutSeconds, int maxConcurrencyPerEnvironment, String systemLogLevel,
                                   String mode) throws IOException {
+        return createFunction(timeoutSeconds, maxConcurrencyPerEnvironment, systemLogLevel, mode, "ApplicationManaged");
+    }
+
+    private String createFunction(int timeoutSeconds, int maxConcurrencyPerEnvironment, String systemLogLevel,
+                                  String mode, String authType) throws IOException {
         functionName = "dp-docker-" + Long.toString(System.nanoTime(), 36);
         s3Service.createBucket(BUCKET, "us-east-1");
         s3Service.putObject(BUCKET, functionName + ".zip", zip(APP), "application/zip", Map.of());
@@ -488,9 +528,9 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                                              "environmentVariables": {"CUSTOM": "yes", "MODE": "%s"},
                                              "telemetryConfig": {"loggingConfig": {"systemLogLevel": "%s"}}}},
                          "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
-                                            "authType": "ApplicationManaged", "autoDeploymentMode": "LatestRevision"}}
+                                            "authType": "%s", "autoDeploymentMode": "LatestRevision"}}
                         """.formatted(functionName, BUCKET, functionName, ROLE, timeoutSeconds,
-                        maxConcurrencyPerEnvironment, mode, systemLogLevel))
+                        maxConcurrencyPerEnvironment, mode, systemLogLevel, authType))
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(202)
                 .extract().path("endpoint.domainName");

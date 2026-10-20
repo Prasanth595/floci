@@ -22,8 +22,37 @@ By default, Docker containers launched for EC2 instances are bounded to the CPU 
 
 - **CPU limit**: Each vCPU corresponds to 1024 CPU units (Docker nanoCPUs = `vcpu * 1_000_000_000`). If the host machine has fewer physical cores than requested, Floci clamps execution to available host CPUs and warns (since Docker refuses a nanoCPUs value exceeding the host CPU count).
 - **Memory limit**: Container memory is bounded to the exact MiB value specified for the instance type in the catalog.
-- **Unknown instance types**: If an instance type is not present in the catalog, the container launches unbounded without CPU or memory restrictions, avoiding launch failures for custom or unmodeled instance types.
+- **Types outside the full catalog**: Docker CPU and memory limits are not applied when the full catalog lacks a type. When opted in, Standard On-Demand admission requires a known default vCPU count, as described below.
 - **Configuration knob**: To disable container resource limits (for example, running a large instance type on a developer machine with limited resources), set `floci.services.ec2.instance-resource-limits: false` (or environment variable `FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS=false`).
+
+## Standard On-Demand admission
+
+Quota admission is opt-in. Set `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS=true` to
+check `RunInstances` and `StartInstances` against the applied Standard On-Demand
+quota (`L-1216C47A`) for the caller's account and region. The flag defaults to
+`false`, including mock mode. Disabled admission does not refuse a type merely
+because its default vCPU count is absent from the snapshot.
+
+`FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` supplies the applied value
+(default `5`). Service Quotas reports this value independently of admission.
+With admission enabled, a launch batch can return fewer than `MaxCount` when at
+least `MinCount` fits, otherwise it returns `VcpuLimitExceeded`. A refused start
+leaves stopped instances unchanged. Types in the Standard bucket require a
+known default vCPU count; the separate CPU-only snapshot supplements the full
+instance metadata catalog without inventing memory sizes or regional availability.
+
+Only current `running` Standard On-Demand instances count. Pending, stopping,
+stopped, shutting-down and terminated instances do not reserve capacity. Spot
+and dedicated-host instances do not consume this bucket. RunInstances retains
+direct or inherited launch-template Spot selection; explicit request market
+options override the template. Requests for Spot through the other supported
+launch APIs retain that provenance too.
+
+These are checks of running usage at request admission, not a reservation ledger
+or an eventual running ceiling. Accepted pending operations can complete after
+other work consumes capacity, and changing a running instance's type is not
+covered by the Run/Start checks. Admission does not change guest cleanup,
+restart, user-data, public-address or CloudFormation lifecycle behavior.
 
 ## AMI to Docker Image Mapping
 
@@ -115,6 +144,8 @@ Notes and limitations:
 EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_ENDPOINT_URL` for AWS service API calls back to Floci.
 
 CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and update, including parameter references. Omission, a selected `AWS::NoValue` branch, or `not-specified` uses the default `ipv4`; an explicitly empty value is rejected. Updates retain the existing replacement behavior; synthetic interfaces remain IPv4-only.
+
+CloudFormation `AWS::EC2::LaunchTemplate` stores `LaunchTemplateData.MetadataOptions`, and `AWS::EC2::Instance` launches with its own `MetadataOptions` over those of the launch template it names, as `RunInstances` merges them, so CDK's `requireImdsv2` sets `HttpTokens=required`. A block or member of the wrong type, such as `HttpTokens: [required]`, fails the resource with CloudFormation's type error, a member given as an empty or padded string fails an instance with `InvalidParameterValue` (a launch template stores it unchecked, as `CreateLaunchTemplate` does, and the instances launched from it fail), and `AWS::NoValue` leaves a member or the whole block out. A stack update checks the options before it changes anything, applies changed ones in place, returns options it no longer declares to their defaults, and puts them back if the stack update rolls back. An update that kept the instance and changed no EC2 setting, such as one that only declares the options the instance already has, rolls back in full. When the same update also changed the instance's type, security groups, user data, profile or tags, which have no in-place rollback, the options still go back but the stack ends `UPDATE_ROLLBACK_FAILED` for the instance ("Rollback is not implemented"). The options handling includes an update that changes or drops the instance's `LaunchTemplate` (another template or version, as `Fn::GetAtt LatestVersionNumber` gives after the template changes): AWS replaces the instance then, as `LaunchTemplate` is a replacement property, but Floci keeps it and applies what the new template declares, unless the `ImageId` or `KeyName` the template supplies changed, which replaces it. A change set still previews a literal `LaunchTemplate` change as a replacement.
 
 ## Instance Metadata Service (IMDS)
 
@@ -283,6 +314,17 @@ private gateway lifecycles are not modelled.
 
 ### Key Pairs
 
+`DescribeKeyPairs` omits the public key unless `IncludePublicKey=true`. When requested,
+it returns the OpenSSH public key with the key-pair name as its comment, including for
+imported keys, whatever comment they were imported with; a name holding a control character,
+such as a line break, is left off. It never returns private key material. `ImportKeyPair`
+stores the material as it was given, and a key pair whose material is not exactly one whole
+OpenSSH public key is described without one: PEM, DER or RFC 4716 text, material of more than
+one line, a line whose blob lacks a field its type requires (such as an `ssh-rsa` blob with no
+modulus), has bytes after its key or declares a different type than the line names, and a
+key of any type but `ssh-rsa`, `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`,
+`ecdsa-sha2-nistp521`, `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`.
+
 | Action | Description |
 |--------|-------------|
 | CreateKeyPair | Creates and stores a local key pair. |
@@ -297,6 +339,8 @@ private gateway lifecycles are not modelled.
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
+| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. |
+| DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account
 [STS](sts.md) reports for those credentials, and that account is what `ownerId` and the resource ARN
@@ -305,6 +349,16 @@ registered, and `--owners self` resolves to the same account. This is what lets 
 `aws_ami` data source pin `owners` to the account under test instead of the emulator's default
 `000000000000`. The `amazon` and `aws-marketplace` aliases still resolve to the AWS-owned accounts
 that publish those images.
+
+`DescribeImages` reports where an AMI came from. An AMI made by `CreateImage` reports the instance
+it captured as `SourceInstanceId`, and the AMI that instance was launched from, with its region, as
+`SourceImageId` and `SourceImageRegion`. An AMI made by `CopyImage` reports the AMI it copied and
+that AMI's region, and no instance. Each names its immediate source by AMI ID, even when the
+instance was launched, or the copy requested, with a catalog alias such as `ami-amazonlinux2`, and
+keeps naming it after the source is deregistered. AMIs made by `RegisterImage`, catalog AMIs and
+AMIs saved by an earlier Floci version report none. The `source-image-id`, `source-image-region` and
+`source-instance-id` filters match these fields, and `source-image-id` also takes a catalog alias,
+as `image-id` does.
 
 ### Tags
 
@@ -1062,6 +1116,25 @@ Synthesised addresses come from the subnet's own CIDR block, skipping the first 
 and the last one as AWS reserves them, and skipping every address a persisted instance, network
 interface or NAT gateway in the subnet still holds, so a restart does not hand one out twice. A
 subnet with no free address left fails the request with `InsufficientFreeAddressesInSubnet`.
+
+`RunInstances` with `PrivateIpAddress`, or `NetworkInterface.1.PrivateIpAddress` (the shape
+Terraform's `aws_instance` sends for `private_ip` with a `subnet_id`), gives the instance and its
+primary network interface that address instead of the next free one. So does the
+`NetworkInterface.1.PrivateIpAddresses` entry marked `Primary`, the shape the AWS CLI sends for
+`--private-ip-address` together with `--associate-public-ip-address` or the secondary-address
+options, and the `PrivateIpAddress` of a launch template's primary interface. Secondary addresses,
+from `PrivateIpAddresses` entries not marked `Primary` or from `SecondaryPrivateIpAddressCount`, are
+not applied. An address outside the subnet's CIDR, or one of the five AWS reserves, fails with
+`InvalidParameterValue`, and one that an instance, network interface, NAT gateway or interface
+endpoint already holds fails with `InvalidIPAddress.InUse`. In a Docker-backed default subnet, whose
+network every account shares, that includes an address another account's instance, network interface
+or NAT gateway holds. As on AWS it applies only to a single instance that creates its own primary
+interface: with more than one instance, or with `NetworkInterface.1.NetworkInterfaceId`, the call
+fails with `InvalidParameterCombination`, and so does a top-level `PrivateIpAddress` sent with
+network interfaces, from the request or the launch template. In a Docker-backed subnet the container
+joins the VPC network at that address. In a subnet whose CIDR was substituted the address lies
+outside the network's range, so the container cannot hold it, and the instance reports its bridge
+address unless `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` is true, as for a synthesised address.
 
 `CreateSubnet` derives `AvailableIpAddressCount` from the IPv4 CIDR, excluding the
 five AWS-reserved addresses. `DescribeSubnets` subtracts addresses currently held

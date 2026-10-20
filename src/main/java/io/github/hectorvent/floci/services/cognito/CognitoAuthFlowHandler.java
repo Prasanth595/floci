@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
@@ -58,6 +59,8 @@ final class CognitoAuthFlowHandler {
     /** The message of a wrong password, which managed login also shows for an unknown user. */
     static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
     static final int MAX_USER_AUTH_SESSIONS_PER_PARTITION = 4_096;
+    /** VerifySoftwareToken's {@code FriendlyDeviceName} length limit in the service model. */
+    static final int MAX_FRIENDLY_DEVICE_NAME_LENGTH = 131_072;
     /** The challenges a USER_AUTH PREFERRED_CHALLENGE may name, in the order AWS lists them when refusing another. */
     private static final List<String> PREFERRED_CHALLENGES =
             List.of("PASSWORD", "PASSWORD_SRP", "SMS_OTP", "EMAIL_OTP", "WEB_AUTHN");
@@ -345,7 +348,16 @@ final class CognitoAuthFlowHandler {
         return result;
     }
 
-    Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode) {
+    Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode,
+                                            String friendlyDeviceName) {
+        // Smithy's @length counts Unicode scalar values, so a supplementary character counts once.
+        int nameLength = friendlyDeviceName == null ? 0
+                : friendlyDeviceName.codePointCount(0, friendlyDeviceName.length());
+        if (nameLength > MAX_FRIENDLY_DEVICE_NAME_LENGTH) {
+            throw SmithyValidationErrors.exception("InvalidParameterException", "Value '" + friendlyDeviceName
+                    + "' at 'friendlyDeviceName' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to " + MAX_FRIENDLY_DEVICE_NAME_LENGTH);
+        }
         requireOneTotpCredential(accessToken, session);
         if (userCode == null || !userCode.matches("[0-9]{6}")) {
             throw new AwsException("InvalidParameterException", "UserCode must be a six-digit code", 400);
@@ -364,7 +376,7 @@ final class CognitoAuthFlowHandler {
             username = token.username();
         }
         if (!service.activateSoftwareTokenMfa(poolId, username, state == null ? null : state.secret(),
-                userCode, clock.instant())) {
+                userCode, friendlyDeviceName, clock.instant())) {
             throw new AwsException("CodeMismatchException",
                     "Invalid verification code provided, please try again.", 400);
         }
@@ -712,7 +724,7 @@ final class CognitoAuthFlowHandler {
                 clientMetadata, "TokenGeneration_RefreshTokens", scopes);
         Map<String, Object> result = new HashMap<>();
         result.put("AuthenticationResult", service.accessAndIdTokens(user, pool, client, override, refreshTokenUuid,
-                scopes, iat / 1000L));
+                scopes, CognitoService.refreshTokenAuthTime(parts, iat)));
         return result;
     }
 
@@ -1004,10 +1016,10 @@ final class CognitoAuthFlowHandler {
         firePreAuthentication(pool, client, user, null, clientMetadata, false);
         VerificationCode.Purpose purpose = "EMAIL_OTP".equals(challengeName)
                 ? VerificationCode.Purpose.EMAIL_OTP : VerificationCode.Purpose.SMS_OTP;
-        Map<String, Object> customMessage = fireCustomMessage(pool, client, user, "CustomMessage_Authentication",
-                Map.of());
+        Map<String, Object> customMessage = customEmailSenderTakesOver(pool, deliveryMedium) ? Map.of()
+                : fireCustomMessage(pool, client, user, "CustomMessage_Authentication", Map.of());
         Map<String, String> challengeParams = new HashMap<>(
-                service.issueSignInOtp(pool, user, purpose, attributeName, deliveryMedium, customMessage));
+                service.issueSignInOtp(pool, client, user, purpose, attributeName, deliveryMedium, customMessage));
         challengeParams.put("USERNAME", user.getUsername());
         return userAuthChallengeResponse(pool, client, user, challengeName, available, challengeParams);
     }
@@ -1648,29 +1660,8 @@ final class CognitoAuthFlowHandler {
         if (functionRef == null) return TriggerResult.notConfigured();
 
         String region = regionForPool(pool);
-
-        Map<String, Object> event = new HashMap<>();
-        event.put("version", "1");
-        event.put("region", region);
-        event.put("userPoolId", pool.getId());
-        event.put("userName", user == null ? null : user.getUsername());
-        event.put("callerContext", Map.of(
-                "awsSdkVersion", "floci",
-                "clientId", client == null ? CLIENT_ID_NOT_APPLICABLE : client.getClientId()));
-        event.put("triggerSource", triggerSource);
-        Map<String, Object> req = new HashMap<>(request);
-        if (user != null) {
-            Map<String, String> userAttributes = new LinkedHashMap<>();
-            if (user.getAttributes() != null) {
-                userAttributes.putAll(user.getAttributes());
-            }
-            if ("PreAuthentication".equals(triggerKey)) {
-                userAttributes.put("cognito:user_status", user.getUserStatus());
-            }
-            req.put("userAttributes", userAttributes);
-        }
-        event.put("request", req);
-        event.put("response", new HashMap<>());
+        String clientId = client == null ? CLIENT_ID_NOT_APPLICABLE : client.getClientId();
+        Map<String, Object> event = triggerEvent(pool, clientId, user, triggerKey, triggerSource, request);
 
         try {
             byte[] payload = MAPPER.writeValueAsBytes(event);
@@ -1712,6 +1703,34 @@ final class CognitoAuthFlowHandler {
             LOG.warnv(e, "Cognito trigger {0} invocation failed", triggerKey);
             return TriggerResult.error(TriggerErrorKind.INVOCATION_FAILED, e.getMessage());
         }
+    }
+
+    /** The event every trigger receives: the common parameters around the trigger's own request. */
+    private Map<String, Object> triggerEvent(UserPool pool, String clientId, CognitoUser user, String triggerKey,
+                                             String triggerSource, Map<String, Object> request) {
+        Map<String, Object> event = new HashMap<>();
+        event.put("version", "1");
+        event.put("region", regionForPool(pool));
+        event.put("userPoolId", pool.getId());
+        event.put("userName", user == null ? null : user.getUsername());
+        event.put("callerContext", Map.of(
+                "awsSdkVersion", "floci",
+                "clientId", clientId));
+        event.put("triggerSource", triggerSource);
+        Map<String, Object> req = new HashMap<>(request);
+        if (user != null) {
+            Map<String, String> userAttributes = new LinkedHashMap<>();
+            if (user.getAttributes() != null) {
+                userAttributes.putAll(user.getAttributes());
+            }
+            if ("PreAuthentication".equals(triggerKey) || "CustomEmailSender".equals(triggerKey)) {
+                userAttributes.put("cognito:user_status", user.getUserStatus());
+            }
+            req.put("userAttributes", userAttributes);
+        }
+        event.put("request", req);
+        event.put("response", new HashMap<>());
+        return event;
     }
 
     private static String lambdaFunctionErrorMessage(InvokeResult result) {
@@ -1889,6 +1908,40 @@ final class CognitoAuthFlowHandler {
             return null;
         }
         return result.response();
+    }
+
+    boolean hasCustomEmailSender(UserPool pool) {
+        return lambdaService != null && resolveTriggerArn(pool, "CustomEmailSender") != null;
+    }
+
+    /** Whether a code going by {@code deliveryMedium} goes to the CustomEmailSender, so no CustomMessage shapes it. */
+    private boolean customEmailSenderTakesOver(UserPool pool, String deliveryMedium) {
+        return "EMAIL".equals(deliveryMedium) && hasCustomEmailSender(pool);
+    }
+
+    /**
+     * Hands an encrypted code to the pool's CustomEmailSender function, which delivers the email in
+     * Cognito's place. Cognito invokes custom sender triggers asynchronously, so the function's own
+     * outcome never reaches the caller; a function that cannot be invoked at all throws.
+     * {@code clientMetadata} is the request's ClientMetadata, or null when it carries none; the
+     * caller passes null for a sign-in code, whose event Cognito sends without InitiateAuth's
+     * (measured, eu-west-1, 2026-10-16 and 2026-10-20).
+     */
+    void fireCustomEmailSender(UserPool pool, String clientId, CognitoUser user, String triggerSource,
+                               String encryptedCode, Map<String, String> clientMetadata) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("type", "customEmailSenderRequestV1");
+        req.put("code", encryptedCode);
+        req.put("clientMetadata", clientMetadata == null || clientMetadata.isEmpty() ? null : clientMetadata);
+        byte[] payload;
+        try {
+            payload = MAPPER.writeValueAsBytes(
+                    triggerEvent(pool, clientId, user, "CustomEmailSender", triggerSource, req));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot serialize the CustomEmailSender event", e);
+        }
+        lambdaService.invoke(regionForPool(pool), resolveTriggerArn(pool, "CustomEmailSender"), payload,
+                InvocationType.Event);
     }
 
     private CognitoService.ClaimsOverride firePreTokenGeneration(UserPool pool, UserPoolClient client, CognitoUser user,
@@ -2132,9 +2185,9 @@ final class CognitoAuthFlowHandler {
             return totpChallenge(pool, client, user, TotpPhase.CODE_REQUIRED, triggerSource, metadata);
         }
         boolean sms = "SMS_MFA".equals(factor);
-        Map<String, Object> customMessage = fireCustomMessage(pool, client, user, "CustomMessage_Authentication",
-                Map.of());
-        Map<String, String> parameters = new HashMap<>(service.issueMfaCode(pool, user,
+        Map<String, Object> customMessage = customEmailSenderTakesOver(pool, sms ? "SMS" : "EMAIL") ? Map.of()
+                : fireCustomMessage(pool, client, user, "CustomMessage_Authentication", Map.of());
+        Map<String, String> parameters = new HashMap<>(service.issueMfaCode(pool, client, user,
                 sms ? VerificationCode.Purpose.SMS_MFA : VerificationCode.Purpose.EMAIL_MFA,
                 sms ? "phone_number" : "email", sms ? "SMS" : "EMAIL", customMessage));
         parameters.put("USERNAME", user.getUsername());
@@ -2172,9 +2225,15 @@ final class CognitoAuthFlowHandler {
                 phase, metadata, triggerSource, sessionExpiry(client, clock.instant()),
                 user.getSoftwareTokenMfaSecret()));
         Map<String, String> parameters = new HashMap<>();
-        parameters.put("USERNAME", user.getUsername());
         if (phase == TotpPhase.SETUP) {
+            parameters.put("USERNAME", user.getUsername());
             parameters.put("MFAS_CAN_SETUP", "[\"SOFTWARE_TOKEN_MFA\"]");
+        } else {
+            // As on AWS: the canonical username (never an alias) to answer with, and the authenticator's name.
+            parameters.put("USER_ID_FOR_SRP", user.getUsername());
+            if (user.getSoftwareTokenMfaDeviceName() != null) {
+                parameters.put("FRIENDLY_DEVICE_NAME", user.getSoftwareTokenMfaDeviceName());
+            }
         }
         result.put("ChallengeParameters", parameters);
         return result;
@@ -2307,6 +2366,10 @@ final class CognitoAuthFlowHandler {
         if (cfg == null) return null;
         Object v = cfg.get(triggerKey);
         if (v instanceof String s && !s.isBlank()) return s;
+        // Custom sender triggers are configured as { LambdaArn, LambdaVersion }.
+        if (v instanceof Map<?, ?> m && m.get("LambdaArn") instanceof String arn && !arn.isBlank()) {
+            return arn;
+        }
         // V2 form: PreTokenGeneration is configured under "PreTokenGenerationConfig"
         // as { LambdaArn, LambdaVersion } (UpdateUserPool / UpdateUserPoolClient
         // API). Fall through so callers using the V1 key still work, and pick up

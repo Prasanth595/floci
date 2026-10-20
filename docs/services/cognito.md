@@ -360,9 +360,13 @@ first factor returns `MFA_SETUP` instead of tokens for a user without a verified
 Call `AssociateSoftwareToken` with that session, then `VerifySoftwareToken` with the
 returned session and a six-digit TOTP code. Finish with `RespondToAuthChallenge`
 (`MFA_SETUP`) to receive tokens. Later sign-ins return `SOFTWARE_TOKEN_MFA`, which
-requires a fresh code in `SOFTWARE_TOKEN_MFA_CODE`. Both token-management actions
-also accept an access token for an already authenticated user. Sessions expire with
-the app client's `AuthSessionValidity` and cannot be replayed after completion.
+requires a fresh code in `SOFTWARE_TOKEN_MFA_CODE`. Its `ChallengeParameters` carry
+`USER_ID_FOR_SRP`, the user's actual username rather than an alias (the `sub` in a pool
+with `UsernameAttributes`), to send back as `USERNAME` and to compute `SECRET_HASH` from,
+plus `FRIENDLY_DEVICE_NAME` when `VerifySoftwareToken` was given a `FriendlyDeviceName`.
+Both token-management actions also accept an access token for an already authenticated
+user. Sessions expire with the app client's `AuthSessionValidity` and cannot be replayed
+after completion.
 
 Completing `MFA_SETUP` turns software-token MFA on for the user and, when no other factor is
 preferred, makes it the preferred one, so `GetUser` and `AdminGetUser` report it.
@@ -520,6 +524,44 @@ empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`
 the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
 `USER_AUTH` must list the matching `ALLOW_` value.
 
+## Custom Email Sender Trigger
+
+A pool whose `LambdaConfig` names a `CustomEmailSender` function (`{"LambdaArn": ..., "LambdaVersion": "V1_0"}`)
+and a `KMSKeyID` hands its email codes to that function instead of sending them through SES, as AWS
+does. Floci invokes the function asynchronously (`InvocationType=Event`), as Cognito invokes custom
+sender triggers, with the documented event: the common trigger parameters and a `request` with
+`type` `customEmailSenderRequestV1`, `code`, `clientMetadata` and `userAttributes`. The CustomMessage
+trigger does not fire for these messages, since Cognito sends no message for it to shape.
+
+`code` is encrypted the way Cognito encrypts it: a base64 AWS Encryption SDK message (algorithm suite
+`0x0378`, signed with ECDSA P-384) whose data key comes from Floci KMS `GenerateDataKey` under the
+pool's `KMSKeyID`, with the encryption context `userpool-id` set to the pool ID. A function decrypts
+it with the AWS Encryption SDK and a KMS keyring pointed at Floci (`AWS_ENDPOINT_URL` reaches it from a
+Floci Lambda container), with a commitment policy that allows decrypting it, `REQUIRE_ENCRYPT_ALLOW_DECRYPT`,
+as in the [AWS example](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-custom-email-sender.html#custom-email-sender-code-examples).
+
+| Trigger source | Sent by |
+|---|---|
+| `CustomEmailSender_SignUp` | `SignUp` |
+| `CustomEmailSender_ResendCode` | `ResendConfirmationCode` |
+| `CustomEmailSender_ForgotPassword` | `ForgotPassword` |
+| `CustomEmailSender_UpdateUserAttribute` | `UpdateUserAttributes` changing `email` |
+| `CustomEmailSender_VerifyUserAttribute` | `GetUserAttributeVerificationCode` for `email` |
+| `CustomEmailSender_Authentication` | the `EMAIL_OTP` sign-in code of `USER_AUTH` and managed login |
+
+`userAttributes` includes `cognito:user_status`, and `clientMetadata` is the request's
+`ClientMetadata`, or `null` when it carries none. A sign-in code's event carries none even when the
+`InitiateAuth` does, as in the events Cognito sends.
+`CreateUserPool` and `UpdateUserPool` refuse a custom sender trigger without a `KMSKeyID`, and
+`CreateUserPool` a key that does not exist. A key that cannot encrypt fails the request, a sign-in
+included, with `CodeDeliveryFailureException` ("Caller needs to enable the configured KMS Key" for a
+disabled key, "Unable to encrypt CustomEmailSender/CustomSMSSender code using the configured KMS
+Key" otherwise) and keeps a sign-up's user; a function that cannot be invoked fails it with
+`UnexpectedLambdaException`. What the function does once invoked does not reach the caller.
+`CustomEmailSender_AdminCreateUser` and `CustomEmailSender_AccountTakeOverNotification` are not
+emulated, since Floci sends no invitations and has no threat protection, and neither is the
+`CustomSMSSender` trigger: SMS codes still go through SNS.
+
 ## User Attribute Update Verification
 
 `UpdateUserAttributes` and `AdminUpdateUserAttributes` delete attributes submitted with a blank value, including whitespace-only values. Deleting an email or phone number also removes its verified flag and pending value. Admin updates invalidate the matching pending verification code.
@@ -675,7 +717,8 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 
 1. `GET /cognito-idp/oauth2/authorize` redirects to `/cognito-idp/login` with the request's
    parameters, `login_hint` included. If the browser already has a managed login session in the
-   pool, it skips the form and redirects straight to the callback with a code, as AWS does. A
+   pool, it skips the form and redirects straight to the callback with a code, as AWS does; the
+   code's tokens carry the `auth_time` of the session's sign-in, not of this request. A
    `scope` the client's `AllowedOAuthScopes` does not include is refused first, as on AWS, with a
    redirect to the callback carrying `error=invalid_request`, `error_description=invalid_scope`
    and the `state`.
@@ -840,9 +883,16 @@ Floci mirrors AWS's access-token / ID-token split:
 - **ID token:** `sub`, `cognito:username`, `aud`, and readable user attributes (`email`,
   `email_verified`, `phone_number`, `custom:*`, ...). Attribute claims are filtered by the app client's
   `ReadAttributes` (an unset/empty list means all attributes are readable).
+- **Both tokens:** `auth_time` is when the user signed in, as on AWS. Tokens from an authorization
+  code carry the time the user signed in at the login page or the identity provider, also when a
+  managed login session skipped the form, and tokens from `REFRESH_TOKEN_AUTH`,
+  `GetTokensFromRefreshToken` or the token endpoint's `refresh_token` grant keep the `auth_time` of
+  the sign-in that issued the refresh token. A
+  refresh token issued by an older Floci does not carry its sign-in time, so its tokens get the time
+  it was issued.
 
-As on AWS, a pre token generation trigger cannot suppress or override `sub`, the access token's
-`username` or the ID token's `cognito:username`; Floci ignores those entries in its response.
+As on AWS, a pre token generation trigger cannot suppress or override `sub`, `auth_time`, the access
+token's `username` or the ID token's `cognito:username`; Floci ignores those entries in its response.
 
 Not-found errors (`ResourceNotFoundException`, `UserNotFoundException`) return HTTP `400`, matching the
 Cognito JSON protocol.

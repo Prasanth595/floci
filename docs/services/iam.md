@@ -1495,6 +1495,10 @@ for `DATA_PROTECTION_POLICY`, `logs:PutSubscriptionFilter` for `SUBSCRIPTION_FIL
 `logs:PutMetricExtractionPolicy` for `METRIC_EXTRACTION_POLICY`. Without it the request is refused with
 `AccessDeniedException` and no policy is stored. The `iam:PassRole` a subscription filter policy with a
 `RoleArn` also needs is not checked.
+`DescribeAccountPolicies` likewise needs the read action for the type it lists:
+`logs:GetDataProtectionPolicy`, `logs:DescribeSubscriptionFilters`, `logs:GetTransformer` or
+`logs:DescribeIndexPolicies`. Its reference names none for `METRIC_EXTRACTION_POLICY`, which needs only
+`logs:DescribeAccountPolicies`.
 
 **Secrets Manager secrets.** A request that names a secret by its name, or by a partial ARN without
 the random suffix, is evaluated against the stored secret's full ARN, suffix included, so a
@@ -1503,6 +1507,13 @@ it does on AWS, and a `Deny` on the full ARN applies. `CreateSecret` is evaluate
 `secret:<Name>-??????`, standing in for the suffix the secret is assigned when it is created, so a
 policy scoped to a name prefix such as `secret:app/*` allows it. A name that matches no secret in the
 request's account and region is evaluated as `secret:<name>`, and an ARN that matches none as given.
+
+**Redshift GetClusterCredentials options.** Besides `redshift:GetClusterCredentials`, a request with
+`DbGroups` needs `redshift:JoinGroup` on each group's `dbgroup:<cluster>/<group>` ARN, and a request with
+`AutoCreate` set to `true` needs `redshift:CreateClusterUser` on the user's `dbuser:<cluster>/<user>` ARN,
+as the GetClusterCredentials API reference lists them. They are checked before the cluster is looked up,
+so a denied request gets `AccessDenied` even for a cluster that does not exist. The `dbname` resource
+that `DbName` needs is not checked.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets

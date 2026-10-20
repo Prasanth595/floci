@@ -10,18 +10,21 @@ import io.github.hectorvent.floci.services.dynamodb.model.KinesisStreamingDestin
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
 /**
- * Table control operations on the native DynamoDB engine: CreateTable, UpdateTable and the Kinesis
- * streaming destination toggles.
+ * Table control operations on the native DynamoDB engine: CreateTable, UpdateTable, the table a
+ * restore creates and the Kinesis streaming destination toggles.
  *
  * <p>Owns the sequence each operation runs against the backend: the validation that must fail
  * before any side effect, the underlying create or update, the settings applied to the stored
@@ -73,6 +76,18 @@ public class NativeDynamoDbTableService {
      */
     record KinesisDestination(String tableName, String streamArn, String destinationStatus,
                               String approximateCreationDateTimePrecision) {}
+
+    /** One GlobalSecondaryIndexOverride or LocalSecondaryIndexOverride entry; LSIs carry no throughput. */
+    record IndexOverride(String indexName, List<KeySchemaElement> keySchema, String projectionType,
+                         List<String> nonKeyAttributes, Throughput provisionedThroughput,
+                         OnDemandThroughput onDemandThroughput) {}
+
+    /** The overrides of a restore request. A null member or list means the request did not override it. */
+    record RestoreOverrides(String billingMode, Throughput provisionedThroughput,
+                            OnDemandThroughput onDemandThroughput,
+                            List<IndexOverride> globalSecondaryIndexes, List<IndexOverride> localSecondaryIndexes,
+                            List<VectorIndex> vectorIndexes,
+                            Boolean sseEnabled, String sseType, String kmsMasterKeyId) {}
 
     private final DynamoDbService dynamoDbService;
     private final DynamoDbStreamService streamService;
@@ -163,6 +178,225 @@ public class NativeDynamoDbTableService {
         // especially, since startup rebuilds streams from the persisted table.
         dynamoDbService.persistTable(tableName, table, region);
         return table;
+    }
+
+    /**
+     * Creates the target of a restore in CREATING from {@code source}, a copy of the table the
+     * backup holds, with the request's overrides applied. Like AWS, the new table gets the keys,
+     * indexes, capacity and encryption, and none of the stream, TTL, point-in-time recovery, tags,
+     * deletion protection or table class.
+     */
+    TableDefinition restoreTable(TableDefinition source, String targetTableName, RestoreOverrides overrides,
+                                 String region) {
+        String billingMode = overrides.billingMode() != null
+                ? overrides.billingMode()
+                : "PAY_PER_REQUEST".equals(source.getBillingMode()) ? "PAY_PER_REQUEST" : "PROVISIONED";
+        boolean provisioned = "PROVISIONED".equals(billingMode);
+        checkThroughputOverrides(overrides.billingMode(), provisioned, overrides.provisionedThroughput(),
+                overrides.onDemandThroughput(), "");
+        Throughput throughput = null;
+        if (provisioned) {
+            throughput = overrides.provisionedThroughput() != null
+                    ? overrides.provisionedThroughput()
+                    : new Throughput(source.getProvisionedThroughput().getReadCapacityUnits(),
+                            source.getProvisionedThroughput().getWriteCapacityUnits());
+        }
+
+        List<GlobalSecondaryIndex> gsis = restoredGlobalSecondaryIndexes(source, overrides, provisioned);
+        List<LocalSecondaryIndex> lsis = restoredLocalSecondaryIndexes(source, overrides);
+        List<DynamoDbService.VectorIndexCreate> vectorIndexes = restoredVectorIndexes(source, overrides);
+
+        Set<String> usedAttributes = new HashSet<>();
+        source.getKeySchema().forEach(k -> usedAttributes.add(k.getAttributeName()));
+        gsis.forEach(g -> g.getKeySchema().forEach(k -> usedAttributes.add(k.getAttributeName())));
+        lsis.forEach(l -> l.getKeySchema().forEach(k -> usedAttributes.add(k.getAttributeName())));
+        vectorIndexes.forEach(v -> usedAttributes.addAll(v.index().getSearchSchemaAttributeNames()));
+        List<AttributeDefinition> attributeDefinitions = source.getAttributeDefinitions().stream()
+                .filter(a -> usedAttributes.contains(a.getAttributeName()))
+                .toList();
+
+        Boolean sseEnabled = overrides.sseEnabled() != null ? overrides.sseEnabled() : source.isSseEnabled();
+        String sseType = overrides.sseEnabled() != null ? overrides.sseType() : source.getSseType();
+        String kmsMasterKeyId = overrides.sseEnabled() != null ? overrides.kmsMasterKeyId() : source.getKmsMasterKeyArn();
+        OnDemandThroughput onDemand = provisioned ? null : mergedOnDemand(overrides.onDemandThroughput(),
+                source.getOnDemandMaxReadRequestUnits(), source.getOnDemandMaxWriteRequestUnits());
+        TableSettings settings = new TableSettings(billingMode, false, null, onDemand, null, null,
+                sseEnabled, sseType, kmsMasterKeyId);
+        dynamoDbService.requireRestoreTarget(targetTableName, region);
+        return createTable(new CreateTableRequest(targetTableName, new ArrayList<>(source.getKeySchema()),
+                new ArrayList<>(attributeDefinitions), throughput, gsis, lsis, vectorIndexes, Map.of(), settings),
+                "CREATING", region);
+    }
+
+    private static List<GlobalSecondaryIndex> restoredGlobalSecondaryIndexes(TableDefinition source,
+            RestoreOverrides overrides, boolean provisioned) {
+        List<GlobalSecondaryIndex> restored = new ArrayList<>();
+        if (overrides.globalSecondaryIndexes() == null) {
+            for (GlobalSecondaryIndex gsi : source.getGlobalSecondaryIndexes()) {
+                if ("PROVISIONED".equals(overrides.billingMode())) {
+                    throw invalidRestore("Must override ProvisionedThroughput if BillingMode is overridden to "
+                            + "PROVISIONED for index " + gsi.getIndexName());
+                }
+                restored.add(restoredGsi(gsi.getIndexName(), gsi, provisioned, null, null));
+            }
+            return restored;
+        }
+        for (IndexOverride override : overrides.globalSecondaryIndexes()) {
+            GlobalSecondaryIndex match = source.getGlobalSecondaryIndexes().stream()
+                    .filter(gsi -> sameIndex(override, gsi.getKeySchema(), gsi.getProjectionType(),
+                            gsi.getNonKeyAttributes()))
+                    .findFirst()
+                    .orElseThrow(() -> indexMismatch(override.indexName()));
+            String forIndex = " for index " + override.indexName();
+            checkThroughputOverrides(overrides.billingMode(), provisioned, override.provisionedThroughput(),
+                    override.onDemandThroughput(), forIndex);
+            if (provisioned && override.provisionedThroughput() == null) {
+                throw invalidRestore("Must specify provisioned throughput" + forIndex);
+            }
+            restored.add(restoredGsi(override.indexName(), match, provisioned, override.provisionedThroughput(),
+                    override.onDemandThroughput()));
+        }
+        return restored;
+    }
+
+    /**
+     * The table and each index override go through the same checks in this order. An empty
+     * OnDemandThroughput is ignored, and the message names the first member the override sets.
+     */
+    private static void checkThroughputOverrides(String billingModeOverride, boolean provisioned,
+                                                 Throughput throughput, OnDemandThroughput onDemand, String suffix) {
+        if ("PAY_PER_REQUEST".equals(billingModeOverride) && throughput != null) {
+            throw invalidRestore("Cannot override ProvisionedThroughput if BillingMode is overridden to "
+                    + "PAY_PER_REQUEST" + suffix);
+        }
+        if ("PROVISIONED".equals(billingModeOverride) && throughput == null) {
+            throw invalidRestore("Must override ProvisionedThroughput if BillingMode is overridden to PROVISIONED"
+                    + suffix);
+        }
+        if (onDemand != null && (onDemand.maxReadRequestUnits() != null || onDemand.maxWriteRequestUnits() != null)) {
+            String cannot = "Cannot override "
+                    + (onDemand.maxReadRequestUnits() != null ? "MaxReadRequestUnits" : "MaxWriteRequestUnits")
+                    + " for OnDemandThroughput ";
+            if ("PROVISIONED".equals(billingModeOverride)) {
+                throw invalidRestore(cannot + "when BillingMode is PROVISIONED" + suffix);
+            }
+            if (throughput != null) {
+                throw invalidRestore(cannot + "when ProvisionedThroughputOverride is present" + suffix);
+            }
+            if (provisioned) {
+                throw invalidRestore(cannot + "unless BillingModeOverride is PAY_PER_REQUEST" + suffix);
+            }
+        }
+        if (!provisioned && throughput != null) {
+            throw invalidRestore("Cannot override ProvisionedThroughput unless BillingMode is PROVISIONED" + suffix);
+        }
+    }
+
+    /** An on-demand override replaces only the members it sets. */
+    private static OnDemandThroughput mergedOnDemand(OnDemandThroughput override, Integer maxReadRequestUnits,
+                                                     Integer maxWriteRequestUnits) {
+        Integer maxRead = override != null && override.maxReadRequestUnits() != null
+                ? override.maxReadRequestUnits() : maxReadRequestUnits;
+        Integer maxWrite = override != null && override.maxWriteRequestUnits() != null
+                ? override.maxWriteRequestUnits() : maxWriteRequestUnits;
+        return maxRead == null && maxWrite == null ? null : new OnDemandThroughput(maxRead, maxWrite);
+    }
+
+    private static GlobalSecondaryIndex restoredGsi(String indexName, GlobalSecondaryIndex source, boolean provisioned,
+                                                    Throughput throughput, OnDemandThroughput onDemandOverride) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, new ArrayList<>(source.getKeySchema()), null,
+                source.getProjectionType(), new ArrayList<>(source.getNonKeyAttributes()));
+        if (provisioned) {
+            gsi.getProvisionedThroughput().setReadCapacityUnits(throughput != null ? throughput.readCapacityUnits()
+                    : source.getProvisionedThroughput().getReadCapacityUnits());
+            gsi.getProvisionedThroughput().setWriteCapacityUnits(throughput != null ? throughput.writeCapacityUnits()
+                    : source.getProvisionedThroughput().getWriteCapacityUnits());
+            return gsi;
+        }
+        OnDemandThroughput onDemand = mergedOnDemand(onDemandOverride, source.getOnDemandMaxReadRequestUnits(),
+                source.getOnDemandMaxWriteRequestUnits());
+        if (onDemand != null) {
+            gsi.setOnDemandMaxReadRequestUnits(onDemand.maxReadRequestUnits());
+            gsi.setOnDemandMaxWriteRequestUnits(onDemand.maxWriteRequestUnits());
+        }
+        return gsi;
+    }
+
+    private static List<LocalSecondaryIndex> restoredLocalSecondaryIndexes(TableDefinition source,
+                                                                           RestoreOverrides overrides) {
+        List<LocalSecondaryIndex> restored = new ArrayList<>();
+        if (overrides.localSecondaryIndexes() == null) {
+            for (LocalSecondaryIndex lsi : source.getLocalSecondaryIndexes()) {
+                restored.add(new LocalSecondaryIndex(lsi.getIndexName(), new ArrayList<>(lsi.getKeySchema()), null,
+                        lsi.getProjectionType(), new ArrayList<>(lsi.getNonKeyAttributes())));
+            }
+            return restored;
+        }
+        for (IndexOverride override : overrides.localSecondaryIndexes()) {
+            LocalSecondaryIndex match = source.getLocalSecondaryIndexes().stream()
+                    .filter(lsi -> sameIndex(override, lsi.getKeySchema(), lsi.getProjectionType(),
+                            lsi.getNonKeyAttributes()))
+                    .findFirst()
+                    .orElseThrow(() -> indexMismatch(override.indexName()));
+            restored.add(new LocalSecondaryIndex(override.indexName(), new ArrayList<>(match.getKeySchema()), null,
+                    match.getProjectionType(), new ArrayList<>(match.getNonKeyAttributes())));
+        }
+        return restored;
+    }
+
+    /** Vector indexes, unlike the others, are matched by name. */
+    private static List<DynamoDbService.VectorIndexCreate> restoredVectorIndexes(TableDefinition source,
+                                                                                 RestoreOverrides overrides) {
+        List<VectorIndex> kept = new ArrayList<>();
+        if (overrides.vectorIndexes() == null) {
+            kept.addAll(source.getVectorIndexes());
+        } else {
+            for (VectorIndex override : overrides.vectorIndexes()) {
+                kept.add(source.getVectorIndexes().stream()
+                        .filter(v -> v.getIndexName().equals(override.getIndexName()))
+                        .findFirst()
+                        .orElseThrow(() -> invalidRestore("Vector index " + override.getIndexName()
+                                + " does not match a vector index that existed in the source table and cannot be "
+                                + "created during the restore operation")));
+            }
+        }
+        List<DynamoDbService.VectorIndexCreate> restored = new ArrayList<>();
+        for (int i = 0; i < kept.size(); i++) {
+            VectorIndex v = kept.get(i);
+            VectorIndex copy = new VectorIndex(v.getIndexName(), v.getVectorAttributeName(),
+                    new ArrayList<>(v.getSearchSchema()), v.getProjectionType(),
+                    new ArrayList<>(v.getNonKeyAttributes()), v.getDimensions(), v.getDistanceFunction());
+            restored.add(new DynamoDbService.VectorIndexCreate(copy, "vectorIndexOverride." + (i + 1) + ".member"));
+        }
+        return restored;
+    }
+
+    private static boolean sameIndex(IndexOverride override, List<KeySchemaElement> keySchema, String projectionType,
+                                     List<String> nonKeyAttributes) {
+        if (override.keySchema().size() != keySchema.size()) {
+            return false;
+        }
+        for (int i = 0; i < keySchema.size(); i++) {
+            KeySchemaElement want = override.keySchema().get(i);
+            KeySchemaElement have = keySchema.get(i);
+            if (!want.getAttributeName().equals(have.getAttributeName()) || !want.getKeyType().equals(have.getKeyType())) {
+                return false;
+            }
+        }
+        String type = projectionType != null ? projectionType : "ALL";
+        if (!type.equals(override.projectionType())) {
+            return false;
+        }
+        return !"INCLUDE".equals(type) || Set.copyOf(nonKeyAttributes).equals(Set.copyOf(override.nonKeyAttributes()));
+    }
+
+    private static AwsException indexMismatch(String indexName) {
+        return invalidRestore("Index " + indexName + " does not match a secondary index that existed in the source "
+                + "table and cannot be created during the restore operation");
+    }
+
+    private static AwsException invalidRestore(String message) {
+        return new AwsException("ValidationException", "Invalid Request: " + message, 400);
     }
 
     /**

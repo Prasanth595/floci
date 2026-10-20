@@ -26,6 +26,7 @@ order:
   - AWS::ECS
   - AWS::EKS
   - AWS::RDS
+  - AWS::DSQL
   - AWS::ElastiCache
   - AWS::Redshift
   - AWS::RedshiftServerless
@@ -136,6 +137,7 @@ service_labels:
   AWS::CodePipeline: CodePipeline
   AWS::Cognito: Cognito
   AWS::Config: Config
+  AWS::DSQL: Aurora DSQL
   AWS::DynamoDB: DynamoDB
   AWS::EC2: EC2
   AWS::ECR: ECR

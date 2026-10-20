@@ -41,7 +41,7 @@ The `Lambda Web` service model (apiVersion 2025-03-07, `aws lambda-web` in the A
 - **ARNs** given as identifiers must name the request's region and the caller's account, as on AWS. A revision or endpoint ARN resolves by its id or name only.
 - **Page tokens** are base64 cursors that carry the request and the position of the page, not the UUIDs AWS issues. A token reused with other parameters gets the AWS "does not match the request" error, and any other token the "invalid or has expired" error.
 - **Domain names** take the form `<id>.001.lambda-web.<region>.<floci host>` and `<id>.lambda-web.global.<floci host>`, with the host and port of `floci.base-url`. A `PerRegion` endpoint gets one domain per region in `regionalEndpoints`.
-- **Not implemented yet:** SigV4a on `MultiRegion` endpoints, the check that a policy's principal exists, the automatic deletion of revisions past 50, the metadata API, CloudFront origin access control, and serving a `MultiRegion` or `PerRegion` endpoint in its other regions.
+- **Not implemented yet:** SigV4a on `MultiRegion` endpoints, the check that a policy's principal exists, the automatic deletion of revisions past 50, the metadata API, and serving a `MultiRegion` or `PerRegion` endpoint in its other regions.
 
 ### `aws lambda-web deploy`
 
@@ -64,7 +64,7 @@ curl -H "Host: <domainName>" http://localhost:4566/
 
 The `Host` must match the domain exactly, as on AWS: another case or another port is `404` with `lambda-web-error-type: Platform.InvalidEndpoint`.
 
-A CloudFront distribution of this Floci can use the endpoint as a custom origin, named by its `domainName` without the port as on AWS. See [CloudFront](cloudfront.md).
+A CloudFront distribution of this Floci can use the endpoint as a custom origin, named by its `domainName` without the port as on AWS. Under an `always-amz-auth` origin access control, CloudFront signs the requests to an `IamAuth` endpoint, and the function's resource policy has to allow `cloudfront.amazonaws.com` when IAM enforcement is on. See [CloudFront](cloudfront.md).
 
 An execution environment is a `public.ecr.aws/lambda/nodejs:24` container that a request starts when every environment of the endpoint is full. The code is the revision's S3 object unpacked into `/var/task`. Node starts `/var/runtime/index.js` with the flags AWS uses, as on AWS, and that runtime imports `index.js` or the file `AWS_LAMBDA_NODEJS_ENTRYPOINT` names. So `require.main` is not the app's module, as on AWS. The app sees `AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000`, `AWS_LAMBDA_INITIALIZATION_TYPE=native-http`, `AWS_EXECUTION_ENV`, `AWS_LAMBDA_FUNCTION_MEMORY_SIZE=2048`, `AWS_LAMBDA_LOG_LEVEL`, `AWS_ACCOUNT_ID`, `AWS_REGION`, credentials and `AWS_ENDPOINT_URL` for Floci, `NODE_PATH`, and its own variables. The server has 9 seconds to listen. An environment that sees no request for `floci.services.lambda.container-idle-timeout-seconds` is stopped with `SIGTERM` and one second, as on scale to zero. Node runs under Docker's init, so a server without a `SIGTERM` handler stops at once, as on AWS. A process that exits between requests is replaced by a fresh environment on the next request.
 
@@ -87,13 +87,14 @@ The platform answers these cases itself, with the AWS HTML pages and `lambda-web
 | 404 | `Platform.InvalidEndpoint` | The `Host` is a `lambda-web` domain Floci did not mint |
 | 429 | `Platform.EndpointMaxEnvThrottle` | Every environment is full and the endpoint runs `maxEnvironments` |
 | 429 | `Platform.EndpointRequestThrottle` | The requests exceed the endpoint's `rateLimit` |
+| 431 | `Platform.HeaderTooLarge` | The request line, the headers and the blank line pass 128 KiB, counted as `Name: value` lines. This page answers before every other check |
 | 502 | `Application.TimeoutListenError`, `Application.InitCodeError`, `Runtime.ImportCodeError`, `Runtime.Exit`, `Runtime.ExitError` | The server did not listen within 9 seconds, threw at import, could not find a module at import, or exited at start with status 0 or another status |
 | 503 | `Platform.EndpointDisabled` | The endpoint's `rateLimit` is 0 |
 | 503 | `Runtime.OriginRequestError` | The process died while handling the request, or tens of milliseconds before it |
 | 504 | `Runtime.RequestTimeout` | No response within the revision's `timeoutSeconds` |
 | 505 | `Platform.UnsupportedHttpVersion` | HTTP/1.0 |
 
-A request head over 128 KiB is refused with `431`, without the AWS page. A request without a `Host` header cannot be told apart from one for another Floci service, so it does not get `Platform.MissingHostHeader`.
+A URI of 65,535 bytes or more gets an empty `414`, as on AWS. Headers or a request line past 256 KiB get the HTTP server's empty `431` or `414` instead of the AWS answer. A request without a `Host` header cannot be told apart from one for another Floci service, so it does not get `Platform.MissingHostHeader`.
 
 ## Logs
 

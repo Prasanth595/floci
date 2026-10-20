@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
@@ -14,9 +15,12 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -145,6 +149,114 @@ class CloudWatchMetricsJsonHandlerTest {
                 EPOCH_NOW.minusSeconds(10), EPOCH_NOW.plusSeconds(10), 60);
         assertEquals(0, narrow.get("Datapoints").size(),
                 "metric stored with 24h-ago timestamp must not appear in a 20-second window around now");
+    }
+
+    // The CloudWatch Agent sends an empty top-level MetricData and nests every datum under
+    // EntityMetricData, floci-io/floci#6066.
+    @Test
+    void putMetricData_entityMetricDataOnly_storesNestedDatumsUnderTheRequestNamespace() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Namespace", "CWAgent");
+        req.putArray("MetricData");
+        ObjectNode entityMetricData = req.putArray("EntityMetricData").addObject();
+        ObjectNode entity = entityMetricData.putObject("Entity");
+        entity.putObject("KeyAttributes")
+                .put("Type", "AWS::Resource")
+                .put("ResourceType", "AWS::EC2::Instance")
+                .put("Identifier", "i-0123456789abcdef0");
+        entity.putObject("Attributes");
+        ObjectNode datum = entityMetricData.putArray("MetricData").addObject();
+        datum.put("MetricName", "mem_used_percent");
+        datum.put("Value", 6.43);
+        datum.put("Unit", "Percent");
+        datum.put("StorageResolution", 60);
+        datum.put("Timestamp", sdkTimestamp(EPOCH_NOW));
+        datum.putArray("Dimensions").addObject().put("Name", "host").put("Value", "h1");
+        req.put("StrictEntityValidation", false);
+
+        assertEquals(200, handler.handle("PutMetricData", req, REGION).getStatus());
+
+        ObjectNode stats = getStats("CWAgent", "mem_used_percent", "host", "h1",
+                EPOCH_NOW.minusSeconds(60), EPOCH_NOW.plusSeconds(60), 60);
+        assertEquals(1, stats.get("Datapoints").size());
+        assertEquals(6.43, stats.get("Datapoints").get(0).get("Sum").asDouble());
+    }
+
+    @Test
+    void putMetricData_topLevelAndEntityMetricData_storesBoth() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Namespace", "Mixed");
+        req.putArray("MetricData").addObject()
+                .put("MetricName", "TopLevel").put("Value", 1.0);
+        ArrayNode entityMetricData = req.putArray("EntityMetricData");
+        entityMetricData.addObject().putArray("MetricData").addObject()
+                .put("MetricName", "FirstEntity").put("Value", 2.0);
+        entityMetricData.addObject().putArray("MetricData").addObject()
+                .put("MetricName", "SecondEntity").put("Value", 3.0);
+
+        assertEquals(200, handler.handle("PutMetricData", req, REGION).getStatus());
+
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.put("Namespace", "Mixed");
+        ObjectNode listed = (ObjectNode) handler.handle("ListMetrics", listReq, REGION).getEntity();
+        List<String> names = new ArrayList<>();
+        listed.get("Metrics").forEach(m -> names.add(m.get("MetricName").asText()));
+        assertEquals(List.of("FirstEntity", "SecondEntity", "TopLevel"), names.stream().sorted().toList());
+    }
+
+    @Test
+    void putMetricData_entityDatumWithoutMetricName_rejectsTheWholeRequest() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Namespace", "Invalid");
+        req.putArray("MetricData").addObject()
+                .put("MetricName", "TopLevel").put("Value", 1.0);
+        ArrayNode nested = req.putArray("EntityMetricData").addObject().putArray("MetricData");
+        nested.addObject().put("MetricName", "Valid").put("Value", 2.0);
+        nested.addObject().put("Value", 3.0);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", req, REGION));
+        assertEquals("MissingParameter", e.getErrorCode());
+        assertEquals("MissingRequiredParameterException", e.jsonType());
+        assertEquals(400, e.getHttpStatus());
+        assertEquals("The parameter EntityMetricData.member.1.MetricData.member.2.MetricName is required.",
+                e.getMessage());
+        assertEquals(0, listMetricNames("Invalid").size());
+    }
+
+    @Test
+    void putMetricData_topLevelDatumWithEmptyMetricName_rejectsTheWholeRequest() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Namespace", "InvalidTop");
+        ArrayNode data = req.putArray("MetricData");
+        data.addObject().put("MetricName", "Valid").put("Value", 1.0);
+        data.addObject().put("MetricName", "").put("Value", 2.0);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> handler.handle("PutMetricData", req, REGION));
+        assertEquals("MissingParameter", e.getErrorCode());
+        assertEquals("The parameter MetricData.member.2.MetricName is required.", e.getMessage());
+        assertEquals(0, listMetricNames("InvalidTop").size());
+    }
+
+    // AWS constrains MetricName to 1 to 255 characters with no pattern, so whitespace is a name.
+    @Test
+    void putMetricData_whitespaceMetricName_isStored() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Namespace", "WhitespaceName");
+        req.putArray("MetricData").addObject().put("MetricName", " ").put("Value", 1.0);
+
+        assertEquals(200, handler.handle("PutMetricData", req, REGION).getStatus());
+        assertEquals(List.of(" "), listMetricNames("WhitespaceName"));
+    }
+
+    private List<String> listMetricNames(String namespace) {
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.put("Namespace", namespace);
+        ObjectNode listed = (ObjectNode) handler.handle("ListMetrics", listReq, REGION).getEntity();
+        List<String> names = new ArrayList<>();
+        listed.get("Metrics").forEach(m -> names.add(m.get("MetricName").asText()));
+        return names;
     }
 
     @Test

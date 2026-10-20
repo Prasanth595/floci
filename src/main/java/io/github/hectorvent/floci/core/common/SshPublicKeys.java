@@ -14,7 +14,8 @@ import java.util.HexFormat;
 
 /**
  * The OpenSSH public key wire form, {@code "ssh-rsa AAAA..."}: decoding a line into its
- * length-prefixed fields, and reading or writing the RSA key they carry.
+ * length-prefixed fields, reading or writing the RSA key they carry, and telling whether a blob
+ * holds a whole RSA, ed25519, ECDSA or security-key public key of the type it declares.
  *
  * <p>Extracted from {@code Ec2KeyMaterial} rather than left there because it is key-format
  * handling rather than anything EC2 owns. The digest helper is here for the same reason, and
@@ -31,6 +32,9 @@ public final class SshPublicKeys {
     private static final int MAX_FIELD_LENGTH = 64 * 1024;
 
     private static final int PEM_LINE_LENGTH = 64;
+
+    /** The length of an ed25519 public key, the one field after its type. */
+    private static final int ED25519_KEY_LENGTH = 32;
 
     private SshPublicKeys() {}
 
@@ -101,6 +105,11 @@ public final class SshPublicKeys {
             buffer.get(field);
             return field;
         }
+
+        /** Whether every byte of the blob has been read. */
+        private boolean atEnd() {
+            return !buffer.hasRemaining();
+        }
     }
 
     /**
@@ -117,6 +126,11 @@ public final class SshPublicKeys {
         if (!"ssh-rsa".equals(type)) {
             throw new SshPublicKeyException("not an ssh-rsa blob: " + type);
         }
+        return rsaKeyFrom(reader);
+    }
+
+    /** The RSA public key whose exponent and then modulus are the reader's next two fields. */
+    private static RSAPublicKey rsaKeyFrom(Reader reader) {
         BigInteger exponent = new BigInteger(reader.readField());
         BigInteger modulus = new BigInteger(reader.readField());
         try {
@@ -142,6 +156,64 @@ public final class SshPublicKeys {
             blob.putInt(field.length).put(field);
         }
         return blob.array();
+    }
+
+    /**
+     * Whether a blob carries a whole public key of the type it declares: an {@code ssh-rsa}
+     * exponent and modulus that make a usable key, a 32-byte ed25519 key, or an uncompressed point
+     * of the size of the curve an ECDSA type names, followed by an application field for the two
+     * security-key types, {@code sk-ssh-ed25519@openssh.com} and
+     * {@code sk-ecdsa-sha2-nistp256@openssh.com}. A type field alone, or a field of the wrong size,
+     * is not a key, and neither is a type other than these, such as {@code ssh-dss} or a
+     * certificate. Unlike {@link #rsaKeyOf}, which reads only the fields it needs, nothing may
+     * follow the key, as OpenSSH requires. The check is of the format alone: it does not ask
+     * whether an RSA modulus is long enough for OpenSSH or whether an EC point lies on its curve.
+     */
+    public static boolean carriesAKey(byte[] blob) {
+        if (blob == null) {
+            return false;
+        }
+        try {
+            Reader reader = reader(blob);
+            String type = new String(reader.readField(), StandardCharsets.UTF_8);
+            boolean keyFields = switch (type) {
+                case "ssh-rsa" -> {
+                    rsaKeyFrom(reader); // throws when the exponent and modulus make no usable key
+                    yield true;
+                }
+                case "ssh-ed25519" -> reader.readField().length == ED25519_KEY_LENGTH;
+                case "sk-ssh-ed25519@openssh.com" -> {
+                    boolean key = reader.readField().length == ED25519_KEY_LENGTH;
+                    reader.readField(); // the application, which only has to be there
+                    yield key;
+                }
+                case "ecdsa-sha2-nistp256" -> carriesAPointOn(reader, "nistp256", 32);
+                case "ecdsa-sha2-nistp384" -> carriesAPointOn(reader, "nistp384", 48);
+                case "ecdsa-sha2-nistp521" -> carriesAPointOn(reader, "nistp521", 66);
+                case "sk-ecdsa-sha2-nistp256@openssh.com" -> {
+                    boolean point = carriesAPointOn(reader, "nistp256", 32);
+                    reader.readField(); // the application, which only has to be there
+                    yield point;
+                }
+                default -> false;
+            };
+            return keyFields && reader.atEnd();
+        } catch (SshPublicKeyException | NumberFormatException ignored) {
+            // A missing or empty field, such as an ssh-rsa type with no exponent: not a key.
+            return false;
+        }
+    }
+
+    /**
+     * Whether the next fields name the curve and hold an uncompressed point of its size:
+     * {@code 0x04} and then both coordinates, each {@code coordinateLength} bytes long.
+     */
+    private static boolean carriesAPointOn(Reader reader, String curve, int coordinateLength) {
+        if (!curve.equals(new String(reader.readField(), StandardCharsets.UTF_8))) {
+            return false;
+        }
+        byte[] point = reader.readField();
+        return point.length == 1 + 2 * coordinateLength && point[0] == 4;
     }
 
     /** The key type an OpenSSH blob declares, such as {@code ssh-rsa}. */

@@ -251,8 +251,22 @@ PUT, PATCH and DELETE).
   served by Floci itself, at the address the viewer reached. The origin names the endpoint's
   `domainName` with or without its port, and its protocol and ports do not matter, so neither DNS nor
   the private address check applies. A forwarded viewer `Host` is a 502, as on AWS, where the endpoint's
-  certificate does not name it. Origin access control does not sign these requests yet, so an
-  `IamAuth` endpoint answers them with its 403 page.
+  certificate does not name it. Under an `always-amz-auth` origin access control, Floci signs these
+  requests for the distribution. An `IamAuth` endpoint then lets them through, or with IAM enforcement on
+  evaluates the function's resource policy for `cloudfront.amazonaws.com`, with the distribution as
+  `aws:SourceArn` and its account as `aws:SourceAccount`. Without one, an `IamAuth` endpoint answers
+  with its 403 page. CloudFront forwards the viewer's `Authorization` on GET and HEAD only when the
+  cache policy includes it. A forwarded `Authorization` reaches the function unless it is an AWS
+  signature.
+- Origin access controls and distributions follow the AWS checks for Lambda origins. CloudFront tells
+  them apart by a hostname under `on.aws` with its fixed labels in lowercase, and Floci also by one
+  under its own host. A Web Function endpoint needs a `lambda` origin access control with
+  `always-amz-auth`, signed with `sigv4a` for a `global` endpoint and `sigv4` otherwise, and
+  `always-amz-auth` is for Web Function origins only. A Lambda@Edge origin trigger is refused in
+  front of an origin signed with `always-amz-auth` or `sigv4a`. The `execute-api` origin type is
+  refused with `AccessDenied`, as AWS refuses it. A distribution has to name an origin access control
+  that exists, and a control in use keeps its origin type, its signing protocol and whether it is
+  `always-amz-auth`.
 - Response headers policies validate the AWS configuration shape and are applied after the origin
   response, including CORS preflight fields, origin override behavior, custom headers, security
   headers, allowed header removals, and sampled `Server-Timing` metrics. `Pragma: server-timing`

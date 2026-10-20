@@ -743,6 +743,7 @@ public interface EmulatorConfig {
         RdsServiceConfig rds();
         RedshiftServiceConfig redshift();
         RdsDataServiceConfig rdsData();
+        DsqlServiceConfig dsql();
         RedshiftDataServiceConfig redshiftData();
         RedshiftServerlessServiceConfig redshiftServerless();
         EventBridgeServiceConfig eventbridge();
@@ -1761,6 +1762,19 @@ public interface EmulatorConfig {
          *  Env: FLOCI_SERVICES_RDS_AURORA_RESUME_DELAY_MILLIS */
         @WithDefault("0")
         int auroraResumeDelayMillis();
+    }
+
+    interface DsqlServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Domain under which cluster endpoints are named, {@code <id>.dsql.<region>.<suffix>}. The
+         * default resolves to the loopback address on the host and to Floci inside its Docker
+         * network.
+         */
+        @WithDefault("localhost.floci.io")
+        String endpointSuffix();
     }
 
     interface RdsDataServiceConfig {
@@ -3140,6 +3154,10 @@ public interface EmulatorConfig {
 
         @WithDefault("true")
         boolean enabled();
+
+        /** Enables RunInstances and StartInstances checks against current running vCPU usage. */
+        @WithDefault("false")
+        boolean enforceVcpuQuotas();
 
         /**
          * When true, DescribeInstances and IMDS report each instance's CFN- and

@@ -10,8 +10,10 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.CreateTableRequest;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.GsiThroughputUpdate;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.IndexOverride;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.KinesisDestination;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.OnDemandThroughput;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.RestoreOverrides;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.TableSettings;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.Throughput;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.UpdateTableRequest;
@@ -23,6 +25,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.KinesisStreamingDestination;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.SearchSchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -30,6 +33,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -52,6 +57,9 @@ public class NativeDynamoDbJsonHandler {
 
     private static final String SSE_TYPE_KMS = "KMS";
     private static final Pattern INDEX_NAME_CHARS = Pattern.compile("[a-zA-Z0-9_.\\-]+");
+    // The order AWS prints the enum constraint in.
+    private static final List<String> BACKUP_TYPE_FILTERS = List.of("ALL", "AWS_BACKUP", "USER", "SYSTEM");
+    private static final int MAX_LIST_BACKUPS_LIMIT = 100;
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -95,6 +103,11 @@ public class NativeDynamoDbJsonHandler {
             case "UpdateTimeToLive" -> handleUpdateTimeToLive(request, region);
             case "DescribeContinuousBackups" -> handleDescribeContinuousBackups(request, region);
             case "UpdateContinuousBackups" -> handleUpdateContinuousBackups(request, region);
+            case "CreateBackup" -> handleCreateBackup(request, region);
+            case "DescribeBackup" -> handleDescribeBackup(request, region);
+            case "ListBackups" -> handleListBackups(request, region);
+            case "DeleteBackup" -> handleDeleteBackup(request, region);
+            case "RestoreTableFromBackup" -> handleRestoreTableFromBackup(request, region);
             case "TransactWriteItems" -> handleTransactWriteItems(request, region);
             case "TransactGetItems" -> handleTransactGetItems(request, region);
             case "TagResource" -> handleTagResource(request, region);
@@ -1877,6 +1890,352 @@ public class NativeDynamoDbJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("ContinuousBackupsDescription", continuousBackupsDescriptionNode(table));
         return Response.ok(response).build();
+    }
+
+    private Response handleCreateBackup(JsonNode request, String region) {
+        String tableName = requireTableNameParameter(request, "TableName");
+        DynamoDbTableNames.resolveWithRegion(tableName, region);
+        JsonNode backupNameNode = request.path("BackupName");
+        if (backupNameNode.isMissingNode() || backupNameNode.isNull()) {
+            throwValidationErrors(List.of(
+                    "Value null at 'backupName' failed to satisfy constraint: Member must not be null"));
+        }
+        String backupName = backupNameNode.asText();
+        throwValidationErrors(nameViolations(backupName, "backupName"));
+
+        TableBackup backup = dynamoDbService.createBackup(tableName, backupName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("BackupDetails", backupDetailsNode(backup, "CREATING"));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeBackup(JsonNode request, String region) {
+        TableBackup backup = dynamoDbService.describeBackup(textOrNull(request, "BackupArn"), region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("BackupDescription", backupDescriptionNode(backup, "AVAILABLE"));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteBackup(JsonNode request, String region) {
+        TableBackup backup = dynamoDbService.deleteBackup(textOrNull(request, "BackupArn"), region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("BackupDescription", backupDescriptionNode(backup, "DELETED"));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListBackups(JsonNode request, String region) {
+        String tableName = request.hasNonNull("TableName")
+                ? DynamoDbTableNames.resolveWithRegion(request.get("TableName").asText(), region).name()
+                : null;
+        List<String> violations = new ArrayList<>();
+        Integer limit = request.hasNonNull("Limit") ? request.get("Limit").asInt() : null;
+        if (limit != null && limit < 1) {
+            violations.add("Value '" + limit + "' at 'limit' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 1");
+        }
+        if (limit != null && MAX_LIST_BACKUPS_LIMIT < limit) {
+            violations.add("Value '" + limit + "' at 'limit' failed to satisfy constraint: "
+                    + "Member must have value less than or equal to " + MAX_LIST_BACKUPS_LIMIT);
+        }
+        String backupType = request.hasNonNull("BackupType") ? request.get("BackupType").asText() : "USER";
+        if (!BACKUP_TYPE_FILTERS.contains(backupType)) {
+            violations.add("Value '" + backupType + "' at 'backupType' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: " + BACKUP_TYPE_FILTERS);
+        }
+        throwValidationErrors(violations);
+        Instant lowerBound = timestampOrNull(request, "TimeRangeLowerBound");
+        Instant upperBound = timestampOrNull(request, "TimeRangeUpperBound");
+        if (lowerBound != null && upperBound != null && upperBound.isBefore(lowerBound)) {
+            throw new AwsException("ValidationException", "One or more parameter values were invalid: "
+                    + "Time range lower bound must be less than or equal to upper bound", 400);
+        }
+
+        DynamoDbService.ListBackupsResult result = dynamoDbService.listBackups(tableName, limit, lowerBound,
+                upperBound, textOrNull(request, "ExclusiveStartBackupArn"), backupType, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("BackupSummaries");
+        for (TableBackup backup : result.backups()) {
+            summaries.add(backupSummaryNode(backup));
+        }
+        if (result.lastEvaluatedBackupArn() != null) {
+            response.put("LastEvaluatedBackupArn", result.lastEvaluatedBackupArn());
+        }
+        return Response.ok(response).build();
+    }
+
+    /**
+     * Restores synchronously. The answer still reports the table CREATING with the restore in
+     * progress, as AWS does, but the table is ACTIVE with every item by the time it is sent.
+     */
+    private Response handleRestoreTableFromBackup(JsonNode request, String region) {
+        String backupArn = textOrNull(request, "BackupArn");
+        DynamoDbBackupArns.parse(backupArn);
+        String targetTableName = requireTableNameParameter(request, "TargetTableName");
+        List<String> violations = new ArrayList<>(throughputViolations(request.path("ProvisionedThroughputOverride"),
+                "provisionedThroughputOverride"));
+        JsonNode billingModeOverride = request.path("BillingModeOverride");
+        if (billingModeOverride.isTextual() && !"PROVISIONED".equals(billingModeOverride.asText())
+                && !"PAY_PER_REQUEST".equals(billingModeOverride.asText())) {
+            violations.add("Value '" + billingModeOverride.asText() + "' at 'billingModeOverride' failed to "
+                    + "satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]");
+        }
+        violations.addAll(nameViolations(targetTableName, "targetTableName"));
+        JsonNode gsiOverrides = request.path("GlobalSecondaryIndexOverride");
+        if (gsiOverrides.isArray()) {
+            int position = 0;
+            for (JsonNode gsiOverride : gsiOverrides) {
+                position++;
+                String member = "globalSecondaryIndexOverride." + position + ".member";
+                violations.addAll(restoreIndexNameViolations(gsiOverride.path("IndexName"), member + ".indexName"));
+                violations.addAll(throughputViolations(gsiOverride.path("ProvisionedThroughput"),
+                        member + ".provisionedThroughput"));
+            }
+        }
+        throwValidationErrors(violations);
+
+        TableBackup backup = dynamoDbService.describeBackup(backupArn, region);
+        TableDefinition table = tableService.restoreTable(DynamoDbService.snapshotOf(backup.getTable()),
+                targetTableName, parseRestoreOverrides(request), region);
+        ObjectNode description = tableToNode(table);
+        description.set("RestoreSummary", restoreSummaryNode(backup.getBackupArn(),
+                backup.getTable().getTableArn(), backup.getCreationDateTime()));
+        dynamoDbService.finishRestore(targetTableName, backup.getItems(), region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("TableDescription", description);
+        return Response.ok(response).build();
+    }
+
+    private static RestoreOverrides parseRestoreOverrides(JsonNode request) {
+        JsonNode throughputNode = request.path("ProvisionedThroughputOverride");
+        Throughput throughput = throughputNode.isObject()
+                ? new Throughput(throughputNode.path("ReadCapacityUnits").asLong(),
+                        throughputNode.path("WriteCapacityUnits").asLong())
+                : null;
+        List<VectorIndex> vectorIndexes = null;
+        JsonNode vectorArray = request.path("VectorIndexOverride");
+        if (vectorArray.isArray()) {
+            vectorIndexes = new ArrayList<>();
+            int position = 0;
+            for (JsonNode vectorNode : vectorArray) {
+                position++;
+                vectorIndexes.add(parseVectorIndex(vectorNode, "vectorIndexOverride." + position + ".member"));
+            }
+        }
+        JsonNode sse = request.path("SSESpecificationOverride");
+        return new RestoreOverrides(textOrNull(request, "BillingModeOverride"), throughput,
+                parseOnDemandThroughput(request.path("OnDemandThroughputOverride")),
+                parseIndexOverrides(request.path("GlobalSecondaryIndexOverride"), "globalSecondaryIndexOverride"),
+                parseIndexOverrides(request.path("LocalSecondaryIndexOverride"), "localSecondaryIndexOverride"),
+                vectorIndexes,
+                sse.isObject() ? sse.path("Enabled").asBoolean(false) : null,
+                textOrNull(sse, "SSEType"), textOrNull(sse, "KMSMasterKeyId"));
+    }
+
+    private static List<IndexOverride> parseIndexOverrides(JsonNode array, String memberPrefix) {
+        if (!array.isArray()) {
+            return null;
+        }
+        List<IndexOverride> overrides = new ArrayList<>();
+        int position = 0;
+        for (JsonNode node : array) {
+            position++;
+            String indexName = requireIndexName(node, memberPrefix + "." + position + ".member");
+            List<KeySchemaElement> keySchema = new ArrayList<>();
+            node.path("KeySchema").forEach(ks -> keySchema.add(
+                    new KeySchemaElement(ks.path("AttributeName").asText(), ks.path("KeyType").asText())));
+            List<String> nonKeyAttributes = new ArrayList<>();
+            node.path("Projection").path("NonKeyAttributes").forEach(a -> nonKeyAttributes.add(a.asText()));
+            JsonNode throughputNode = node.path("ProvisionedThroughput");
+            Throughput throughput = throughputNode.isObject()
+                    ? new Throughput(throughputNode.path("ReadCapacityUnits").asLong(),
+                            throughputNode.path("WriteCapacityUnits").asLong())
+                    : null;
+            overrides.add(new IndexOverride(indexName, keySchema,
+                    node.path("Projection").path("ProjectionType").asText("ALL"), nonKeyAttributes, throughput,
+                    parseOnDemandThroughput(node.path("OnDemandThroughput"))));
+        }
+        return overrides;
+    }
+
+    /** AWS names the member 'TableName' in this message even when the request calls it something else. */
+    private static String requireTableNameParameter(JsonNode request, String member) {
+        JsonNode node = request.path(member);
+        if (node.isMissingNode() || node.isNull()) {
+            throw new AwsException("ValidationException",
+                    "The parameter 'TableName' is required but was not present in the request", 400);
+        }
+        return node.asText();
+    }
+
+    /** Table, index and backup names share one pattern and length range. */
+    private static List<String> nameViolations(String name, String memberPath) {
+        String value = "Value '" + name + "' at '" + memberPath + "' failed to satisfy constraint: ";
+        List<String> violations = new ArrayList<>();
+        if (!INDEX_NAME_CHARS.matcher(name).matches()) {
+            violations.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
+        }
+        if (name.length() < 3) {
+            violations.add(value + "Member must have length greater than or equal to 3");
+        }
+        if (255 < name.length()) {
+            violations.add(value + "Member must have length less than or equal to 255");
+        }
+        return violations;
+    }
+
+    /** AWS lists WriteCapacityUnits before ReadCapacityUnits. */
+    private static List<String> throughputViolations(JsonNode throughput, String memberPath) {
+        List<String> violations = new ArrayList<>();
+        if (!throughput.isObject()) {
+            return violations;
+        }
+        for (String member : List.of("WriteCapacityUnits", "ReadCapacityUnits")) {
+            JsonNode value = throughput.path(member);
+            String constraint = " at '" + memberPath + "." + Character.toLowerCase(member.charAt(0))
+                    + member.substring(1) + "' failed to satisfy constraint: ";
+            if (value.isMissingNode() || value.isNull()) {
+                violations.add("Value null" + constraint + "Member must not be null");
+            } else if (value.asLong() < 1) {
+                violations.add("Value '" + value.asText() + "'" + constraint
+                        + "Member must have value greater than or equal to 1");
+            }
+        }
+        return violations;
+    }
+
+    /** Unlike CreateTable, a restore lists the length violation of an index name before the pattern. */
+    private static List<String> restoreIndexNameViolations(JsonNode indexName, String memberPath) {
+        String constraint = " at '" + memberPath + "' failed to satisfy constraint: ";
+        if (indexName.isMissingNode() || indexName.isNull()) {
+            return List.of("Value null" + constraint + "Member must not be null");
+        }
+        String value = "Value '" + indexName.asText() + "'" + constraint;
+        List<String> violations = new ArrayList<>();
+        if (indexName.asText().length() < 3) {
+            violations.add(value + "Member must have length greater than or equal to 3");
+        }
+        if (255 < indexName.asText().length()) {
+            violations.add(value + "Member must have length less than or equal to 255");
+        }
+        if (!INDEX_NAME_CHARS.matcher(indexName.asText()).matches()) {
+            violations.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
+        }
+        return violations;
+    }
+
+    private static String textOrNull(JsonNode node, String member) {
+        return node.hasNonNull(member) ? node.get(member).asText() : null;
+    }
+
+    private static Instant timestampOrNull(JsonNode request, String member) {
+        JsonNode node = request.path(member);
+        return node.isNumber() ? Instant.ofEpochMilli(node.decimalValue().movePointRight(3).longValue()) : null;
+    }
+
+    private static BigDecimal epochSeconds(Instant instant) {
+        return BigDecimal.valueOf(instant.toEpochMilli(), 3);
+    }
+
+    private ObjectNode backupDetailsNode(TableBackup backup, String status) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("BackupArn", backup.getBackupArn());
+        node.put("BackupName", backup.getBackupName());
+        node.put("BackupSizeBytes", backup.getSizeBytes());
+        node.put("BackupStatus", status);
+        node.put("BackupType", backup.getBackupType());
+        node.put("BackupCreationDateTime", epochSeconds(backup.getCreationDateTime()));
+        if (backup.getExpiryDateTime() != null) {
+            node.put("BackupExpiryDateTime", epochSeconds(backup.getExpiryDateTime()));
+        }
+        return node;
+    }
+
+    private ObjectNode backupSummaryNode(TableBackup backup) {
+        ObjectNode node = backupDetailsNode(backup, "AVAILABLE");
+        TableDefinition table = backup.getTable();
+        node.put("TableName", table.getTableName());
+        node.put("TableId", table.getTableId());
+        node.put("TableArn", table.getTableArn());
+        return node;
+    }
+
+    /** The source table parts are DescribeTable's, minus the members that only describe a live table. */
+    private ObjectNode backupDescriptionNode(TableBackup backup, String status) {
+        TableDefinition table = backup.getTable();
+        ObjectNode described = tableToNode(table);
+
+        ObjectNode source = objectMapper.createObjectNode();
+        source.put("TableName", table.getTableName());
+        source.put("TableId", table.getTableId());
+        source.put("TableArn", table.getTableArn());
+        source.put("TableSizeBytes", table.getTableSizeBytes());
+        source.set("KeySchema", described.get("KeySchema"));
+        source.set("TableCreationDateTime", described.get("CreationDateTime"));
+        ObjectNode throughput = (ObjectNode) described.get("ProvisionedThroughput");
+        throughput.remove("NumberOfDecreasesToday");
+        source.set("ProvisionedThroughput", throughput);
+        if (described.has("OnDemandThroughput")) {
+            source.set("OnDemandThroughput", described.get("OnDemandThroughput"));
+        }
+        source.put("ItemCount", table.getItemCount());
+        source.put("BillingMode", "PAY_PER_REQUEST".equals(table.getBillingMode()) ? "PAY_PER_REQUEST" : "PROVISIONED");
+
+        ObjectNode features = objectMapper.createObjectNode();
+        if (described.has("LocalSecondaryIndexes")) {
+            for (JsonNode lsi : described.get("LocalSecondaryIndexes")) {
+                ((ObjectNode) lsi).remove(List.of("IndexArn", "IndexSizeBytes", "ItemCount"));
+            }
+            features.set("LocalSecondaryIndexes", described.get("LocalSecondaryIndexes"));
+        }
+        if (described.has("GlobalSecondaryIndexes")) {
+            for (JsonNode gsi : described.get("GlobalSecondaryIndexes")) {
+                ((ObjectNode) gsi).remove(List.of("IndexArn", "IndexStatus", "IndexSizeBytes", "ItemCount"));
+                ((ObjectNode) gsi.get("ProvisionedThroughput")).remove("NumberOfDecreasesToday");
+            }
+            features.set("GlobalSecondaryIndexes", described.get("GlobalSecondaryIndexes"));
+        }
+        if (table.isStreamEnabled()) {
+            ObjectNode stream = features.putObject("StreamDescription");
+            stream.put("StreamEnabled", true);
+            stream.put("StreamViewType", table.getStreamViewType());
+        }
+        if (table.isTtlEnabled()) {
+            ObjectNode ttl = features.putObject("TimeToLiveDescription");
+            ttl.put("AttributeName", table.getTtlAttributeName());
+            ttl.put("TimeToLiveStatus", "ENABLED");
+        }
+        if (described.has("SSEDescription")) {
+            features.set("SSEDescription", described.get("SSEDescription"));
+        }
+        if (described.has("VectorIndexes")) {
+            for (JsonNode vectorIndex : described.get("VectorIndexes")) {
+                ((ObjectNode) vectorIndex).remove(
+                        List.of("IndexArn", "IndexStatus", "Backfilling", "IndexSizeBytes", "ItemCount"));
+            }
+            features.set("VectorIndexes", described.get("VectorIndexes"));
+        }
+
+        ObjectNode node = objectMapper.createObjectNode();
+        node.set("BackupDetails", backupDetailsNode(backup, status));
+        node.set("SourceTableDetails", source);
+        node.set("SourceTableFeatureDetails", features);
+        return node;
+    }
+
+    private ObjectNode restoreSummaryNode(String sourceBackupArn, String sourceTableArn, Instant restoreDateTime) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (sourceBackupArn != null) {
+            node.put("SourceBackupArn", sourceBackupArn);
+        }
+        node.put("SourceTableArn", sourceTableArn);
+        node.put("RestoreDateTime", epochSeconds(restoreDateTime));
+        node.put("RestoreInProgress", true);
+        return node;
     }
 
     private Response handleTransactWriteItems(JsonNode request, String region) {

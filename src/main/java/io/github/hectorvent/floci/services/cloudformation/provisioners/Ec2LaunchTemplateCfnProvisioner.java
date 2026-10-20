@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
@@ -64,6 +65,14 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
             data.setEncodedUserData(encodedUserData);
             data.setUserData(Ec2UserDataDecoder.decode(encodedUserData));
             data.setIamInstanceProfile(iamInstanceProfile(node.path("IamInstanceProfile")));
+            // MetadataOptions is read as the template writes it: resolving turns AWS::NoValue into ""
+            // first, which the typed read would refuse for the block or the hop limit. A
+            // LaunchTemplateData that is absent or an intrinsic call carries no MetadataOptions member.
+            JsonNode written = ctx.engine().omitNoValue(props.get("LaunchTemplateData"));
+            JsonNode metadataOptions = written.isObject() && !CloudFormationTemplateEngine.callsIntrinsic(written)
+                    ? written.get("MetadataOptions") : null;
+            data.setMetadataOptions(Ec2CfnMetadataOptions.read("LaunchTemplateData/MetadataOptions",
+                    metadataOptions, Ec2CfnMetadataOptions.LAUNCH_TEMPLATE_SHAPE, ctx.engine()));
             if (node.has("SecurityGroupIds")) {
                 List<String> securityGroupIds = new ArrayList<>();
                 for (JsonNode securityGroup : node.get("SecurityGroupIds")) {

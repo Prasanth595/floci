@@ -3535,6 +3535,53 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                     String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
                                     String hostId, String tenancy,
                                     List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, hostId, tenancy,
+                blockDeviceMappings, false, null);
+    }
+
+    Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
+                                    String hostId, String tenancy,
+                                    List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings, boolean spot) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, hostId, tenancy,
+                blockDeviceMappings, spot, null);
+    }
+
+    /**
+     * @param privateIpAddress PrivateIpAddress: the primary private address of the interface the
+     *                         launch creates, or null to let the subnet pick one. It must be an
+     *                         assignable address of the subnet that no other resource holds, and
+     *                         AWS accepts it only for a single instance launched without an
+     *                         existing network interface.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
+                                    String hostId, String tenancy,
+                                    List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings, boolean spot,
+                                    String privateIpAddress) {
+        if (privateIpAddress != null && privateIpAddress.isBlank()) {
+            privateIpAddress = null;
+        }
         if (hostId != null && !hostId.isBlank()) {
             Host host = getRequiredAvailableHost(region, hostId);
             if ((availabilityZone == null || availabilityZone.isBlank())
@@ -3631,6 +3678,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
+        if (privateIpAddress != null) {
+            privateIpAddress = validateRequestedPrivateIp(privateIpAddress, subnet, suppliedEni, maxCount);
+        }
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
         // An entry with NoDevice set removes its device whatever else it names, as on AWS.
         List<LaunchTemplateData.BlockDeviceMapping> mappedDevices = blockDeviceMappings == null ? List.of()
@@ -3673,14 +3723,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
             }
             synchronized (privateIpAllocationLock) {
+                int admitted = !config.services().ec2().enforceVcpuQuotas() || spot || "host".equals(tenancy)
+                        ? count : admittedInstanceCount(region, effectiveInstanceType, minCount, maxCount);
                 synchronized (hostLock) {
                     if (hostId != null) {
                         // Re-checked under hostLock: a ReleaseHosts or ModifyHosts may have landed
                         // since the unlocked check above.
                         validateHostPlacement(getRequiredAvailableHost(region, hostId), az, effectiveInstanceType, tenancy);
                     }
-                    List<String> privateIps = allocateLaunchAddresses(region, finalSubnetId, suppliedEni, count);
-                    for (int i = 0; i < count; i++) {
+                    List<String> privateIps = allocateLaunchAddresses(region, finalSubnetId, suppliedEni,
+                            privateIpAddress, admitted);
+                    for (int i = 0; i < admitted; i++) {
                         String instanceId = "i-" + randomHex(17);
                         String privateIp = privateIps.get(i);
 
@@ -3690,6 +3743,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         inst.setImageId(imageId);
                         inst.setState(InstanceState.pending());
                         inst.setInstanceType(effectiveInstanceType);
+                        inst.setSpot(spot);
                         Placement placement = new Placement(az);
                         placement.setHostId(hostId);
                         if (tenancy != null && !tenancy.isBlank()) {
@@ -4039,14 +4093,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * Every private address a launch needs, allocated before any of its instances is stored, so
      * a subnet without room for the whole launch fails it without leaving the instances that did
      * fit behind. Callers must hold {@link #privateIpAllocationLock}.
+     *
+     * @param requestedPrivateIp the launch's PrivateIpAddress, already checked by
+     *                           {@link #validateRequestedPrivateIp}, or null
      */
     private List<String> allocateLaunchAddresses(String region, String subnetId, NetworkInterface suppliedEni,
-                                                 int count) {
+                                                 String requestedPrivateIp, int count) {
         List<String> addresses = new ArrayList<>(count);
         if (suppliedEni != null) {
             for (int i = 0; i < count; i++) {
                 addresses.add(suppliedEni.getPrivateIpAddress());
             }
+            return addresses;
+        }
+        if (requestedPrivateIp != null) {
+            claimRequestedPrivateIp(region, subnetId, requestedPrivateIp);
+            addresses.add(requestedPrivateIp);
             return addresses;
         }
         try {
@@ -4096,12 +4158,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (privateIpAllocationLock) {
             // The addresses persisted resources already hold, so a restart, which forgets the
             // cursor, never hands out an address that is still in use.
-            Set<String> persistedInUse = privateIpsInUse(region, subnetId);
-            Set<String> inUse = new HashSet<>(persistedInUse);
-            // Interface endpoint interfaces are derived, not stored, so the scan above misses them.
-            if (subnetId != null) {
-                inUse.addAll(endpointPrivateIpsIn(region, subnetId, persistedInUse));
-            }
+            Set<String> inUse = privateIpsTaken(region, subnetId);
             inUse.addAll(pending);
             long start = Math.clamp(subnetIpCursors.getOrDefault(cursorKey, SYNTHETIC_FIRST_OFFSET), first, last);
             long span = last - first + 1;
@@ -4117,6 +4174,91 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         throw insufficientFreeAddresses(subnetId);
     }
 
+    /**
+     * Checks a launch's PrivateIpAddress before anything is stored. AWS applies it to the primary
+     * interface the launch creates, so it cannot be combined with an existing interface or with
+     * more than one instance, and it has to be an address the subnet can assign. Whether another
+     * resource holds it is checked under the allocation lock, by {@link #claimRequestedPrivateIp}.
+     *
+     * @param subnet the launch's subnet, or null when the region has no default subnet to place
+     *               it in, in which case there is no range to check the address against
+     * @param maxCount the launch's MaxCount. A request that may launch more than one instance is
+     *                 refused even when fewer would be launched.
+     * @return the address in its canonical dotted form. The in-use check, the VPC network's lease
+     *         table and Docker all compare addresses as text, so a zero-padded octet must not make
+     *         one address look like two.
+     */
+    private static String validateRequestedPrivateIp(String privateIpAddress, Subnet subnet,
+                                                     NetworkInterface suppliedEni, int maxCount) {
+        if (suppliedEni != null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "A private IP address may not be specified with an existing network interface.", 400);
+        }
+        if (maxCount > 1) {
+            throw new AwsException("InvalidParameterCombination",
+                    "A private IP address may only be specified for a single instance.", 400);
+        }
+        String address = canonicalIpv4(privateIpAddress)
+                .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                        "Invalid IPv4 address: " + privateIpAddress, 400));
+        if (subnet != null) {
+            requireAssignableSubnetAddress(subnet, address);
+        }
+        return address;
+    }
+
+    /**
+     * Claims the address a launch named, which {@link #validateRequestedPrivateIp} has already
+     * placed inside the subnet. Callers must hold {@link #privateIpAllocationLock}.
+     *
+     * <p>The caller's stored resources decide whether the address is in use. A Docker-backed
+     * subnet also leases it, so the network's own allocator never hands it to a later launch.
+     *
+     * <p>Inside a Docker-backed range, what every account holds counts as well. Default VPC and
+     * subnet ids are the same in every account, so their Docker network is shared, and another
+     * account's instance, network interface or NAT gateway there may hold the address with no
+     * lease to show for it: an interface created with its own address never takes one, and a
+     * restart re-leases only instances. Any other subnet id belongs to one account, so for it the
+     * wider scan finds nothing more. A lease with nothing in any account behind it is stale
+     * (DeleteNetworkInterface and DeleteNatGateway never return theirs) and does not fail the
+     * launch, and an address outside a substituted subnet's effective range is never leased at
+     * all, in which case the instance keeps it the way it keeps a synthesised address.
+     */
+    private void claimRequestedPrivateIp(String region, String subnetId, String address) {
+        if (privateIpsTaken(region, subnetId).contains(address)) {
+            throw new AwsException("InvalidIPAddress.InUse", "Address " + address + " is in use.", 400);
+        }
+        if (vpcNetworkManager == null || subnetId == null) {
+            return;
+        }
+        boolean leasable = vpcNetworkManager.effectiveSubnetCidr(region, subnetId)
+                .filter(cidr -> Ipv4Cidrs.contains(cidr, address + "/32"))
+                .isPresent();
+        if (!leasable) {
+            return;
+        }
+        if (privateIpsInUseInEveryAccount(region, subnetId).contains(address)) {
+            throw new AwsException("InvalidIPAddress.InUse", "Address " + address + " is in use.", 400);
+        }
+        vpcNetworkManager.claimPrivateIp(region, subnetId, address);
+    }
+
+    /** {@link #privateIpsInUse}, across every account rather than only the caller's. */
+    private Set<String> privateIpsInUseInEveryAccount(String region, String subnetId) {
+        String regionPrefix = region + "::";
+        return privateIpsBySubnet(valuesOfEveryAccount(networkInterfaces, regionPrefix),
+                valuesOfEveryAccount(instances, regionPrefix),
+                valuesOfEveryAccount(natGateways, regionPrefix))
+                .getOrDefault(subnetId, Set.of());
+    }
+
+    private static <T> List<T> valuesOfEveryAccount(StorageBackend<String, T> store, String keyPrefix) {
+        return entriesOfEveryAccount(store).stream()
+                .filter(entry -> entry.key().startsWith(keyPrefix))
+                .map(AccountAwareStorageBackend.AccountEntry::value)
+                .toList();
+    }
+
     private static AwsException insufficientFreeAddresses(String subnetId) {
         return new AwsException("InsufficientFreeAddressesInSubnet",
                 "There are not enough free addresses in subnet '" + subnetId + "' to satisfy the requested number of instances.",
@@ -4128,17 +4270,36 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return new HashSet<>(privateIpsBySubnet(region).getOrDefault(subnetId, Set.of()));
     }
 
+    /** {@link #privateIpsInUse}, plus the addresses of the subnet's interface endpoint interfaces. */
+    private Set<String> privateIpsTaken(String region, String subnetId) {
+        Set<String> persistedInUse = privateIpsInUse(region, subnetId);
+        Set<String> taken = new HashSet<>(persistedInUse);
+        // Interface endpoint interfaces are derived, not stored, so the scan above misses them.
+        if (subnetId != null) {
+            taken.addAll(endpointPrivateIpsIn(region, subnetId, persistedInUse));
+        }
+        return taken;
+    }
+
     private Map<String, Set<String>> privateIpsBySubnet(String region) {
         String regionPrefix = region + "::";
+        return privateIpsBySubnet(networkInterfaces.scan(k -> k.startsWith(regionPrefix)),
+                instances.scan(k -> k.startsWith(regionPrefix)),
+                natGateways.scan(k -> k.startsWith(regionPrefix)));
+    }
+
+    private static Map<String, Set<String>> privateIpsBySubnet(List<NetworkInterface> regionInterfaces,
+                                                               List<Instance> regionInstances,
+                                                               List<NatGateway> regionNatGateways) {
         Map<String, Set<String>> bySubnet = new HashMap<>();
-        for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(regionPrefix))) {
+        for (NetworkInterface ni : regionInterfaces) {
             Set<String> inUse = bySubnet.computeIfAbsent(ni.getSubnetId(), ignored -> new HashSet<>());
             addIfSet(inUse, ni.getPrivateIpAddress());
             for (NetworkInterfacePrivateIpAddress ip : nullToEmpty(ni.getPrivateIpAddresses())) {
                 addIfSet(inUse, ip.getPrivateIpAddress());
             }
         }
-        for (Instance instance : instances.scan(k -> k.startsWith(regionPrefix))) {
+        for (Instance instance : regionInstances) {
             String state = instance.getState() == null ? null : instance.getState().getName();
             if ("terminated".equals(state)) {
                 continue;
@@ -4150,7 +4311,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         ni.getPrivateIpAddress());
             }
         }
-        for (NatGateway natGateway : natGateways.scan(k -> k.startsWith(regionPrefix))) {
+        for (NatGateway natGateway : regionNatGateways) {
             if ("deleted".equals(natGateway.getState())) {
                 continue;
             }
@@ -4168,8 +4329,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private static void addIfSet(Set<String> addresses, String address) {
         if (address != null && !address.isBlank()) {
-            addresses.add(address);
+            // CreateNetworkInterface keeps its address as given, so a zero-padded octet has to be
+            // folded here for the in-use checks to see one address rather than two.
+            addresses.add(canonicalIpv4(address).orElse(address));
         }
+    }
+
+    /** {@code address} in canonical dotted form, or empty when it is not an IPv4 address. */
+    private static Optional<String> canonicalIpv4(String address) {
+        return Cidr4.parse(address + "/32").map(host -> Cidr4.format(host.network()));
     }
 
     public List<Reservation> describeInstances(String region, List<String> instanceIds, Map<String, List<String>> filters) {
@@ -4590,6 +4758,33 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public List<Map<String, String>> startInstances(String region, List<String> instanceIds) {
         ensureDefaultResources(region);
+        if (config.services().ec2().enforceVcpuQuotas()) {
+            synchronized (privateIpAllocationLock) {
+                long additional = 0;
+                Set<String> legacySpot = spotInstanceIds(region);
+                List<Instance> targets = new ArrayList<>();
+                for (String id : new LinkedHashSet<>(instanceIds)) {
+                    Instance instance = getRequiredInstance(region, id);
+                    if (isExternalInstance(region, id)) {
+                        throw new AwsException("OperationNotPermitted",
+                                "The instance '" + id + "' is a cluster node and cannot be started through EC2", 400);
+                    }
+                    if ("terminated".equals(instance.getState().getName())) {
+                        throw new AwsException("IncorrectInstanceState",
+                                "The instance '" + id + "' is not in a state from which it can be started.", 400);
+                    }
+                    targets.add(instance);
+                }
+                for (Instance instance : targets) {
+                    String state = instance.getState().getName();
+                    if (("stopped".equals(state) || "stopping".equals(state))
+                            && !isSpot(instance, legacySpot) && !onDedicatedHost(instance)) {
+                        additional += standardOnDemandVcpus(instance.getInstanceType());
+                    }
+                }
+                enforceStandardOnDemandQuota(region, additional);
+            }
+        }
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
            Instance inst = getRequiredInstance(region, id);
@@ -4629,6 +4824,71 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             result.add(entry);
         }
         return result;
+    }
+
+    private int appliedStandardOnDemandLimit() {
+        return config.services().servicequotas() == null ? 5
+                : config.services().servicequotas().standardOnDemandVcpus();
+    }
+
+    private int admittedInstanceCount(String region, String instanceType, int minimum, int maximum) {
+        int vcpus = standardOnDemandVcpus(instanceType);
+        int requested = Math.max(maximum, Math.max(minimum, 1));
+        if (vcpus == 0) {
+            return requested;
+        }
+        long available = Math.max(0L, (long) appliedStandardOnDemandLimit() - runningStandardOnDemandVcpus(region));
+        int admitted = (int) Math.min(requested, available / vcpus);
+        if (admitted < Math.max(minimum, 1)) {
+            throw vcpuLimitExceeded();
+        }
+        return admitted;
+    }
+
+    private void enforceStandardOnDemandQuota(String region, long additional) {
+        if (additional > 0 && runningStandardOnDemandVcpus(region) + additional > appliedStandardOnDemandLimit()) {
+            throw vcpuLimitExceeded();
+        }
+    }
+
+    private AwsException vcpuLimitExceeded() {
+        return new AwsException("VcpuLimitExceeded", "You have requested more vCPU capacity than your current vCPU limit of "
+                + appliedStandardOnDemandLimit() + " allows for the instance bucket that the specified instance type belongs to.", 400);
+    }
+
+    private Set<String> spotInstanceIds(String region) {
+        return spotInstanceRequests.scan(k -> k.startsWith(region + "::")).stream()
+                .map(SpotInstanceRequest::getInstanceId).filter(Objects::nonNull).collect(Collectors.toSet());
+    }
+
+    private static boolean isSpot(Instance instance, Set<String> legacySpot) {
+        return instance.isSpot() || legacySpot.contains(instance.getInstanceId());
+    }
+
+    private static boolean onDedicatedHost(Instance instance) {
+        return instance.getPlacement() != null && "host".equals(instance.getPlacement().getTenancy());
+    }
+
+    /** Current running usage only: pending operations do not reserve admission capacity. */
+    private long runningStandardOnDemandVcpus(String region) {
+        Set<String> legacySpot = spotInstanceIds(region);
+        return instances.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(i -> !isSpot(i, legacySpot) && !onDedicatedHost(i))
+                .filter(i -> i.getState() != null && "running".equals(i.getState().getName()))
+                .mapToLong(i -> standardOnDemandVcpus(i.getInstanceType())).sum();
+    }
+
+    private int standardOnDemandVcpus(String type) {
+        if (type == null || type.isBlank() || type.startsWith("mac") || type.startsWith("dl")
+                || type.startsWith("hpc") || type.startsWith("inf") || type.startsWith("trn")) {
+            return 0;
+        }
+        return switch (Character.toLowerCase(type.charAt(0))) {
+            case 'a', 'c', 'd', 'h', 'i', 'm', 'r', 't', 'z' -> instanceTypeCatalog.defaultVcpus(type)
+                    .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                            "Instance type '" + type + "' is not supported for quota-enforced launches.", 400));
+            default -> 0;
+        };
     }
 
     public void rebootInstances(String region, List<String> instanceIds) {
@@ -5006,7 +5266,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return inst;
     }
 
-    static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
+    public static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
         if (options == null) {
             return;
         }
@@ -5906,21 +6166,30 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (ipv4 == null || ipv4.isBlank()) {
                 continue;
             }
-            String host = ipv4 + "/32";
-            if (!Ipv4Cidrs.isIpv4(host)) {
-                throw new AwsException("InvalidParameterValue",
-                        "Invalid IPv4 address: " + ipv4, 400);
-            }
-            if (subnet.getCidrBlock() == null || !Ipv4Cidrs.contains(subnet.getCidrBlock(), host)) {
-                throw new AwsException("InvalidParameterValue",
-                        "Address " + ipv4 + " does not fall within the address range of subnet "
-                                + subnet.getSubnetId(), 400);
-            }
-            if (Ipv4Cidrs.isSubnetReserved(subnet.getCidrBlock(), host)) {
-                throw new AwsException("InvalidParameterValue",
-                        "Address " + ipv4 + " is reserved by AWS in subnet " + subnet.getSubnetId()
-                                + " and cannot be assigned", 400);
-            }
+            requireAssignableSubnetAddress(subnet, ipv4);
+        }
+    }
+
+    /**
+     * Rejects an IPv4 address an interface in {@code subnet} could not take: one that does not
+     * parse, one outside the subnet's CIDR, or one of the five addresses AWS reserves in every
+     * subnet (see {@link Ipv4Cidrs#isSubnetReserved}).
+     */
+    private static void requireAssignableSubnetAddress(Subnet subnet, String ipv4) {
+        String host = ipv4 + "/32";
+        if (!Ipv4Cidrs.isIpv4(host)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid IPv4 address: " + ipv4, 400);
+        }
+        if (subnet.getCidrBlock() == null || !Ipv4Cidrs.contains(subnet.getCidrBlock(), host)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Address " + ipv4 + " does not fall within the address range of subnet "
+                            + subnet.getSubnetId(), 400);
+        }
+        if (Ipv4Cidrs.isSubnetReserved(subnet.getCidrBlock(), host)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Address " + ipv4 + " is reserved by AWS in subnet " + subnet.getSubnetId()
+                            + " and cannot be assigned", 400);
         }
     }
 
@@ -7393,6 +7662,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // of falling through to the catalog default. This is also the fallback when the file
         // system cannot be captured below.
         image.setSourceImageId(resolveLaunchableImageId(region, source.getImageId()));
+        // The resolved image rather than the instance's id: an instance launched by a catalog alias
+        // records the alias.
+        image.setCreationSourceImageId(sourceImage != null ? sourceImage.getImageId() : source.getImageId());
+        image.setCreationSourceImageRegion(region);
+        image.setCreationSourceInstanceId(source.getInstanceId());
 
         // Capture the instance's file system. Without this the AMI is a metadata record that
         // launches the *base* image, so everything provisioned on the source instance is
@@ -7912,6 +8186,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // chain of CreateImage parents lives; it bottoms out at a catalog id, which is
             // region-agnostic.
             copy.setSourceImageId(resolveLaunchableImageId(sourceRegion, sourceImageId));
+            // The resolved id rather than the request's: a catalog image may be named by an alias.
+            copy.setCreationSourceImageId(source.getImageId());
+            copy.setCreationSourceImageRegion(sourceRegion);
             // The captured file system is the point of a CreateImage AMI, and the ancestry the
             // copy inherits does not carry it: sourceImageId is flattened to a launchable catalog
             // id, and the chain in between lives in the source region where the copy cannot see
@@ -8431,6 +8708,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "owner-id" -> matchesFilterValue(values, image.getOwnerId());
             case "root-device-name" -> matchesFilterValue(values, image.getRootDeviceName());
             case "root-device-type" -> matchesFilterValue(values, image.getRootDeviceType());
+            case "source-image-id" -> matchesSourceImageId(values, image.getCreationSourceImageId());
+            case "source-image-region" -> matchesFilterValue(values, image.getCreationSourceImageRegion());
+            case "source-instance-id" -> matchesFilterValue(values, image.getCreationSourceInstanceId());
             case "state" -> matchesFilterValue(values, image.getState());
             case "virtualization-type" -> matchesFilterValue(values, image.getVirtualizationType());
             default -> true;
@@ -8513,10 +8793,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "owner-id" -> matchesFilterValue(values, image.getOwnerId());
             case "root-device-name" -> matchesFilterValue(values, image.getRootDeviceName());
             case "root-device-type" -> matchesFilterValue(values, image.getRootDeviceType());
+            case "source-image-id" -> matchesSourceImageId(values, image.getCreationSourceImageId());
+            case "source-image-region" -> matchesFilterValue(values, image.getCreationSourceImageRegion());
+            case "source-instance-id" -> matchesFilterValue(values, image.getCreationSourceInstanceId());
             case "state" -> matchesFilterValue(values, image.getState());
             case "virtualization-type" -> matchesFilterValue(values, image.getVirtualizationType());
             default -> true;
         };
+    }
+
+    /**
+     * A catalog source is recorded by its AMI id, but an instance launched by one of its aliases
+     * reports the alias as its ImageId, so the filter takes either, as image-id does.
+     */
+    private boolean matchesSourceImageId(List<String> values, String sourceImageId) {
+        if (sourceImageId == null) {
+            return matchesFilterValue(values, null);
+        }
+        return imageCatalog.findByIdOrAlias(sourceImageId)
+                .map(Ec2ImageCatalog.CatalogImage::idsAndAliases)
+                .orElse(List.of(sourceImageId))
+                .stream()
+                .anyMatch(id -> matchesFilterValue(values, id));
     }
 
     private Image withCurrentImageTags(Image image) {
@@ -12698,7 +12996,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     securityGroupIds, subnetId, null, instanceTags, userData, iamInstanceProfileArn,
                     /* associatePublicIp */ null, /* networkInterfaceId */ null,
                     /* networkInterfaceDeviceIndex */ 0, /* availabilityZone */ null,
-                    /* metadataOptions */ null, /* creditSpecificationCpuCredits */ null, encodedUserData);
+                    /* metadataOptions */ null, /* creditSpecificationCpuCredits */ null, encodedUserData,
+                    false, null, null, null, true);
 
             Instance launchedInstance = reservation.getInstances().get(0);
 

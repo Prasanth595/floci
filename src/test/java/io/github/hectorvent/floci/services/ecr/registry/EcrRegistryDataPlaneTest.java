@@ -25,6 +25,8 @@ import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -36,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 /** Unit tests for routing AWS-shaped ECR repository URIs through Floci's data plane. */
@@ -563,6 +566,11 @@ class EcrRegistryDataPlaneTest {
                 .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
         when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
                 .thenReturn(immutableTags);
+        // The tag lock lives in EcrService, so the mock holds a real one.
+        Set<String> heldTags = ConcurrentHashMap.newKeySet();
+        when(ecrService.claimImmutableTag(anyString())).thenAnswer(call -> heldTags.add(call.getArgument(0)));
+        Mockito.doAnswer(call -> heldTags.remove(call.getArgument(0)))
+                .when(ecrService).releaseImmutableTag(anyString());
         when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
                 .thenReturn("legacy/platform-api");
 

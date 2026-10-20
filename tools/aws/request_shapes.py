@@ -1,7 +1,8 @@
 """Shared generator for the vendored request shapes a service's request check reads.
 
 `regen_dynamodb_shapes.py`, `regen_sesv2_shapes.py` and `regen_ecs_shapes.py` each name a botocore
-model and an output file and hand the rest to `main()`. The output keeps only what `RequestShapeModel` reads: the input
+model and an output file and hand the rest to `main()`. `regen_resource_groups_shapes.py` and
+`regen_ecr_shapes.py` vendor constraints as well, through `build_constraints()`. The output keeps only what `RequestShapeModel` reads: the input
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
 
@@ -67,6 +68,39 @@ def build(model: dict, provenance: str, generator: str) -> dict:
         "operations": operations,
         "shapes": dict(sorted(kept.items())),
     }
+
+
+def build_constraints(model: dict, operations: tuple[str, ...], provenance: str, generator: str) -> dict:
+    """The input shapes of `operations` with the constraints `RequestConstraintCheck` reads: for every
+    shape reachable from one, its type, required members, min, max, pattern and enum, and the shapes
+    of its members, list elements or map keys and values. Unlike `build`, it keeps members bound to
+    the URI, query string or headers, so it suits the JSON protocols, whose members all travel in
+    the body."""
+    kept: dict[str, dict] = {}
+
+    def keep(name: str) -> None:
+        if name in kept:
+            return
+        shape = model["shapes"][name]
+        entry = {k: shape[k] for k in ("type", "required", "min", "max", "pattern", "enum") if k in shape}
+        kept[name] = entry
+        if shape["type"] == "structure":
+            entry["members"] = {k: v["shape"] for k, v in shape.get("members", {}).items()}
+            for child in entry["members"].values():
+                keep(child)
+        elif shape["type"] == "list":
+            entry["member"] = shape["member"]["shape"]
+            keep(entry["member"])
+        elif shape["type"] == "map":
+            for side in ("key", "value"):
+                entry[side] = shape[side]["shape"]
+                keep(entry[side])
+
+    inputs = {name: model["operations"][name]["input"]["shape"] for name in operations}
+    for name in inputs.values():
+        keep(name)
+    return {"_source": {"generator": generator, "botocore": provenance},
+            "operations": inputs, "shapes": dict(sorted(kept.items()))}
 
 
 def render(doc: dict) -> str:
