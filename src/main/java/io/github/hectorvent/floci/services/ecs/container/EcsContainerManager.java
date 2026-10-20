@@ -1799,8 +1799,8 @@ public class EcsContainerManager {
                     "unable to write FireLens config: " + e.getMessage(), 500);
         }
         byte[] tarBytes = archive.toByteArray();
-        RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId,
-                remotePath, "firelens-config", out -> out.write(tarBytes));
+        RetryingTarCopier.copyArchive(lifecycleManager.getDockerClient(), containerId,
+                remotePath, "firelens-config", tarBytes);
     }
 
     private static void putTarEntry(TarArchiveOutputStream tar, String name, byte[] content) throws IOException {

@@ -49,6 +49,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -394,6 +395,15 @@ class EcsContainerManagerFirelensTest {
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("FireLens configuration type must be fluentbit or fluentd.", failure.getMessage());
         verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"fluentbit,false", "fluentbit,true", "fluentd,false", "fluentd,true"})
+    void uploadsConfigFromMemoryWithoutAStreamingPipe(String type, boolean external) {
+        manager.startTask(task(), retryTaskDefinition(type, external, "# external config\n"), null, "us-east-1");
+
+        assertInstanceOf(ByteArrayInputStream.class, uploadStream,
+                "an already-built archive must not allocate a streaming pipe and writer thread");
     }
 
     @ParameterizedTest
