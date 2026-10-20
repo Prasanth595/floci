@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
-import io.github.hectorvent.floci.services.iam.PublicAccessConditions;
 import org.jboss.logging.Logger;
 
 import java.util.Iterator;
@@ -202,7 +201,7 @@ final class S3PublicAccessEvaluator {
                 }
                 if (NON_PUBLIC_CONDITION_KEYS.contains(key)
                         && !operatorName.equalsIgnoreCase("IpAddress")
-                        && allValuesFixed(entry.getValue(), PublicAccessConditions::isFixedValue)) {
+                        && allValuesFixed(entry.getValue(), S3PublicAccessEvaluator::isFixedValue)) {
                     return true;
                 }
                 if (SOURCE_IP_CONDITION_KEY.equals(key)
@@ -240,6 +239,13 @@ final class S3PublicAccessEvaluator {
         return false;
     }
 
+    private static boolean isFixedValue(String value) {
+        return !value.isEmpty()
+                && value.indexOf('*') < 0
+                && value.indexOf('?') < 0
+                && !value.contains("${");
+    }
+
     private static boolean isFixedAccountAccessPointArn(String value) {
         return BUCKET_POLICY_ACCESS_POINT_ARN.matcher(value).matches();
     }
@@ -249,17 +255,40 @@ final class S3PublicAccessEvaluator {
             return false;
         }
         if (value.isTextual()) {
-            return PublicAccessConditions.isNarrowSourceIp(value.asText());
+            return isNarrowCidr(value.asText());
         }
         if (value.isArray() && !value.isEmpty()) {
             for (JsonNode item : value) {
-                if (!item.isTextual() || !PublicAccessConditions.isNarrowSourceIp(item.asText())) {
+                if (!item.isTextual() || !isNarrowCidr(item.asText())) {
                     return false;
                 }
             }
             return true;
         }
         return false;
+    }
+
+    /**
+     * AWS still calls a policy public when it is conditioned on an {@code aws:SourceIp} range
+     * broader than /8 for IPv4 or /32 for IPv6, so only a prefix at least that long makes the
+     * statement non-public. A bare address carries no prefix and is as narrow as a range gets.
+     */
+    private static boolean isNarrowCidr(String cidr) {
+        int slash = cidr.indexOf('/');
+        if (slash < 0) {
+            return isFixedValue(cidr);
+        }
+        String address = cidr.substring(0, slash);
+        if (!isFixedValue(address)) {
+            return false;
+        }
+        try {
+            int prefixLength = Integer.parseInt(cidr.substring(slash + 1).trim());
+            return address.indexOf(':') >= 0 ? prefixLength >= 32 : prefixLength >= 8;
+        } catch (NumberFormatException e) {
+            LOG.debugv("Treating aws:SourceIp value with an unparseable prefix as public: {0}", cidr);
+            return false;
+        }
     }
 
     static String bucketArn(String partition, String bucketName) {

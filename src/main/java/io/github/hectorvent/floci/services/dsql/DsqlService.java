@@ -269,11 +269,11 @@ public class DsqlService implements Resettable {
         String keptPolicy = checkedPolicy(policy, arn, region, bypassPolicyLockoutSafetyCheck);
         DsqlCluster cluster = getCluster(region, identifier);
         synchronized (lockFor(cluster.getArn())) {
+            // Measured: with no policy any expected version is not found; with one, another version conflicts.
+            if (expectedPolicyVersion != null && cluster.getPolicy() == null) {
+                throw policyVersionNotFound(identifier, expectedPolicyVersion);
+            }
             if (expectedPolicyVersion != null && !expectedPolicyVersion.equals(cluster.getPolicyVersion())) {
-                // Measured: a version that is not the current policy's conflicts, one with no policy is not found.
-                if (cluster.getPolicy() == null) {
-                    throw policyVersionNotFound(identifier, expectedPolicyVersion);
-                }
                 throw new AwsException("ConflictException", policyVersionMessage(identifier, expectedPolicyVersion),
                         409, Map.of("resourceId", identifier, "resourceType", "cluster"));
             }
@@ -304,6 +304,7 @@ public class DsqlService implements Resettable {
             }
             String version = cluster.getPolicyVersion();
             cluster.setPolicy(null);
+            cluster.setPolicyVersion(null);
             clusters.put(key(region, identifier), cluster);
             return version;
         }

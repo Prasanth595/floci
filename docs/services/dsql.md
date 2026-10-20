@@ -48,14 +48,13 @@ it with DSQL's messages:
   an IAM role or user is looked up in its account, and an account is always taken to exist;
 - a service principal;
 - an `Allow` to everyone (`"*"` or an `AWS` `"*"`) that no condition restricts. A condition
-  restricts with `aws:SourceVpc`, `aws:SourceVpce`, `aws:SourceVpcArn`, `aws:SourceArn`,
-  `aws:SourceAccount`, `aws:SourceOrgID`, `aws:SourceOrgPaths`, `aws:PrincipalAccount`,
-  `aws:PrincipalArn`, `aws:PrincipalOrgID`, `aws:PrincipalOrgPaths`, `aws:PrincipalServiceName`,
-  `aws:PrincipalServiceNamesList`, `aws:VpceAccount`, `aws:VpceOrgID`, `aws:VpceOrgPaths`,
-  `aws:Ec2InstanceSourceVpc` or `aws:userid` under an equality operator, or a pattern without a
-  wildcard (for an ARN, without one in the account); with an `aws:SourceIp` prefix of at least /8
-  for IPv4 or /32 for IPv6;
-  or with `aws:PrincipalIsAWSService` true. `IfExists`, `ForAllValues:` and negated operators never
+  restricts with one of the trusted keys of DSQL's
+  [block public access](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/rbp-block-public-access.html)
+  page, or `aws:SourceIp`, `aws:SourceVpcArn`, `aws:VpceAccount`, `aws:VpceOrgID` or
+  `aws:VpceOrgPaths`, which DSQL also accepts: under a string equality, or a pattern without a
+  wildcard (for an ARN, without one in the account), and never with a policy variable; with an
+  `aws:SourceIp` prefix of at least /8 for IPv4 or /32 for IPv6; or with
+  `aws:PrincipalIsAWSService` true. `IfExists`, `ForAllValues:` and negated operators never
   restrict;
 - a policy that explicitly denies the caller both `dsql:PutClusterPolicy` and
   `dsql:DeleteClusterPolicy`, unless `bypassPolicyLockoutSafetyCheck` is true.

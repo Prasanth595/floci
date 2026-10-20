@@ -210,7 +210,25 @@ class DsqlClusterPoliciesTest {
                 Arguments.of("{\"Bool\":{\"aws:PrincipalIsAWSService\":\"true\"}}", false),
                 Arguments.of("{\"Bool\":{\"aws:PrincipalIsAWSService\":\"false\"}}", true),
                 Arguments.of("{\"StringEquals\":{\"aws:SourceVpc\":\"vpc-1\"},\"Bool\":{\"aws:SecureTransport\":\"true\"}}",
-                        false));
+                        false),
+                Arguments.of("{\"StringEquals\":{\"aws:SourceVpcArn\":\"arn:aws:ec2:eu-west-1:" + ACCOUNT + ":vpc/vpc-1\"}}",
+                        false),
+                Arguments.of("{\"StringEquals\":{\"aws:VpceAccount\":\"" + ACCOUNT + "\"}}", false),
+                Arguments.of("{\"StringEquals\":{\"aws:VpceOrgID\":\"o-abc\"}}", false),
+                Arguments.of("{\"StringEquals\":{\"aws:VpceOrgPaths\":\"o-a/r-b/ou-c/\"}}", false),
+                Arguments.of("{\"StringEquals\":{\"aws:PrincipalServiceName\":\"lambda.amazonaws.com\"}}", false),
+                Arguments.of("{\"ForAnyValue:StringEquals\":{\"aws:PrincipalServiceNamesList\":\"lambda.amazonaws.com\"}}",
+                        false),
+                Arguments.of("{\"StringEquals\":{\"aws:Ec2InstanceSourceVpc\":\"vpc-1\"}}", false),
+                Arguments.of("{\"StringEquals\":{\"aws:SourceOrgID\":\"o-abc\"}}", false),
+                Arguments.of("{\"StringEquals\":{\"aws:SourceOrgPaths\":\"o-a/r-b/ou-c/\"}}", false),
+                Arguments.of("{\"StringEquals\":{\"aws:PrincipalArn\":\"${aws:PrincipalArn}\"}}", true),
+                Arguments.of("{\"StringEquals\":{\"aws:SourceVpc\":\"${aws:SourceVpc}\"}}", true),
+                Arguments.of("{\"StringEquals\":{\"aws:PrincipalArn\":\"arn:aws:iam::" + ACCOUNT + ":role/${aws:username}\"}}",
+                        true),
+                Arguments.of("{\"StringEquals\":{\"aws:PrincipalAccount\":[\"" + ACCOUNT + "\",\"${aws:PrincipalAccount}\"]}}",
+                        true),
+                Arguments.of("{\"ArnEquals\":{\"aws:SourceArn\":\"${aws:SourceArn}\"}}", false));
     }
 
     @Test

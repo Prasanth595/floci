@@ -9,7 +9,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
-import io.github.hectorvent.floci.services.iam.PublicAccessConditions;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -61,9 +60,18 @@ final class DsqlClusterPolicies {
             new DefaultPrettyPrinter().withObjectIndenter(new DefaultIndenter("  ", "\n"));
     private static final String SOURCE_IP = "aws:sourceip";
     private static final String PRINCIPAL_IS_AWS_SERVICE = "aws:principalisawsservice";
-    /** The shared keys and aws:SourceIp, which restricts on DSQL too (measured); keys are case-insensitive. */
-    private static final Set<String> RESTRICTING_KEYS = lowercase(PublicAccessConditions.RESTRICTING_KEYS, SOURCE_IP);
-    private static final Set<String> ARN_KEYS = lowercase(PublicAccessConditions.ARN_KEYS);
+    /**
+     * The trusted condition keys of DSQL's block public access page, and those it was measured to
+     * accept too: {@code aws:SourceIp}, {@code aws:SourceVpcArn} and the three {@code aws:Vpce*}.
+     * Keys are matched in any case (measured).
+     */
+    private static final Set<String> RESTRICTING_KEYS = lowercase(Set.of(
+            "aws:PrincipalAccount", "aws:PrincipalArn", "aws:PrincipalOrgID", "aws:PrincipalOrgPaths",
+            "aws:SourceAccount", "aws:SourceArn", "aws:SourceVpc", "aws:SourceVpce", "aws:UserId",
+            "aws:PrincipalServiceName", "aws:PrincipalServiceNamesList", "aws:PrincipalIsAWSService",
+            "aws:Ec2InstanceSourceVpc", "aws:SourceOrgID", "aws:SourceOrgPaths",
+            "aws:SourceIp", "aws:SourceVpcArn", "aws:VpceAccount", "aws:VpceOrgID", "aws:VpceOrgPaths"));
+    private static final Set<String> ARN_KEYS = lowercase(Set.of("aws:PrincipalArn", "aws:SourceArn", "aws:SourceVpcArn"));
 
     private DsqlClusterPolicies() {
     }
@@ -228,13 +236,14 @@ final class DsqlClusterPolicies {
     /**
      * Whether a condition keeps a statement that grants to everyone from being public, as DSQL
      * decides (measured): one of the restricting keys, compared with an operator that cannot be met
-     * by just anyone. An equality operator restricts whatever it names, even {@code "*"}, which it
-     * takes literally. A pattern restricts only a value without a wildcard, and for an ARN key one
-     * that pins the account; an {@code ArnLike} value that is no ARN matches nothing, so it
-     * restricts too. {@code aws:SourceIp} restricts through a narrow range, and
-     * {@code aws:PrincipalIsAWSService} when it is true. {@code ForAnyValue:} reads as the operator
-     * it qualifies; {@code ForAllValues:}, {@code IfExists} and the negated operators let a caller
-     * without the key through, so they never restrict.
+     * by just anyone. No value may hold a policy variable, which the caller could fill in. A string
+     * equality restricts whatever else it names, even {@code "*"}, which it takes literally; a string
+     * pattern only a value without a wildcard, and for an ARN key one that pins the account. An ARN
+     * operator's value that is no ARN matches nothing, so it restricts; an ARN must pin the account.
+     * {@code aws:SourceIp} restricts through a narrow range, and {@code aws:PrincipalIsAWSService}
+     * when it is true. {@code ForAnyValue:} reads as the operator it qualifies; {@code ForAllValues:},
+     * {@code IfExists} and the negated operators let a caller without the key through, so they never
+     * restrict.
      */
     static boolean restricts(JsonNode condition) {
         Iterator<Map.Entry<String, JsonNode>> operators = condition.fields();
@@ -258,17 +267,43 @@ final class DsqlClusterPolicies {
 
     private static boolean restricts(String operator, String key, List<String> values) {
         if (SOURCE_IP.equals(key) && "IpAddress".equals(operator)) {
-            return values.stream().allMatch(PublicAccessConditions::isNarrowSourceIp);
+            return values.stream().allMatch(DsqlClusterPolicies::isNarrowSourceIp);
         }
         return switch (operator) {
-            case "StringEquals", "StringEqualsIgnoreCase", "ArnEquals" -> true;
-            case "StringLike" -> values.stream().allMatch(ARN_KEYS.contains(key)
-                    ? PublicAccessConditions::pinsAccount : PublicAccessConditions::isFixedValue);
-            case "ArnLike" -> values.stream().allMatch(value -> value.split(":", 6).length < 6
-                    || PublicAccessConditions.pinsAccount(value));
+            case "StringEquals", "StringEqualsIgnoreCase" -> values.stream().noneMatch(value -> value.contains("${"));
+            case "StringLike" -> values.stream().allMatch(value -> ARN_KEYS.contains(key)
+                    ? pinsAccount(value) && !value.contains("${") : isFixedValue(value));
+            case "ArnEquals", "ArnLike" -> values.stream().allMatch(value -> value.split(":", 6).length < 6
+                    || pinsAccount(value) && !value.contains("${"));
             case "Bool" -> PRINCIPAL_IS_AWS_SERVICE.equals(key) && values.stream().allMatch("true"::equalsIgnoreCase);
             default -> false;
         };
+    }
+
+    /** A value that names one thing: not empty, and with no wildcard or policy variable in it. */
+    private static boolean isFixedValue(String value) {
+        return !value.isEmpty() && value.indexOf('*') < 0 && value.indexOf('?') < 0 && !value.contains("${");
+    }
+
+    /** An ARN of six fields whose account has no wildcard. */
+    private static boolean pinsAccount(String arn) {
+        String[] fields = arn.split(":", 6);
+        return fields.length == 6 && fields[4].indexOf('*') < 0 && fields[4].indexOf('?') < 0;
+    }
+
+    /** A range of /8 or narrower for IPv4, /32 for IPv6, or one address (measured /8 restricts, /7 does not). */
+    private static boolean isNarrowSourceIp(String cidr) {
+        int slash = cidr.indexOf('/');
+        if (slash < 0) {
+            return isFixedValue(cidr);
+        }
+        String address = cidr.substring(0, slash);
+        try {
+            int prefixLength = Integer.parseInt(cidr.substring(slash + 1).trim());
+            return isFixedValue(address) && prefixLength >= (address.indexOf(':') >= 0 ? 32 : 8);
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     private static boolean grantsToEveryone(JsonNode principal) {
@@ -323,10 +358,9 @@ final class DsqlClusterPolicies {
         return names;
     }
 
-    private static Set<String> lowercase(Set<String> keys, String... more) {
+    private static Set<String> lowercase(Set<String> keys) {
         Set<String> lowered = new HashSet<>();
         keys.forEach(key -> lowered.add(key.toLowerCase(Locale.ROOT)));
-        lowered.addAll(List.of(more));
         return Set.copyOf(lowered);
     }
 

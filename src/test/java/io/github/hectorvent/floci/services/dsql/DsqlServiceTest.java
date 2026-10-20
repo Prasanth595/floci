@@ -85,6 +85,14 @@ class DsqlServiceTest {
         AwsException delete = assertThrows(AwsException.class, () -> service.deleteClusterPolicy(REGION, id, "1"));
         assertEquals("ResourceNotFoundException", delete.getErrorCode());
         assertEquals("policy", delete.getExtendedData().get("resourceType"));
+
+        String current = service.getClusterPolicy(REGION, id).getPolicyVersion();
+        service.deleteClusterPolicy(REGION, id, current);
+        AwsException deleted = assertThrows(AwsException.class,
+                () -> service.putClusterPolicy(REGION, id, deny("dsql:DbConnect"), current, false));
+        assertEquals("ResourceNotFoundException", deleted.getErrorCode());
+        assertEquals("Aurora DSQL can't find policy version " + current + " for resource " + id
+                + ". Verify that the policy exists and that the version is correct.", deleted.getMessage());
     }
 
     @Test
