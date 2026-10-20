@@ -28,6 +28,14 @@ public interface RdsBackendGate {
         return enter(host, port);
     }
 
+    /**
+     * Enters the container owned by {@code runtimeId}. Backends that do not track runtime
+     * identities may use this default implementation.
+     */
+    default Lease enterRuntime(String runtimeId) throws InterruptedException {
+        return Lease.NONE;
+    }
+
     /** The backend is being resumed; no lease was acquired and the caller must retry. */
     class ResumingException extends RuntimeException {
     }

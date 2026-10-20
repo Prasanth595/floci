@@ -460,6 +460,20 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         return lifecycleManager.probeContainer(containerId);
     }
 
+    /** Resolves the current endpoint for the container owned by an RDS runtime. */
+    public EndpointInfo resolveBackendEndpoint(String runtimeId, DatabaseEngine engine) {
+        if (runtimeId == null || runtimeId.isBlank()) {
+            throw new IllegalArgumentException("RDS runtime ID is required to resolve its backend endpoint");
+        }
+        RdsContainerHandle handle = activeContainers.get(runtimeId);
+        if (handle == null) {
+            throw new IllegalStateException("RDS runtime " + runtimeId + " has no active container");
+        }
+        return lifecycleManager.resolveEndpoint(
+                handle.getContainerId(), engine.defaultPort(),
+                config.services().rds().dockerNetwork().orElse(null));
+    }
+
     /** Returns the retained runtime handle used to persist cleanup identity after a failed start. */
     public RdsContainerHandle getActiveHandle(String runtimeId) {
         if (runtimeId == null || runtimeId.isBlank()) {
@@ -497,6 +511,12 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         }
         boolean enabled = config.services().rds().auroraAutoPauseEnabled();
         controller.configure(enabled ? secondsUntilAutoPause : null, listener);
+    }
+
+    @Override
+    public Lease enterRuntime(String runtimeId) throws InterruptedException {
+        AutoPauseController controller = runtimeId != null ? autoPauses.get(runtimeId) : null;
+        return controller != null ? controller.acquire() : Lease.NONE;
     }
 
     @Override

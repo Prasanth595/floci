@@ -279,6 +279,37 @@ class ContainerLifecycleManagerNetworkTest {
     }
 
     @Test
+    void resolveEndpointFailsClosedWhenNativePortBindingIsMissing() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        InspectContainerResponse inspect = inspectOf("container-id");
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(inspect.getNetworkSettings()).thenReturn(networks);
+        when(networks.getPorts()).thenReturn(new Ports());
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> manager().resolveEndpoint("container-id", 5432));
+
+        assertTrue(failure.getMessage().contains("no published binding"));
+    }
+
+    @Test
+    void resolveEndpointFailsClosedWhenContainerAddressIsMissing() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerResponse inspect = inspectOf("container-id");
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(inspect.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        when(inspect.getNetworkSettings()).thenReturn(networks);
+        when(networks.getNetworks()).thenReturn(Map.of(
+                "floci-net", new ContainerNetwork().withIpv4Address("")));
+        when(networks.getIpAddress()).thenReturn("");
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> manager().resolveEndpoint("container-id", 5432, "floci-net"));
+
+        assertTrue(failure.getMessage().contains("no reachable address"));
+    }
+
+    @Test
     void resolveEndpointPrefersTheServiceNetworkOverTheDefaultBridge() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         InspectContainerResponse inspect = inspectOf("container-id");

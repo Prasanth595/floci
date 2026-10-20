@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
+import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
+import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.testutil.FreePorts;
 import org.junit.jupiter.api.Test;
@@ -29,6 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RdsProxyManagerTest {
@@ -297,6 +302,52 @@ class RdsProxyManagerTest {
         assertFalse(registry.containsKey("successful"));
         assertPortAvailable(successfulPort);
         registry.clear();
+    }
+
+    @Test
+    void dynamicProxyResolvesTheBackendForEveryConnection() throws Exception {
+        RdsContainerManager containerManager = mock(RdsContainerManager.class);
+        RdsBackendGate backendGate = mock(RdsBackendGate.class);
+        String runtimeId = "arn:aws:rds:us-east-1:123456789012:db:db-a";
+        when(backendGate.enterRuntime(runtimeId)).thenReturn(RdsBackendGate.Lease.NONE);
+        try (ServerSocket backend = reusableSocket(0)) {
+            when(containerManager.resolveBackendEndpoint(runtimeId, DatabaseEngine.SQLSERVER))
+                    .thenReturn(new EndpointInfo("127.0.0.1", backend.getLocalPort()));
+            RdsProxyManager manager = new RdsProxyManager(
+                    mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class),
+                    testConfig(), backendGate, containerManager);
+            int proxyPort = FreePorts.anyInterfacePort();
+            Thread serving = Thread.ofVirtual().start(() -> {
+                try {
+                    for (int connection = 0; connection < 2; connection++) {
+                        try (Socket accepted = backend.accept()) {
+                            accepted.getOutputStream().write('x');
+                        }
+                    }
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            try {
+                manager.startProxy("proxy", runtimeId, DatabaseEngine.SQLSERVER, false,
+                        proxyPort, "stale-address", 1, "localhost", "sa", "secret", null,
+                        (user, password) -> true, null);
+
+                for (int connection = 0; connection < 2; connection++) {
+                    try (Socket client = new Socket("127.0.0.1", proxyPort)) {
+                        client.setSoTimeout(5000);
+                        assertEquals('x', client.getInputStream().read());
+                    }
+                }
+
+                assertTrue(serving.join(Duration.ofSeconds(5)));
+                verify(containerManager, times(2))
+                        .resolveBackendEndpoint(runtimeId, DatabaseEngine.SQLSERVER);
+                verify(backendGate, times(2)).enterRuntime(runtimeId);
+            } finally {
+                manager.stopAll();
+            }
+        }
     }
 
     private static void start(RdsProxyManager manager, String key, int proxyPort) {

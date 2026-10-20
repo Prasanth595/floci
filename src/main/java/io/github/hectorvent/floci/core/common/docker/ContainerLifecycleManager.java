@@ -1097,7 +1097,7 @@ public class ContainerLifecycleManager {
      */
     public EndpointInfo resolveEndpoint(String containerId, int containerPort) {
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
-        return resolveEndpoint(inspect, containerPort);
+        return resolveEndpoint(inspect, containerPort, null, true);
     }
 
     /**
@@ -1109,7 +1109,7 @@ public class ContainerLifecycleManager {
      */
     public EndpointInfo resolveEndpoint(String containerId, int containerPort, String preferredNetwork) {
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
-        return resolveEndpoint(inspect, containerPort, preferredNetwork);
+        return resolveEndpoint(inspect, containerPort, preferredNetwork, true);
     }
 
     /**
@@ -1492,7 +1492,13 @@ public class ContainerLifecycleManager {
         return resolveEndpoint(inspect, containerPort, null);
     }
 
-    private EndpointInfo resolveEndpoint(InspectContainerResponse inspect, int containerPort, String preferredNetwork) {
+    private EndpointInfo resolveEndpoint(InspectContainerResponse inspect, int containerPort,
+                                         String preferredNetwork) {
+        return resolveEndpoint(inspect, containerPort, preferredNetwork, false);
+    }
+
+    private EndpointInfo resolveEndpoint(InspectContainerResponse inspect, int containerPort,
+                                         String preferredNetwork, boolean requireReachable) {
         if (!containerDetector.isRunningInContainer()) {
             // Native mode: use localhost and the bound host port
             Map<ExposedPort, Ports.Binding[]> bindings = inspect.getNetworkSettings().getPorts().getBindings();
@@ -1502,11 +1508,19 @@ public class ContainerLifecycleManager {
                 int hostPort = Integer.parseInt(binding[0].getHostPortSpec());
                 return new EndpointInfo("localhost", hostPort);
             }
-            // Fallback to container port
+            if (requireReachable) {
+                throw new IllegalStateException(
+                        "Container " + inspect.getId() + " has no published binding for port " + containerPort);
+            }
+            // Creation can still expose an internal-only port to another container.
             return new EndpointInfo("localhost", containerPort);
-        } else {
-            return new EndpointInfo(resolveReachableHost(inspect, preferredNetwork), containerPort);
         }
+        String host = resolveReachableHost(inspect, preferredNetwork);
+        if (requireReachable && (host == null || host.isBlank())) {
+            throw new IllegalStateException(
+                    "Container " + inspect.getId() + " has no reachable address for port " + containerPort);
+        }
+        return new EndpointInfo(host, containerPort);
     }
 
     private String resolveReachableHost(InspectContainerResponse inspect, String preferredNetwork) {

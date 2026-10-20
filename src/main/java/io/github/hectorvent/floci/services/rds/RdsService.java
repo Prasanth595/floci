@@ -905,6 +905,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
                 try {
                     proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                    backendRuntimeIdForInstance(instance),
                             engine, iamEnabled, proxyPort, backendHost, backendPort,
                             instance.getEndpoint().address(),
                             instance.getMasterUsername(), instance.getMasterPassword(), dbName,
@@ -3572,6 +3573,7 @@ public class RdsService implements Resettable, ResourceProvider {
             final String accountId = accountIdFromArn(instance.getDbInstanceArn());
             final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
             proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                    backendRuntimeIdForInstance(instance),
                     instance.getEngine(),
                     instance.isIamDatabaseAuthenticationEnabled(),
                     instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
@@ -3752,6 +3754,7 @@ public class RdsService implements Resettable, ResourceProvider {
             final String accountId = accountIdFromArn(cluster.getDbClusterArn());
             final String clusterRegion = regionFromArn(cluster.getDbClusterArn());
             proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
+                    cluster.getDbClusterArn(),
                     cluster.getEngine(), cluster.isIamDatabaseAuthenticationEnabled(), cluster.getProxyPort(),
                     handle.getHost(), handle.getPort(), cluster.getEndpoint().address(),
                     cluster.getMasterUsername() != null ? cluster.getMasterUsername() : "root",
@@ -3821,6 +3824,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 final String accountId = accountIdFromArn(instance.getDbInstanceArn());
                 final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
                 proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                    backendRuntimeIdForInstance(instance),
                         instance.getEngine(),
                         instance.isIamDatabaseAuthenticationEnabled(),
                         instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
@@ -3838,6 +3842,18 @@ public class RdsService implements Resettable, ResourceProvider {
 
         LOG.infov("DB instance {0} rebooted", id);
         return instance;
+    }
+
+    private String backendRuntimeIdForInstance(DbInstance instance) {
+        String clusterId = instance.getDbClusterIdentifier();
+        if (clusterId != null && !clusterId.isBlank()) {
+            DbCluster cluster = findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
+                    regionFromArn(instance.getDbInstanceArn()), clusterId);
+            if (cluster != null) {
+                return cluster.getDbClusterArn();
+            }
+        }
+        return instance.getDbInstanceArn();
     }
 
     private String dbUserResourceId(DbInstance instance) {
@@ -3947,6 +3963,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 relayEndpoint = proxyEndpoint(relayPort);
             }
             proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                    backendRuntimeIdForInstance(instance),
                     instance.getEngine(), instance.isIamDatabaseAuthenticationEnabled(),
                     relayPort, backendHost, backendPort, relayEndpoint.address(),
                     effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
@@ -4045,6 +4062,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 relayEndpoint = proxyEndpoint(relayPort);
             }
             proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
+                    cluster.getDbClusterArn(),
                     cluster.getEngine(), cluster.isIamDatabaseAuthenticationEnabled(),
                     relayPort, started.getHost(), started.getPort(), relayEndpoint.address(),
                     effectiveMasterUser, cluster.getMasterPassword(), cluster.getDatabaseName(),
@@ -4481,6 +4499,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 final String accountId = accountIdFromArn(cluster.getDbClusterArn());
                 final String clusterRegion = regionFromArn(cluster.getDbClusterArn());
                 proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
+                    cluster.getDbClusterArn(),
                         engine, iamEnabled, proxyPort,
                         cluster.getContainerHost(), cluster.getContainerPort(),
                         cluster.getEndpoint().address(),
@@ -5890,6 +5909,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
         String backendHost;
         int backendPort;
+        String backendRuntimeId;
         DatabaseEngine engine;
         String masterUser;
         String masterPassword;
@@ -5911,6 +5931,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     effectiveRegion, "DB cluster", clusterId);
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
+            backendRuntimeId = cluster.getDbClusterArn();
             engine = cluster.getEngine();
             masterUser = cluster.getMasterUsername();
             masterPassword = cluster.getMasterPassword();
@@ -5931,6 +5952,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     effectiveRegion, "DB instance", instanceId);
             backendHost = instance.getContainerHost();
             backendPort = instance.getContainerPort();
+            backendRuntimeId = backendRuntimeIdForInstance(instance);
             engine = instance.getEngine();
             masterUser = instance.getMasterUsername();
             masterPassword = instance.getMasterPassword();
@@ -5982,7 +6004,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 final String targetId = target.getRdsResourceId();
                 final boolean isCluster = "TRACKED_CLUSTER".equals(target.getType());
                 final String targetRegion = regionFromArn(proxy.getDbProxyArn());
-                proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(),
+                proxyManager.startProxy(dbProxyRelayKey(proxy), backendRuntimeId, engine, proxy.isIamAuth(),
                         proxy.getProxyPort(), backendHost, backendPort, proxy.getEndpointHost(),
                         effectiveMasterUser, masterPassword, dbName,
                         (user, pw) -> isCluster
@@ -8204,6 +8226,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         boolean clusterTarget = "TRACKED_CLUSTER".equals(target.getType());
         DatabaseEngine engine;
+        String backendRuntimeId;
         String backendHost;
         int backendPort;
         String masterUser;
@@ -8219,6 +8242,7 @@ public class RdsService implements Resettable, ResourceProvider {
             validateProxyTargetScope(cluster.getDbClusterArn(), accountId, proxyRegion,
                     "DB cluster", target.getRdsResourceId());
             engine = cluster.getEngine();
+            backendRuntimeId = cluster.getDbClusterArn();
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
             masterUser = cluster.getMasterUsername();
@@ -8234,6 +8258,7 @@ public class RdsService implements Resettable, ResourceProvider {
             validateProxyTargetScope(instance.getDbInstanceArn(), accountId, proxyRegion,
                     "DB instance", target.getRdsResourceId());
             engine = instance.getEngine();
+            backendRuntimeId = backendRuntimeIdForInstance(instance);
             backendHost = instance.getContainerHost();
             backendPort = instance.getContainerPort();
             masterUser = instance.getMasterUsername();
@@ -8247,7 +8272,7 @@ public class RdsService implements Resettable, ResourceProvider {
         validateTargetEngineFamily(proxy, engine);
         String effectiveMasterUser = masterUser != null ? masterUser : "root";
         String targetId = target.getRdsResourceId();
-        proxyManager.startProxy(dbProxyRelayKey(proxy), engine, proxy.isIamAuth(), proxy.getProxyPort(),
+        proxyManager.startProxy(dbProxyRelayKey(proxy), backendRuntimeId, engine, proxy.isIamAuth(), proxy.getProxyPort(),
                 backendHost, backendPort, proxy.getEndpointHost(), effectiveMasterUser, masterPassword, dbName,
                 (user, password) -> clusterTarget
                         ? validateDbClusterPasswordForScope(
@@ -8356,7 +8381,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             ? cluster.getMasterUsername() : "root";
                     proxyManager.startProxy(rdsResourceRelayKey(
                                     cluster.getDbClusterArn(), cluster.getDbClusterIdentifier()),
-                            cluster.getEngine(),
+                            cluster.getDbClusterArn(), cluster.getEngine(),
                             cluster.isIamDatabaseAuthenticationEnabled(), proxyPort,
                             restoredHandle.getHost(), restoredHandle.getPort(), cluster.getEndpoint().address(),
                             effectiveMasterUser, cluster.getMasterPassword(), cluster.getDatabaseName(),
@@ -8499,7 +8524,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             ? instance.getMasterUsername() : "root";
                     proxyManager.startProxy(rdsResourceRelayKey(
                                     instance.getDbInstanceArn(), instance.getDbInstanceIdentifier()),
-                            instance.getEngine(),
+                            backendRuntimeIdForInstance(instance), instance.getEngine(),
                             instance.isIamDatabaseAuthenticationEnabled(), proxyPort,
                             backendHost, backendPort, instance.getEndpoint().address(),
                             effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),

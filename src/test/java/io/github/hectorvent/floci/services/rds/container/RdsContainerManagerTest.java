@@ -786,6 +786,44 @@ class RdsContainerManagerTest {
                 org.mockito.ArgumentMatchers.eq("first-container"), any());
     }
 
+    @Test
+    void resolveBackendEndpointUsesTheActiveRuntimeContainerAndPreferredNetwork() {
+        EmulatorConfig config = config(tempDir.resolve("endpoint-root"));
+        when(config.services().rds().dockerNetwork()).thenReturn(Optional.of("rds-network"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "container-a", Map.of(3306,
+                new ContainerLifecycleManager.EndpointInfo("old-address", 3306))));
+        ContainerLifecycleManager.EndpointInfo currentEndpoint =
+                new ContainerLifecycleManager.EndpointInfo("current-address", 3306);
+        when(lifecycleManager.resolveEndpoint("container-a", 3306, "rds-network"))
+                .thenReturn(currentEndpoint);
+        RdsContainerManager manager = autoPauseManager(config, lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
+        manager.start(runtimeId, "db1", null,
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        ContainerLifecycleManager.EndpointInfo resolved =
+                manager.resolveBackendEndpoint(runtimeId, DatabaseEngine.MYSQL);
+
+        assertSame(currentEndpoint, resolved);
+        verify(lifecycleManager).resolveEndpoint("container-a", 3306, "rds-network");
+        verify(lifecycleManager, never()).probeContainer(any());
+    }
+
+    @Test
+    void resolveBackendEndpointFailsWhenRuntimeIsInactive() {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> manager.resolveBackendEndpoint(
+                        "arn:aws:rds:us-east-1:000000000000:db:missing",
+                        DatabaseEngine.POSTGRES));
+
+        assertTrue(failure.getMessage().contains("has no active container"));
+    }
+
     private RdsContainerManager daemonlessCapableManager(ContainerLifecycleManager lifecycleManager) {
         EmulatorConfig config = config(tempDir.resolve("host-root"));
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
@@ -1276,7 +1314,7 @@ class RdsContainerManagerTest {
         verify(pause).exec();
 
         assertThrows(RdsBackendGate.ResumingException.class, () -> manager.enter("db1", 3306, false));
-        manager.enter("db1", 3306).close();
+        manager.enterRuntime(runtimeId).close();
         verify(unpause).exec();
 
         assertTrue(manager.pauseIfIdle(runtimeId));
@@ -1285,6 +1323,7 @@ class RdsContainerManagerTest {
         order.verify(unpause, times(2)).exec();
         order.verify(lifecycleManager).stopAndRemoveStrict(eq("cluster-container"), any());
         assertSame(RdsBackendGate.Lease.NONE, manager.enter("db1", 3306));
+        assertSame(RdsBackendGate.Lease.NONE, manager.enterRuntime(runtimeId));
     }
 
     @Test
