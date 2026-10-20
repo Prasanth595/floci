@@ -494,6 +494,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>elasticloadbalancingv2</artifactId>
         </dependency>
+        <!-- Route 53 Resolver client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>route53resolver</artifactId>
+        </dependency>
         <!-- Global Accelerator client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

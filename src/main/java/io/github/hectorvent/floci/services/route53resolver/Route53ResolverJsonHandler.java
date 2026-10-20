@@ -73,6 +73,18 @@ public class Route53ResolverJsonHandler {
                         service.getResolverRuleAssociation(text(request, "ResolverRuleAssociationId")));
                 case "ListResolverRuleAssociations" -> handleListResolverRuleAssociations();
 
+                case "TagResource" -> {
+                    service.tagResource(text(request, "ResourceArn"), request.get("Tags"));
+                    yield Response.ok(objectMapper.createObjectNode()).build();
+                }
+                case "UntagResource" -> {
+                    service.untagResource(text(request, "ResourceArn"), request.get("TagKeys"));
+                    yield Response.ok(objectMapper.createObjectNode()).build();
+                }
+                case "ListTagsForResource" -> Response.ok(service.listTagsForResource(
+                        text(request, "ResourceArn"), request.get("MaxResults"),
+                        text(request, "NextToken"))).build();
+
                 default -> Response.status(400)
                         .entity(new AwsErrorResponse("UnknownOperationException",
                                 "Unknown operation: Route53Resolver." + action))

@@ -86,6 +86,12 @@ public class Route53ResolverService {
      * wire. Read by the CreatorRequestId conflict check and ListResolverEndpointIpAddresses.
      */
     private final StorageBackend<String, ObjectNode> endpointIpRequestStore;
+    /**
+     * Tags keyed by resource ARN, each an object of key to value. Kept apart from the resources
+     * for the same reason as {@link #endpointIpRequestStore}: none of the modeled resource
+     * shapes carries {@code Tags}, and the handlers return stored nodes verbatim.
+     */
+    private final StorageBackend<String, ObjectNode> tagStore;
     private final ObjectMapper objectMapper;
 
     @Inject
@@ -101,6 +107,8 @@ public class Route53ResolverService {
         this.endpointIpRequestStore = storageFactory.create("route53resolver",
                 "route53resolver-endpoint-ip-requests.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
+        this.tagStore = storageFactory.create("route53resolver", "route53resolver-tags.json",
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.objectMapper = objectMapper;
     }
 
@@ -112,12 +120,14 @@ public class Route53ResolverService {
                            StorageBackend<String, ObjectNode> ruleStore,
                            StorageBackend<String, ObjectNode> ruleAssociationStore,
                            StorageBackend<String, ObjectNode> endpointIpRequestStore,
+                           StorageBackend<String, ObjectNode> tagStore,
                            ObjectMapper objectMapper) {
         this.domainListStore = domainListStore;
         this.endpointStore = endpointStore;
         this.ruleStore = ruleStore;
         this.ruleAssociationStore = ruleAssociationStore;
         this.endpointIpRequestStore = endpointIpRequestStore;
+        this.tagStore = tagStore;
         this.objectMapper = objectMapper;
     }
 
@@ -140,6 +150,7 @@ public class Route53ResolverService {
 
     public synchronized ObjectNode createFirewallDomainList(JsonNode request, String region, String accountId) {
         String name = requireText(request, "Name", VALIDATION);
+        JsonNode tags = validatedTags(request.get("Tags"), VALIDATION);
         Optional<ObjectNode> replay = replayOf(domainListStore, request, region);
         if (replay.isPresent()) {
             return replay.get();
@@ -156,12 +167,14 @@ public class Route53ResolverService {
         list.put("CreationTime", Instant.now().toString());
         list.put("ModificationTime", Instant.now().toString());
         domainListStore.put(id, list);
+        putTags(list, tags);
         return list.deepCopy();
     }
 
     public ObjectNode deleteFirewallDomainList(String id) {
         ObjectNode list = require(domainListStore, id, "firewall domain list");
         domainListStore.delete(id);
+        tagStore.delete(text(list, "Arn"));
         ObjectNode result = list.deepCopy();
         result.put("Status", "DELETING");
         return result;
@@ -182,6 +195,7 @@ public class Route53ResolverService {
         String direction = requireText(request, "Direction", INVALID_PARAMETER);
         String idPrefix = endpointIdPrefix(direction);
         JsonNode ipAddresses = ipAddressesOf(request);
+        JsonNode tags = validatedTags(request.get("Tags"), INVALID_PARAMETER);
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
             throw new AwsException(INVALID_PARAMETER, "IpAddresses is required", 400);
         }
@@ -219,6 +233,7 @@ public class Route53ResolverService {
         endpointStore.put(id, endpoint);
         endpointIpRequestStore.put(id,
                 objectMapper.createObjectNode().set("IpAddressRequests", normalizedIpRequests(ipAddresses)));
+        putTags(endpoint, tags);
         return endpoint.deepCopy();
     }
 
@@ -226,6 +241,7 @@ public class Route53ResolverService {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
         endpointStore.delete(id);
         endpointIpRequestStore.delete(id);
+        tagStore.delete(text(endpoint, "Arn"));
         ObjectNode result = endpoint.deepCopy();
         result.put("Status", "DELETING");
         return result;
@@ -297,6 +313,7 @@ public class Route53ResolverService {
                     "TargetIps must contain at least one target address.", 400);
         }
         String domainName = text(request, "DomainName");
+        JsonNode tags = validatedTags(request.get("Tags"), INVALID_PARAMETER);
         Optional<ObjectNode> replay = replayOf(ruleStore, request, region);
         if (replay.isPresent()) {
             requireReplayMatches(replay.get(), request,
@@ -319,12 +336,14 @@ public class Route53ResolverService {
         rule.put("CreationTime", Instant.now().toString());
         rule.put("ModificationTime", Instant.now().toString());
         ruleStore.put(id, rule);
+        putTags(rule, tags);
         return rule.deepCopy();
     }
 
     public ObjectNode deleteResolverRule(String id) {
         ObjectNode rule = require(ruleStore, id, "resolver rule");
         ruleStore.delete(id);
+        tagStore.delete(text(rule, "Arn"));
         ObjectNode result = rule.deepCopy();
         result.put("Status", "DELETING");
         return result;
@@ -452,6 +471,126 @@ public class Route53ResolverService {
             return accountAware.getForAccount(accountId, ruleId);
         }
         return ruleStore.get(ruleId);
+    }
+
+    // ---------- Tagging ----------
+
+    public synchronized void tagResource(String arn, JsonNode tags) {
+        if (tags == null || tags.isNull()) {
+            throw new AwsException(INVALID_PARAMETER, "Tags is required", 400);
+        }
+        JsonNode validated = validatedTags(tags, "InvalidTagException");
+        putTags(requireTaggable(arn), validated);
+    }
+
+    public synchronized void untagResource(String arn, JsonNode tagKeys) {
+        if (tagKeys == null || !tagKeys.isArray()) {
+            throw new AwsException(INVALID_PARAMETER, "TagKeys is required", 400);
+        }
+        requireTaggable(arn);
+        ObjectNode stored = tagStore.get(arn).orElse(null);
+        if (stored == null) {
+            return;
+        }
+        tagKeys.forEach(key -> stored.remove(key.asText()));
+        tagStore.put(arn, stored);
+    }
+
+    /**
+     * One page of a resource's tags as modeled {@code Tag} entries. {@code NextToken} is the
+     * offset of the next tag; {@code MaxResults} defaults to the modeled 100.
+     */
+    public ObjectNode listTagsForResource(String arn, JsonNode maxResults, String nextToken) {
+        requireTaggable(arn);
+        int limit = maxResults == null || maxResults.isNull() ? 100 : maxResults.asInt();
+        if (limit < 1 || limit > 100) {
+            throw new AwsException(INVALID_PARAMETER, "MaxResults must be between 1 and 100", 400);
+        }
+        List<Map.Entry<String, JsonNode>> all = new ArrayList<>();
+        tagStore.get(arn).ifPresent(stored -> stored.fields().forEachRemaining(all::add));
+        int start = 0;
+        if (nextToken != null) {
+            try {
+                start = Integer.parseInt(nextToken);
+            } catch (NumberFormatException e) {
+                start = -1;
+            }
+            if (start < 0 || start > all.size()) {
+                throw new AwsException("InvalidNextTokenException", "Invalid NextToken: " + nextToken, 400);
+            }
+        }
+        int end = Math.min(all.size(), start + limit);
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode page = result.putArray("Tags");
+        for (Map.Entry<String, JsonNode> tag : all.subList(start, end)) {
+            page.addObject().put("Key", tag.getKey()).set("Value", tag.getValue());
+        }
+        if (end < all.size()) {
+            result.put("NextToken", String.valueOf(end));
+        }
+        return result;
+    }
+
+    /**
+     * The stored resource an ARN names. The id is looked up in the caller's own account
+     * partition and the stored resource's ARN must match the request exactly, so an ARN naming
+     * another account, region or partition is not found rather than resolved to a local
+     * resource that happens to share its id. AWS-managed firewall domain lists are not stored
+     * and so are not taggable here.
+     */
+    private ObjectNode requireTaggable(String arn) {
+        if (arn == null || arn.isBlank()) {
+            throw new AwsException(INVALID_PARAMETER, "ResourceArn is required", 400);
+        }
+        String resource = AwsArnUtils.resourceIfArnFor(arn, "route53resolver").orElse("");
+        int slash = resource.indexOf('/');
+        StorageBackend<String, ObjectNode> store = slash < 0 ? null : switch (resource.substring(0, slash)) {
+            case "resolver-endpoint" -> endpointStore;
+            case "resolver-rule" -> ruleStore;
+            case "firewall-domain-list" -> domainListStore;
+            default -> null;
+        };
+        return Optional.ofNullable(store)
+                .flatMap(s -> s.get(resource.substring(slash + 1)))
+                .filter(stored -> arn.equals(text(stored, "Arn")))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Resource not found: " + arn, 400));
+    }
+
+    /**
+     * Checks a modeled {@code TagList}: each {@code Tag} requires {@code Key} (1-128 chars) and
+     * {@code Value} (0-256 chars). Returns {@code null} for an absent list. Called before a
+     * create allocates anything, so an invalid tag never leaves a resource behind.
+     *
+     * <p>{@code InvalidTagException} is modeled only on {@code TagResource}; the create
+     * operations reject with their own parameter error (see {@link #INVALID_PARAMETER}).</p>
+     */
+    private JsonNode validatedTags(JsonNode tags, String errorCode) {
+        if (tags == null || tags.isNull()) {
+            return null;
+        }
+        if (!tags.isArray()) {
+            throw new AwsException(errorCode, "Tags must be a list", 400);
+        }
+        for (JsonNode tag : tags) {
+            String key = text(tag, "Key");
+            String value = text(tag, "Value");
+            if (key == null || key.isEmpty() || key.length() > 128 || value == null || value.length() > 256) {
+                throw new AwsException(errorCode,
+                        "Each tag needs a Key of 1-128 characters and a Value of at most 256 characters.", 400);
+            }
+        }
+        return tags;
+    }
+
+    private void putTags(ObjectNode resource, JsonNode tags) {
+        if (tags == null || tags.isEmpty()) {
+            return;
+        }
+        String arn = text(resource, "Arn");
+        ObjectNode stored = tagStore.get(arn).orElseGet(objectMapper::createObjectNode);
+        tags.forEach(tag -> stored.put(text(tag, "Key"), text(tag, "Value")));
+        tagStore.put(arn, stored);
     }
 
     /**
