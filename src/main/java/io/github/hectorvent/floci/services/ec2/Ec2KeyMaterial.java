@@ -85,7 +85,7 @@ public final class Ec2KeyMaterial {
             }
 
             // "The SHA-1 digest of the DER encoded private key" for a key pair AWS created.
-            // (Imported keys use the MD5 of the public key instead -- see readImportedKey.)
+            // (Imported keys are fingerprinted another way, by key type -- see readImportedKey.)
             String fingerprint = colonHex(Digests.sha1(pair.getPrivate().getEncoded()));
 
             return new Generated(

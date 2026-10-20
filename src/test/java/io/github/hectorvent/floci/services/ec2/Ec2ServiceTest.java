@@ -68,6 +68,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.mockito.MockMakers;
+import org.mockito.MockedStatic;
 
 import java.io.StringReader;
 import java.lang.reflect.Field;
@@ -111,15 +113,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 class Ec2ServiceTest {
 
@@ -4379,6 +4384,8 @@ class Ec2ServiceTest {
 
         Map<String, String> types = new HashMap<>();
         for (KeyPair keyPair : service.describeKeyPairs("us-east-1", List.of(), List.of())) {
+            // The reader itself refuses each of these; keyTypeOf's own guard must not be what passes.
+            assertDoesNotThrow(() -> Ec2KeyMaterial.readImportedKey(keyPair.getPublicKey()), keyPair.getKeyPairId());
             types.put(keyPair.getKeyPairId(), Ec2Service.keyTypeOf(keyPair));
             assertNull(keyPair.getKeyType(), "the stored record is not rewritten");
             assertNull(keyPair.getCreateTime());
@@ -4393,6 +4400,39 @@ class Ec2ServiceTest {
         assertEquals(expected, types);
         assertEquals(List.of("key-ed25519"), service.describeKeyPairs("us-east-1", List.of(), List.of(),
                 Map.of("key-type", List.of("ed25519"))).stream().map(KeyPair::getKeyPairId).toList());
+    }
+
+    /**
+     * Should the reader ever fail on what an older record holds, the record is still described, with
+     * no type, and a key-type filter passes over it, rather than every description in the region
+     * failing with it.
+     */
+    @Test
+    void aStoredKeyPairWhoseKeyTheReaderFailsOnIsDescribedWithoutAType() {
+        AccountAwareStorageBackend<KeyPair> keyPairStore = AccountAwareStorageBackend.inMemory("000000000000");
+        KeyPair stored = new KeyPair();
+        stored.setKeyPairId("key-unreadable");
+        stored.setKeyName("key-unreadable");
+        stored.setRegion("us-east-1");
+        stored.setPublicKey("any text an earlier ImportKeyPair stored");
+        keyPairStore.put("us-east-1::key-unreadable", stored);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+
+        try (MockedStatic<Ec2KeyMaterial> reader = mockStatic(Ec2KeyMaterial.class,
+                withSettings().mockMaker(MockMakers.INLINE).defaultAnswer(CALLS_REAL_METHODS))) {
+            reader.when(() -> Ec2KeyMaterial.readImportedKey(anyString()))
+                    .thenThrow(new IllegalStateException("a reader that fails"));
+
+            List<KeyPair> described = service.describeKeyPairs("us-east-1", List.of(), List.of());
+
+            assertEquals(List.of("key-unreadable"), described.stream().map(KeyPair::getKeyPairId).toList());
+            assertNull(Ec2Service.keyTypeOf(described.getFirst()));
+            assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of(),
+                    Map.of("key-type", List.of("rsa"))).isEmpty());
+        }
     }
 
     @Test

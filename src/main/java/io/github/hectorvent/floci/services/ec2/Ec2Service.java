@@ -7313,7 +7313,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * The key type DescribeKeyPairs reports. A key pair stored before the type was recorded has it
      * read from what it holds: rsa when CreateKeyPair made it, since that has only ever generated
      * RSA keys, and otherwise the type of its imported key, or none when ImportKeyPair would now
-     * refuse that material.
+     * refuse that material or reading it fails, which is logged.
      */
     static String keyTypeOf(KeyPair keyPair) {
         if (keyPair.getKeyType() != null) {

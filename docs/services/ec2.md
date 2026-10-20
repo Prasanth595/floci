@@ -320,28 +320,28 @@ covers ssh-keygen's default of 3072. A DSA, ECDSA, security-key or certificate k
 whose blob is incomplete, has bytes after its key or declares another type, and material holding
 more than one key line are refused with `InvalidKey.Format`. The key is stored as one OpenSSH line,
 which is what `RunInstances` copies into `authorized_keys`. `CreateKeyPair` and `ImportKeyPair`
-take a `KeyName` of up to 255 ASCII characters with no leading or trailing space, and answer any
-other with `InvalidParameterValue`.
+take a `KeyName` of up to 255 ASCII characters with no leading or trailing space; a missing or
+blank one is `MissingParameter`, and they answer any other with `InvalidParameterValue`.
 
 `DescribeKeyPairs` returns each key pair's `keyType` and `createTime`. It filters by `key-pair-id`,
 `key-name`, `fingerprint`, `tag-key` and `tag:<key>`, as AWS documents, and also by `key-type`,
 which AWS does not document; `*` and `?` are wildcards, and any other filter name is
 `InvalidParameterValue`. It omits the public key unless `IncludePublicKey=true`, read as `true` or
-`false` in any case and as `false` when empty; any other value is `InvalidParameterValue`. When
-requested, it returns the OpenSSH public key with the key-pair name as its comment, whatever
+`false` in any case and as `false` when empty or blank; any other value is `InvalidParameterValue`.
+When requested, it returns the OpenSSH public key with the key-pair name as its comment, whatever
 comment the key was imported with; a name holding a control character, such as a line break, is
 left off. It never returns private key material.
 
 A key pair saved by an earlier version of Floci is described from what it stored. It has no
 `createTime`, and its `keyType` is read from the stored key: `rsa` for a created key pair,
-otherwise the type of the imported key, left out when that material would not import now. Its
-imported material is kept as it was given, and is what `RunInstances` copies into
+otherwise the type of the imported key, left out when that material would not import now or cannot
+be read. Its imported material is kept as it was given, and is what `RunInstances` copies into
 `authorized_keys`. Material that is not exactly one whole OpenSSH public key is described without
-one: PEM, DER or RFC 4716 text, material of more than one line, a line whose blob lacks a field
-its type requires (such as an `ssh-rsa` blob with no modulus), has bytes after its key or
-declares a different type than the line names, and a key of any type but `ssh-rsa`,
-`ssh-ed25519`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`,
-`sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`.
+one: PEM, DER or RFC 4716 text, material of more than one line, a line whose blob lacks a field its
+type requires (such as an `ssh-rsa` blob with no modulus), has bytes after its key or declares a
+different type than the line names, and a key of any type but `ssh-rsa`, `ssh-ed25519`,
+`ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `sk-ssh-ed25519@openssh.com`
+and `sk-ecdsa-sha2-nistp256@openssh.com`.
 
 | Action | Description |
 |--------|-------------|
