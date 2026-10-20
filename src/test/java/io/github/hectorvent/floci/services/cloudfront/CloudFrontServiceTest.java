@@ -659,6 +659,59 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void aDistributionNamingAnUnknownOriginAccessControlIsRefused() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        AwsException created = assertThrows(AwsException.class, () -> service.createDistribution(
+                distributionWithOrigin("example.com", "E0000000000000", null), Map.of()));
+        assertEquals("InvalidOriginAccessControl", created.getErrorCode());
+        assertEquals("The specified origin access control does not exist or is not valid.", created.getMessage());
+        assertEquals(400, created.getHttpStatus());
+
+        Distribution existing = service.createDistribution(distributionWithOrigin("example.com", null, null), Map.of());
+        AwsException updated = assertThrows(AwsException.class, () -> service.updateDistribution(existing.getId(),
+                existing.getEtag(), distributionWithOrigin("example.com", "E0000000000000", null)));
+        assertEquals("InvalidOriginAccessControl", updated.getErrorCode());
+        assertNull(service.getDistribution(existing.getId()).getConfig().getOrigins().getFirst()
+                .getOriginAccessControlId());
+    }
+
+    @Test
+    void anOriginAccessControlInUseKeepsHowItSigns() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        String s3 = oac(service, "sigv4", "always", "s3");
+        service.createDistribution(distributionWithOrigin("bucket.s3.us-east-1.amazonaws.com", s3, null), Map.of());
+        String functionUrl = oac(service, "sigv4", "always", "lambda");
+        service.createDistribution(distributionWithOrigin(
+                "abcdefghijklmnopqrstuvwxyz0123.lambda-url.us-east-1.on.aws", functionUrl, null), Map.of());
+
+        assertDoesNotThrow(() -> updateOriginAccessControl(service, s3, "sigv4", "never", "s3"));
+        assertDoesNotThrow(() -> updateOriginAccessControl(service, s3, "sigv4", "no-override", "s3"));
+        assertDoesNotThrow(() -> updateOriginAccessControl(service, functionUrl, "sigv4", "never", "lambda"));
+        assertIllegalUpdate(service, s3, "sigv4a", "no-override", "s3");
+        assertIllegalUpdate(service, s3, "sigv4", "no-override", "mediastore");
+        assertIllegalUpdate(service, functionUrl, "sigv4", "always-amz-auth", "lambda");
+        assertIllegalUpdate(service, functionUrl, "sigv4a", "never", "lambda");
+
+        String unused = oac(service, "sigv4", "always", "s3");
+        assertDoesNotThrow(() -> updateOriginAccessControl(service, unused, "sigv4a", "always", "lambda"));
+    }
+
+    private static void updateOriginAccessControl(CloudFrontService service, String id, String protocol,
+                                                  String behavior, String originType) {
+        service.updateOriginAccessControl(id, service.getOriginAccessControl(id).getEtag(),
+                originAccessControl(protocol, behavior, originType));
+    }
+
+    private static void assertIllegalUpdate(CloudFrontService service, String id, String protocol, String behavior,
+                                            String originType) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> updateOriginAccessControl(service, id, protocol, behavior, originType));
+        assertEquals("IllegalUpdate", error.getErrorCode());
+        assertEquals("Cannot update origin type when associated to origins.", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
     void lambdaEdgeOriginTriggersAreRefusedInFrontOfAnAlwaysAmzAuthOrSigV4aOrigin() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
         String regional = "abcdefghijklmnopqrstuvwxyz.001.lambda-web.us-east-1.on.aws";

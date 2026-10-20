@@ -261,7 +261,9 @@ PUT, PATCH and DELETE).
   `always-amz-auth`, signed with `sigv4a` for a `global` endpoint and `sigv4` otherwise, and
   `always-amz-auth` is for Web Function origins only. A Lambda@Edge origin trigger is refused in
   front of an origin signed with `always-amz-auth` or `sigv4a`. The `execute-api` origin type is
-  refused with `AccessDenied`, as AWS refuses it.
+  refused with `AccessDenied`, as AWS refuses it. A distribution has to name an origin access control
+  that exists, and a control in use keeps its origin type, its signing protocol and whether it is
+  `always-amz-auth`.
 - Response headers policies validate the AWS configuration shape and are applied after the origin
   response, including CORS preflight fields, origin override behavior, custom headers, security
   headers, allowed header removals, and sampled `Server-Timing` metrics. `Pragma: server-timing`

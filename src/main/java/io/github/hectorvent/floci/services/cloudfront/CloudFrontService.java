@@ -1141,6 +1141,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
         validateOriginAccessControl(updated);
+        if (changesHowItSigns(existing, updated) && originAccessControlInUse(id)) {
+            throw new AwsException("IllegalUpdate", "Cannot update origin type when associated to origins.", 400);
+        }
         updated.setId(id);
         updated.setEtag(UUID.randomUUID().toString());
         updated.setLastModifiedTime(Instant.now());
@@ -1263,6 +1266,14 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         }
     }
 
+    /** What an origin access control may not change while an origin uses it. */
+    private static boolean changesHowItSigns(OriginAccessControl existing, OriginAccessControl updated) {
+        return !Objects.equals(existing.getOriginAccessControlOriginType(), updated.getOriginAccessControlOriginType())
+                || !Objects.equals(existing.getSigningProtocol(), updated.getSigningProtocol())
+                || "always-amz-auth".equals(existing.getSigningBehavior())
+                        != "always-amz-auth".equals(updated.getSigningBehavior());
+    }
+
     private static void addEnumViolation(List<String> violations, String member, String value, List<String> values) {
         if (value == null) {
             violations.add(nullViolation(member));
@@ -1294,8 +1305,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     /**
-     * The origin access control rules CloudFront applies to Lambda origins, in the order it checks
-     * them, then the Lambda@Edge origin triggers it refuses in front of the origins they sign.
+     * The origin access control an origin names has to exist, and suit a Lambda origin by the rules
+     * CloudFront checks in this order. Then come the Lambda@Edge origin triggers it refuses in front
+     * of the origins those controls sign.
      */
     private void validateOriginAccessControls(DistributionConfig config) {
         if (config == null || config.getOrigins() == null) {
@@ -1304,9 +1316,13 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         Set<String> amzAuthOrigins = new HashSet<>();
         for (Origin origin : config.getOrigins()) {
             String oacId = origin == null ? null : origin.getOriginAccessControlId();
-            Optional<OriginAccessControl> oac = oacId == null || oacId.isBlank() ? Optional.empty() : oacStore.get(oacId);
-            if (oac.isEmpty()) {
+            if (oacId == null || oacId.isBlank()) {
                 continue;
+            }
+            Optional<OriginAccessControl> oac = oacStore.get(oacId);
+            if (oac.isEmpty()) {
+                throw new AwsException("InvalidOriginAccessControl",
+                        "The specified origin access control does not exist or is not valid.", 400);
             }
             validateOriginAccessControlFor(lambdaOrigin(origin.getDomainName()), oac.get());
             if ("always-amz-auth".equals(oac.get().getSigningBehavior())
