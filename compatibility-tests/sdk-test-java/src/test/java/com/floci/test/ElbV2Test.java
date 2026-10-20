@@ -242,6 +242,24 @@ class ElbV2Test {
                 .isInstanceOf(LoadBalancerNotFoundException.class);
     }
 
+    @Test
+    @Order(7)
+    @DisplayName("CreateLoadBalancer - an Application Load Balancer on one subnet is a ValidationError")
+    void createApplicationLoadBalancerOnOneSubnet() {
+        String name = TestFixtures.uniqueName("sdk-one-subnet");
+        String subnet = TestFixtures.defaultVpcSubnets().get(0);
+        assertThatThrownBy(() -> elb.createLoadBalancer(r -> r.name(name).type(LoadBalancerTypeEnum.APPLICATION)
+                        .subnets(subnet)))
+                .isInstanceOfSatisfying(ElasticLoadBalancingV2Exception.class, e -> {
+                    assertThat(e.statusCode()).isEqualTo(400);
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                    assertThat(e.awsErrorDetails().errorMessage())
+                            .isEqualTo("At least two subnets in two different Availability Zones must be specified");
+                });
+        assertThatThrownBy(() -> elb.describeLoadBalancers(r -> r.names(name)))
+                .isInstanceOf(LoadBalancerNotFoundException.class);
+    }
+
     // ─── Target Groups ───────────────────────────────────────────────────────
 
     @Test

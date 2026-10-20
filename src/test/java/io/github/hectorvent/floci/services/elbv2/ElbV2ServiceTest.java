@@ -126,6 +126,39 @@ class ElbV2ServiceTest {
     }
 
     /**
+     * An Application Load Balancer takes subnets in at least two Availability Zones, so one subnet gets
+     * the refusal a balancer with none gets. AWS counts before it looks the subnet up, so the subnet is
+     * not looked up here either, and nothing is stored.
+     */
+    @ParameterizedTest
+    @CsvSource(nullValues = "NONE", value = {"NONE", "application"})
+    void anApplicationLoadBalancerOnOneSubnetIsRefusedBeforeTheSubnetIsLookedUp(String type) {
+        lenient().when(ec2Service.describeSubnets(REGION, List.of("subnet-a"), Map.of()))
+                .thenReturn(List.of(subnet("subnet-a", REGION + "a")));
+        AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
+                "one-subnet", null, type, null, List.of("subnet-a"), List.of(), Map.of()));
+        assertEquals("ValidationError", refusal.getErrorCode());
+        assertEquals("At least two subnets in two different Availability Zones must be specified",
+                refusal.getMessage());
+        assertEquals(400, refusal.getHttpStatus());
+        assertTrue(service.describeLoadBalancers(REGION, null, null, null, null).isEmpty());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
+    }
+
+    /** A Network or Gateway Load Balancer can be in a single Availability Zone. */
+    @ParameterizedTest
+    @ValueSource(strings = {"network", "gateway"})
+    void aNetworkOrGatewayLoadBalancerCanBeOnOneSubnet(String type) {
+        when(ec2Service.describeSubnets(REGION, List.of("subnet-a"), Map.of()))
+                .thenReturn(List.of(subnet("subnet-a", REGION + "a")));
+        LoadBalancer created = service.createLoadBalancer(REGION, "one-subnet", null, type, null,
+                List.of("subnet-a"), List.of(), Map.of());
+        assertEquals("vpc-a", created.getVpcId());
+        assertEquals(List.of("subnet-a"),
+                created.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+    }
+
+    /**
      * The API handler and the CloudFormation provisioner both take a request's subnets from here: one
      * side as given, an empty list for neither, and a refusal for both.
      */

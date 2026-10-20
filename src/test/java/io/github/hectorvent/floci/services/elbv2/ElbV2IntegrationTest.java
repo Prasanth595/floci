@@ -447,20 +447,77 @@ class ElbV2IntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("InvalidConfigurationRequest"));
     }
 
-    @Test
+    /**
+     * An Application Load Balancer takes subnets in at least two Availability Zones, so one subnet, in
+     * Subnets or in SubnetMappings, is the ValidationError a balancer with none gets, and nothing is
+     * created. AWS counts the subnets before it looks them up, so one that does not exist gets it too.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', nullValues = "NONE", value = {
+        "single-subnet-lb|application|Subnets.member.1|a",
+        "single-subnet-default-lb|NONE|Subnets.member.1|a",
+        "single-mapping-lb|application|SubnetMappings.member.1.SubnetId|a",
+        "single-missing-subnet-lb|application|Subnets.member.1|NONE"
+    })
     @Order(12)
-    void createLoadBalancerWithSingleSubnetThrowsInvalidConfigurationRequest() {
-        given()
+    void createLoadBalancerWithOneSubnetIsAValidationError(String name, String type, String parameter, String zone) {
+        String subnet = zone == null ? "subnet-does-not-exist" : Ec2Service.defaultSubnetId("us-east-1", zone);
+        RequestSpecification request = given()
                 .formParam("Action", "CreateLoadBalancer")
-                .formParam("Name", "single-subnet-lb")
-                .formParam("Type", "application")
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Name", name)
+                .formParam(parameter, subnet)
+                .header("Authorization", AUTH);
+        if (type != null) {
+            request.formParam("Type", type);
+        }
+        request
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("At least two subnets in two different Availability Zones must be specified"));
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("Names.member.1", name)
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
             .then()
                 .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("InvalidConfigurationRequest"));
+                .body("ErrorResponse.Error.Code", equalTo("LoadBalancerNotFound"));
+    }
+
+    /** A Network or Gateway Load Balancer can be in a single Availability Zone. */
+    @ParameterizedTest
+    @CsvSource({"network", "gateway"})
+    @Order(12)
+    void createLoadBalancerOnOneSubnetIsAllowedForNetworkAndGatewayLoadBalancers(String type) {
+        String arn = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "single-subnet-" + type)
+                .formParam("Type", type)
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
+                        equalTo(Ec2Service.defaultSubnetId("us-east-1", "a")))
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        given()
+                .formParam("Action", "DeleteLoadBalancer")
+                .formParam("LoadBalancerArn", arn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
     }
 
     @Test
@@ -629,7 +686,8 @@ class ElbV2IntegrationTest {
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", "missing-subnet-lb")
                 .formParam("Type", "application")
-                .formParam("Subnets.member.1", "subnet-does-not-exist")
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Subnets.member.2", "subnet-does-not-exist")
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -1278,7 +1336,7 @@ class ElbV2IntegrationTest {
         given()
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", "lb-missing-subnet")
-                .formParam("Type", "application")
+                .formParam("Type", "network")
                 .formParam("Subnets.member.1", "subnet-does-not-exist")
                 .header("Authorization", AUTH)
             .when()
