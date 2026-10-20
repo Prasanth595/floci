@@ -74,6 +74,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -90,8 +91,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -4013,7 +4016,7 @@ class Ec2ServiceTest {
         KeyPair second = service.importKeyPair("us-east-1", "imported-b", secondKey);
 
         assertNotEquals(first.getKeyFingerprint(), second.getKeyFingerprint());
-        assertEquals(Ec2KeyMaterial.fingerprintOf(firstKey), first.getKeyFingerprint());
+        assertEquals(Ec2KeyMaterial.readImportedKey(firstKey).fingerprint(), first.getKeyFingerprint());
     }
 
     @Test
@@ -4120,15 +4123,16 @@ class Ec2ServiceTest {
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
 
-        service.importKeyPair("us-east-1", "duplicate-key", "c3NoLXJzYSBBQUFB");
+        String publicKey = Ec2KeyMaterial.generateRsa().openSshPublicKey();
+        service.importKeyPair("us-east-1", "duplicate-key", publicKey);
 
         AwsException error = assertThrows(AwsException.class,
-                () -> service.importKeyPair("us-east-1", "duplicate-key", "c3NoLXJzYSBBQUFB"));
+                () -> service.importKeyPair("us-east-1", "duplicate-key", publicKey));
         assertEquals("InvalidKeyPair.Duplicate", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
 
         // same name in another region is allowed
-        service.importKeyPair("us-west-2", "duplicate-key", "c3NoLXJzYSBBQUFB");
+        service.importKeyPair("us-west-2", "duplicate-key", publicKey);
     }
 
     @Test
@@ -4140,8 +4144,8 @@ class Ec2ServiceTest {
 
         service.createKeyPair("us-east-1", "shared-key-name");
 
-        AwsException error = assertThrows(AwsException.class,
-                () -> service.importKeyPair("us-east-1", "shared-key-name", "c3NoLXJzYSBBQUFB"));
+        AwsException error = assertThrows(AwsException.class, () -> service.importKeyPair(
+                "us-east-1", "shared-key-name", Ec2KeyMaterial.generateRsa().openSshPublicKey()));
         assertEquals("InvalidKeyPair.Duplicate", error.getErrorCode());
     }
 
@@ -4187,6 +4191,196 @@ class Ec2ServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.describeKeyPairs("us-east-1", List.of("present-key", "absent-key"), List.of()));
         assertEquals("InvalidKeyPair.NotFound", error.getErrorCode());
+    }
+
+    /**
+     * ImportKeyPair refuses what EC2 does not import, as AWS does, with InvalidKey.Format: an ECDSA
+     * key, and the truncated ssh-rsa blob Floci's own tests used to import, which no SSH server
+     * could use. Nothing is stored for either.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFaxjAHsoCE0FmjbKLGzgVRKfOKFmYj1"
+                    + "/JpnSjsuLjy23mHIUPkLJ5thgE47igHp+KufC1V2KqJE4OP5w4EK9SU= throwaway",
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAQQDHnLTTbpnrFWkfVt test@test"})
+    void importKeyPairRefusesAKeyEc2DoesNotImport(String material) {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.importKeyPair("us-east-1", "refused-key", material));
+
+        assertEquals("InvalidKey.Format", error.getErrorCode());
+        assertEquals("Key is not in valid OpenSSH public key format", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty());
+    }
+
+    /**
+     * AWS documents one rule for the names CreateKeyPair and ImportKeyPair take: up to 255 ASCII
+     * characters, with no leading or trailing space. A refused name stores nothing.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void keyPairNamesFollowTheRuleAwsDocuments(boolean imported) {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String publicKey = Ec2KeyMaterial.generateRsa().openSshPublicKey();
+        Function<String, KeyPair> make = name -> imported
+                ? service.importKeyPair("us-east-1", name, publicKey)
+                : service.createKeyPair("us-east-1", name);
+
+        String longest = "k".repeat(255);
+        assertEquals(longest, make.apply(longest).getKeyName());
+        assertEquals("a name with inner spaces", make.apply("a name with inner spaces").getKeyName());
+
+        Map<String, String> refused = Map.of(
+                "k".repeat(256), "Length exceeds maximum of 255 characters.",
+                "cl\u00e9", "Character sets beyond ASCII are not supported.",
+                " leading", "Leading and trailing spaces are not allowed.",
+                "trailing ", "Leading and trailing spaces are not allowed.");
+        for (Map.Entry<String, String> name : refused.entrySet()) {
+            AwsException error = assertThrows(AwsException.class, () -> make.apply(name.getKey()));
+            assertEquals("InvalidParameterValue", error.getErrorCode());
+            assertEquals("Value (" + name.getKey() + ") for parameter KeyName is invalid. " + name.getValue(),
+                    error.getMessage());
+            assertEquals(400, error.getHttpStatus());
+        }
+        assertEquals(2, service.describeKeyPairs("us-east-1", List.of(), List.of()).size());
+    }
+
+    /**
+     * A key pair records its type and when it was made, and an import keeps its key as one OpenSSH
+     * line whatever format it came in, since that is what RunInstances writes to authorized_keys.
+     */
+    @Test
+    void keyPairsRecordTheirTypeAndCreateTime() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String rsaLine = Ec2KeyMaterial.generateRsa().openSshPublicKey();
+        String rfc4716 = "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"throwaway\"\n" + rsaLine.split(" ")[1]
+                + "\n---- END SSH2 PUBLIC KEY ----\n";
+        String ed25519 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
+        Instant before = Instant.now();
+
+        KeyPair created = service.createKeyPair("us-east-1", "created");
+        KeyPair importedRsa = service.importKeyPair("us-east-1", "imported-rsa", rfc4716);
+        KeyPair importedEd25519 = service.importKeyPair("us-east-1", "imported-ed25519", ed25519 + " someone@host\n");
+
+        Instant after = Instant.now();
+        assertEquals("rsa", created.getKeyType());
+        assertEquals("rsa", importedRsa.getKeyType());
+        assertEquals("ed25519", importedEd25519.getKeyType());
+        for (KeyPair keyPair : List.of(created, importedRsa, importedEd25519)) {
+            assertFalse(keyPair.getCreateTime().isBefore(before), keyPair.getKeyName());
+            assertFalse(keyPair.getCreateTime().isAfter(after), keyPair.getKeyName());
+        }
+        assertEquals(rsaLine, importedRsa.getPublicKey());
+        assertEquals(ed25519, importedEd25519.getPublicKey());
+    }
+
+    /**
+     * Filter.N narrows DescribeKeyPairs by the names AWS documents, key-pair-id, key-name,
+     * fingerprint, tag-key and tag:&lt;key&gt;, and by key-type, with wildcards, values of one filter
+     * ORed and filters ANDed with each other and with KeyName.N. Any other name is refused, as AWS
+     * refuses it, rather than matching every key pair.
+     */
+    @Test
+    void describeKeyPairsHonoursItsFilters() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        KeyPair alpha = service.createKeyPair("us-east-1", "alpha-rsa");
+        KeyPair beta = service.importKeyPair("us-east-1", "beta-ed25519",
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj");
+        KeyPair gamma = service.importKeyPair("us-east-1", "gamma-rsa", Ec2KeyMaterial.generateRsa().openSshPublicKey());
+        service.createKeyPair("us-west-2", "alpha-rsa");
+        service.createTags("us-east-1", List.of(beta.getKeyPairId()), List.of(new Tag("Team", "blue")));
+        BiFunction<List<String>, Map<String, List<String>>, List<String>> names = (keyNames, filters) ->
+                service.describeKeyPairs("us-east-1", keyNames, List.of(), filters).stream()
+                        .map(KeyPair::getKeyName).sorted().toList();
+
+        assertEquals(List.of("alpha-rsa", "beta-ed25519", "gamma-rsa"), names.apply(List.of(), Map.of()));
+        assertEquals(List.of("beta-ed25519"), names.apply(List.of(), Map.of("key-pair-id", List.of(beta.getKeyPairId()))));
+        assertEquals(List.of("alpha-rsa"), names.apply(List.of(), Map.of("key-name", List.of("alpha-rsa"))));
+        assertEquals(List.of("alpha-rsa", "gamma-rsa"), names.apply(List.of(), Map.of("key-name", List.of("*-rsa"))));
+        assertEquals(List.of("beta-ed25519"), names.apply(List.of(), Map.of("key-name", List.of("?eta-*"))));
+        assertEquals(List.of("gamma-rsa"), names.apply(List.of(), Map.of("fingerprint", List.of(gamma.getKeyFingerprint()))));
+        assertEquals(List.of("beta-ed25519"), names.apply(List.of(), Map.of("fingerprint", List.of(beta.getKeyFingerprint()))));
+        assertEquals(List.of("alpha-rsa", "gamma-rsa"), names.apply(List.of(), Map.of("key-type", List.of("rsa"))));
+        assertEquals(List.of("beta-ed25519"), names.apply(List.of(), Map.of("key-type", List.of("ed25519"))));
+        assertEquals(List.of("beta-ed25519"), names.apply(List.of(), Map.of("tag-key", List.of("Team"))));
+        assertEquals(List.of("beta-ed25519"), names.apply(List.of(), Map.of("tag:Team", List.of("blue"))));
+        assertEquals(List.of(), names.apply(List.of(), Map.of("tag:Team", List.of("red"))));
+        assertEquals(List.of("alpha-rsa", "beta-ed25519"),
+                names.apply(List.of(), Map.of("key-name", List.of("alpha-rsa", "beta-ed25519"))));
+        assertEquals(List.of("gamma-rsa"), names.apply(List.of(),
+                Map.of("key-type", List.of("rsa"), "key-name", List.of("g*"))));
+        assertEquals(List.of("alpha-rsa"), names.apply(List.of("alpha-rsa", "beta-ed25519"),
+                Map.of("key-type", List.of("rsa"))));
+        assertEquals(alpha.getKeyPairId(), service.describeKeyPairs("us-east-1", List.of(), List.of(),
+                Map.of("key-name", List.of("alpha-rsa"))).getFirst().getKeyPairId());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> names.apply(List.of(), Map.of("owner-id", List.of("000000000000"))));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals("The filter 'owner-id' is invalid", error.getMessage());
+    }
+
+    /**
+     * A key pair stored before its type was recorded has none, so DescribeKeyPairs reads it from
+     * what the record holds: a created key pair is RSA, an imported one has the type of its key,
+     * and material ImportKeyPair would now refuse has no type. key-type filters by the same answer.
+     */
+    @Test
+    void theTypeOfAKeyPairStoredWithoutOneIsReadFromItsKey() {
+        AccountAwareStorageBackend<KeyPair> keyPairStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Map<String, String> legacy = new LinkedHashMap<>();
+        legacy.put("key-created", null);
+        legacy.put("key-ed25519", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj me\n");
+        legacy.put("key-ecdsa", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFaxjAHsoCE0"
+                + "FmjbKLGzgVRKfOKFmYj1/JpnSjsuLjy23mHIUPkLJ5thgE47igHp+KufC1V2KqJE4OP5w4EK9SU= throwaway");
+        legacy.put("key-garbage", "c3NoLXJzYSBBQUFB");
+        for (Map.Entry<String, String> record : legacy.entrySet()) {
+            KeyPair keyPair = new KeyPair();
+            keyPair.setKeyPairId(record.getKey());
+            keyPair.setKeyName(record.getKey());
+            keyPair.setRegion("us-east-1");
+            if (record.getValue() == null) {
+                Ec2KeyMaterial.Generated generated = Ec2KeyMaterial.generateRsa();
+                keyPair.setKeyMaterial(generated.privateKeyPem());
+                keyPair.setPublicKey(generated.openSshPublicKey());
+            } else {
+                keyPair.setPublicKey(record.getValue());
+            }
+            keyPairStore.put("us-east-1::" + record.getKey(), keyPair);
+        }
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+
+        Map<String, String> types = new HashMap<>();
+        for (KeyPair keyPair : service.describeKeyPairs("us-east-1", List.of(), List.of())) {
+            types.put(keyPair.getKeyPairId(), Ec2Service.keyTypeOf(keyPair));
+            assertNull(keyPair.getKeyType(), "the stored record is not rewritten");
+            assertNull(keyPair.getCreateTime());
+        }
+        Map<String, String> expected = new HashMap<>();
+        expected.put("key-created", "rsa");
+        expected.put("key-ed25519", "ed25519");
+        expected.put("key-ecdsa", null);
+        expected.put("key-garbage", null);
+        assertEquals(expected, types);
+        assertEquals(List.of("key-ed25519"), service.describeKeyPairs("us-east-1", List.of(), List.of(),
+                Map.of("key-type", List.of("ed25519"))).stream().map(KeyPair::getKeyPairId).toList());
     }
 
     @Test

@@ -330,6 +330,22 @@ key of any type but `ssh-rsa`, `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ecdsa-sha2
 | DeleteKeyPair | Deletes a key pair from the local EC2 store. |
 | ImportKeyPair | Imports a public key as a local key pair. |
 
+`ImportKeyPair` takes the key types and formats AWS documents: an RSA or ED25519 key as an
+OpenSSH public key line, and an RSA key also as an RFC 4716 file or as base64 DER, bare or in
+PEM armour. RSA keys must be 1024 to 16384 bits. A DSA, ECDSA, security-key or certificate key, a
+key line whose blob is incomplete, has bytes after its key or declares another type, and material
+holding more than one key line are refused with `InvalidKey.Format`. The key is stored as one
+OpenSSH line, which is what `RunInstances` copies into `authorized_keys`. `CreateKeyPair` and
+`ImportKeyPair` take a `KeyName` of up to 255 ASCII characters with no leading or trailing space,
+and answer any other with `InvalidParameterValue`.
+
+`DescribeKeyPairs` returns each key pair's `keyType` and `createTime`, and filters by
+`key-pair-id`, `key-name`, `fingerprint`, `key-type`, `tag-key` and `tag:<key>`, with `*` and `?`
+wildcards; any other filter name is `InvalidParameterValue`. A key pair stored before Floci
+recorded these fields has no `createTime`, and its `keyType` is read from the stored key: `rsa`
+for a created key pair, otherwise the type of the imported key, left out when that key would no
+longer import.
+
 ### AMIs
 
 | Action | Description |
