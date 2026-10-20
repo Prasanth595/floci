@@ -102,8 +102,9 @@ class ElbV2ServiceTest {
     }
 
     /**
-     * Every type takes Subnets or SubnetMappings, so a balancer with neither is refused with the
-     * message AWS gives for its type, before a subnet is looked up or anything is stored.
+     * Every type takes Subnets or SubnetMappings, so a balancer with neither is refused before a
+     * subnet is looked up or anything is stored. The messages are the ones AWS gives an Application
+     * or a Network Load Balancer; a Gateway Load Balancer gets the Network one.
      */
     @ParameterizedTest
     @CsvSource(delimiter = '|', nullValues = "NONE", value = {

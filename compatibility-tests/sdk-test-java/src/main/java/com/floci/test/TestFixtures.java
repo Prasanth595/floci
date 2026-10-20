@@ -302,7 +302,7 @@ public final class TestFixtures {
             }
             if (byZone.size() < 2) {
                 throw new IllegalStateException("default VPC " + vpcId + " has default subnets in "
-                        + byZone.keySet() + ", and a load balancer needs two availability zones");
+                        + byZone.keySet() + ", and an Application Load Balancer needs two availability zones");
             }
             return byZone.values().stream().limit(2).toList();
         }

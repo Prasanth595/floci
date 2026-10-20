@@ -86,9 +86,10 @@ class ElbV2CfnProvisionerTest {
         return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 
-    /** Load balancer properties on two subnets, which CreateLoadBalancer requires of every type. */
+    /** Load balancer properties given Subnets, which CreateLoadBalancer requires of every type. */
     private static ObjectNode onTwoSubnets(ObjectNode props) {
-        props.putArray("Subnets").add("subnet-1").add("subnet-2");
+        ArrayNode subnets = props.putArray("Subnets");
+        TWO_SUBNETS.forEach(subnets::add);
         return props;
     }
 

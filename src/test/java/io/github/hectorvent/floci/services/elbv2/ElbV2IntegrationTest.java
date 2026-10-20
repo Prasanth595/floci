@@ -1318,8 +1318,9 @@ class ElbV2IntegrationTest {
     }
 
     /**
-     * Every type takes Subnets or SubnetMappings, so CreateLoadBalancer with neither is refused with
-     * the ValidationError AWS gives for the type, and no load balancer is created.
+     * Every type takes Subnets or SubnetMappings, so CreateLoadBalancer with neither is a
+     * ValidationError and no load balancer is created. The messages are the ones AWS gives an
+     * Application or a Network Load Balancer; a Gateway Load Balancer gets the Network one.
      */
     @ParameterizedTest
     @CsvSource(delimiter = '|', nullValues = "NONE", value = {
