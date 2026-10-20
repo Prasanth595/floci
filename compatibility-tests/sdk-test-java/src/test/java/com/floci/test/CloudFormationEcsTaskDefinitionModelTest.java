@@ -25,7 +25,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("CloudFormation ECS task definition model")
 class CloudFormationEcsTaskDefinitionModelTest {
 
-    private static final Duration DEPLOY_TIMEOUT = Duration.ofSeconds(60);
+    private static final Duration DEPLOY_TIMEOUT =
+            TestFixtures.isRealAws() ? Duration.ofMinutes(10) : Duration.ofSeconds(10);
     private static final String UNCONVERTED_STACK = TestFixtures.uniqueName("compat-cfn-ecs-unconverted");
     private static final String CONVERTED_STACK = TestFixtures.uniqueName("compat-cfn-ecs-converted");
     private static final String HINT = ". This may occur when a numeric value exceeds 32-bit integer max"

@@ -24,7 +24,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("CloudFormation AWS::ECS::TaskDefinition LinuxParameters")
 class CloudFormationEcsLinuxParametersTest {
 
-    private static final Duration DEPLOY_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration DEPLOY_TIMEOUT =
+            TestFixtures.isRealAws() ? Duration.ofMinutes(10) : Duration.ofSeconds(10);
     private static final String LINUX_STACK = TestFixtures.uniqueName("compat-cfn-linux");
     private static final String FARGATE_STACK = TestFixtures.uniqueName("compat-cfn-linux-fargate");
 
