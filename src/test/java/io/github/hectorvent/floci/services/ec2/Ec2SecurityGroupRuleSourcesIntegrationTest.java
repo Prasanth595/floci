@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -287,6 +288,109 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
                     + ".item.cidrIpv6", equalTo("2001:db8::/32"))
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.ipPermissions.item.ipv6Ranges"
                     + ".item.description", equalTo("v6-range"));
+    }
+
+    @Test
+    void revokeIngressBySecurityGroupRuleIdRemovesTheRule() {
+        String vpcId = createVpc();
+        String groupId = createSecurityGroup(uniqueName("revoke-by-id"), vpcId);
+        String ruleId = authorizeRule("AuthorizeSecurityGroupIngress", groupId, "5432", "10.0.0.0/16");
+
+        revokeByRuleId("RevokeSecurityGroupIngress", groupId, ruleId)
+            .then()
+            .statusCode(200)
+            .body("RevokeSecurityGroupIngressResponse.return", equalTo("true"));
+
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", groupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString(ruleId)));
+
+        given()
+            .formParam("Action", "DescribeSecurityGroups")
+            .formParam("GroupId.1", groupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<fromPort>5432</fromPort>")));
+    }
+
+    @Test
+    void revokeEgressBySecurityGroupRuleIdRemovesTheRule() {
+        String vpcId = createVpc();
+        String groupId = createSecurityGroup(uniqueName("revoke-egress-by-id"), vpcId);
+        String ruleId = authorizeRule("AuthorizeSecurityGroupEgress", groupId, "8443", "10.5.0.0/16");
+
+        revokeByRuleId("RevokeSecurityGroupEgress", groupId, ruleId)
+            .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeSecurityGroups")
+            .formParam("GroupId.1", groupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("10.5.0.0/16")));
+    }
+
+    @Test
+    void revokeBySecurityGroupRuleIdOfAnotherGroupFailsAndKeepsTheRule() {
+        String vpcId = createVpc();
+        String targetId = createSecurityGroup(uniqueName("revoke-target"), vpcId);
+        String otherId = createSecurityGroup(uniqueName("revoke-other"), vpcId);
+        String otherRuleId = authorizeRule("AuthorizeSecurityGroupIngress", otherId, "9999", "10.0.0.0/16");
+
+        revokeByRuleId("RevokeSecurityGroupIngress", targetId, otherRuleId)
+            .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidSecurityGroupRuleId.NotFound</Code>"));
+
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("SecurityGroupRuleId.1", otherRuleId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString(otherRuleId));
+    }
+
+    private String authorizeRule(String action, String groupId, String port, String cidr) {
+        return given()
+            .formParam("Action", action)
+            .formParam("GroupId", groupId)
+            .formParam("IpPermissions.1.IpProtocol", "tcp")
+            .formParam("IpPermissions.1.FromPort", port)
+            .formParam("IpPermissions.1.ToPort", port)
+            .formParam("IpPermissions.1.IpRanges.1.CidrIp", cidr)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path(action + "Response.securityGroupRuleSet.item.securityGroupRuleId");
+    }
+
+    private Response revokeByRuleId(String action, String groupId, String ruleId) {
+        return given()
+            .formParam("Action", action)
+            .formParam("GroupId", groupId)
+            .formParam("SecurityGroupRuleId.1", ruleId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/");
     }
 
     private String referencedGroupInfoXml(String groupId) {

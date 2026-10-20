@@ -7209,6 +7209,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * Revokes rules named by their {@code sgr-} ids ({@code SecurityGroupRuleId.N}). Every id must
+     * name a rule of the group in the requested direction before any is removed.
+     */
+    public void revokeSecurityGroupRulesByIds(String region, String groupId, List<String> ruleIds,
+                                              boolean egress) {
+        ensureDefaultResources(region);
+        getRequiredSecurityGroup(region, groupId);
+        for (String ruleId : ruleIds) {
+            SecurityGroupRule rule = securityGroupRules.get(key(region, ruleId)).orElse(null);
+            if (rule == null || !groupId.equals(rule.getGroupId()) || rule.isEgress() != egress) {
+                throw new AwsException("InvalidSecurityGroupRuleId.NotFound",
+                        "The security group rule ID '" + ruleId + "' does not exist", 400);
+            }
+        }
+        for (String ruleId : ruleIds) {
+            deleteSecurityGroupRule(region, ruleId);
+        }
+    }
+
+    /**
      * Deletes a rule by its {@code sgr-} id, which is what a standalone
      * {@code AWS::EC2::SecurityGroupIngress} or {@code Egress} resource holds as its physical id.
      * Returns false when the rule is already gone, so a stack delete stays idempotent.
