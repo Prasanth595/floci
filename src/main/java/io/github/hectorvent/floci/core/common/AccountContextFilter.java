@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.auth.SigV4aSignature;
 import io.github.hectorvent.floci.services.s3.PreSignedUrlFilter;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -85,7 +86,10 @@ public class AccountContextFilter implements ContainerRequestFilter {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
             requestContext.setAccessKeyId(akid);
             requestContext.setSessionToken(sessionToken);
-            String region = regionResolver.resolveRegionFromAuth(auth);
+            // A SigV4A scope has no region segment; the regions come from the signed region set.
+            String region = auth.trim().startsWith(SigV4aSignature.ALGORITHM + " ")
+                    ? regionResolver.resolveRegionFromRegionSet(ctx.getHeaderString("X-Amz-Region-Set"))
+                    : regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
             if (rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth))) {
                 return;
@@ -104,7 +108,11 @@ public class AccountContextFilter implements ContainerRequestFilter {
                         resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));
                 requestContext.setAccessKeyId(presignedAkid);
                 requestContext.setSessionToken(sessionToken);
-                String region = regionResolver.resolveRegionFromPresignedCredential(credential);
+                String region = SigV4aSignature.ALGORITHM.equals(
+                        ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Algorithm"))
+                        ? regionResolver.resolveRegionFromRegionSet(
+                                ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Region-Set"))
+                        : regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
                 if (rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential))) {
                     return;

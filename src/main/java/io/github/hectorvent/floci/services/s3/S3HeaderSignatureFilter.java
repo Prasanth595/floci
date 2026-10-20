@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
+import io.github.hectorvent.floci.core.common.auth.SigV4aSignature;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -41,6 +42,11 @@ import java.util.Optional;
  * {@code STREAMING-*} sentinel, the body is hashed too, so a signed request cannot be replayed
  * with a different payload.
  *
+ * <p>A SigV4A ({@code AWS4-ECDSA-P256-SHA256}) header is verified over the same canonical request,
+ * with the region-less scope {@code <date>/s3/aws4_request} and the signed {@code x-amz-region-set}
+ * header, by checking its ECDSA signature against the key pair derived from the secret
+ * ({@link SigV4aSignature}).
+ *
  * <p>Error codes, statuses and ordering follow real S3: a structurally bad header is
  * {@code 400 AuthorizationHeaderMalformed}; a request with no date is {@code 403 AccessDenied};
  * a missing {@code x-amz-content-sha256} is {@code 400 InvalidRequest}; an unregistered key is
@@ -79,6 +85,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
     private static final String ALGORITHM = "AWS4-HMAC-SHA256";
     private static final String SIGNING_SERVICE = "s3";
     private static final String TERMINATOR = "aws4_request";
+    private static final String REGION_SET_HEADER = "x-amz-region-set";
     private static final Duration MAX_CLOCK_SKEW = Duration.ofMinutes(15);
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
@@ -119,7 +126,8 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         if (authorization == null || authorization.isBlank()) {
             return;
         }
-        if (!authorization.startsWith(ALGORITHM + " ")) {
+        boolean asymmetric = authorization.startsWith(SigV4aSignature.ALGORITHM + " ");
+        if (!asymmetric && !authorization.startsWith(ALGORITHM + " ")) {
             abort(ctx, 400, "AuthorizationHeaderMalformed",
                     "The authorization header you provided is invalid.");
             return;
@@ -134,20 +142,32 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
                     + "Credential, SignedHeaders, and Signature.");
             return;
         }
+        // A SigV4A scope names no region: the regions the signature is good for travel in the
+        // signed x-amz-region-set header instead.
         String[] scope = credential.split("/");
-        if (scope.length != 5 || !TERMINATOR.equals(scope[4])) {
+        int terminatorIndex = asymmetric ? 3 : 4;
+        if (scope.length != terminatorIndex + 1 || !TERMINATOR.equals(scope[terminatorIndex])) {
             abort(ctx, 400, "AuthorizationHeaderMalformed", "The authorization header is malformed; "
                     + "the Credential is mal-formed; expecting "
-                    + "\"<YOUR-AKID>/YYYYMMDD/REGION/SERVICE/aws4_request\".");
+                    + (asymmetric ? "\"<YOUR-AKID>/YYYYMMDD/SERVICE/aws4_request\"."
+                    : "\"<YOUR-AKID>/YYYYMMDD/REGION/SERVICE/aws4_request\"."));
             return;
         }
         String accessKeyId = scope[0];
         String scopeDate = scope[1];
-        String region = scope[2];
-        if (!SIGNING_SERVICE.equals(scope[3])) {
+        String region = asymmetric ? null : scope[2];
+        String scopeService = scope[terminatorIndex - 1];
+        if (!SIGNING_SERVICE.equals(scopeService)) {
             abort(ctx, 400, "AuthorizationHeaderMalformed", "The authorization header is malformed; "
-                    + "incorrect service \"" + scope[3] + "\". This endpoint belongs to \""
+                    + "incorrect service \"" + scopeService + "\". This endpoint belongs to \""
                     + SIGNING_SERVICE + "\".");
+            return;
+        }
+        if (asymmetric && (!SigV4RequestValidator.containsHeader(signedHeaders, REGION_SET_HEADER)
+                || isBlank(ctx.getHeaderString(REGION_SET_HEADER)))) {
+            abort(ctx, 400, "AuthorizationHeaderMalformed", "The authorization header is malformed; "
+                    + "a " + SigV4aSignature.ALGORITHM + " request must sign the "
+                    + REGION_SET_HEADER + " header.");
             return;
         }
 
@@ -192,7 +212,8 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         boolean matches;
         try {
             matches = SigV4RequestValidator.containsHeader(signedHeaders, "host") && signatureMatches(
-                    ctx, secretKey.get(), scopeDate, region, amzDate, signedHeaders, declaredHash, signature);
+                    ctx, accessKeyId, secretKey.get(), scopeDate, region, amzDate, signedHeaders,
+                    declaredHash, signature);
         } catch (Exception e) {
             LOG.debugv(e, "S3 header SigV4 verification failed to complete for accessKey={0}", accessKeyId);
             matches = false;
@@ -209,8 +230,9 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         }
     }
 
-    private boolean signatureMatches(ContainerRequestContext ctx, String secretKey, String scopeDate,
-                                     String region, String amzDate, String signedHeaders,
+    /** A {@code null} {@code region} marks a SigV4A request, whose scope has no region segment. */
+    private boolean signatureMatches(ContainerRequestContext ctx, String accessKeyId, String secretKey,
+                                     String scopeDate, String region, String amzDate, String signedHeaders,
                                      String payloadHash, String signature) throws Exception {
         URI requestUri = ctx.getProperty(S3VirtualHostFilter.ORIGINAL_REQUEST_URI_PROPERTY) instanceof URI uri
                 ? uri
@@ -231,6 +253,13 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
                 + canonicalHeaders + "\n"
                 + signedHeaders + "\n"
                 + payloadHash;
+        if (region == null) {
+            String stringToSign = SigV4aSignature.ALGORITHM + "\n"
+                    + amzDate + "\n"
+                    + scopeDate + "/" + SIGNING_SERVICE + "/" + TERMINATOR + "\n"
+                    + Digests.sha256Hex(canonicalRequest);
+            return SigV4aSignature.verify(secretKey, accessKeyId, stringToSign, signature);
+        }
         String stringToSign = ALGORITHM + "\n"
                 + amzDate + "\n"
                 + scopeDate + "/" + region + "/" + SIGNING_SERVICE + "/" + TERMINATOR + "\n"
@@ -300,7 +329,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
 
     /** The value of one {@code Name=value} component of a SigV4 {@code Authorization} header. */
     private static String component(String authorization, String name) {
-        String parameters = authorization.substring(ALGORITHM.length() + 1);
+        String parameters = authorization.substring(authorization.indexOf(' ') + 1);
         for (String part : parameters.split(",")) {
             String trimmed = part.trim();
             if (trimmed.startsWith(name + "=")) {
@@ -309,6 +338,10 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
             }
         }
         return null;
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private static void abort(ContainerRequestContext ctx, int status, String code, String message) {

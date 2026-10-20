@@ -107,7 +107,7 @@ class S3HeaderSignatureFilterTest {
     }
 
     @Test
-    void abortsSigV4AAuthorizationHeaderWhenValidationEnabled() throws IOException {
+    void abortsSigV4AAuthorizationHeaderWhoseScopeStillCarriesARegion() throws IOException {
         when(ctx.getHeaderString("Authorization"))
                 .thenReturn("AWS4-ECDSA-P256-SHA256 Credential=111122223333/20261001/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc");
 
@@ -119,6 +119,6 @@ class S3HeaderSignatureFilterTest {
         assertEquals(400, response.getStatus());
         String entity = (String) response.getEntity();
         assertTrue(entity.contains("<Code>AuthorizationHeaderMalformed</Code>"), entity);
-        assertTrue(entity.contains("The authorization header you provided is invalid."), entity);
+        assertTrue(entity.contains("YYYYMMDD/SERVICE/aws4_request"), entity);
     }
 }

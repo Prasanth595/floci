@@ -34,12 +34,14 @@ class SigV4CredentialScopeTest {
     }
 
     @Test
-    void ignoresSigV4aBecauseItsCredentialOmitsTheRegion() {
+    void readsTheServiceOfASigV4aCredentialThatOmitsTheRegion() {
         // SigV4a carries the region in X-Amz-Region-Set, so its credential is
-        // <key>/<date>/<service>/aws4_request — one segment shorter than SigV4.
-        assertTrue(SigV4CredentialScope.serviceName(
+        // <key>/<date>/<service>/aws4_request, one segment shorter than SigV4.
+        assertEquals(Optional.of("s3"), SigV4CredentialScope.serviceName(
                 "AWS4-ECDSA-P256-SHA256 Credential=AKID/20260707/s3/aws4_request,"
-                        + " SignedHeaders=host;x-amz-region-set, Signature=deadbeef").isEmpty());
+                        + " SignedHeaders=host;x-amz-region-set, Signature=deadbeef"));
+        assertEquals(Optional.of("s3"), SigV4CredentialScope.serviceNameFromCredential(
+                "AKID/20260707/s3/aws4_request"));
     }
 
     @Test

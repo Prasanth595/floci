@@ -29,6 +29,21 @@ class RegionResolverTest {
     }
 
     @Test
+    void sigV4aRegionSetOfOneRegionSelectsIt() {
+        assertEquals("eu-west-1", resolver.resolveRegionFromRegionSet("eu-west-1"));
+        assertEquals("eu-west-1", resolver.resolveRegionFromRegionSet(" eu-west-1 "));
+    }
+
+    @Test
+    void sigV4aWildcardListOrMissingRegionSetServesTheDefaultRegion() {
+        assertEquals("us-east-1", resolver.resolveRegionFromRegionSet("*"));
+        assertEquals("us-east-1", resolver.resolveRegionFromRegionSet("eu-*"));
+        assertEquals("us-east-1", resolver.resolveRegionFromRegionSet("eu-west-1,us-west-2"));
+        assertEquals("us-east-1", resolver.resolveRegionFromRegionSet(""));
+        assertEquals("us-east-1", resolver.resolveRegionFromRegionSet(null));
+    }
+
+    @Test
     void resolveRegionFromDifferentRegion() {
         HttpHeaders headers = stubHeaders(
                 "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260215/eu-west-1/sqs/aws4_request, " +

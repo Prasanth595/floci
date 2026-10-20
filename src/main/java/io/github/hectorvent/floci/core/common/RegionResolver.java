@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.auth.SigV4aSignature;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
@@ -83,7 +84,11 @@ public class RegionResolver {
         if (headers == null) {
             return defaultRegion;
         }
-        return resolveRegionFromAuth(headers.getHeaderString("Authorization"));
+        String authorization = headers.getHeaderString("Authorization");
+        if (authorization != null && authorization.trim().startsWith(SigV4aSignature.ALGORITHM + " ")) {
+            return resolveRegionFromRegionSet(headers.getHeaderString("X-Amz-Region-Set"));
+        }
+        return resolveRegionFromAuth(authorization);
     }
 
     /**
@@ -150,6 +155,24 @@ public class RegionResolver {
         return defaultRegion;
     }
 
+
+    /**
+     * The region a SigV4A ({@code AWS4-ECDSA-P256-SHA256}) request is served in. Its credential
+     * scope names no region; the signed {@code X-Amz-Region-Set} lists the ones the signature is
+     * good for. A set of exactly one concrete region selects it. A wildcard, a list, or no set
+     * leaves the choice to the server, which serves the default region.
+     */
+    public String resolveRegionFromRegionSet(String regionSet) {
+        if (regionSet == null || regionSet.isBlank()) {
+            return defaultRegion;
+        }
+        String[] regions = regionSet.split(",");
+        String only = regions[0].trim();
+        if (regions.length != 1 || only.isEmpty() || only.contains("*")) {
+            return defaultRegion;
+        }
+        return withoutPseudoRegion(only);
+    }
 
     /**
      * Resolves the region from a SigV4 Authorization credential scope, or
