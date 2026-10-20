@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.configservice;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -436,5 +437,49 @@ class ConfigRuleIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    @Order(100)
+    void putConfigRuleTagsAreListedForTheRuleArn() {
+        String body = """
+            {
+                "ConfigRule": {
+                    "ConfigRuleName": "rule-tags-test",
+                    "Source": {"Owner": "AWS", "SourceIdentifier": "S3_BUCKET_VERSIONING_ENABLED"}
+                },
+                "Tags": [%s]
+            }
+            """;
+        post("PutConfigRule", body.formatted("{\"Key\": \"env\", \"Value\": \"prod\"}"))
+            .then().statusCode(200);
+        String arn = post("DescribeConfigRules", "{\"ConfigRuleNames\": [\"rule-tags-test\"]}")
+            .then().statusCode(200).extract().path("ConfigRules[0].ConfigRuleArn");
+        String listTags = "{\"ResourceArn\": \"" + arn + "\"}";
+
+        post("ListTagsForResource", listTags)
+            .then().statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("env"))
+            .body("Tags[0].Value", equalTo("prod"));
+
+        // Tags are applied at creation only; a later Put with other Tags leaves them alone.
+        post("PutConfigRule", body.formatted("{\"Key\": \"env\", \"Value\": \"dev\"}"))
+            .then().statusCode(200);
+        post("ListTagsForResource", listTags)
+            .then().statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Value", equalTo("prod"));
+
+        post("DeleteConfigRule", "{\"ConfigRuleName\": \"rule-tags-test\"}").then().statusCode(200);
+    }
+
+    private static Response post(String action, String body) {
+        return given()
+            .header("X-Amz-Target", TARGET_PREFIX + action)
+            .contentType(CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/");
     }
 }

@@ -117,6 +117,33 @@ class AwsConfigServiceTaggingTest {
     }
 
     @Test
+    void putConfigRuleAppliesRequestTagsAtCreationOnly() {
+        AwsConfigService service = service();
+        String arn = service.putConfigRule(REGION, rule("tagged"), ENV_PROD).configRuleArn();
+        assertEquals(ENV_PROD, service.listTagsForResource(REGION, arn));
+
+        ConfigRule updated = service.putConfigRule(REGION, rule("tagged"),
+                List.of(Map.of("Key", "env", "Value", "dev"), Map.of("Key", "team", "Value", "sec")));
+
+        assertEquals(arn, updated.configRuleArn());
+        assertEquals(ENV_PROD, service.listTagsForResource(REGION, arn));
+    }
+
+    @Test
+    void deletingAConfigRuleDropsItsTagsAndARecreatedRuleStartsFresh() {
+        AwsConfigService service = service();
+        String oldArn = service.putConfigRule(REGION, rule("tagged"), ENV_PROD).configRuleArn();
+        service.tagResource(REGION, oldArn, List.of(Map.of("Key", "team", "Value", "sec")));
+
+        service.deleteConfigRule(REGION, "tagged");
+
+        assertTrue(service.storedTags(oldArn).isEmpty(), "delete must drop the rule's tags");
+        List<Map<String, String>> fresh = List.of(Map.of("Key", "env", "Value", "dev"));
+        String newArn = service.putConfigRule(REGION, rule("tagged"), fresh).configRuleArn();
+        assertEquals(fresh, service.listTagsForResource(REGION, newArn));
+    }
+
+    @Test
     void aDeletedAggregationAuthorizationIsNotFound() {
         AwsConfigService service = service();
         String arn = service.putAggregationAuthorization(REGION, "111122223333", "eu-west-1", ENV_PROD)

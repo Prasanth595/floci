@@ -85,7 +85,7 @@ public class ConfigServiceJsonHandler {
     private Response putConfigRule(JsonNode req, String region) throws Exception {
         JsonNode ruleNode = req.path("ConfigRule");
         ConfigRule rule = ruleNode.isObject() ? mapper.treeToValue(ruleNode, ConfigRule.class) : null;
-        service.putConfigRule(region, rule);
+        service.putConfigRule(region, rule, extractTags(req));
         return Response.ok(mapper.createObjectNode()).build();
     }
 

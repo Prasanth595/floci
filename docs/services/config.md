@@ -199,3 +199,6 @@ aws configservice delete-config-rule --config-rule-name s3-bucket-versioning
       authorization ARN that does not name an existing resource in the caller's account and
       region. ARNs of resource kinds Floci does not model (configuration aggregators, stored
       queries, organization rules and packs, recorders) are accepted without a check.
+    - `PutConfigRule` applies its `Tags` only when it creates the rule; a later
+      `PutConfigRule` for the same rule leaves its tags unchanged, as AWS documents. Use
+      `TagResource` and `UntagResource` to change them. `DeleteConfigRule` drops the rule's tags.
