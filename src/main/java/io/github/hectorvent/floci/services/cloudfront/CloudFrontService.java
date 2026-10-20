@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.config.LocalStackParity;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -51,6 +52,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -60,10 +62,15 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final int MAX_CUSTOM_RESPONSE_HEADERS_POLICIES = 20;
     private static final int MAX_DISTRIBUTIONS_PER_RESPONSE_HEADERS_POLICY = 100;
     private static final SecureRandom RANDOM = new SecureRandom();
-    private static final Set<String> OAC_ORIGIN_TYPES =
-            Set.of("s3", "mediastore", "mediapackagev2", "lambda");
-    private static final Set<String> OAC_SIGNING_BEHAVIORS =
-            Set.of("always", "never", "no-override");
+    /** The enum values in the order AWS lists them. */
+    private static final List<String> OAC_ORIGIN_TYPES =
+            List.of("s3", "execute-api", "lambda", "mediastore", "mediapackagev2");
+    private static final List<String> OAC_SIGNING_PROTOCOLS = List.of("sigv4", "sigv4a");
+    private static final List<String> OAC_SIGNING_BEHAVIORS =
+            List.of("always-amz-auth", "never", "always", "no-override");
+    /** CloudFront knows a Lambda origin by its hostname alone, which also matches Floci's own endpoints. */
+    private static final Pattern LAMBDA_ORIGIN_HOST = Pattern.compile(
+            "(?:^|\\.)(lambda-web|lambda-url)\\.(global|[a-z]{2,4}-[a-z-]+-\\d+)\\.", Pattern.CASE_INSENSITIVE);
     private static final Set<String> FUNCTION_RUNTIMES = Set.of("cloudfront-js-1.0", "cloudfront-js-2.0");
     private static final int MAX_ORIGIN_CUSTOM_HEADERS = 30;
     private static final int MAX_CUSTOM_HEADER_NAME_LENGTH = 256;
@@ -195,6 +202,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateOriginCustomHeaders(dist.getConfig());
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
+        validateOriginAccessControls(dist.getConfig());
         return whileCertificatesHeld(dist.getConfig(), () -> {
             validateViewerCertificate(dist.getConfig());
             String id = generateDistributionId();
@@ -228,6 +236,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateOriginCustomHeaders(updated.getConfig());
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
+        validateOriginAccessControls(updated.getConfig());
         return whileCertificatesHeld(updated.getConfig(), () -> {
             validateViewerCertificate(updated.getConfig());
             updated.setId(id);
@@ -1222,29 +1231,142 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             throw new AwsException("InvalidArgument",
                     "The origin access control configuration is required.", 400);
         }
-        if (oac.getName() == null || oac.getName().isBlank()) {
-            throw new AwsException("InvalidArgument", "The parameter Name is required.", 400);
+        List<String> violations = new ArrayList<>();
+        addEnumViolation(violations, "originAccessControlOriginType", oac.getOriginAccessControlOriginType(),
+                OAC_ORIGIN_TYPES);
+        addEnumViolation(violations, "signingProtocol", oac.getSigningProtocol(), OAC_SIGNING_PROTOCOLS);
+        addEnumViolation(violations, "signingBehavior", oac.getSigningBehavior(), OAC_SIGNING_BEHAVIORS);
+        if (oac.getName() == null) {
+            violations.add(nullViolation("name"));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.exception("MalformedXML", violations);
+        }
+        if (oac.getName().isEmpty()) {
+            throw new AwsException("InvalidArgument", "The parameter Name is too small or empty.", 400);
         }
         if (oac.getName().length() > 64) {
-            throw new AwsException("InvalidArgument",
-                    "The parameter Name must be 64 characters or fewer.", 400);
+            throw new AwsException("InvalidArgument", "The parameter Name is too big.", 400);
         }
-        if (!"sigv4".equals(oac.getSigningProtocol())) {
+        String originType = oac.getOriginAccessControlOriginType();
+        if ("always-amz-auth".equals(oac.getSigningBehavior()) && !"lambda".equals(originType)) {
             throw new AwsException("InvalidArgument",
-                    "The parameter SigningProtocol must be sigv4.", 400);
+                    "The parameter SigningBehavior always-amz-auth is only supported with lambda origin type.", 400);
         }
-        if (oac.getSigningBehavior() == null
-                || !OAC_SIGNING_BEHAVIORS.contains(oac.getSigningBehavior())) {
+        if ("sigv4a".equals(oac.getSigningProtocol()) && !"s3".equals(originType) && !"lambda".equals(originType)) {
             throw new AwsException("InvalidArgument",
-                    "The parameter SigningBehavior must be one of always, never, or no-override.",
-                    400);
+                    "The parameter OriginType sigv4a is only supported with s3 or lambda origin types.", 400);
         }
-        if (oac.getOriginAccessControlOriginType() == null
-                || !OAC_ORIGIN_TYPES.contains(oac.getOriginAccessControlOriginType())) {
-            throw new AwsException("InvalidArgument",
-                    "The parameter OriginAccessControlOriginType must be one of s3, mediastore, "
-                            + "mediapackagev2, or lambda.",
-                    400);
+        if ("execute-api".equals(originType)) {
+            // AWS lists this origin type but refuses it.
+            throw new AwsException("AccessDenied", "Access Denied.", 403);
+        }
+    }
+
+    private static void addEnumViolation(List<String> violations, String member, String value, List<String> values) {
+        if (value == null) {
+            violations.add(nullViolation(member));
+        } else if (!values.contains(value)) {
+            violations.add("Value '" + value + "' at 'originAccessControlConfig." + member
+                    + "' failed to satisfy constraint: Member must satisfy enum value set: ["
+                    + String.join(", ", values) + "]");
+        }
+    }
+
+    private static String nullViolation(String member) {
+        return "Value null at 'originAccessControlConfig." + member
+                + "' failed to satisfy constraint: Member must not be null";
+    }
+
+    /** The kinds of Lambda origin CloudFront tells apart. */
+    private enum LambdaOrigin { NONE, FUNCTION_URL, WEB_FUNCTION, GLOBAL_WEB_FUNCTION }
+
+    private static LambdaOrigin lambdaOrigin(String domainName) {
+        Matcher matcher = LAMBDA_ORIGIN_HOST.matcher(domainName == null ? "" : domainName);
+        if (!matcher.find()) {
+            return LambdaOrigin.NONE;
+        }
+        boolean global = "global".equalsIgnoreCase(matcher.group(2));
+        if ("lambda-url".equalsIgnoreCase(matcher.group(1))) {
+            return global ? LambdaOrigin.NONE : LambdaOrigin.FUNCTION_URL;
+        }
+        return global ? LambdaOrigin.GLOBAL_WEB_FUNCTION : LambdaOrigin.WEB_FUNCTION;
+    }
+
+    /**
+     * The origin access control rules CloudFront applies to Lambda origins, in the order it checks
+     * them, then the Lambda@Edge origin triggers it refuses in front of the origins they sign.
+     */
+    private void validateOriginAccessControls(DistributionConfig config) {
+        if (config == null || config.getOrigins() == null) {
+            return;
+        }
+        Set<String> amzAuthOrigins = new HashSet<>();
+        for (Origin origin : config.getOrigins()) {
+            String oacId = origin == null ? null : origin.getOriginAccessControlId();
+            Optional<OriginAccessControl> oac = oacId == null || oacId.isBlank() ? Optional.empty() : oacStore.get(oacId);
+            if (oac.isEmpty()) {
+                continue;
+            }
+            validateOriginAccessControlFor(lambdaOrigin(origin.getDomainName()), oac.get());
+            if ("always-amz-auth".equals(oac.get().getSigningBehavior())
+                    || "sigv4a".equals(oac.get().getSigningProtocol())) {
+                amzAuthOrigins.add(origin.getId());
+            }
+        }
+        if (config.getDefaultCacheBehavior() != null) {
+            rejectOriginTriggers(amzAuthOrigins, config.getDefaultCacheBehavior().getTargetOriginId(),
+                    config.getDefaultCacheBehavior().getLambdaFunctionAssociations());
+        }
+        if (config.getCacheBehaviors() != null) {
+            for (CacheBehavior behavior : config.getCacheBehaviors()) {
+                rejectOriginTriggers(amzAuthOrigins, behavior.getTargetOriginId(),
+                        behavior.getLambdaFunctionAssociations());
+            }
+        }
+    }
+
+    private static void validateOriginAccessControlFor(LambdaOrigin origin, OriginAccessControl oac) {
+        boolean lambda = "lambda".equals(oac.getOriginAccessControlOriginType());
+        boolean webFunction = origin == LambdaOrigin.WEB_FUNCTION || origin == LambdaOrigin.GLOBAL_WEB_FUNCTION;
+        if (webFunction ? !lambda : (lambda && origin == LambdaOrigin.NONE)) {
+            throw illegalOriginAccessConfiguration("The origin type and OAC origin type differ");
+        }
+        if (!lambda) {
+            return;
+        }
+        boolean sigv4a = "sigv4a".equals(oac.getSigningProtocol());
+        if (origin == LambdaOrigin.GLOBAL_WEB_FUNCTION && !sigv4a) {
+            throw illegalOriginAccessConfiguration("This origin domain requires SigV4a signing protocol.");
+        }
+        if (origin != LambdaOrigin.GLOBAL_WEB_FUNCTION && sigv4a) {
+            throw illegalOriginAccessConfiguration("SigV4a signing protocol is not compatible with this origin domain.");
+        }
+        boolean amzAuth = "always-amz-auth".equals(oac.getSigningBehavior());
+        if (webFunction && !amzAuth) {
+            throw illegalOriginAccessConfiguration("Lambda-Web origins require always-amz-auth signing behavior.");
+        }
+        if (!webFunction && amzAuth) {
+            throw illegalOriginAccessConfiguration("always-amz-auth signing behavior requires a Lambda-Web origin.");
+        }
+    }
+
+    private static AwsException illegalOriginAccessConfiguration(String reason) {
+        return new AwsException("IllegalOriginAccessConfiguration", "Illegal configuration: " + reason, 400);
+    }
+
+    private static void rejectOriginTriggers(Set<String> amzAuthOrigins, String targetOriginId,
+                                             List<Map<String, Object>> associations) {
+        if (!amzAuthOrigins.contains(targetOriginId) || associations == null) {
+            return;
+        }
+        for (Map<String, Object> association : associations) {
+            Object eventType = association.get("EventType");
+            if ("origin-request".equals(eventType) || "origin-response".equals(eventType)) {
+                throw new AwsException("InvalidLambdaFunctionAssociation",
+                        "Lambda@Edge origin triggers are incompatible with SigV4a and always-amz-auth origins."
+                                + " Use a different origin or disassociate the function.", 400);
+            }
         }
     }
 

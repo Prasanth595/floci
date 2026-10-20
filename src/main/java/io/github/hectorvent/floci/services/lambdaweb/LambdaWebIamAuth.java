@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.auth.CredentialScope;
 import io.github.hectorvent.floci.core.common.auth.SessionTokenCheck;
 import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
@@ -27,9 +29,13 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -39,6 +45,10 @@ import java.util.Optional;
  * signature for the service {@code lambda} in the endpoint's region, then
  * {@code lambda:InvokeWebFunctionEndpoint} on the endpoint ARN. The signature is always checked.
  * The policies are evaluated when IAM enforcement is on, as everywhere else in Floci.
+ *
+ * <p>CloudFront signs for a distribution under an {@code always-amz-auth} origin access control.
+ * Floci's CloudFront stands in for that signature with the {@code lambda-web-cloudfront-*} headers,
+ * which carry the distribution and a key only this process knows. The function never sees them.
  */
 @ApplicationScoped
 public class LambdaWebIamAuth {
@@ -48,11 +58,14 @@ public class LambdaWebIamAuth {
     private static final String SERVICE = "lambda";
     private static final String SECURITY_TOKEN = "X-Amz-Security-Token";
     private static final String TEST_ACCESS_KEY = "test";
+    private static final String CLOUDFRONT_SOURCE_ARN = "lambda-web-cloudfront-source-arn";
+    private static final String CLOUDFRONT_KEY = "lambda-web-cloudfront-key";
 
     private final EmulatorConfig config;
     private final IamService iamService;
     private final IamPolicyEvaluator evaluator;
     private final Instance<ScpProvider> scpProvider;
+    private final String cloudFrontKey;
 
     @Inject
     public LambdaWebIamAuth(EmulatorConfig config, IamService iamService, IamPolicyEvaluator evaluator,
@@ -61,6 +74,14 @@ public class LambdaWebIamAuth {
         this.iamService = iamService;
         this.evaluator = evaluator;
         this.scpProvider = scpProvider;
+        byte[] key = new byte[32];
+        new SecureRandom().nextBytes(key);
+        this.cloudFrontKey = HexFormat.of().formatHex(key);
+    }
+
+    /** The headers CloudFront signs an origin request with for {@code distributionArn}. */
+    public Map<String, String> cloudFrontSignature(String distributionArn) {
+        return Map.of(CLOUDFRONT_SOURCE_ARN, distributionArn, CLOUDFRONT_KEY, cloudFrontKey);
     }
 
     /** What the checks read from a request, copied on the event loop so a worker can check it. */
@@ -87,8 +108,44 @@ public class LambdaWebIamAuth {
      * storage, is thrown rather than taken for a refusal. Blocks on IAM storage.
      */
     public boolean allows(Inbound request, WebFunctionTarget target) {
+        String distributionArn = cloudFrontSource(request);
+        if (distributionArn != null) {
+            return authorizeCloudFront(distributionArn, target);
+        }
         String accessKeyId = authenticate(request, target.region());
         return accessKeyId != null && authorize(accessKeyId, target);
+    }
+
+    /** The distribution CloudFront signed the request for, or null when it did not sign it. */
+    private String cloudFrontSource(Inbound request) {
+        String key = request.headers().get(CLOUDFRONT_KEY);
+        String distributionArn = request.headers().get(CLOUDFRONT_SOURCE_ARN);
+        if (key == null || !AwsArnUtils.isArn(distributionArn) || !MessageDigest.isEqual(
+                key.getBytes(StandardCharsets.UTF_8), cloudFrontKey.getBytes(StandardCharsets.UTF_8))) {
+            return null;
+        }
+        return distributionArn;
+    }
+
+    /** CloudFront calls as its service principal, so the function's resource policy decides alone. */
+    private boolean authorizeCloudFront(String distributionArn, WebFunctionTarget target) {
+        if (!config.services().iam().enforcementEnabled()) {
+            return true;
+        }
+        String principal = ServicePrincipals.of("cloudfront");
+        String endpointArn = target.endpoint().endpointArn;
+        Map<String, List<String>> context = new HashMap<>(IamConditionContextResolver.serviceCallContext(principal,
+                endpointArn, target.accountId(), distributionArn, AwsArnUtils.parse(distributionArn).accountId()));
+        context.put("lambda:Resource/WebFunctionAuthType", List.of(target.endpoint().authType));
+        target.function().tags.forEach((key, value) -> context.put("aws:ResourceTag/" + key, List.of(value)));
+        String policy = target.function().policy;
+        boolean allowed = evaluator.evaluateServicePrincipal(isBlank(policy) ? null : List.of(policy), principal,
+                ACTION, endpointArn, context) == Decision.ALLOW;
+        if (!allowed) {
+            LOG.infov("IAM enforcement DENY: service={0} action={1} resource={2} source={3}",
+                    principal, ACTION, endpointArn, distributionArn);
+        }
+        return allowed;
     }
 
     /** The access key that signed the request, or null when the signature does not hold. */

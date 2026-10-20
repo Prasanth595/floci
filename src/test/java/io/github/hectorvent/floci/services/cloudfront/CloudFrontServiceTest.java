@@ -531,23 +531,165 @@ class CloudFrontServiceTest {
 
         OriginAccessControl missingName = originAccessControl();
         missingName.setName(null);
-        assertInvalidOriginAccessControl(service, missingName);
+        assertInvalidOriginAccessControl(service, missingName, "MalformedXML", "1 validation error detected: Value null"
+                + " at 'originAccessControlConfig.name' failed to satisfy constraint: Member must not be null");
+
+        OriginAccessControl emptyName = originAccessControl();
+        emptyName.setName("");
+        assertInvalidOriginAccessControl(service, emptyName, "InvalidArgument", "The parameter Name is too small or empty.");
 
         OriginAccessControl longName = originAccessControl();
         longName.setName("x".repeat(65));
-        assertInvalidOriginAccessControl(service, longName);
+        assertInvalidOriginAccessControl(service, longName, "InvalidArgument", "The parameter Name is too big.");
 
         OriginAccessControl invalidProtocol = originAccessControl();
         invalidProtocol.setSigningProtocol("sigv2");
-        assertInvalidOriginAccessControl(service, invalidProtocol);
+        assertInvalidOriginAccessControl(service, invalidProtocol, "MalformedXML", "1 validation error detected: Value"
+                + " 'sigv2' at 'originAccessControlConfig.signingProtocol' failed to satisfy constraint: Member must"
+                + " satisfy enum value set: [sigv4, sigv4a]");
 
         OriginAccessControl invalidBehavior = originAccessControl();
         invalidBehavior.setSigningBehavior("sometimes");
-        assertInvalidOriginAccessControl(service, invalidBehavior);
+        assertInvalidOriginAccessControl(service, invalidBehavior, "MalformedXML", "1 validation error detected: Value"
+                + " 'sometimes' at 'originAccessControlConfig.signingBehavior' failed to satisfy constraint: Member"
+                + " must satisfy enum value set: [always-amz-auth, never, always, no-override]");
 
         OriginAccessControl invalidOriginType = originAccessControl();
         invalidOriginType.setOriginAccessControlOriginType("custom");
-        assertInvalidOriginAccessControl(service, invalidOriginType);
+        assertInvalidOriginAccessControl(service, invalidOriginType, "MalformedXML", "1 validation error detected:"
+                + " Value 'custom' at 'originAccessControlConfig.originAccessControlOriginType' failed to satisfy"
+                + " constraint: Member must satisfy enum value set: [s3, execute-api, lambda, mediastore,"
+                + " mediapackagev2]");
+    }
+
+    @Test
+    void originAccessControlEnumsAndNameAreReportedTogetherBeforeTheOtherRules() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        assertInvalidOriginAccessControl(service, new OriginAccessControl(), "MalformedXML", "4 validation errors"
+                + " detected: Value null at 'originAccessControlConfig.originAccessControlOriginType' failed to satisfy"
+                + " constraint: Member must not be null; Value null at 'originAccessControlConfig.signingProtocol'"
+                + " failed to satisfy constraint: Member must not be null; Value null at"
+                + " 'originAccessControlConfig.signingBehavior' failed to satisfy constraint: Member must not be null;"
+                + " Value null at 'originAccessControlConfig.name' failed to satisfy constraint: Member must not be null");
+
+        OriginAccessControl longNameAndBehavior = originAccessControl();
+        longNameAndBehavior.setName("x".repeat(65));
+        longNameAndBehavior.setSigningBehavior("always-amz-auth");
+        assertInvalidOriginAccessControl(service, longNameAndBehavior, "InvalidArgument", "The parameter Name is too big.");
+    }
+
+    @Test
+    void alwaysAmzAuthIsForLambdaAndSigV4aForS3OrLambda() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        assertInvalidOriginAccessControl(service, originAccessControl("sigv4", "always-amz-auth", "s3"),
+                "InvalidArgument", "The parameter SigningBehavior always-amz-auth is only supported with lambda origin type.");
+        assertInvalidOriginAccessControl(service, originAccessControl("sigv4a", "always-amz-auth", "mediastore"),
+                "InvalidArgument", "The parameter SigningBehavior always-amz-auth is only supported with lambda origin type.");
+        assertInvalidOriginAccessControl(service, originAccessControl("sigv4a", "always", "mediapackagev2"),
+                "InvalidArgument", "The parameter OriginType sigv4a is only supported with s3 or lambda origin types.");
+
+        assertDoesNotThrow(() -> service.createOriginAccessControl(originAccessControl("sigv4a", "always-amz-auth", "lambda")));
+        assertDoesNotThrow(() -> service.createOriginAccessControl(originAccessControl("sigv4a", "never", "lambda")));
+        assertDoesNotThrow(() -> service.createOriginAccessControl(originAccessControl("sigv4a", "always", "s3")));
+    }
+
+    @Test
+    void theExecuteApiOriginTypeIsRefused() {
+        AwsException error = assertThrows(AwsException.class, () -> serviceWithDomainSuffix("cloudfront.net")
+                .createOriginAccessControl(originAccessControl("sigv4", "always", "execute-api")));
+
+        assertEquals("AccessDenied", error.getErrorCode());
+        assertEquals("Access Denied.", error.getMessage());
+        assertEquals(403, error.getHttpStatus());
+    }
+
+    @Test
+    void aLambdaOriginNeedsTheOriginAccessControlItsHostnameCallsFor() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        String regional = "abcdefghijklmnopqrstuvwxyz.001.lambda-web.us-east-1.on.aws";
+        String global = "abcdefghijklmnopqrstuvwxyz.lambda-web.global.on.aws";
+        String functionUrl = "abcdefghijklmnopqrstuvwxyz0123.lambda-url.us-east-1.on.aws";
+        String differ = "The origin type and OAC origin type differ";
+
+        assertOriginAccessControlRefused(service, regional, "sigv4", "never", "lambda",
+                "Lambda-Web origins require always-amz-auth signing behavior.");
+        assertOriginAccessControlRefused(service, "abcdefghijklmnop.001.lambda-web.us-east-1.localhost:4566", "sigv4",
+                "always", "lambda", "Lambda-Web origins require always-amz-auth signing behavior.");
+        assertOriginAccessControlRefused(service, regional, "sigv4", "always", "s3", differ);
+        assertOriginAccessControlRefused(service, global, "sigv4", "always", "s3", differ);
+        assertOriginAccessControlRefused(service, "example.com", "sigv4", "always-amz-auth", "lambda", differ);
+        assertOriginAccessControlRefused(service, "bucket.s3.us-east-1.amazonaws.com", "sigv4", "always", "lambda", differ);
+        assertOriginAccessControlRefused(service, global, "sigv4", "always-amz-auth", "lambda",
+                "This origin domain requires SigV4a signing protocol.");
+        assertOriginAccessControlRefused(service, global, "sigv4", "never", "lambda",
+                "This origin domain requires SigV4a signing protocol.");
+        assertOriginAccessControlRefused(service, regional, "sigv4a", "always", "lambda",
+                "SigV4a signing protocol is not compatible with this origin domain.");
+        assertOriginAccessControlRefused(service, "abcdefghijklmnopqrstuvwxyz.001.lambda-web.us-west-2.on.aws", "sigv4a",
+                "always-amz-auth", "lambda", "SigV4a signing protocol is not compatible with this origin domain.");
+        assertOriginAccessControlRefused(service, functionUrl, "sigv4a", "always-amz-auth", "lambda",
+                "SigV4a signing protocol is not compatible with this origin domain.");
+        assertOriginAccessControlRefused(service, functionUrl, "sigv4", "always-amz-auth", "lambda",
+                "always-amz-auth signing behavior requires a Lambda-Web origin.");
+
+        assertDoesNotThrow(() -> service.createDistribution(
+                distributionWithOrigin(regional, oac(service, "sigv4", "always-amz-auth", "lambda"), null), Map.of()));
+        assertDoesNotThrow(() -> service.createDistribution(
+                distributionWithOrigin(global, oac(service, "sigv4a", "always-amz-auth", "lambda"), null), Map.of()));
+        assertDoesNotThrow(() -> service.createDistribution(
+                distributionWithOrigin(functionUrl, oac(service, "sigv4", "never", "lambda"), null), Map.of()));
+    }
+
+    @Test
+    void anUpdateChecksTheOriginAccessControlOfALambdaOrigin() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        String never = oac(service, "sigv4", "never", "lambda");
+        Distribution created = service.createDistribution(
+                distributionWithOrigin("abcdefghijklmnopqrstuvwxyz0123.lambda-url.us-east-1.on.aws", never, null), Map.of());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateDistribution(created.getId(),
+                created.getEtag(), distributionWithOrigin(
+                        "abcdefghijklmnopqrstuvwxyz.001.lambda-web.us-east-1.on.aws", never, null)));
+
+        assertEquals("IllegalOriginAccessConfiguration", error.getErrorCode());
+        assertEquals("Illegal configuration: Lambda-Web origins require always-amz-auth signing behavior.",
+                error.getMessage());
+    }
+
+    @Test
+    void lambdaEdgeOriginTriggersAreRefusedInFrontOfAnAlwaysAmzAuthOrSigV4aOrigin() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        String regional = "abcdefghijklmnopqrstuvwxyz.001.lambda-web.us-east-1.on.aws";
+        String amzAuth = oac(service, "sigv4", "always-amz-auth", "lambda");
+        String message = "Lambda@Edge origin triggers are incompatible with SigV4a and always-amz-auth origins."
+                + " Use a different origin or disassociate the function.";
+
+        for (String eventType : List.of("origin-request", "origin-response")) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createDistribution(
+                    distributionWithOrigin(regional, amzAuth, eventType), Map.of()));
+            assertEquals("InvalidLambdaFunctionAssociation", error.getErrorCode());
+            assertEquals(message, error.getMessage());
+            assertEquals(400, error.getHttpStatus());
+        }
+        Distribution onABehavior = distributionWithOrigin(regional, amzAuth, null);
+        CacheBehavior behavior = new CacheBehavior();
+        behavior.setPathPattern("/api/*");
+        behavior.setTargetOriginId("o");
+        behavior.setLambdaFunctionAssociations(List.of(Map.<String, Object>of("LambdaFunctionARN",
+                "arn:aws:lambda:us-east-1:000000000000:function:edge:1", "EventType", "origin-request")));
+        onABehavior.getConfig().setCacheBehaviors(List.of(behavior));
+        assertEquals(message, assertThrows(AwsException.class,
+                () -> service.createDistribution(onABehavior, Map.of())).getMessage());
+        assertEquals(message, assertThrows(AwsException.class, () -> service.createDistribution(distributionWithOrigin(
+                "bucket.s3.us-east-1.amazonaws.com", oac(service, "sigv4a", "always", "s3"), "origin-request"),
+                Map.of())).getMessage());
+
+        assertDoesNotThrow(() -> service.createDistribution(
+                distributionWithOrigin(regional, amzAuth, "viewer-request"), Map.of()));
+        assertDoesNotThrow(() -> service.createDistribution(distributionWithOrigin(
+                "bucket.s3.us-east-1.amazonaws.com", oac(service, "sigv4", "always", "s3"), "origin-request"), Map.of()));
     }
 
     @Test
@@ -562,7 +704,7 @@ class CloudFrontServiceTest {
                 () -> service.updateOriginAccessControl(
                         existing.getId(), existing.getEtag(), invalid));
 
-        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals("MalformedXML", error.getErrorCode());
         assertEquals("test-oac", service.getOriginAccessControl(existing.getId()).getName());
     }
 
@@ -1232,12 +1374,48 @@ class CloudFrontServiceTest {
     }
 
     private static OriginAccessControl originAccessControl() {
+        return originAccessControl("sigv4", "always", "s3");
+    }
+
+    private static OriginAccessControl originAccessControl(String protocol, String behavior, String originType) {
         OriginAccessControl oac = new OriginAccessControl();
         oac.setName("test-oac");
-        oac.setSigningProtocol("sigv4");
-        oac.setSigningBehavior("always");
-        oac.setOriginAccessControlOriginType("s3");
+        oac.setSigningProtocol(protocol);
+        oac.setSigningBehavior(behavior);
+        oac.setOriginAccessControlOriginType(originType);
         return oac;
+    }
+
+    private static String oac(CloudFrontService service, String protocol, String behavior, String originType) {
+        return service.createOriginAccessControl(originAccessControl(protocol, behavior, originType)).getId();
+    }
+
+    /** A distribution whose only origin {@code o} is {@code domainName}, with an optional Lambda@Edge trigger. */
+    private static Distribution distributionWithOrigin(String domainName, String oacId, String edgeEventType) {
+        Origin origin = new Origin();
+        origin.setId("o");
+        origin.setDomainName(domainName);
+        origin.setOriginAccessControlId(oacId);
+        DefaultCacheBehavior behavior = new DefaultCacheBehavior();
+        behavior.setTargetOriginId("o");
+        if (edgeEventType != null) {
+            behavior.setLambdaFunctionAssociations(List.of(Map.<String, Object>of("LambdaFunctionARN",
+                    "arn:aws:lambda:us-east-1:000000000000:function:edge:1", "EventType", edgeEventType)));
+        }
+        Distribution distribution = distribution(false, List.of());
+        distribution.getConfig().setOrigins(List.of(origin));
+        distribution.getConfig().setDefaultCacheBehavior(behavior);
+        return distribution;
+    }
+
+    private static void assertOriginAccessControlRefused(CloudFrontService service, String domainName, String protocol,
+                                                         String behavior, String originType, String reason) {
+        Distribution distribution = distributionWithOrigin(domainName, oac(service, protocol, behavior, originType), null);
+        AwsException error = assertThrows(AwsException.class, () -> service.createDistribution(distribution, Map.of()),
+                domainName + " " + protocol + " " + behavior + " " + originType);
+        assertEquals("IllegalOriginAccessConfiguration", error.getErrorCode());
+        assertEquals("Illegal configuration: " + reason, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
     }
 
     private static PublicKey validPublicKey(String name) throws Exception {
@@ -1287,10 +1465,11 @@ class CloudFrontServiceTest {
     }
 
     private static void assertInvalidOriginAccessControl(
-            CloudFrontService service, OriginAccessControl oac) {
+            CloudFrontService service, OriginAccessControl oac, String errorCode, String message) {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.createOriginAccessControl(oac));
-        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals(errorCode, error.getErrorCode());
+        assertEquals(message, error.getMessage());
         assertEquals(400, error.getHttpStatus());
     }
 
