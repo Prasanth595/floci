@@ -1504,6 +1504,13 @@ it does on AWS, and a `Deny` on the full ARN applies. `CreateSecret` is evaluate
 policy scoped to a name prefix such as `secret:app/*` allows it. A name that matches no secret in the
 request's account and region is evaluated as `secret:<name>`, and an ARN that matches none as given.
 
+**Redshift GetClusterCredentials options.** Besides `redshift:GetClusterCredentials`, a request with
+`DbGroups` needs `redshift:JoinGroup` on each group's `dbgroup:<cluster>/<group>` ARN, and a request with
+`AutoCreate` set to `true` needs `redshift:CreateClusterUser` on the user's `dbuser:<cluster>/<user>` ARN,
+as the GetClusterCredentials API reference lists them. They are checked before the cluster is looked up,
+so a denied request gets `AccessDenied` even for a cluster that does not exist. The `dbname` resource
+that `DbName` needs is not checked.
+
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
 Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
