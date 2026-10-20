@@ -275,10 +275,10 @@ private gateway lifecycles are not modelled.
 it returns the OpenSSH public key with the key-pair name as its comment, including for
 imported keys, whatever comment they were imported with. It never returns private key
 material. `ImportKeyPair` stores the material as it was given, and a key pair whose material
-is not a whole OpenSSH public key is described without one: PEM or RFC 4716 text, a line
-whose blob lacks a field its type requires (such as an `ssh-rsa` blob with no modulus) or
-declares a different type than the line names, and a key of a type other than RSA, ED25519,
-ECDSA and their security-key forms.
+is not exactly one whole OpenSSH public key is described without one: PEM or RFC 4716 text,
+several key lines, a line whose blob lacks a field its type requires (such as an `ssh-rsa`
+blob with no modulus), has bytes after its key or declares a different type than the line
+names, and a key of a type other than RSA, ED25519, ECDSA and their security-key forms.
 
 | Action | Description |
 |--------|-------------|

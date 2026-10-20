@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -258,6 +259,28 @@ class Ec2QueryHandlerTest {
 
         assertTrue(xml.contains("<regionEndpoint>ec2.us-gov-west-1.amazonaws.com</regionEndpoint>"), xml);
         assertFalse(xml.contains("cn-north-1"), xml);
+    }
+
+    /**
+     * A key pair stored before KeyName was required has no name, so its public key is described
+     * without a comment rather than with the word {@code null} as one.
+     */
+    @Test
+    void describeKeyPairsGivesTheKeyOfANamelessKeyPairNoComment() {
+        String line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIj7azlDjVHAsSxgcpCRZ3oWnTm0nAFM64y9jd22ioI/";
+        KeyPair nameless = new KeyPair();
+        nameless.setKeyPairId("key-0123456789abcdef0");
+        nameless.setPublicKey(line + " imported-comment");
+        Ec2Service service = mock(Ec2Service.class);
+        when(service.describeKeyPairs(eq("us-east-1"), anyList(), anyList())).thenReturn(List.of(nameless));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("IncludePublicKey", "true");
+
+        Response response = handler(service).handle("DescribeKeyPairs", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<publicKey>" + line + "</publicKey>"), xml);
     }
 
     private String describeRegions(RegionResolver regionResolver, String region) {

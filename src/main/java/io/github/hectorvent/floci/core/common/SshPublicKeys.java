@@ -104,6 +104,11 @@ public final class SshPublicKeys {
             buffer.get(field);
             return field;
         }
+
+        /** Whether every byte of the blob has been read. */
+        private boolean atEnd() {
+            return !buffer.hasRemaining();
+        }
     }
 
     /**
@@ -120,6 +125,11 @@ public final class SshPublicKeys {
         if (!"ssh-rsa".equals(type)) {
             throw new SshPublicKeyException("not an ssh-rsa blob: " + type);
         }
+        return rsaKeyFrom(reader);
+    }
+
+    /** The RSA public key whose exponent and then modulus are the reader's next two fields. */
+    private static RSAPublicKey rsaKeyFrom(Reader reader) {
         BigInteger exponent = new BigInteger(reader.readField());
         BigInteger modulus = new BigInteger(reader.readField());
         try {
@@ -152,8 +162,9 @@ public final class SshPublicKeys {
      * exponent and modulus that make a usable key, a 32-byte ed25519 key, or an uncompressed point
      * of the size of the curve an ECDSA type names, each with the application field a security-key
      * type adds. A type field alone, or a field of the wrong size, is not a key, and neither is a
-     * type other than these, such as {@code ssh-dss} or a certificate. Fields after the key do not
-     * count against it, as for {@link #rsaKeyOf}.
+     * type other than these, such as {@code ssh-dss} or a certificate. Unlike {@link #rsaKeyOf},
+     * which reads only the fields it needs, nothing may follow the key: OpenSSH refuses a blob with
+     * trailing data, so describing one as a key would hand out a line no SSH client reads.
      */
     public static boolean carriesAKey(byte[] blob) {
         if (blob == null) {
@@ -162,8 +173,11 @@ public final class SshPublicKeys {
         try {
             Reader reader = reader(blob);
             String type = new String(reader.readField(), StandardCharsets.UTF_8);
-            return switch (type) {
-                case "ssh-rsa" -> rsaKeyOf(blob) != null;
+            boolean keyFields = switch (type) {
+                case "ssh-rsa" -> {
+                    rsaKeyFrom(reader); // throws when the exponent and modulus make no usable key
+                    yield true;
+                }
                 case "ssh-ed25519" -> reader.readField().length == ED25519_KEY_LENGTH;
                 case "sk-ssh-ed25519@openssh.com" ->
                         reader.readField().length == ED25519_KEY_LENGTH && hasAnotherField(reader);
@@ -173,6 +187,7 @@ public final class SshPublicKeys {
                         carriesAPointOn(reader, "nistp256") && hasAnotherField(reader);
                 default -> false;
             };
+            return keyFields && reader.atEnd();
         } catch (SshPublicKeyException | NumberFormatException ignored) {
             // A missing or empty field, such as an ssh-rsa type with no exponent: not a key.
             return false;

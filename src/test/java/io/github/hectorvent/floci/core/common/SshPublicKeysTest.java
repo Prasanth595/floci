@@ -229,6 +229,26 @@ class SshPublicKeysTest {
         assertFalse(SshPublicKeys.carriesAKey(null));
     }
 
+    /**
+     * Unlike rsaKeyOf, which reads only the fields it needs, a blob carries a key only when nothing
+     * follows the fields of its type: OpenSSH refuses a blob with trailing data, whether that is a
+     * whole extra field or a few stray bytes.
+     */
+    @Test
+    void aBlobWithAnythingAfterItsKeyCarriesNoKey() {
+        assertFalse(SshPublicKeys.carriesAKey(blobWithTrailingJunk()));
+        assertFalse(SshPublicKeys.carriesAKey(withTrailing(SshPublicKeys.openSshBlob(KEY), new byte[4])));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-ed25519", new byte[32], ascii("extra"))));
+        assertFalse(SshPublicKeys.carriesAKey(withTrailing(blob("ssh-ed25519", new byte[32]), new byte[] {1, 2, 3})));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp256", ascii("nistp256"), point(32), new byte[0])));
+        assertFalse(SshPublicKeys.carriesAKey(
+                blob("sk-ssh-ed25519@openssh.com", new byte[32], ascii("ssh:"), ascii("extra"))));
+    }
+
+    private static byte[] withTrailing(byte[] blob, byte[] trailing) {
+        return ByteBuffer.allocate(blob.length + trailing.length).put(blob).put(trailing).array();
+    }
+
     /** An uncompressed EC point, {@code 0x04} and then both coordinates of the given size. */
     private static byte[] point(int coordinateLength) {
         byte[] point = new byte[1 + 2 * coordinateLength];

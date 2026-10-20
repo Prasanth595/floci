@@ -3416,12 +3416,13 @@ public class Ec2QueryHandler {
 
     /**
      * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
-     * DescribeKeyPairs reports for created and imported keys alike. Null unless the stored material
-     * is an OpenSSH line whose blob is a whole key of the type the line names: ImportKeyPair keeps
-     * what it was given, and rewriting a PEM or RFC 4716 body, a partial blob or a line labelled
-     * with another type would report a key that was never imported. The line is rebuilt from the
-     * blob's type, the blob and the name rather than copied, so no character of the stored text,
-     * such as a NUL that XML cannot carry, reaches the response.
+     * DescribeKeyPairs reports for created and imported keys alike. ImportKeyPair keeps what it was
+     * given, so this is null unless the material is a single OpenSSH line whose blob is a whole key
+     * of the type the line names: a partial blob, a line labelled with another type and several key
+     * lines are not one key to report. PEM and RFC 4716 bodies are not converted either, since
+     * ImportKeyPair does not read those formats yet. The line is rebuilt from the blob's type, the
+     * blob and the name rather than copied, so no character of the stored text, such as a NUL that
+     * XML cannot carry, reaches the response.
      */
     private static String openSshPublicKeyNamedFor(KeyPair kp) {
         String material = kp.getPublicKey();
@@ -3429,12 +3430,17 @@ public class Ec2QueryHandler {
         if (!SshPublicKeys.carriesAKey(blob)) {
             return null;
         }
-        // decodeBlob took the blob from the second field; the first has to name the same type.
+        String line = material.trim();
+        // decodeBlob took the blob from the second field; the first has to name the same type, and
+        // a line break means more keys than this one, since authorized_keys takes one per line.
         String type = SshPublicKeys.keyType(blob);
-        if (!type.equals(material.trim().split("\\s+", 2)[0])) {
+        if (line.indexOf('\n') >= 0 || !type.equals(line.split("\\s+", 2)[0])) {
             return null;
         }
-        return type + " " + Base64.getEncoder().encodeToString(blob) + " " + kp.getKeyName();
+        // A key pair stored before KeyName was required has no name, and so no comment.
+        String name = kp.getKeyName();
+        String comment = name == null || name.isBlank() ? "" : " " + name;
+        return type + " " + Base64.getEncoder().encodeToString(blob) + comment;
     }
 
     private Response handleDeleteKeyPair(MultivaluedMap<String, String> p, String region) {
