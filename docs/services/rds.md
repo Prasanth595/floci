@@ -36,6 +36,11 @@ mark those members `failed` until a successful retry.
 
 Floci manages real PostgreSQL, MySQL, MariaDB, and SQL Server Docker containers and proxies TCP connections to them, including IAM authentication support where the protocol supports it. SQL Server uses a transparent TCP relay for its native TDS protocol.
 
+MySQL and MariaDB master-grant script uploads retry transient Docker connection failures up to
+six attempts with exponential backoff starting at 500 ms. Every attempt sends a fresh archive;
+the container starts only after the upload succeeds. A permanent Docker error or exhausted
+retries follows the existing failed-start cleanup path.
+
 RDS Data API (`rds-data`) is documented separately because it uses REST JSON routes instead of the RDS Query protocol. See [RDS Data API](rds-data.md).
 
 ## Supported Management Actions
