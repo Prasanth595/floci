@@ -27,11 +27,16 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.SortedSet;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class CloudWatchMetricsQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsQueryHandler.class);
+    private static final Pattern ENTITY_METRIC_DATA_MEMBER = Pattern.compile("EntityMetricData\\.member\\.(\\d{1,9})\\.");
 
     private CloudWatchMetricsService metricsService;
     private final CloudWatchDashboardsService dashboardsService;
@@ -592,42 +597,59 @@ public class CloudWatchMetricsQueryHandler {
     // ──────────────────────────── Parsing Helpers ────────────────────────────
 
     private List<MetricDatum> parseMetricData(MultivaluedMap<String, String> params) {
-        LOG.infov("Query PutMetricData params: {0}", params);
+        List<MetricDatum> datums = parseMetricData(params, "MetricData");
+        // An empty EntityMetricData entry serializes to no keys, so its index is absent
+        // while later entries keep theirs: iterate the indexes present, not 1..first gap.
+        SortedSet<Integer> entityIndexes = new TreeSet<>();
+        for (String key : params.keySet()) {
+            Matcher matcher = ENTITY_METRIC_DATA_MEMBER.matcher(key);
+            if (matcher.lookingAt()) {
+                entityIndexes.add(Integer.parseInt(matcher.group(1)));
+            }
+        }
+        for (int index : entityIndexes) {
+            datums.addAll(parseMetricData(params, "EntityMetricData.member." + index + ".MetricData"));
+        }
+        LOG.debugv("Query PutMetricData parsed {0} datums", datums.size());
+        return datums;
+    }
+
+    private List<MetricDatum> parseMetricData(MultivaluedMap<String, String> params, String listPrefix) {
         List<MetricDatum> datums = new ArrayList<>();
         for (int i = 1; ; i++) {
-            String metricName = params.getFirst("MetricData.member." + i + ".MetricName");
+            String metricName = params.getFirst(listPrefix + ".member." + i + ".MetricName");
             if (metricName == null) {
                 break;
             }
             MetricDatum datum = new MetricDatum();
             datum.setMetricName(metricName);
-            datum.setUnit(params.getFirst("MetricData.member." + i + ".Unit"));
+            datum.setUnit(params.getFirst(listPrefix + ".member." + i + ".Unit"));
 
-            String valueStr = params.getFirst("MetricData.member." + i + ".Value");
+            String valueStr = params.getFirst(listPrefix + ".member." + i + ".Value");
             if (valueStr != null) {
                 datum.setValue(parseDouble(valueStr, 0));
             }
 
-            String tsStr = params.getFirst("MetricData.member." + i + ".Timestamp");
+            String tsStr = params.getFirst(listPrefix + ".member." + i + ".Timestamp");
             if (tsStr != null) {
                 Instant ts = parseInstant(tsStr);
                 datum.setTimestamp(ts != null ? ts.getEpochSecond() : 0);
             }
 
             // StatisticValues
-            String sc = params.getFirst("MetricData.member." + i + ".StatisticValues.SampleCount");
+            String sc = params.getFirst(listPrefix + ".member." + i + ".StatisticValues.SampleCount");
             if (sc != null) {
                 datum.setSampleCount(parseDouble(sc, 0));
-                datum.setSum(parseDouble(params.getFirst("MetricData.member." + i + ".StatisticValues.Sum"), 0));
-                datum.setMinimum(parseDouble(params.getFirst("MetricData.member." + i + ".StatisticValues.Minimum"), 0));
-                datum.setMaximum(parseDouble(params.getFirst("MetricData.member." + i + ".StatisticValues.Maximum"), 0));
+                datum.setSum(parseDouble(params.getFirst(listPrefix + ".member." + i + ".StatisticValues.Sum"), 0));
+                datum.setMinimum(parseDouble(params.getFirst(listPrefix + ".member." + i + ".StatisticValues.Minimum"), 0));
+                datum.setMaximum(parseDouble(params.getFirst(listPrefix + ".member." + i + ".StatisticValues.Maximum"), 0));
             }
 
             // Dimensions
             List<Dimension> dims = new ArrayList<>();
             for (int j = 1; ; j++) {
-                String dimName = params.getFirst("MetricData.member." + i + ".Dimensions.member." + j + ".Name");
-                String dimValue = params.getFirst("MetricData.member." + i + ".Dimensions.member." + j + ".Value");
+                String dimName = params.getFirst(listPrefix + ".member." + i + ".Dimensions.member." + j + ".Name");
+                String dimValue = params.getFirst(listPrefix + ".member." + i + ".Dimensions.member." + j + ".Value");
                 if (dimName == null) {
                     break;
                 }

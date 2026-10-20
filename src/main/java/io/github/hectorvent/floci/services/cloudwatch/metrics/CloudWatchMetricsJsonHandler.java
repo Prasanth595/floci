@@ -83,10 +83,11 @@ public class CloudWatchMetricsJsonHandler {
 
     private Response handlePutMetricData(JsonNode request, String region) {
         String namespace = request.path("Namespace").asText();
-        LOG.infov("JSON PutMetricData raw: {0}", request);
         List<MetricDatum> datums = parseMetricDataJson(request.path("MetricData"));
-        LOG.infov("JSON PutMetricData parsed {0} datums, sums={1}", datums.size(),
-                datums.stream().map(d -> d.getMetricName() + "=" + d.getSum()).toList());
+        for (JsonNode entityMetricData : request.path("EntityMetricData")) {
+            datums.addAll(parseMetricDataJson(entityMetricData.path("MetricData")));
+        }
+        LOG.debugv("JSON PutMetricData parsed {0} datums for namespace {1}", datums.size(), namespace);
         metricsService.putMetricData(namespace, datums, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
