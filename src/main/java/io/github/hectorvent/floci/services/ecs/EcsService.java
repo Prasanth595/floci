@@ -205,6 +205,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final Map<String, ServiceDeployment> serviceDeployments = new ConcurrentHashMap<>();
     // serviceRevisionArn → ServiceRevision
     private final Map<String, ServiceRevision> serviceRevisions = new ConcurrentHashMap<>();
+    // accountId::serviceKey → the Container Insights sample last written for that service
+    private final Map<String, InsightsSample> publishedInsights = new ConcurrentHashMap<>();
     // targetArn → List<Attribute>
     private Map<String, List<Attribute>> attributes = new ConcurrentHashMap<>();
     // name → value (account-level settings)
@@ -388,7 +390,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     @Override
     public void clear() {
-        // Nothing to wipe: the stores hold the ECS state and afterReset() restarts the reconciler.
+        // The stores hold the ECS state and afterReset() restarts the reconciler. The reset also
+        // wipes CloudWatch, so the Container Insights samples it held must be written again.
+        publishedInsights.clear();
     }
 
     /**
@@ -5014,6 +5018,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         Map<String, Integer> counts = Map.of("RunningTaskCount", running,
                 "PendingTaskCount", Collections.frequency(statuses, TaskStatus.PENDING.name()),
                 "DesiredTaskCount", svc.getDesiredCount());
+        String accountId = regionResolver.getAccountId();
+        String sampleKey = accountId + "::" + key;
+        InsightsSample sample = new InsightsSample(minute, counts);
+        // A persistent metric store rewrites its file on every put, and the reconciler ticks every
+        // five seconds, so the minute's sample is written again only when a count changes.
+        if (sample.equals(publishedInsights.get(sampleKey))) {
+            return;
+        }
         for (Map.Entry<String, Integer> count : counts.entrySet()) {
             MetricDatum datum = new MetricDatum();
             datum.setMetricName(count.getKey());
@@ -5022,9 +5034,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     new Dimension("ServiceName", svc.getServiceName())));
             datum.setTimestamp(minute);
             datum.setValue(count.getValue());
-            cloudWatchMetricsService.publishMetricForAccount(regionResolver.getAccountId(), "ECS/ContainerInsights",
+            cloudWatchMetricsService.publishMetricForAccount(accountId, "ECS/ContainerInsights",
                     datum, region, "ecs-container-insights");
         }
+        publishedInsights.put(sampleKey, sample);
+    }
+
+    private record InsightsSample(long minute, Map<String, Integer> counts) {
     }
 
     /**

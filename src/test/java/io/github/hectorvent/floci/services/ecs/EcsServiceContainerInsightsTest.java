@@ -20,6 +20,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,8 +28,15 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -49,7 +57,7 @@ class EcsServiceContainerInsightsTest {
     void setUp() {
         InMemoryStorageFactory storage = new InMemoryStorageFactory();
         RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
-        metrics = new CloudWatchMetricsService(storage, regionResolver);
+        metrics = spy(new CloudWatchMetricsService(storage, regionResolver));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(true);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -86,6 +94,18 @@ class EcsServiceContainerInsightsTest {
         List<Datapoint> points = statistics("RunningTaskCount");
         assertFalse(points.isEmpty());
         assertTrue(points.stream().allMatch(p -> p.sampleCount() == 1.0), points.toString());
+    }
+
+    @Test
+    void anUnchangedSampleIsNotWrittenAgainWithinTheMinute() {
+        startService(List.of(new ClusterSetting("containerInsights", "enabled")), 1);
+        Instant minute = Instant.now().truncatedTo(ChronoUnit.MINUTES);
+
+        service.reconcile();
+        service.reconcile();
+
+        assumeTrue(minute.equals(Instant.now().truncatedTo(ChronoUnit.MINUTES)), "the minute rolled over between the ticks");
+        verify(metrics, times(3)).publishMetricForAccount(anyString(), eq(NAMESPACE), any(), eq(REGION), anyString());
     }
 
     @Test
