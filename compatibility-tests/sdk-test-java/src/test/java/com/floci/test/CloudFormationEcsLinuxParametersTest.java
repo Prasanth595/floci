@@ -5,16 +5,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
-import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
-import software.amazon.awssdk.services.cloudformation.model.DescribeStacksRequest;
-import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.cloudformation.model.StackEvent;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.ContainerDefinition;
 import software.amazon.awssdk.services.ecs.model.LinuxParameters;
 import software.amazon.awssdk.services.ecs.model.Tmpfs;
 
-import java.util.ArrayList;
+import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -27,9 +24,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("CloudFormation AWS::ECS::TaskDefinition LinuxParameters")
 class CloudFormationEcsLinuxParametersTest {
 
+    private static final Duration DEPLOY_TIMEOUT = Duration.ofSeconds(30);
+    private static final String LINUX_STACK = TestFixtures.uniqueName("compat-cfn-linux");
+    private static final String FARGATE_STACK = TestFixtures.uniqueName("compat-cfn-linux-fargate");
+
     private static CloudFormationClient cloudFormation;
     private static EcsClient ecs;
-    private static final List<String> STACKS = new ArrayList<>();
 
     @BeforeAll
     static void setup() {
@@ -37,50 +37,22 @@ class CloudFormationEcsLinuxParametersTest {
         ecs = TestFixtures.ecsClient();
     }
 
-    /**
-     * Deletes each stack a test asked for and waits until it is gone, so no stack or task
-     * definition outlives the run. Every stack is tried; a delete that fails or does not finish
-     * fails the cleanup once all of them have been, with each failure attached.
-     */
     @AfterAll
     static void cleanup() {
-        AssertionError failure = new AssertionError("Deleting the LinuxParameters stacks failed");
-        boolean interrupted = false;
-        try {
-            if (cloudFormation != null) {
-                for (String stack : STACKS) {
-                    try {
-                        cloudFormation.deleteStack(r -> r.stackName(stack));
-                        waitForDeleted(stack);
-                    } catch (InterruptedException e) {
-                        // Recorded and restored below, so the remaining stacks are still deleted.
-                        interrupted = true;
-                        failure.addSuppressed(e);
-                    } catch (RuntimeException | AssertionError e) {
-                        failure.addSuppressed(e);
-                    }
-                }
-            }
-        } finally {
-            if (cloudFormation != null) {
-                cloudFormation.close();
-            }
-            if (ecs != null) {
-                ecs.close();
-            }
+        if (cloudFormation != null) {
+            // DeleteStack answers for a stack that is gone too, so a failure here is a real one.
+            cloudFormation.deleteStack(r -> r.stackName(LINUX_STACK));
+            cloudFormation.deleteStack(r -> r.stackName(FARGATE_STACK));
+            cloudFormation.close();
         }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-        if (failure.getSuppressed().length > 0) {
-            throw failure;
+        if (ecs != null) {
+            ecs.close();
         }
     }
 
     @Test
     void linuxParametersReachTheTaskDefinition() throws InterruptedException {
-        String name = TestFixtures.uniqueName("compat-cfn-linux");
-        STACKS.add(name);
+        String name = LINUX_STACK;
         cloudFormation.createStack(r -> r.stackName(name).templateBody("""
                 {"Resources": {"TaskDef": {"Type": "AWS::ECS::TaskDefinition", "Properties": {
                   "Family": "%s", "RequiresCompatibilities": ["EC2"], "NetworkMode": "bridge",
@@ -90,7 +62,7 @@ class CloudFormationEcsLinuxParametersTest {
                       "SharedMemorySize": 256, "MaxSwap": 1024, "Swappiness": 10,
                       "Tmpfs": [{"ContainerPath": "/scratch", "Size": 64, "MountOptions": ["noexec"]}]}}]}}}}
                 """.formatted(name)));
-        assertThat(waitForTerminal(name)).isEqualTo("CREATE_COMPLETE");
+        assertThat(TestFixtures.awaitStackTerminal(cloudFormation, name, DEPLOY_TIMEOUT)).isEqualTo("CREATE_COMPLETE");
 
         ContainerDefinition container = ecs.describeTaskDefinition(r -> r.taskDefinition(name))
                 .taskDefinition().containerDefinitions().get(0);
@@ -109,8 +81,7 @@ class CloudFormationEcsLinuxParametersTest {
 
     @Test
     void aFargateTemplateAskingForSwapFailsAsRegisterTaskDefinitionDoes() throws InterruptedException {
-        String name = TestFixtures.uniqueName("compat-cfn-linux-fargate");
-        STACKS.add(name);
+        String name = FARGATE_STACK;
         cloudFormation.createStack(r -> r.stackName(name).templateBody("""
                 {"Resources": {"TaskDef": {"Type": "AWS::ECS::TaskDefinition", "Properties": {
                   "Family": "%s", "RequiresCompatibilities": ["FARGATE"], "NetworkMode": "awsvpc",
@@ -118,43 +89,10 @@ class CloudFormationEcsLinuxParametersTest {
                   "ContainerDefinitions": [{"Name": "worker", "Image": "busybox",
                     "LinuxParameters": {"MaxSwap": 512, "Swappiness": 10}}]}}}}
                 """.formatted(name)));
-        assertThat(waitForTerminal(name)).isEqualTo("ROLLBACK_COMPLETE");
+        assertThat(TestFixtures.awaitStackTerminal(cloudFormation, name, DEPLOY_TIMEOUT)).isEqualTo("ROLLBACK_COMPLETE");
 
         List<StackEvent> events = cloudFormation.describeStackEvents(r -> r.stackName(name)).stackEvents();
         assertThat(events).anySatisfy(event -> assertThat(event.resourceStatusReason())
                 .contains("Fargate compatible task definitions do not support maxSwap"));
-    }
-
-    private static void waitForDeleted(String name) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + 30_000L;
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                List<Stack> stacks = cloudFormation.describeStacks(
-                        DescribeStacksRequest.builder().stackName(name).build()).stacks();
-                if (stacks.isEmpty() || "DELETE_COMPLETE".equals(stacks.get(0).stackStatusAsString())) {
-                    return;
-                }
-            } catch (CloudFormationException e) {
-                if (e.getMessage() != null && e.getMessage().contains("does not exist")) {
-                    return;
-                }
-                throw e;
-            }
-            Thread.sleep(500);
-        }
-        throw new AssertionError("Stack " + name + " was not deleted within 30s");
-    }
-
-    private static String waitForTerminal(String name) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + 30_000L;
-        while (System.currentTimeMillis() < deadline) {
-            List<Stack> stacks = cloudFormation.describeStacks(
-                    DescribeStacksRequest.builder().stackName(name).build()).stacks();
-            if (!stacks.isEmpty() && !stacks.get(0).stackStatusAsString().endsWith("_IN_PROGRESS")) {
-                return stacks.get(0).stackStatusAsString();
-            }
-            Thread.sleep(500);
-        }
-        throw new AssertionError("Stack " + name + " did not reach a terminal state within 30s");
     }
 }
