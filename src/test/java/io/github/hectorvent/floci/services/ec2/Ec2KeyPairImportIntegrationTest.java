@@ -15,7 +15,7 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.UUID;
 
-import static io.github.hectorvent.floci.core.common.SshKeyBlobs.line;
+import static io.github.hectorvent.floci.core.common.SshPublicKeysTest.blob;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.createKeyPair;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.deleteKeyPair;
@@ -57,8 +57,8 @@ class Ec2KeyPairImportIntegrationTest {
         String material = switch (shape) {
             case "dsa" -> DSA_KEY;
             case "ecdsa" -> ECDSA_KEY;
-            case "rsa-768" -> line("ssh-rsa", BigInteger.valueOf(65537).toByteArray(),
-                    BigInteger.ONE.shiftLeft(767).setBit(0).toByteArray());
+            case "rsa-768" -> "ssh-rsa " + base64(blob("ssh-rsa", BigInteger.valueOf(65537).toByteArray(),
+                    BigInteger.ONE.shiftLeft(767).setBit(0).toByteArray()));
             // A SubjectPublicKeyInfo whose key bit string declares an unused bit: no whole key.
             case "der-pad-bits" -> base64(withPadBits(Ec2KeyMaterial.generateRsa().openSshPublicKey()));
             // An rsaEncryption SubjectPublicKeyInfo whose key bit string is empty: no key at all.

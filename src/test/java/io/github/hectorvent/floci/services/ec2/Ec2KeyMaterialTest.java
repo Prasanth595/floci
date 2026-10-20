@@ -20,8 +20,8 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Random;
 
-import static io.github.hectorvent.floci.core.common.SshKeyBlobs.concat;
-import static io.github.hectorvent.floci.core.common.SshKeyBlobs.line;
+import static io.github.hectorvent.floci.core.common.SshPublicKeysTest.blob;
+import static io.github.hectorvent.floci.core.common.SshPublicKeysTest.withTrailing;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -404,8 +404,8 @@ class Ec2KeyMaterialTest {
             case "ed25519-blob-labelled-rsa" -> "ssh-rsa " + base64(ed25519Blob);
             case "rsa-without-modulus" -> line("ssh-rsa", exponent);
             case "rsa-extra-field" -> line("ssh-rsa", exponent, modulus, utf8("extra"));
-            case "rsa-trailing-bytes" -> "ssh-rsa " + base64(concat(rsaBlob, new byte[] {1, 2, 3}));
-            case "ed25519-trailing-bytes" -> "ssh-ed25519 " + base64(concat(ed25519Blob, new byte[] {1, 2, 3}));
+            case "rsa-trailing-bytes" -> "ssh-rsa " + base64(withTrailing(rsaBlob, new byte[] {1, 2, 3}));
+            case "ed25519-trailing-bytes" -> "ssh-ed25519 " + base64(withTrailing(ed25519Blob, new byte[] {1, 2, 3}));
             case "ed25519-33-bytes" -> line("ssh-ed25519", new byte[33]);
             // Two's complement with the top bit set and no leading zero: a negative number.
             case "rsa-negative-modulus" -> line("ssh-rsa", exponent, Arrays.copyOfRange(modulus, 1, modulus.length));
@@ -440,7 +440,7 @@ class Ec2KeyMaterialTest {
             case "pem-mismatched-end" -> RSA_PEM_SPKI.replace("END PUBLIC KEY", "END RSA PUBLIC KEY");
             case "pem-ec-key" -> "-----BEGIN PUBLIC KEY-----\n" + ecDer + "\n-----END PUBLIC KEY-----\n";
             case "der-ec-key" -> ecDer;
-            case "der-trailing-bytes" -> base64(concat(Base64.getDecoder().decode(RSA_DER_SPKI), new byte[] {0}));
+            case "der-trailing-bytes" -> base64(withTrailing(Base64.getDecoder().decode(RSA_DER_SPKI), new byte[] {0}));
             default -> throw new IllegalArgumentException(shape);
         };
 
@@ -488,7 +488,7 @@ class Ec2KeyMaterialTest {
             random.nextBytes(bytes);
             assertDoesNotThrow(new String(bytes, StandardCharsets.ISO_8859_1));
             assertDoesNotThrow("ssh-rsa " + base64(bytes));
-            assertDoesNotThrow(base64(concat(new byte[] {0x30}, bytes)));
+            assertDoesNotThrow(base64(withTrailing(new byte[] {0x30}, bytes)));
         }
     }
 
@@ -587,6 +587,11 @@ class Ec2KeyMaterialTest {
     private static String fingerprintOf(String material) {
         Ec2KeyMaterial.Imported key = Ec2KeyMaterial.readImportedKey(material);
         return key != null ? key.fingerprint() : null;
+    }
+
+    /** An OpenSSH line of the given type whose blob holds the type and then these fields. */
+    private static String line(String type, byte[]... fields) {
+        return type + " " + base64(blob(type, fields));
     }
 
     private static String base64(byte[] bytes) {

@@ -24,7 +24,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.stream.Stream;
 
-import static io.github.hectorvent.floci.core.common.SshKeyBlobs.concat;
+import static io.github.hectorvent.floci.core.common.SshPublicKeysTest.withTrailing;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_BLOB;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -321,8 +321,8 @@ class Ec2QueryHandlerTest {
         return Stream.of(
                 "ssh-rsa AAAAB3NzaC1yc2E= saved-earlier",
                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= saved-earlier",
-                "ssh-ed25519 " + Base64.getEncoder().encodeToString(concat(ed25519, new byte[] {0, 0, 0, 5, 'e', 'x', 't', 'r', 'a'})),
-                "ssh-ed25519 " + Base64.getEncoder().encodeToString(concat(ed25519, new byte[] {1, 2, 3})),
+                "ssh-ed25519 " + Base64.getEncoder().encodeToString(withTrailing(ed25519, new byte[] {0, 0, 0, 5, 'e', 'x', 't', 'r', 'a'})),
+                "ssh-ed25519 " + Base64.getEncoder().encodeToString(withTrailing(ed25519, new byte[] {1, 2, 3})),
                 "ssh-ed25519 " + rsaBlob + " saved-earlier",
                 "ssh-ed25519 " + ED25519_BLOB + " first\n" + Ec2KeyMaterial.generateRsa().openSshPublicKey() + " second\n",
                 "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"saved-earlier\"\n" + rsaBlob + "\n---- END SSH2 PUBLIC KEY ----\n",
