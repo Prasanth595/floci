@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_cfn_property_types.py",
     "schemas": "https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip",
-    "retrieved": "2026-10-20",
+    "retrieved": "2026-10-19",
     "note": "make cfn-property-types-verify checks the file against AWS."
   },
   "operations": {
@@ -1291,16 +1291,6 @@
         "ContainerPath": "String"
       }
     },
-    "AWS::ECS::TaskDefinition/NvidiaMpsAllocation": {
-      "type": "structure",
-      "members": {
-        "Memory": "Integer",
-        "MaxComputePercent": "Integer"
-      },
-      "required": [
-        "Memory"
-      ]
-    },
     "AWS::ECS::TaskDefinition/PortMapping": {
       "type": "structure",
       "members": {
@@ -1337,7 +1327,6 @@
       "type": "structure",
       "members": {
         "Type": "String",
-        "SharingStrategy": "AWS::ECS::TaskDefinition/SharingStrategy",
         "Value": "String"
       },
       "required": [
@@ -1384,15 +1373,6 @@
       "required": [
         "Name",
         "ValueFrom"
-      ]
-    },
-    "AWS::ECS::TaskDefinition/SharingStrategy": {
-      "type": "structure",
-      "members": {
-        "NvidiaMps": "AWS::ECS::TaskDefinition/NvidiaMpsAllocation"
-      },
-      "required": [
-        "NvidiaMps"
       ]
     },
     "AWS::ECS::TaskDefinition/SystemControl": {
