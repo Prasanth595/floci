@@ -72,10 +72,12 @@ import org.mockito.InOrder;
 import java.io.StringReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -4340,7 +4342,7 @@ class Ec2ServiceTest {
      * and material ImportKeyPair would now refuse has no type. key-type filters by the same answer.
      */
     @Test
-    void theTypeOfAKeyPairStoredWithoutOneIsReadFromItsKey() {
+    void theTypeOfAKeyPairStoredWithoutOneIsReadFromItsKey() throws Exception {
         AccountAwareStorageBackend<KeyPair> keyPairStore = AccountAwareStorageBackend.inMemory("000000000000");
         Map<String, String> legacy = new LinkedHashMap<>();
         legacy.put("key-created", null);
@@ -4348,6 +4350,12 @@ class Ec2ServiceTest {
         legacy.put("key-ecdsa", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFaxjAHsoCE0"
                 + "FmjbKLGzgVRKfOKFmYj1/JpnSjsuLjy23mHIUPkLJ5thgE47igHp+KufC1V2KqJE4OP5w4EK9SU= throwaway");
         legacy.put("key-garbage", "c3NoLXJzYSBBQUFB");
+        // A SubjectPublicKeyInfo whose bit string declares an unused bit (byte 23 of a 2048-bit RSA
+        // key): the earlier ImportKeyPair stored it, and reading it must not fail the whole listing.
+        byte[] padded = KeyPairGenerator.getInstance("RSA").generateKeyPair().getPublic().getEncoded();
+        padded[23] = 1;
+        legacy.put("key-pad-bits", "-----BEGIN PUBLIC KEY-----\n" + Base64.getEncoder().encodeToString(padded)
+                + "\n-----END PUBLIC KEY-----\n");
         for (Map.Entry<String, String> record : legacy.entrySet()) {
             KeyPair keyPair = new KeyPair();
             keyPair.setKeyPairId(record.getKey());
@@ -4378,6 +4386,7 @@ class Ec2ServiceTest {
         expected.put("key-ed25519", "ed25519");
         expected.put("key-ecdsa", null);
         expected.put("key-garbage", null);
+        expected.put("key-pad-bits", null);
         assertEquals(expected, types);
         assertEquals(List.of("key-ed25519"), service.describeKeyPairs("us-east-1", List.of(), List.of(),
                 Map.of("key-type", List.of("ed25519"))).stream().map(KeyPair::getKeyPairId).toList());

@@ -491,6 +491,55 @@ class Ec2KeyMaterialTest {
         }
     }
 
+    /**
+     * A SubjectPublicKeyInfo whose key BIT STRING declares unused pad bits holds no whole key. Bouncy
+     * Castle answers such a bit string with an IllegalStateException rather than an IOException, which
+     * escaped the reader as a 500 and, from a stored key pair, failed every DescribeKeyPairs.
+     */
+    @ParameterizedTest
+    @CsvSource({"1, der", "1, pem", "4, der", "7, der", "7, pem"})
+    void aDerKeyWhoseBitStringDeclaresPadBitsIsRefused(int padBits, String armour) {
+        byte[] der = Base64.getDecoder().decode(RSA_DER_SPKI);
+        // 30 82 01 22, then the 15-byte algorithm, then the BIT STRING header 03 82 01 0f: byte 23 is
+        // the count of unused bits in the bit string's last byte.
+        assertEquals(0, der[23]);
+        der[23] = (byte) padBits;
+        String material = "der".equals(armour) ? base64(der)
+                : "-----BEGIN PUBLIC KEY-----\n" + base64(der) + "\n-----END PUBLIC KEY-----\n";
+
+        assertNull(Ec2KeyMaterial.readImportedKey(material));
+    }
+
+    /**
+     * Every byte of each binary form, set in turn to values that matter to DER and SSH framing, is
+     * read without an exception escaping. Corrupting the base64 text, as the test above does, almost
+     * never lands on a byte such as a bit string's pad count.
+     */
+    @Test
+    void noByteOfABinaryKeyMakesTheReaderThrow() {
+        int[] values = {0, 1, 2, 3, 4, 7, 8, 0x0f, 0x10, 0x1f, 0x30, 0x7f, 0x80, 0x81, 0x82, 0x84, 0xfe, 0xff};
+        List<byte[]> binaries = List.of(Base64.getDecoder().decode(RSA_DER_SPKI), Base64.getDecoder().decode(RSA_DER_PKCS1),
+                Base64.getDecoder().decode(RSA_PUBLIC_KEY.split(" ")[1]), Base64.getDecoder().decode(ED25519_PUBLIC_KEY.split(" ")[1]));
+        for (int form = 0; form < binaries.size(); form++) {
+            byte[] original = binaries.get(form);
+            for (int position = 0; position < original.length; position++) {
+                for (int value : values) {
+                    byte[] corrupted = original.clone();
+                    corrupted[position] = (byte) value;
+                    String encoded = base64(corrupted);
+                    if (form < 2) {
+                        assertDoesNotThrow(encoded);
+                        assertDoesNotThrow("-----BEGIN PUBLIC KEY-----\n" + encoded + "\n-----END PUBLIC KEY-----");
+                    } else {
+                        String type = form == 2 ? "ssh-rsa " : "ssh-ed25519 ";
+                        assertDoesNotThrow(type + encoded);
+                        assertDoesNotThrow("---- BEGIN SSH2 PUBLIC KEY ----\n" + encoded + "\n---- END SSH2 PUBLIC KEY ----");
+                    }
+                }
+            }
+        }
+    }
+
     private static void assertDoesNotThrow(String material) {
         try {
             Ec2KeyMaterial.readImportedKey(material);

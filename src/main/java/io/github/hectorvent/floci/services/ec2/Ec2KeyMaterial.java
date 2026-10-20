@@ -150,8 +150,10 @@ public final class Ec2KeyMaterial {
             }
             RSAPublicKey key = rsaKeyOfDer(Base64.getDecoder().decode(String.join("", lines)));
             return importedRsa(key, SshPublicKeys.toOpenSsh(key));
-        } catch (SshPublicKeyException | IllegalArgumentException | GeneralSecurityException | IOException expected) {
-            // Material AWS refuses, which the caller answers with InvalidKey.Format.
+        } catch (SshPublicKeyException | IllegalArgumentException | IllegalStateException
+                 | GeneralSecurityException | IOException expected) {
+            // Material AWS refuses, which the caller answers with InvalidKey.Format. Bouncy Castle
+            // reports some malformed DER with an IllegalStateException rather than an IOException.
             return null;
         }
     }
@@ -262,7 +264,9 @@ public final class Ec2KeyMaterial {
         ASN1Primitive rsaKey = structure;
         if (structure.getObjectAt(0) instanceof ASN1Sequence) {
             SubjectPublicKeyInfo info = SubjectPublicKeyInfo.getInstance(structure);
-            if (!PKCSObjectIdentifiers.rsaEncryption.equals(info.getAlgorithm().getAlgorithm())) {
+            // The key is a whole number of bytes, so a bit string declaring unused bits holds none.
+            if (!PKCSObjectIdentifiers.rsaEncryption.equals(info.getAlgorithm().getAlgorithm())
+                    || info.getPublicKeyData().getPadBits() != 0) {
                 throw new SshPublicKeyException("not an RSA public key");
             }
             rsaKey = info.parsePublicKey();

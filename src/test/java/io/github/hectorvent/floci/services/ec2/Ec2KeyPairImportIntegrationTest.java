@@ -54,13 +54,15 @@ class Ec2KeyPairImportIntegrationTest {
      */
     @ParameterizedTest
     @ValueSource(strings = {"dsa", "ecdsa", "rsa-768", "truncated-rsa", "two-lines", "rfc4716-ed25519",
-            "private-key", "double-base64"})
+            "private-key", "double-base64", "der-pad-bits"})
     void materialEc2DoesNotImportIsRefusedWithInvalidKeyFormat(String shape) {
         String name = "refused-" + UUID.randomUUID();
         String material = switch (shape) {
             case "dsa" -> DSA_KEY;
             case "ecdsa" -> ECDSA_KEY;
             case "rsa-768" -> sshRsaLine(BigInteger.ONE.shiftLeft(767).setBit(0));
+            // A SubjectPublicKeyInfo whose key bit string declares an unused bit: no whole key.
+            case "der-pad-bits" -> base64(withPadBits(Ec2KeyMaterial.generateRsa().openSshPublicKey()));
             case "truncated-rsa" -> "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAQQDHnLTTbpnrFWkfVt test@test";
             case "two-lines" -> ED25519_KEY + " first\n" + Ec2KeyMaterial.generateRsa().openSshPublicKey() + " second\n";
             case "rfc4716-ed25519" -> "---- BEGIN SSH2 PUBLIC KEY ----\n" + ED25519_KEY.split(" ")[1]
@@ -176,6 +178,20 @@ class Ec2KeyPairImportIntegrationTest {
             blob.putInt(field.length).put(field);
         }
         return "ssh-rsa " + base64(blob.array());
+    }
+
+    /**
+     * The DER SubjectPublicKeyInfo of a 2048-bit OpenSSH RSA key with its bit string's pad count, the
+     * byte after the BIT STRING header, set to one.
+     */
+    private static byte[] withPadBits(String openSshRsaKey) {
+        try {
+            byte[] der = rsaKeyOf(Base64.getDecoder().decode(openSshRsaKey.split(" ")[1])).getEncoded();
+            der[23] = 1;
+            return der;
+        } catch (Exception e) {
+            throw new IllegalStateException("could not encode the test key", e);
+        }
     }
 
     /** The RSA key of an ssh-rsa blob: its type, then the exponent, then the modulus. */
