@@ -1013,14 +1013,6 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
      * that is no ARN at all, so letting it through would store a certificate the listener cannot
      * serve.
      */
-    private void requireListenerCertificates(String region, String protocol, List<String> certificateArns) {
-        requireCertificates(region, protocol, certificateArns);
-        if ("HTTPS".equalsIgnoreCase(protocol) && (certificateArns == null || certificateArns.isEmpty())) {
-            throw new AwsException("InvalidConfigurationRequest",
-                    "An HTTPS listener requires a default certificate.", 400);
-        }
-    }
-
     private void requireCertificates(String region, String protocol,
                                      List<String> certificateArns) {
         if (certificateResolver == null || certificateArns == null || !servesCertificates(protocol)) {
@@ -1032,6 +1024,14 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 throw new AwsException("CertificateNotFound",
                         "The specified certificate does not exist.", 400);
             }
+        }
+    }
+
+    private void requireListenerCertificates(String region, String protocol, List<String> certificateArns) {
+        requireCertificates(region, protocol, certificateArns);
+        if ("HTTPS".equalsIgnoreCase(protocol) && (certificateArns == null || certificateArns.isEmpty())) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "An HTTPS listener requires a default certificate.", 400);
         }
     }
 
