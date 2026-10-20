@@ -5280,6 +5280,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (sample.equals(publishedInsights.get(sampleKey))) {
             return;
         }
+        // Forgotten before writing, so a write that fails partway is repeated on the next tick
+        // even when the counts are back to the ones last written in full.
+        publishedInsights.remove(sampleKey);
         for (Map.Entry<String, Integer> count : counts.entrySet()) {
             MetricDatum datum = new MetricDatum();
             datum.setMetricName(count.getKey());

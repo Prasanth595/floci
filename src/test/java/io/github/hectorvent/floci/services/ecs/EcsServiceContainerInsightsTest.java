@@ -33,6 +33,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -105,6 +107,23 @@ class EcsServiceContainerInsightsTest {
         service.reconcile();
 
         assumeTrue(minute.equals(Instant.now().truncatedTo(ChronoUnit.MINUTES)), "the minute rolled over between the ticks");
+        verify(metrics, times(3)).publishMetricForAccount(anyString(), eq(NAMESPACE), any(), eq(REGION), anyString());
+    }
+
+    @Test
+    void aWriteThatFailsPartwayIsRepeatedEvenWhenTheCountsReturn() {
+        startService(List.of(new ClusterSetting("containerInsights", "enabled")), 1);
+        service.reconcile();
+        service.updateService("insights", "web", null, 2, null, REGION);
+        // One of the three counts lands, the next write fails.
+        doCallRealMethod().doThrow(new IllegalStateException("disk full")).doCallRealMethod().when(metrics)
+                .publishMetricForAccount(anyString(), eq(NAMESPACE), any(), eq(REGION), anyString());
+        service.reconcile();
+
+        service.updateService("insights", "web", null, 1, null, REGION);
+        clearInvocations(metrics);
+        service.reconcile();
+
         verify(metrics, times(3)).publishMetricForAccount(anyString(), eq(NAMESPACE), any(), eq(REGION), anyString());
     }
 
