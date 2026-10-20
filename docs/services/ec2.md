@@ -339,7 +339,8 @@ returns: the PKCS#1 `BEGIN RSA PRIVATE KEY` block for an RSA key, OpenSSH's own
 unencrypted, with the key pair's name as its comment. The fingerprint follows the key's type rather
 than its format: the SHA-1 of the DER private key for RSA, as colon-separated hex, and the base64
 SHA-256 of the public key for ED25519, with the `=` padding that `ssh-keygen -l` leaves off. Any other
-`KeyType` or `KeyFormat` is `InvalidParameterValue`, and nothing is created.
+`KeyType` or `KeyFormat` is `InvalidParameterValue`, and nothing is created. `DryRun=true` is answered
+with `DryRunOperation` before any of these checks, and creates nothing either.
 
 ### AMIs
 

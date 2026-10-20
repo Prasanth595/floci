@@ -7406,8 +7406,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Creates a key pair of {@code keyType}, {@code rsa} when null, and returns its private key in
-     * {@code keyFormat}, {@code pem} when null. A value outside either enum is refused as AWS's request
-     * validation refuses it, before the name is checked for a duplicate.
+     * {@code keyFormat}, {@code pem} when null. A value outside either enum is refused with the message
+     * AWS's request validation gives; Floci checks the values after the name is found present and
+     * before it is found taken.
      */
     public KeyPair createKeyPair(String region, String keyName, String keyType, String keyFormat) {
         ensureDefaultResources(region);

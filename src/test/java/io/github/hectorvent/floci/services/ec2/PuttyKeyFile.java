@@ -30,11 +30,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * A PuTTY private key file, version 2, read the way PuTTY reads one, for the key pair tests: written
- * apart from the code that writes these files, so a test checks the format rather than the writer's
- * own idea of it. The layout and the MAC follow PuTTY's sshpubk.c: a version line, an encryption line
- * and a comment, the public blob and the private fields as counted lines of base64, and an HMAC-SHA1,
- * keyed with the SHA-1 of "putty-private-key-file-mac-key" when unencrypted, over the algorithm, the
- * encryption, the comment and both blobs, each as an SSH string.
+ * apart from Ec2PuttyKeys, so a test checks the format rather than the writer's own idea of it. The
+ * layout and the MAC follow PuTTY's sshpubk.c: a version line, an encryption line and a comment, the
+ * public blob and the private fields as counted lines of base64, and an HMAC-SHA1, keyed with the
+ * SHA-1 of "putty-private-key-file-mac-key" when unencrypted, over the algorithm, the encryption, the
+ * comment and both blobs, each as an SSH string. Its fields and the RSA public key are read with
+ * SshPublicKeys, which SshPublicKeysTest checks on its own.
  */
 record PuttyKeyFile(String algorithm, String encryption, String comment, byte[] publicBlob, byte[] privateBlob,
                     String mac) {

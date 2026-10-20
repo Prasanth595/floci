@@ -119,10 +119,28 @@ class Ec2CreateKeyPairTest {
         }
     }
 
+    @Test
+    @DisplayName("DryRun is answered before the key type is checked, and creates nothing")
+    void dryRunIsAnsweredFirst() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            String name = TestFixtures.uniqueName("dry-run-key");
+
+            assertThatThrownBy(() -> ec2.createKeyPair(r -> r.keyName(name).keyType("ecdsa").dryRun(true)))
+                    .isInstanceOfSatisfying(Ec2Exception.class, e -> {
+                        assertThat(e.statusCode()).isEqualTo(412);
+                        assertThat(e.awsErrorDetails().errorCode()).isEqualTo("DryRunOperation");
+                    });
+            assertThatThrownBy(() -> ec2.describeKeyPairs(r -> r.keyNames(name)))
+                    .isInstanceOfSatisfying(Ec2Exception.class, e ->
+                            assertThat(e.awsErrorDetails().errorCode()).isEqualTo("InvalidKeyPair.NotFound"));
+        }
+    }
+
+    /** The described public key, without the line break AWS ends it with and Floci does not. */
     private static String describedPublicKey(Ec2Client ec2, String keyPairId) {
         KeyPairInfo described = ec2.describeKeyPairs(r -> r.keyPairIds(keyPairId).includePublicKey(true))
                 .keyPairs().get(0);
-        return described.publicKey();
+        return described.publicKey().strip();
     }
 
     /** PuTTY's version 2 MAC of an unencrypted key file, as its sshpubk.c computes it. */

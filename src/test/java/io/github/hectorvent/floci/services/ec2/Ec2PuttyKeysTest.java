@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -53,7 +54,7 @@ class Ec2PuttyKeysTest {
 
         assertEquals("ssh-ed25519", file.algorithm());
         assertTrue(file.macIsValid());
-        assertArrayEquals(Ec2CreateKeyPairIntegrationTest.openSshEd25519Key(pem.privateKeyPem()).getEncoded(),
+        assertArrayEquals(Ec2CreateKeyPairFixtures.openSshEd25519Key(pem.privateKeyPem()).getEncoded(),
                 file.ed25519Key().getEncoded());
         assertArrayEquals(SshPublicKeys.decodeBlob(pem.openSshPublicKey()), file.publicBlob());
     }
@@ -98,17 +99,26 @@ class Ec2PuttyKeysTest {
         assertEquals(colonHex(Digests.sha1(key.getEncoded())), ppk.fingerprint());
     }
 
-    @Test
-    void aNameThatCannotBeOneLineOfTheFileIsLeftOut() throws Exception {
+    /**
+     * PuTTY ends a line at a line feed or a carriage return, so a name holding either cannot be the
+     * comment; a tab or any other control character is left out with them.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"two\nlines", "two\rlines", "a\ttab", "a\177delete"})
+    void aNameThatCannotBeOneLineOfTheFileIsLeftOut(String name) throws Exception {
         Ec2KeyMaterial.Generated pem = Ec2KeyMaterial.generate("ed25519", "pem", "ignored");
 
-        PuttyKeyFile file = PuttyKeyFile.parse(Ec2PuttyKeys.of(pem, "two\nlines").privateKeyPem());
+        PuttyKeyFile file = PuttyKeyFile.parse(Ec2PuttyKeys.of(pem, name).privateKeyPem());
 
         assertEquals("", file.comment());
         assertTrue(file.macIsValid());
     }
 
-    /** A key from generateRsa with its primes in the given order, which Java's generator picks at random. */
+    /**
+     * A key from generateRsa with its primes in the given order, which Java's generator picks at
+     * random. A generator that never puts the smaller prime first leaves that order unreachable,
+     * so the case is skipped rather than failed.
+     */
     private static Ec2KeyMaterial.Generated rsaPemWithLargerPrimeFirst(boolean largerPrimeFirst) {
         for (int attempt = 0; attempt < 64; attempt++) {
             Ec2KeyMaterial.Generated pem = Ec2KeyMaterial.generateRsa();
@@ -117,7 +127,7 @@ class Ec2PuttyKeysTest {
                 return pem;
             }
         }
-        throw new AssertionError("64 generated keys in a row had their primes in the same order");
+        return Assumptions.abort("64 generated keys in a row had their primes in the other order");
     }
 
     private static String colonHex(byte[] digest) {

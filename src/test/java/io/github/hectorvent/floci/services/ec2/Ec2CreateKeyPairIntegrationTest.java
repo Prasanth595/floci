@@ -3,29 +3,31 @@ package io.github.hectorvent.floci.services.ec2;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
-import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
-import org.bouncycastle.crypto.params.AsymmetricKeyParameter;
-import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
-import org.bouncycastle.crypto.util.OpenSSHPrivateKeyUtil;
-import org.bouncycastle.crypto.util.OpenSSHPublicKeyUtil;
 import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
-import org.bouncycastle.util.io.pem.PemObject;
-import org.bouncycastle.util.io.pem.PemReader;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.io.StringReader;
+import java.nio.charset.StandardCharsets;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.ACCOUNT_ID;
+import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.REGION;
+import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.createKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.deleteKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.firstLine;
+import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.openSshEd25519Key;
+import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.sshEd25519Blob;
+import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -40,8 +42,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @QuarkusTest
 class Ec2CreateKeyPairIntegrationTest {
-
-    static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20261020/us-east-1/ec2/aws4_request";
 
     @Test
     void ed25519IsAnOpenSshPrivateKeyFingerprintedWithSha256() throws IOException {
@@ -60,6 +60,28 @@ class Ec2CreateKeyPairIntegrationTest {
             assertDescribedAs(name, id, blob, "ed25519");
         } finally {
             deleteKeyPair(id);
+        }
+    }
+
+    @Test
+    void anEd25519KeyImportedAfterItWasCreatedHasTheSameFingerprint() throws IOException {
+        // AWS fingerprints an ED25519 key the same way whether it created the key or was given it.
+        String name = uniqueName();
+        XmlPath created = createKeyPair(name, "ed25519", null).statusCode(200).extract().xmlPath();
+        String id = created.getString("CreateKeyPairResponse.keyPairId");
+        String publicKey = "ssh-ed25519 " + Base64.getEncoder().encodeToString(
+                sshEd25519Blob(openSshEd25519Key(created.getString("CreateKeyPairResponse.keyMaterial"))));
+        XmlPath imported = ec2("ImportKeyPair", ACCOUNT_ID, REGION)
+                .formParam("KeyName", name + "-imported")
+                .formParam("PublicKeyMaterial",
+                        Base64.getEncoder().encodeToString(publicKey.getBytes(StandardCharsets.UTF_8)))
+                .post("/").then().statusCode(200).extract().xmlPath();
+        try {
+            assertEquals(created.getString("CreateKeyPairResponse.keyFingerprint"),
+                    imported.getString("ImportKeyPairResponse.keyFingerprint"));
+        } finally {
+            deleteKeyPair(id);
+            deleteKeyPair(imported.getString("ImportKeyPairResponse.keyPairId"));
         }
     }
 
@@ -129,6 +151,7 @@ class Ec2CreateKeyPairIntegrationTest {
         assertNotCreated(name);
     }
 
+    /** Floci's order for two violations: KeyType's before KeyFormat's, the model's member order. */
     @Test
     void anUnknownKeyTypeAndFormatAreReportedTogether() {
         String name = uniqueName();
@@ -142,6 +165,7 @@ class Ec2CreateKeyPairIntegrationTest {
         assertNotCreated(name);
     }
 
+    /** Floci checks the values before it looks for the name, as request validation precedes the operation. */
     @Test
     void anUnknownKeyTypeIsRefusedBeforeTheNameIsFoundTaken() {
         String name = uniqueName();
@@ -156,77 +180,67 @@ class Ec2CreateKeyPairIntegrationTest {
     }
 
     /**
+     * AWS answers DryRun before any other check on the request, a taken or empty name and an unknown
+     * type included, and creates nothing.
+     */
+    @ParameterizedTest
+    @CsvSource(value = {"new,NULL", "taken,NULL", "empty,NULL", "new,ecdsa"}, nullValues = "NULL")
+    void aDryRunIsAnsweredBeforeAnyOtherCheckAndCreatesNothing(String nameKind, String keyType) {
+        String name = "empty".equals(nameKind) ? "" : uniqueName();
+        String takenId = "taken".equals(nameKind)
+                ? createKeyPair(name, null, null).statusCode(200).extract().path("CreateKeyPairResponse.keyPairId")
+                : null;
+        try {
+            RequestSpecification dryRun = ec2("CreateKeyPair", ACCOUNT_ID, REGION)
+                    .formParam("KeyName", name)
+                    .formParam("DryRun", "true");
+            if (keyType != null) {
+                dryRun.formParam("KeyType", keyType);
+            }
+            dryRun.post("/").then()
+                    .statusCode(412)
+                    .body("Response.Errors.Error.Code", equalTo("DryRunOperation"))
+                    .body("Response.Errors.Error.Message",
+                            equalTo("Request would have succeeded, but DryRun flag is set."));
+            if ("new".equals(nameKind)) {
+                assertNotCreated(name);
+            }
+        } finally {
+            if (takenId != null) {
+                deleteKeyPair(takenId);
+            }
+        }
+    }
+
+    /**
      * DescribeKeyPairs reports the public half of the created key with the key-pair name as its
-     * comment, and, where it reports a type at all, the type that was created.
+     * comment, and, where it reports a type at all, the type that was created. AWS ends the reported
+     * key with a line break and Floci does not, so the line is compared without it.
      */
     private static void assertDescribedAs(String name, String id, byte[] blob, String keyType) {
         String type = "rsa".equals(keyType) ? "ssh-rsa" : "ssh-ed25519";
-        XmlPath described = given().header("Authorization", AUTH)
-                .formParam("Action", "DescribeKeyPairs")
+        XmlPath described = ec2("DescribeKeyPairs", ACCOUNT_ID, REGION)
                 .formParam("KeyPairId.1", id)
                 .formParam("IncludePublicKey", "true")
                 .post("/").then().statusCode(200)
                 .body("DescribeKeyPairsResponse.keySet.item.keyName", equalTo(name))
-                .body("DescribeKeyPairsResponse.keySet.item.publicKey",
-                        equalTo(type + " " + Base64.getEncoder().encodeToString(blob) + " " + name))
                 .extract().xmlPath();
+        assertEquals(type + " " + Base64.getEncoder().encodeToString(blob) + " " + name,
+                described.getString("DescribeKeyPairsResponse.keySet.item.publicKey").strip());
         String reportedType = described.getString("DescribeKeyPairsResponse.keySet.item.keyType");
         assertTrue(reportedType.isEmpty() || reportedType.equals(keyType),
                 "an " + keyType + " key pair is described as " + reportedType);
     }
 
     private static void assertNotCreated(String name) {
-        given().header("Authorization", AUTH)
-                .formParam("Action", "DescribeKeyPairs")
+        ec2("DescribeKeyPairs", ACCOUNT_ID, REGION)
                 .formParam("KeyName.1", name)
                 .post("/").then().statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.NotFound"));
     }
 
-    /** CreateKeyPair with this name, and the KeyType and KeyFormat when they are not null. */
-    static ValidatableResponse createKeyPair(String name, String keyType, String keyFormat) {
-        RequestSpecification request = given().header("Authorization", AUTH)
-                .formParam("Action", "CreateKeyPair")
-                .formParam("KeyName", name);
-        if (keyType != null) {
-            request.formParam("KeyType", keyType);
-        }
-        if (keyFormat != null) {
-            request.formParam("KeyFormat", keyFormat);
-        }
-        return request.post("/").then();
-    }
-
-    static void deleteKeyPair(String id) {
-        given().header("Authorization", AUTH)
-                .formParam("Action", "DeleteKeyPair")
-                .formParam("KeyPairId", id)
-                .post("/").then().statusCode(200);
-    }
-
-    /** The ED25519 key of an OpenSSH private key file, read with Bouncy Castle's OpenSSH reader. */
-    static Ed25519PrivateKeyParameters openSshEd25519Key(String material) throws IOException {
-        try (PemReader reader = new PemReader(new StringReader(material))) {
-            PemObject pem = reader.readPemObject();
-            assertEquals("OPENSSH PRIVATE KEY", pem.getType());
-            AsymmetricKeyParameter key = OpenSSHPrivateKeyUtil.parsePrivateKeyBlob(pem.getContent());
-            assertTrue(key instanceof Ed25519PrivateKeyParameters, "expected an ED25519 key, got " + key);
-            return (Ed25519PrivateKeyParameters) key;
-        }
-    }
-
-    /** The OpenSSH public key blob of an ED25519 key. */
-    static byte[] sshEd25519Blob(Ed25519PrivateKeyParameters key) throws IOException {
-        return OpenSSHPublicKeyUtil.encodePublicKey(key.generatePublicKey());
-    }
-
     private static String colonHex(byte[] digest) {
         return HexFormat.of().withDelimiter(":").formatHex(digest);
-    }
-
-    /** The first line of key material, which a failure message can show without disclosing the key. */
-    private static String firstLine(String material) {
-        return material.lines().findFirst().orElse("");
     }
 
     private static String uniqueName() {
