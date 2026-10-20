@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -65,13 +66,22 @@ public class ResourceArnBuilder {
     private final Instance<IamService> iamService;
     /** Looked up lazily for the same reason, to resolve a secret named by its name or a partial ARN. */
     private final Instance<SecretsManagerService> secretsManagerService;
+    /** Looked up lazily for the same reason, to read the image a MicroVM runs. */
+    private final Instance<LambdaMicrovmsService> microvmsService;
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
-                              Instance<SecretsManagerService> secretsManagerService) {
+                              Instance<SecretsManagerService> secretsManagerService,
+                              Instance<LambdaMicrovmsService> microvmsService) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
         this.secretsManagerService = secretsManagerService;
+        this.microvmsService = microvmsService;
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              Instance<SecretsManagerService> secretsManagerService) {
+        this(objectMapper, iamService, secretsManagerService, null);
     }
 
     ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
@@ -679,6 +689,14 @@ public class ResourceArnBuilder {
         if (webFunctionArn != null) {
             return webFunctionArn;
         }
+        String microvmArn = microvmArn(path, ctx, region, accountId);
+        if (microvmArn != null) {
+            return microvmArn;
+        }
+        // TagResource, ListTags and UntagResource name the tagged function, image or other resource by its ARN.
+        if (path.startsWith("/2017-03-31/tags/")) {
+            return lambdaTaggedArn(path.substring("/2017-03-31/tags/".length()), accountId);
+        }
         String executionArn = durableExecutionArn(path);
         if (executionArn == null) {
             executionArn = durableCallbackExecutionArn(path);
@@ -712,6 +730,103 @@ public class ResourceArnBuilder {
         } catch (AwsException e) {
             // A reference Lambda refuses, which its handler answers with a 400 before acting on anything.
             return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
+        }
+    }
+
+    /**
+     * The resource of a Lambda MicroVM or network connector route, as the Service Reference gives it:
+     * {@code microvm-image:<name>} for an action on an image, its versions and builds, and
+     * {@code network-connector:<id>} for one on a connector. An identifier given as an ARN is taken for
+     * its trailing name, in the request's account and Region, since that is the resource the service
+     * looks up and acts on, whatever account or Region the ARN names. {@code RunMicrovm} is checked
+     * against the image its {@code imageIdentifier} names, read the same way, an action on a running
+     * MicroVM against the image that MicroVM runs, and a managed image's versions against the managed
+     * image. Creating an image or a connector, listing them and listing MicroVMs name no resource, so
+     * they are {@code *}, as is a MicroVM the account does not hold. Null for every other Lambda route.
+     */
+    private String microvmArn(String path, ContainerRequestContext ctx, String region, String accountId) {
+        if (path.startsWith("/2025-09-09/")) {
+            String image = segmentAfterPrefix(path, "/2025-09-09/microvm-images/");
+            if (image != null) {
+                return microvmImageArn(region, accountId, image);
+            }
+            String managed = segmentAfterPrefix(path, "/2025-09-09/managed-microvm-images/");
+            if (managed != null) {
+                return LambdaMicrovmsService.namesManagedImage(managed)
+                        ? LambdaMicrovmsService.managedImageArn(region) : "*";
+            }
+            String microvm = segmentAfterPrefix(path, "/2025-09-09/microvms/");
+            if (microvm != null) {
+                return runningMicrovmImageArn(region, microvm);
+            }
+            if (path.equals("/2025-09-09/microvms") && "POST".equalsIgnoreCase(ctx.getMethod())) {
+                JsonNode body = readJsonBody(ctx);
+                String identifier = body == null ? null : body.path("imageIdentifier").asText(null);
+                return identifier == null || identifier.isBlank() ? "*" : microvmImageArn(region, accountId, identifier);
+            }
+            return "*";
+        }
+        if (path.startsWith("/2026-04-04/")) {
+            String connector = segmentAfterPrefix(path, "/2026-04-04/network-connectors/");
+            return connector == null ? "*"
+                    : AwsArnUtils.Arn.of("lambda", region, accountId,
+                            "network-connector:" + trailingName(connector)).toString();
+        }
+        return null;
+    }
+
+    private static String microvmImageArn(String region, String accountId, String identifier) {
+        return AwsArnUtils.Arn.of("lambda", region, accountId, "microvm-image:" + trailingName(identifier)).toString();
+    }
+
+    /** The image the caller's MicroVM runs, or {@code *} when the account holds no such MicroVM to act on. */
+    private String runningMicrovmImageArn(String region, String microvmId) {
+        if (microvmsService == null) {
+            return "*";
+        }
+        return microvmsService.get().findMicrovm(region, microvmId)
+                .map(vm -> vm.imageArn)
+                .filter(arn -> arn != null && !arn.isBlank())
+                .orElse("*");
+    }
+
+    /** An identifier's name: an ARN's part after its last {@code :}, as the MicroVM service unwraps it. */
+    private static String trailingName(String identifier) {
+        return identifier.startsWith("arn:") ? identifier.substring(identifier.lastIndexOf(':') + 1) : identifier;
+    }
+
+    /**
+     * The resource a Lambda tag route acts on, from the ARN it names. Tagging looks a function up by the
+     * ARN's Region and name, and a MicroVM image or network connector by the ARN's Region and trailing
+     * name, in the caller's own account whatever account the ARN names, so that resource is the one
+     * checked. The MicroVM tag handler takes any target holding {@code :microvm-image:} or
+     * {@code :network-connector:}, an {@code arn:} prefix or not, so the target is read as it reads it.
+     * Any other ARN, an event source mapping's included, has to name its resource exactly or is
+     * refused, so it is checked as written.
+     */
+    private static String lambdaTaggedArn(String tagged, String accountId) {
+        if (LambdaMicrovmsService.ownsArn(tagged)) {
+            // Read as LambdaTagController and LambdaMicrovmsService read it: the Region is the fourth field,
+            // the name what follows the last colon.
+            String[] fields = tagged.split(":");
+            String region = fields.length > 3 ? fields[3] : "";
+            String type = tagged.contains(":microvm-image:") ? "microvm-image:"
+                    : tagged.contains(":network-connector:") ? "network-connector:" : null;
+            if (type != null && !region.isBlank()) {
+                return AwsArnUtils.Arn.of("lambda", region, accountId,
+                        type + tagged.substring(tagged.lastIndexOf(':') + 1)).toString();
+            }
+        }
+        if (!tagged.startsWith("arn:")) {
+            return "*";
+        }
+        try {
+            LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(tagged);
+            return ref.qualifier() != null ? tagged
+                    : AwsArnUtils.Arn.of("lambda", ref.region(), accountId, "function:" + ref.name()).toString();
+        } catch (AwsException e) {
+            // Not a function ARN Lambda takes, which it tags only when the ARN names the resource exactly.
+            return tagged;
         }
     }
 

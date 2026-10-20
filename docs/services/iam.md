@@ -1253,18 +1253,26 @@ the route's rule miss.
 
 The REST routes mapped to an action are those of S3, Lambda, API Gateway, SES v2, RDS Data,
 Kinesis, EventBridge Scheduler and EventBridge Pipes. In Lambda they are the function, alias,
-event source mapping, function URL, durable execution and Web Function routes,
-`InvokeWithResponseStream` (checked as `lambda:InvokeFunction`) and `GetLayerVersionByArn`
-(`lambda:GetLayerVersion`); the other Lambda routes, such as layers, versions, concurrency and
-MicroVMs, are not mapped yet. API Gateway's management API, v1 and v2, is checked as `apigateway:`
-and the HTTP method, `apigateway:GET`, `apigateway:POST` and so on, except
-`RejectDomainNameAccessAssociation` (`apigateway:RejectAccessAssociation`) and `PutRoutingRule`
-(`apigateway:UpdateRoutingRule`); the v2 routing rule, portal and portal product operations, which
-AWS checks as actions of their own names, are not served.
+event source mapping, function URL, durable execution, Web Function, MicroVM and network connector
+routes, `InvokeWithResponseStream` (checked as `lambda:InvokeFunction`) and `GetLayerVersionByArn`
+(`lambda:GetLayerVersion`); the other Lambda routes, such as layers, versions and concurrency, are
+not mapped yet. API Gateway's management API, v1 and v2, is checked as `apigateway:` and the HTTP
+method, `apigateway:GET`, `apigateway:POST` and so on, except `RejectDomainNameAccessAssociation`
+(`apigateway:RejectAccessAssociation`) and `PutRoutingRule` (`apigateway:UpdateRoutingRule`); the
+v2 routing rule, portal and portal product operations, which AWS checks as actions of their own
+names, are not served.
 
 A Scheduler request is checked against `schedule/<group>/<name>`, the group from the body's
 `GroupName` on a create or an update, from `groupName` otherwise, and `default` when neither names
-one, or `schedule-group/<name>`. A Pipes request is checked against `pipe/<name>`.
+one, or `schedule-group/<name>`. A Pipes request is checked against `pipe/<name>`. A MicroVM image
+or network connector request is checked against `microvm-image:<name>` or `network-connector:<id>`
+in the request's account and Region, an identifier given as an ARN taken for its name, as the
+service looks it up. `RunMicrovm` is checked against the image its `imageIdentifier` names, an
+action on a running MicroVM against the image that MicroVM runs, and a managed image's versions
+against that image, which `aws` owns. A Lambda tagging request, at `/2017-03-31/tags/<arn>`, is
+checked against the caller's own function, MicroVM image or network connector of that ARN's Region
+and name, whatever account the ARN names, as Lambda looks it up, and an event source mapping's ARN
+as written.
 
 The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service its ARN names,
 and it is checked as that service, against that ARN, whatever scope it is signed with. The ARN is
@@ -1353,7 +1361,9 @@ pass a role to EC2 does not let the same role be passed to Lambda. The operation
 role each passes:
 - **Lambda:** `CreateFunction` and `UpdateFunctionConfiguration` (`Role`, when the request sets
   it), `CreateWebFunction` and `CreateWebFunctionRevision` (the service configuration's
-  `executionRoleArn`), passed to `lambda.amazonaws.com`.
+  `executionRoleArn`), `CreateMicrovmImage` and `UpdateMicrovmImage` (`buildRoleArn`),
+  `RunMicrovm` (`executionRoleArn`), and `CreateNetworkConnector` and `UpdateNetworkConnector`
+  (`OperatorRole`), passed to `lambda.amazonaws.com`.
 - **EC2:** `RunInstances`, `RequestSpotInstances`, `AssociateIamInstanceProfile`,
   `ReplaceIamInstanceProfileAssociation`, `CreateLaunchTemplate` and `CreateLaunchTemplateVersion`
   pass the roles of the instance profile they name, to `ec2.amazonaws.com`. `CreateFlowLogs` passes

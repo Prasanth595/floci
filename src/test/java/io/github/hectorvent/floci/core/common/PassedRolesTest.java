@@ -137,7 +137,7 @@ class PassedRolesTest {
     }
 
     @Test
-    void schedulerAndPipesPassTheRoleTheyName() {
+    void schedulerPipesAndLambdaMicrovmsPassTheRoleTheyName() {
         String target = "{\"Target\":{\"RoleArn\":\"" + ROLES + "schedule\"}}";
         assertEquals(List.of(passed("schedule", "scheduler.amazonaws.com")),
                 PassedRoles.of("scheduler:CreateSchedule", json(target), LOOKUPS));
@@ -146,6 +146,18 @@ class PassedRolesTest {
         String pipe = "{\"RoleArn\":\"" + ROLES + "pipe\"}";
         assertEquals(List.of(passed("pipe", "pipes.amazonaws.com")), PassedRoles.of("pipes:CreatePipe", json(pipe), LOOKUPS));
         assertEquals(List.of(passed("pipe", "pipes.amazonaws.com")), PassedRoles.of("pipes:UpdatePipe", json(pipe), LOOKUPS));
+        String build = "{\"buildRoleArn\":\"" + ROLES + "build\"}";
+        assertEquals(List.of(passed("build", "lambda.amazonaws.com")),
+                PassedRoles.of("lambda:CreateMicrovmImage", json(build), LOOKUPS));
+        assertEquals(List.of(passed("build", "lambda.amazonaws.com")),
+                PassedRoles.of("lambda:UpdateMicrovmImage", json(build), LOOKUPS));
+        assertEquals(List.of(passed("vm", "lambda.amazonaws.com")), PassedRoles.of("lambda:RunMicrovm",
+                json("{\"executionRoleArn\":\"" + ROLES + "vm\"}"), LOOKUPS));
+        String operator = "{\"OperatorRole\":\"" + ROLES + "operator\"}";
+        assertEquals(List.of(passed("operator", "lambda.amazonaws.com")),
+                PassedRoles.of("lambda:CreateNetworkConnector", json(operator), LOOKUPS));
+        assertEquals(List.of(passed("operator", "lambda.amazonaws.com")),
+                PassedRoles.of("lambda:UpdateNetworkConnector", json(operator), LOOKUPS));
     }
 
     @Test

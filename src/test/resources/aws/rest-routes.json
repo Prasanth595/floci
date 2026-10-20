@@ -334,6 +334,48 @@
         "UpdateFunctionUrlConfig": {"method": "PUT", "requestUri": "/2021-10-31/functions/{FunctionName}/url"}
       }
     },
+    "lambda-core": {
+      "credentialScope": "lambda",
+      "apiVersion": "2026-04-30",
+      "operations": {
+        "CreateNetworkConnector": {"method": "POST", "requestUri": "/2026-04-04/network-connectors"},
+        "DeleteNetworkConnector": {"method": "DELETE", "requestUri": "/2026-04-04/network-connectors/{Identifier}"},
+        "GetNetworkConnector": {"method": "GET", "requestUri": "/2026-04-04/network-connectors/{Identifier}"},
+        "ListNetworkConnectorVersions": {"method": "GET", "requestUri": "/2026-04-04/network-connectors/{Identifier}/versions"},
+        "ListNetworkConnectors": {"method": "GET", "requestUri": "/2026-04-04/network-connectors"},
+        "UpdateNetworkConnector": {"method": "PUT", "requestUri": "/2026-04-04/network-connectors/{Identifier}"}
+      }
+    },
+    "lambda-microvms": {
+      "credentialScope": "lambda",
+      "apiVersion": "2025-09-09",
+      "operations": {
+        "CreateMicrovmAuthToken": {"method": "POST", "requestUri": "/2025-09-09/microvms/{microvmIdentifier}/auth-token"},
+        "CreateMicrovmImage": {"method": "POST", "requestUri": "/2025-09-09/microvm-images"},
+        "CreateMicrovmShellAuthToken": {"method": "POST", "requestUri": "/2025-09-09/microvms/{microvmIdentifier}/shell-auth-token"},
+        "DeleteMicrovmImage": {"method": "DELETE", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}"},
+        "DeleteMicrovmImageVersion": {"method": "DELETE", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}/versions/{imageVersion}"},
+        "GetMicrovm": {"method": "GET", "requestUri": "/2025-09-09/microvms/{microvmIdentifier}"},
+        "GetMicrovmImage": {"method": "GET", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}"},
+        "GetMicrovmImageBuild": {"method": "GET", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}/versions/{imageVersion}/builds/{buildId}"},
+        "GetMicrovmImageVersion": {"method": "GET", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}/versions/{imageVersion}"},
+        "ListManagedMicrovmImageVersions": {"method": "GET", "requestUri": "/2025-09-09/managed-microvm-images/{imageIdentifier}/versions"},
+        "ListManagedMicrovmImages": {"method": "GET", "requestUri": "/2025-09-09/managed-microvm-images"},
+        "ListMicrovmImageBuilds": {"method": "GET", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}/versions/{imageVersion}/builds"},
+        "ListMicrovmImageVersions": {"method": "GET", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}/versions"},
+        "ListMicrovmImages": {"method": "GET", "requestUri": "/2025-09-09/microvm-images"},
+        "ListMicrovms": {"method": "GET", "requestUri": "/2025-09-09/microvms"},
+        "ListTags": {"method": "GET", "requestUri": "/2017-03-31/tags/{Resource}"},
+        "ResumeMicrovm": {"method": "POST", "requestUri": "/2025-09-09/microvms/{microvmIdentifier}/resume"},
+        "RunMicrovm": {"method": "POST", "requestUri": "/2025-09-09/microvms"},
+        "SuspendMicrovm": {"method": "POST", "requestUri": "/2025-09-09/microvms/{microvmIdentifier}/suspend"},
+        "TagResource": {"method": "POST", "requestUri": "/2017-03-31/tags/{Resource}"},
+        "TerminateMicrovm": {"method": "DELETE", "requestUri": "/2025-09-09/microvms/{microvmIdentifier}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/2017-03-31/tags/{Resource}"},
+        "UpdateMicrovmImage": {"method": "PUT", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}"},
+        "UpdateMicrovmImageVersion": {"method": "PATCH", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}/versions/{imageVersion}"}
+      }
+    },
     "pipes": {
       "credentialScope": "pipes",
       "apiVersion": "2015-10-07",

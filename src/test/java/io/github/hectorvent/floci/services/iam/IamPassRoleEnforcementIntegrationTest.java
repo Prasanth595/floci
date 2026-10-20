@@ -47,6 +47,7 @@ class IamPassRoleEnforcementIntegrationTest {
     private static final String ECS_TASKS = "ecs-tasks.amazonaws.com";
     private static final String ECS = "ecs.amazonaws.com";
     private static final String QUEUE_ARN = "arn:aws:sqs:us-east-1:" + ACCOUNT + ":passrole-queue";
+    private static final String LAMBDA = "lambda.amazonaws.com";
     private static final String SCHEDULER = "scheduler.amazonaws.com";
     private static final String PIPES = "pipes.amazonaws.com";
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
@@ -442,6 +443,42 @@ class IamPassRoleEnforcementIntegrationTest {
         denied(user.rest("pipes").body(update).put(path).then());
         user.policy(allow("pipes:UpdatePipe", arn) + "," + passRole(other, PIPES));
         user.rest("pipes").body(update).put(path).then().statusCode(200);
+    }
+
+    @Test
+    void aMicrovmImageAndANetworkConnectorNeedPassRoleOnTheRolesTheyName() {
+        String build = role("microvm-build");
+        String operator = role("connector-operator");
+        User user = user("passrole-microvm");
+        String image = "passrole-image-" + suffix();
+        String createImage = """
+                {"name":"%s","baseImageArn":"arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                 "buildRoleArn":"%s","codeArtifact":{"uri":"s3://bucket/code.zip"}}""".formatted(image, build);
+
+        user.policy(allow("lambda:CreateMicrovmImage", "*"));
+        denied(user.rest("lambda").body(createImage).post("/2025-09-09/microvm-images").then());
+        user.policy(allow("lambda:CreateMicrovmImage", "*") + "," + passRole(build, LAMBDA));
+        user.rest("lambda").body(createImage).post("/2025-09-09/microvm-images").then().statusCode(201);
+        cleanup.register(() -> admin("lambda").delete("/2025-09-09/microvm-images/" + image));
+        // Reading it is checked against the image's ARN.
+        String imageArn = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":microvm-image:" + image;
+        user.policy(allow("lambda:GetMicrovmImage", imageArn + "-other"));
+        refused(user.rest("lambda").get("/2025-09-09/microvm-images/" + image).then(), "lambda:GetMicrovmImage");
+        user.policy(allow("lambda:GetMicrovmImage", imageArn));
+        user.rest("lambda").get("/2025-09-09/microvm-images/" + image).then().statusCode(200);
+
+        String createConnector = """
+                {"Name":"passrole-connector-%1$s","ClientToken":"passrole-token-%1$s","OperatorRole":"%2$s",
+                 "Configuration":{"VpcEgressConfiguration":{"AssociatedComputeResourceTypes":["MicroVm"],
+                 "NetworkProtocol":"IPv4","SubnetIds":["subnet-0000000000000it01"],
+                 "SecurityGroupIds":["sg-0000000000000it01"]}}}"""
+                .formatted(suffix(), operator);
+        user.policy(allow("lambda:CreateNetworkConnector", "*"));
+        denied(user.rest("lambda").body(createConnector).post("/2026-04-04/network-connectors").then());
+        user.policy(allow("lambda:CreateNetworkConnector", "*") + "," + passRole(operator, LAMBDA));
+        String connector = user.rest("lambda").body(createConnector).post("/2026-04-04/network-connectors").then()
+                .statusCode(202).extract().path("Id");
+        cleanup.register(() -> admin("lambda").delete("/2026-04-04/network-connectors/" + connector));
     }
 
     @Test

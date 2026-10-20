@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -108,6 +109,14 @@ class ResourceArnBuilderTest {
         Instance<IamService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(service);
         return new ResourceArnBuilder(new ObjectMapper(), instance);
+    }
+
+    /** A builder reading {@code microvms}, for an action on a running MicroVM. */
+    private static ResourceArnBuilder backedBy(LambdaMicrovmsService microvms) {
+        @SuppressWarnings("unchecked")
+        Instance<LambdaMicrovmsService> instance = mock(Instance.class);
+        when(instance.get()).thenReturn(microvms);
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, instance);
     }
 
     /** A builder reading {@code secrets}, for a secret named by its name. */
@@ -1198,6 +1207,66 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void lambdaMicrovmAndNetworkConnectorRoutesResolveTheImageOrConnectorTheyName() {
+        String image = "arn:aws:lambda:us-east-1:000000000000:microvm-image:img";
+        when(uriInfo.getPath()).thenReturn("/2025-09-09/microvm-images/img");
+        assertEquals(image, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2025-09-09/microvm-images/img/versions/1/builds/b-1");
+        assertEquals(image, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // An image named by its ARN is looked up by its name in the request's account and Region, so that
+        // is the resource checked, whatever account or Region the ARN names.
+        when(uriInfo.getPath()).thenReturn(
+                "/2025-09-09/microvm-images/arn:aws:lambda:eu-west-1:111122223333:microvm-image:shared/versions");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:microvm-image:shared",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2026-04-04/network-connectors/nc-1/versions");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:network-connector:nc-1",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // RunMicrovm runs the image its imageIdentifier names, read as the service reads it.
+        when(ctx.getMethod()).thenReturn("POST");
+        when(uriInfo.getPath()).thenReturn("/2025-09-09/microvms");
+        setJsonBody("{\"imageIdentifier\":\"img\"}");
+        assertEquals(image, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"imageIdentifier\":\"arn:aws:lambda:eu-west-1:111122223333:microvm-image:img\"}");
+        assertEquals(image, builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{}");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // A managed image's versions are checked against the managed image, which aws owns.
+        when(ctx.getMethod()).thenReturn("GET");
+        when(uriInfo.getPath()).thenReturn("/2025-09-09/managed-microvm-images/al2023-1/versions");
+        assertEquals("arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // Creating or listing either, listing MicroVMs, a managed image there is none of, and a MicroVM the
+        // account does not hold name no resource here.
+        for (String path : new String[] {"/2025-09-09/microvm-images", "/2025-09-09/managed-microvm-images",
+                "/2025-09-09/managed-microvm-images/other/versions", "/2025-09-09/microvms",
+                "/2025-09-09/microvms/vm-1", "/2026-04-04/network-connectors"}) {
+            when(uriInfo.getPath()).thenReturn(path);
+            assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"), path);
+        }
+    }
+
+    @Test
+    void anActionOnARunningMicrovmIsCheckedAgainstTheImageItRuns() {
+        String image = "arn:aws:lambda:us-east-1:000000000000:microvm-image:img";
+        LambdaMicrovmsService.Microvm vm = new LambdaMicrovmsService.Microvm();
+        vm.microvmId = "microvm-1";
+        vm.imageArn = image;
+        LambdaMicrovmsService microvms = mock(LambdaMicrovmsService.class);
+        when(microvms.findMicrovm(any(), any())).thenReturn(Optional.empty());
+        when(microvms.findMicrovm("us-east-1", "microvm-1")).thenReturn(Optional.of(vm));
+        ResourceArnBuilder backed = backedBy(microvms);
+
+        for (String path : new String[] {"/2025-09-09/microvms/microvm-1",
+                "/2025-09-09/microvms/microvm-1/suspend", "/2025-09-09/microvms/microvm-1/auth-token"}) {
+            when(uriInfo.getPath()).thenReturn(path);
+            assertEquals(image, backed.build("lambda", ctx, "us-east-1", "000000000000"), path);
+        }
+        when(uriInfo.getPath()).thenReturn("/2025-09-09/microvms/microvm-2");
+        assertEquals("*", backed.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
     void schedulerRoutesResolveTheScheduleInItsGroupTheGroupOrTheTaggedArn() {
         when(uriInfo.getPath()).thenReturn("/schedules/nightly");
         assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule/default/nightly",
@@ -1285,7 +1354,35 @@ class ResourceArnBuilderTest {
     }
 
     @Test
-    void aStreamingInvokeResolvesItsQualifiedFunctionAsAnInvokeDoes() {
+    void lambdaTagRoutesAndAStreamingInvokeResolveTheResourceTheyName() {
+        // Tagging acts on the caller's own function, image or connector of the ARN's Region and name,
+        // whatever account the ARN names, so that is the resource checked.
+        when(uriInfo.getPath()).thenReturn("/2017-03-31/tags/arn:aws:lambda:eu-west-1:111122223333:function:shared");
+        assertEquals("arn:aws:lambda:eu-west-1:000000000000:function:shared",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn(
+                "/2017-03-31/tags/arn:aws:lambda:eu-west-1:111122223333:microvm-image:img");
+        assertEquals("arn:aws:lambda:eu-west-1:000000000000:microvm-image:img",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn(
+                "/2017-03-31/tags/arn:aws:lambda:eu-west-1:111122223333:network-connector:nc-1");
+        assertEquals("arn:aws:lambda:eu-west-1:000000000000:network-connector:nc-1",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        // A mapping's ARN has to name it exactly, and Lambda refuses a qualified function, a running MicroVM
+        // and an image in no Region, so these stay as written.
+        String mapping = "arn:aws:lambda:us-east-1:111122223333:event-source-mapping:"
+                + "14e0db71-5d35-4eb5-b481-8945cf9d10c2";
+        for (String arn : new String[] {mapping, "arn:aws:lambda:us-east-1:111122223333:function:shared:prod",
+                "arn:aws:lambda:us-east-1:111122223333:microvm:vm-1", "arn:aws:lambda::111122223333:microvm-image:img"}) {
+            when(uriInfo.getPath()).thenReturn("/2017-03-31/tags/" + arn);
+            assertEquals(arn, builder.build("lambda", ctx, "us-east-1", "000000000000"), arn);
+        }
+        // The MicroVM tag handler takes a target without the arn: prefix too, and reads it the same way.
+        when(uriInfo.getPath()).thenReturn("/2017-03-31/tags/x:y:z:eu-west-1:microvm-image:img");
+        assertEquals("arn:aws:lambda:eu-west-1:000000000000:microvm-image:img",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2017-03-31/tags/shared");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
         // A streaming invoke is an invoke: its qualifier and the account its function ARN names count.
         when(uriInfo.getPath()).thenReturn("/2021-11-15/functions/my-function/response-streaming-invocations");
         queryParams.putSingle("Qualifier", "prod");

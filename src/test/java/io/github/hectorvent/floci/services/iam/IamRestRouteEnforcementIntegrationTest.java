@@ -126,6 +126,92 @@ class IamRestRouteEnforcementIntegrationTest {
         return "{\"resourceArn\":\"" + arn + "\",\"tags\":[{\"key\":\"team\",\"value\":\"a\"}]}";
     }
 
+    @Test
+    void lambdaTaggingIsCheckedAgainstTheTaggedFunction() {
+        String user = user("route-lambda-tags");
+        String function = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:route-fn-" + suffix();
+        String path = "/2017-03-31/tags/" + function;
+        String body = "{\"Tags\":{\"team\":\"a\"}}";
+
+        policy(user, allow("lambda:TagResource", function + "-other"));
+        refused(as(user, "lambda").body(body).post(path).then(), "lambda:TagResource");
+        // A grant on the function itself covers it; the request reaches Lambda, which has no such function.
+        policy(user, allow("lambda:TagResource", function));
+        as(user, "lambda").body(body).post(path).then().statusCode(not(403));
+    }
+
+    @Test
+    void lambdaTaggingIsCheckedAgainstTheCallersOwnResourceWhateverAccountTheArnNames() {
+        // Lambda tags the caller's own function or MicroVM image of the ARN's name, so a grant on another
+        // account's ARN of that name does not cover it, and a grant on the caller's own does.
+        String user = user("route-lambda-tags-account");
+        String name = "route-tagged-" + suffix();
+        String body = "{\"Tags\":{\"team\":\"a\"}}";
+
+        for (String type : new String[] {"function:", "microvm-image:"}) {
+            String own = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":" + type + name;
+            String foreign = "arn:aws:lambda:us-east-1:111122223333:" + type + name;
+            policy(user, allow("lambda:TagResource", foreign));
+            refused(as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then(), "lambda:TagResource");
+            policy(user, allow("lambda:TagResource", own));
+            as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then().statusCode(not(403));
+        }
+    }
+
+    @Test
+    void aMicrovmIsCheckedAgainstTheImageItRuns() {
+        // RunMicrovm and the actions on a running MicroVM act on its image, so a Deny on the image applies to
+        // them even where the action is allowed on every resource, and a grant on the image alone covers them.
+        String user = user("route-microvm-image");
+        String image = microvmImage("route-image-" + suffix());
+        String run = "{\"imageIdentifier\":\"" + image.substring(image.lastIndexOf(':') + 1) + "\"}";
+
+        policy(user, allow("lambda:RunMicrovm", "*") + "," + deny("lambda:RunMicrovm", image));
+        refused(as(user, "lambda").body(run).post("/2025-09-09/microvms").then(), "lambda:RunMicrovm");
+        policy(user, allow("lambda:RunMicrovm", image));
+        String microvm = as(user, "lambda").body(run).post("/2025-09-09/microvms").then().statusCode(200)
+                .extract().path("microvmId");
+        cleanup.register(() -> admin().delete("/2025-09-09/microvms/" + microvm));
+
+        policy(user, allow("lambda:GetMicrovm", "*") + "," + deny("lambda:GetMicrovm", image));
+        refused(as(user, "lambda").get("/2025-09-09/microvms/" + microvm).then(), "lambda:GetMicrovm");
+        policy(user, allow("lambda:GetMicrovm", image));
+        as(user, "lambda").get("/2025-09-09/microvms/" + microvm).then().statusCode(200);
+    }
+
+    @Test
+    void aMicrovmImageTaggedThroughATargetWithoutTheArnPrefixIsCheckedAsTheImage() {
+        // Lambda tags the image any target holding :microvm-image: names, read by its fourth field and
+        // its last, so a Deny on the image applies however the target is spelled.
+        String user = user("route-image-tags");
+        String image = microvmImage("route-tagged-image-" + suffix());
+        String target = "/2017-03-31/tags/x:y:z:us-east-1:microvm-image:" + image.substring(image.lastIndexOf(':') + 1);
+        String body = "{\"Tags\":{\"team\":\"a\"}}";
+
+        policy(user, allow("lambda:TagResource", "*") + "," + deny("lambda:TagResource", image));
+        refused(as(user, "lambda").body(body).post(target).then(), "lambda:TagResource");
+        policy(user, allow("lambda:TagResource", "*"));
+        as(user, "lambda").body(body).post(target).then().statusCode(204);
+    }
+
+    /** Creates a MicroVM image as the account's admin, removed afterwards, and returns its ARN. */
+    private String microvmImage(String name) {
+        admin().body("""
+                {"name":"%s","baseImageArn":"arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                 "buildRoleArn":"arn:aws:iam::%s:role/route-build","codeArtifact":{"uri":"s3://bucket/code.zip"}}"""
+                .formatted(name, ACCOUNT)).post("/2025-09-09/microvm-images").then().statusCode(201);
+        cleanup.register(() -> admin().delete("/2025-09-09/microvm-images/" + name));
+        return "arn:aws:lambda:us-east-1:" + ACCOUNT + ":microvm-image:" + name;
+    }
+
+    private static RequestSpecification admin() {
+        return given().header("Authorization", auth(ADMIN, "lambda")).contentType("application/json");
+    }
+
+    private static String deny(String action, String resource) {
+        return "{\"Effect\":\"Deny\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
+    }
+
     private static void refused(ValidatableResponse response, String action) {
         response.statusCode(403).body(containsString(action)).body(not(containsString("iam:PassRole")));
     }

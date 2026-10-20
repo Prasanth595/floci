@@ -115,6 +115,9 @@ final class PassedRoles {
             case "events:PutTargets" -> fromJson(ctx, EVENTS, "Targets", "[]", "RoleArn");
             case "scheduler:CreateSchedule", "scheduler:UpdateSchedule" -> fromJson(ctx, SCHEDULER, "Target", "RoleArn");
             case "pipes:CreatePipe", "pipes:UpdatePipe" -> fromJson(ctx, PIPES, "RoleArn");
+            case "lambda:CreateMicrovmImage", "lambda:UpdateMicrovmImage" -> fromJson(ctx, LAMBDA, "buildRoleArn");
+            case "lambda:RunMicrovm" -> fromJson(ctx, LAMBDA, "executionRoleArn");
+            case "lambda:CreateNetworkConnector", "lambda:UpdateNetworkConnector" -> fromJson(ctx, LAMBDA, "OperatorRole");
             case "cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack",
                  "cloudformation:CreateChangeSet", "cloudformation:ContinueUpdateRollback" ->
                     fromForm(ctx, CLOUDFORMATION, "RoleARN");
