@@ -26,6 +26,7 @@ public class DsqlCluster {
     private String kmsEncryptionKey;
     private String endpoint;
     private String clientToken;
+    private String clientRequest;
     private String policy;
     private String policyVersion;
     private String witnessRegion;
@@ -55,6 +56,8 @@ public class DsqlCluster {
     public void setEndpoint(String endpoint) { this.endpoint = endpoint; }
     public String getClientToken() { return clientToken; }
     public void setClientToken(String clientToken) { this.clientToken = clientToken; }
+    public String getClientRequest() { return clientRequest; }
+    public void setClientRequest(String clientRequest) { this.clientRequest = clientRequest; }
     public String getPolicy() { return policy; }
     public void setPolicy(String policy) { this.policy = policy; }
     public String getPolicyVersion() { return policyVersion; }

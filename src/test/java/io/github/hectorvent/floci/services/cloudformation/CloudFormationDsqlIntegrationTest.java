@@ -9,6 +9,7 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -67,6 +68,31 @@ class CloudFormationDsqlIntegrationTest {
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal("dsql-protected");
         assertEquals("DELETE_FAILED", state.status());
         assertThat(state.reason(), containsString("failed to delete"));
+    }
+
+    /** AWS::NoValue leaves a property out: the cluster is protected by default and has no policy. */
+    @Test
+    void aPropertyLeftOutByNoValueTakesItsDefault() {
+        createStack("dsql-novalue", """
+                {"Conditions": {"Never": {"Fn::Equals": ["a", "b"]}},
+                 "Resources": {"Cluster": {"Type": "AWS::DSQL::Cluster", "Properties": {
+                   "DeletionProtectionEnabled": {"Fn::If": ["Never", false, {"Ref": "AWS::NoValue"}]},
+                   "PolicyDocument": {"Fn::If": ["Never", {"Version": "2012-10-17", "Statement": []}, {"Ref": "AWS::NoValue"}]}}}},
+                 "Outputs": {"Ref": {"Value": {"Ref": "Cluster"}}}}""");
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal("dsql-novalue").status());
+        String identifier = outputs("dsql-novalue").get("Ref");
+        String auth = "AWS4-HMAC-SHA256 Credential=test/20261016/us-east-1/dsql/aws4_request, SignedHeaders=host, Signature=abc";
+
+        given().header("Authorization", auth).get("/cluster/" + identifier).then().statusCode(200)
+                .body("deletionProtectionEnabled", equalTo(true));
+        given().header("Authorization", auth).get("/cluster/" + identifier + "/policy").then().statusCode(404);
+
+        given().header("Authorization", auth).contentType("application/json").body(Map.of("deletionProtectionEnabled", false))
+                .post("/cluster/" + identifier).then().statusCode(200);
+        given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteStack").formParam("StackName", "dsql-novalue")
+                .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStackDeleted("dsql-novalue");
     }
 
     private static void createStack(String name, String template) {

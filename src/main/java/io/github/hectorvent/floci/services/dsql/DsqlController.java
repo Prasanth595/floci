@@ -47,7 +47,7 @@ public class DsqlController {
         Map<String, Object> request = body == null ? Map.of() : body;
         Map<String, Object> multiRegion = map(request.get("multiRegionProperties"));
         DsqlCluster cluster = service.createCluster(regionResolver.resolveRegion(headers),
-                bool(request.get("deletionProtectionEnabled")), string(request.get("kmsEncryptionKey")),
+                deletionProtection(request.get("deletionProtectionEnabled")), string(request.get("kmsEncryptionKey")),
                 stringMap(request.get("tags")), string(request.get("clientToken")),
                 multiRegion == null ? null : string(multiRegion.get("witnessRegion")),
                 multiRegion == null ? null : strings(multiRegion.get("clusters")), string(request.get("policy")));
@@ -107,7 +107,7 @@ public class DsqlController {
         Map<String, Object> request = body == null ? Map.of() : body;
         Map<String, Object> multiRegion = map(request.get("multiRegionProperties"));
         DsqlCluster cluster = service.updateCluster(regionResolver.resolveRegion(headers), identifier,
-                bool(request.get("deletionProtectionEnabled")), string(request.get("kmsEncryptionKey")),
+                deletionProtection(request.get("deletionProtectionEnabled")), string(request.get("kmsEncryptionKey")),
                 multiRegion == null ? null : string(multiRegion.get("witnessRegion")),
                 multiRegion == null ? null : strings(multiRegion.get("clusters")));
         // Measured: the answer reports the update in progress; the cluster is ACTIVE right after.
@@ -217,8 +217,29 @@ public class DsqlController {
         return value instanceof String text ? text : null;
     }
 
-    private static Boolean bool(Object value) {
-        return value instanceof Boolean flag ? flag : null;
+    /**
+     * deletionProtectionEnabled as DSQL reads it (measured, eu-west-1, 2026-10-20): a boolean, or
+     * text that is false when it spells false in any case and true otherwise ("yes", "TRUE", "1");
+     * null leaves it out. Empty text, a number, an object and a list fail to deserialize.
+     */
+    private static Boolean deletionProtection(Object value) {
+        if (value == null || value instanceof Boolean) {
+            return (Boolean) value;
+        }
+        if (value instanceof String text) {
+            if (text.isEmpty()) {
+                throw serialization("Unexpected token received from parser");
+            }
+            return !"false".equalsIgnoreCase(text);
+        }
+        if (value instanceof Number) {
+            throw serialization("NUMBER_VALUE cannot be converted to Boolean");
+        }
+        throw serialization(value instanceof Map<?, ?> ? "Start of structure or map found where not expected" : "");
+    }
+
+    private static AwsException serialization(String message) {
+        return new AwsException("SerializationException", message, 400);
     }
 
     @SuppressWarnings("unchecked")

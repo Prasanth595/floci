@@ -16,13 +16,16 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -72,11 +75,18 @@ public class DsqlService implements Resettable {
                                      List<String> linkedClusterArns, String policy) {
         String accountId = regionResolver.getAccountId();
         synchronized (lockFor(accountId + "::" + region)) {
+            String request = clientRequest(deletionProtectionEnabled, kmsEncryptionKey, tags, witnessRegion,
+                    linkedClusterArns, policy);
             if (clientToken != null) {
                 Optional<DsqlCluster> earlier = clusters.scan(key -> key.startsWith(region + "::")).stream()
                         .filter(cluster -> clientToken.equals(cluster.getClientToken()))
                         .findFirst();
                 if (earlier.isPresent()) {
+                    // Measured: the same token with other parameters is a conflict, not the earlier cluster.
+                    if (!request.equals(earlier.get().getClientRequest())) {
+                        throw new AwsException("ConflictException",
+                                "Requests using a client token should supply identical request parameters", 409);
+                    }
                     return earlier.get();
                 }
             }
@@ -90,10 +100,11 @@ public class DsqlService implements Resettable {
             cluster.setCreationTime(Instant.now());
             // Measured: a cluster created without the member has deletion protection.
             cluster.setDeletionProtectionEnabled(deletionProtectionEnabled == null || deletionProtectionEnabled);
-            cluster.setKmsEncryptionKey(blankToNull(kmsEncryptionKey));
+            cluster.setKmsEncryptionKey(customerKey(kmsEncryptionKey));
             cluster.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
             cluster.setEndpoint(endpointFor(identifier, region));
             cluster.setClientToken(clientToken);
+            cluster.setClientRequest(clientToken == null ? null : request);
             cluster.setWitnessRegion(blankToNull(witnessRegion));
             cluster.setLinkedClusterArns(linkedClusterArns == null || linkedClusterArns.isEmpty()
                     ? null : List.copyOf(linkedClusterArns));
@@ -124,20 +135,22 @@ public class DsqlService implements Resettable {
         all.sort(Comparator.comparing(DsqlCluster::getCreationTime).thenComparing(DsqlCluster::getIdentifier));
         int start = 0;
         if (nextToken != null && !nextToken.isBlank()) {
-            start = -1;
+            // The token holds the sort position of the next page's first cluster, so a page carries
+            // on from there even when that cluster is gone, as on AWS (measured).
+            String[] position = tokenPosition(nextToken);
+            start = all.size();
             for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getIdentifier().equals(nextToken)) {
+                DsqlCluster cluster = all.get(i);
+                int order = cluster.getCreationTime().compareTo(Instant.parse(position[0]));
+                if (order > 0 || (order == 0 && cluster.getIdentifier().compareTo(position[1]) >= 0)) {
                     start = i;
                     break;
                 }
             }
-            if (start < 0) {
-                throw new AwsException("ValidationException", "Invalid nextToken", 400);
-            }
         }
         int size = maxResults == null ? MAX_RESULTS : maxResults;
         int end = Math.min(all.size(), start + size);
-        String next = end < all.size() ? all.get(end).getIdentifier() : null;
+        String next = end < all.size() ? pageToken(all.get(end)) : null;
         return new Page(all.subList(start, end), next);
     }
 
@@ -149,7 +162,7 @@ public class DsqlService implements Resettable {
                 cluster.setDeletionProtectionEnabled(deletionProtectionEnabled);
             }
             if (kmsEncryptionKey != null) {
-                cluster.setKmsEncryptionKey(blankToNull(kmsEncryptionKey));
+                cluster.setKmsEncryptionKey(customerKey(kmsEncryptionKey));
             }
             if (witnessRegion != null) {
                 cluster.setWitnessRegion(blankToNull(witnessRegion));
@@ -179,6 +192,7 @@ public class DsqlService implements Resettable {
         }
         dataPlane.deprovision(cluster, () -> {
             clusters.deleteForAccount(accountId, key(region, identifier));
+            locks.remove(cluster.getArn());
             LOG.infov("Deleted DSQL cluster {0} in {1}", identifier, region);
         });
         return cluster;
@@ -249,11 +263,14 @@ public class DsqlService implements Resettable {
     // ── Tags ──────────────────────────────────────────────────────────────────
 
     public Map<String, String> listTags(String arn) {
-        return new LinkedHashMap<>(clusterForArn(arn).getTags());
+        DsqlCluster cluster = clusterForArn(arn, "ListTagsForResource");
+        synchronized (lockFor(cluster.getArn())) {
+            return new LinkedHashMap<>(cluster.getTags());
+        }
     }
 
     public void tagResource(String arn, Map<String, String> tags) {
-        DsqlCluster cluster = clusterForArn(arn);
+        DsqlCluster cluster = clusterForArn(arn, "TagResource");
         synchronized (lockFor(cluster.getArn())) {
             cluster.getTags().putAll(tags == null ? Map.of() : tags);
             clusters.put(key(cluster.getRegion(), cluster.getIdentifier()), cluster);
@@ -261,7 +278,7 @@ public class DsqlService implements Resettable {
     }
 
     public void untagResource(String arn, List<String> tagKeys) {
-        DsqlCluster cluster = clusterForArn(arn);
+        DsqlCluster cluster = clusterForArn(arn, "UntagResource");
         synchronized (lockFor(cluster.getArn())) {
             (tagKeys == null ? List.<String>of() : tagKeys).forEach(cluster.getTags()::remove);
             clusters.put(key(cluster.getRegion(), cluster.getIdentifier()), cluster);
@@ -274,6 +291,7 @@ public class DsqlService implements Resettable {
             dataPlane.deprovision(cluster, () -> { });
         }
         clusters.clear();
+        locks.clear();
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
@@ -287,7 +305,7 @@ public class DsqlService implements Resettable {
         });
     }
 
-    private DsqlCluster clusterForArn(String arn) {
+    private DsqlCluster clusterForArn(String arn, String action) {
         AwsArnUtils.Arn parsed;
         try {
             parsed = AwsArnUtils.parse(arn);
@@ -297,6 +315,12 @@ public class DsqlService implements Resettable {
         String resource = parsed.resource();
         if (!"dsql".equals(parsed.service()) || !resource.startsWith("cluster/")) {
             throw notFound(arn, resource);
+        }
+        if (!regionResolver.getAccountId().equals(parsed.accountId())) {
+            // Measured: another account's cluster is refused, not looked up in the caller's.
+            throw new AwsException("AccessDeniedException", "User is not authorized to perform: dsql:" + action
+                    + " on resource: " + arn + " because no resource-based policy allows the dsql:" + action
+                    + " action", 403);
         }
         String identifier = resource.substring("cluster/".length());
         return clusters.get(key(parsed.region(), identifier)).orElseThrow(() -> notFound(arn, identifier));
@@ -373,6 +397,39 @@ public class DsqlService implements Resettable {
 
     private static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value;
+    }
+
+    /** A customer-managed key, or null for AWS's own: blank, or the reserved AWS_OWNED_KMS_KEY (measured). */
+    private static String customerKey(String kmsEncryptionKey) {
+        return "AWS_OWNED_KMS_KEY".equals(kmsEncryptionKey) ? null : blankToNull(kmsEncryptionKey);
+    }
+
+    /** What a create asked for, which a later create with the same client token must repeat. */
+    private static String clientRequest(Boolean deletionProtectionEnabled, String kmsEncryptionKey,
+                                        Map<String, String> tags, String witnessRegion,
+                                        List<String> linkedClusterArns, String policy) {
+        return String.join("\n", String.valueOf(deletionProtectionEnabled), String.valueOf(kmsEncryptionKey),
+                String.valueOf(tags == null ? null : new TreeMap<>(tags)), String.valueOf(witnessRegion),
+                String.valueOf(linkedClusterArns), String.valueOf(policy));
+    }
+
+    private static String pageToken(DsqlCluster cluster) {
+        String position = cluster.getCreationTime() + " " + cluster.getIdentifier();
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(position.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String[] tokenPosition(String nextToken) {
+        try {
+            String[] position = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8)
+                    .split(" ", 2);
+            if (position.length == 2) {
+                Instant.parse(position[0]);
+                return position;
+            }
+        } catch (IllegalArgumentException | DateTimeParseException invalid) {
+            // Refused below.
+        }
+        throw new AwsException("ValidationException", "Invalid nextToken", 400);
     }
 
     /** One page of ListClusters. */

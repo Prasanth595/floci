@@ -46,8 +46,9 @@ public class DsqlCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
         String region = ctx.region();
-        Boolean deletionProtection = props != null && props.has("DeletionProtectionEnabled")
-                ? Boolean.valueOf(ctx.engine().resolve(props.get("DeletionProtectionEnabled"))) : null;
+        // AWS::NoValue leaves a property out, so it takes its default rather than reading as false.
+        String protection = ctx.resolveOrDefault(props, "DeletionProtectionEnabled", null);
+        Boolean deletionProtection = protection == null ? null : Boolean.valueOf(protection);
         String kmsKey = props != null && props.has("KmsEncryptionKey")
                 ? ctx.engine().resolve(props.get("KmsEncryptionKey")) : null;
         JsonNode multiRegion = props == null ? null : ctx.engine().resolveNodeOmittingNoValue(props.get("MultiRegionProperties"));
@@ -57,14 +58,16 @@ public class DsqlCfnProvisioner implements CfnResourceProvisioner {
                 ? strings(multiRegion.get("Clusters")) : null;
         Map<String, String> tags = tags(props, ctx);
         String policy = props != null && props.has("PolicyDocument")
-                ? policyText(ctx.engine().resolveNode(props.get("PolicyDocument"))) : null;
+                ? policyText(ctx.engine().resolveNodeOmittingNoValue(props.get("PolicyDocument"))) : null;
 
         DsqlCluster cluster;
         if (ctx.priorPhysicalId() != null) {
             String identifier = ctx.priorPhysicalId();
+            // A property the template no longer sets goes back to its default, multi-Region ones included.
             dsqlService.updateCluster(region, identifier,
                     deletionProtection == null ? Boolean.TRUE : deletionProtection,
-                    kmsKey == null ? "" : kmsKey, witnessRegion, linkedClusters);
+                    kmsKey == null ? "" : kmsKey, witnessRegion == null ? "" : witnessRegion,
+                    linkedClusters == null ? List.of() : linkedClusters);
             reconcileTags(dsqlService.getCluster(region, identifier), tags);
             DsqlCluster current = dsqlService.getCluster(region, identifier);
             if (policy != null && !policy.equals(current.getPolicy())) {

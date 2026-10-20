@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -15,6 +16,7 @@ import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Aurora DSQL's control plane over its REST-JSON paths, with the answers measured on AWS
@@ -88,7 +90,82 @@ class DsqlIntegrationTest {
                 .post("/cluster").then().statusCode(200).extract().path("identifier");
         dsql().body(Map.of("clientToken", "same-request", "deletionProtectionEnabled", false))
                 .post("/cluster").then().statusCode(200).body("identifier", equalTo(first));
+        // Measured (eu-west-1, 2026-10-20): the same token with other parameters is a conflict.
+        dsql().body(Map.of("clientToken", "same-request", "deletionProtectionEnabled", true))
+                .post("/cluster").then().statusCode(409)
+                .body("message", equalTo("Requests using a client token should supply identical request parameters"));
         dsql().delete("/cluster/" + first).then().statusCode(200);
+    }
+
+    /**
+     * Measured (eu-west-1, 2026-10-20): text is false when it spells false in any case and true
+     * otherwise; empty text, a number and an object fail to deserialize.
+     */
+    @Test
+    void deletionProtectionIsReadAsDsqlReadsIt() {
+        String yes = dsql().body(Map.of("deletionProtectionEnabled", "yes")).post("/cluster")
+                .then().statusCode(200).body("deletionProtectionEnabled", equalTo(true)).extract().path("identifier");
+        dsql().body(Map.of("deletionProtectionEnabled", "False")).post("/cluster/" + yes).then().statusCode(200);
+        dsql().get("/cluster/" + yes).then().body("deletionProtectionEnabled", equalTo(false));
+        dsql().body(Map.of("deletionProtectionEnabled", "TRUE")).post("/cluster/" + yes).then().statusCode(200);
+        dsql().get("/cluster/" + yes).then().body("deletionProtectionEnabled", equalTo(true));
+
+        dsql().body(Map.of("deletionProtectionEnabled", 1)).post("/cluster").then().statusCode(400)
+                .body("message", equalTo("NUMBER_VALUE cannot be converted to Boolean"));
+        dsql().body(Map.of("deletionProtectionEnabled", Map.of())).post("/cluster").then().statusCode(400)
+                .body("message", equalTo("Start of structure or map found where not expected"));
+        dsql().body(Map.of("deletionProtectionEnabled", "")).post("/cluster/" + yes).then().statusCode(400)
+                .body("message", equalTo("Unexpected token received from parser"));
+
+        dsql().body(Map.of("deletionProtectionEnabled", false)).post("/cluster/" + yes).then().statusCode(200);
+        dsql().delete("/cluster/" + yes).then().statusCode(200);
+    }
+
+    /** Measured (eu-west-1, 2026-10-20): AWS_OWNED_KMS_KEY names AWS's own key, on create and update. */
+    @Test
+    void theReservedAwsOwnedKeyIsAwsOwned() {
+        String identifier = dsql().body(Map.of("deletionProtectionEnabled", false, "kmsEncryptionKey", "AWS_OWNED_KMS_KEY"))
+                .post("/cluster").then().statusCode(200)
+                .body("encryptionDetails.encryptionType", equalTo("AWS_OWNED_KMS_KEY")).extract().path("identifier");
+        dsql().body(Map.of("kmsEncryptionKey", "AWS_OWNED_KMS_KEY")).post("/cluster/" + identifier).then().statusCode(200);
+        dsql().get("/cluster/" + identifier).then()
+                .body("encryptionDetails.encryptionType", equalTo("AWS_OWNED_KMS_KEY"))
+                .body("encryptionDetails.kmsKeyArn", nullValue());
+        dsql().delete("/cluster/" + identifier).then().statusCode(200);
+    }
+
+    /** Measured (eu-west-1, 2026-10-20): the next page carries on after its first cluster is deleted. */
+    @Test
+    void aPageCarriesOnAfterItsNextClusterIsGone() {
+        String auth = AUTH.replace("eu-west-1", "ap-southeast-4");
+        for (int i = 0; i < 3; i++) {
+            given().header("Authorization", auth).contentType("application/json")
+                    .body(Map.of("deletionProtectionEnabled", false)).post("/cluster")
+                    .then().statusCode(200);
+        }
+        List<String> order = given().header("Authorization", auth).get("/cluster")
+                .then().statusCode(200).extract().jsonPath().getList("clusters.identifier", String.class);
+        assertEquals(3, order.size());
+        String token = given().header("Authorization", auth).queryParam("max-results", 1).get("/cluster")
+                .then().statusCode(200).body("clusters[0].identifier", equalTo(order.get(0))).extract().path("nextToken");
+        given().header("Authorization", auth).delete("/cluster/" + order.get(1)).then().statusCode(200);
+        given().header("Authorization", auth).queryParam("max-results", 1).queryParam("next-token", token).get("/cluster")
+                .then().statusCode(200).body("clusters[0].identifier", equalTo(order.get(2)));
+        given().header("Authorization", auth).delete("/cluster/" + order.get(0)).then().statusCode(200);
+        given().header("Authorization", auth).delete("/cluster/" + order.get(2)).then().statusCode(200);
+    }
+
+    /** Measured (eu-west-1, 2026-10-20): another account's cluster ARN is refused, not read in the caller's. */
+    @Test
+    void anotherAccountsArnIsRefused() {
+        String identifier = dsql().body(Map.of("deletionProtectionEnabled", false)).post("/cluster")
+                .then().statusCode(200).extract().path("identifier");
+        String foreign = "arn:aws:dsql:eu-west-1:999999999999:cluster/" + identifier;
+        dsql().urlEncodingEnabled(false).get("/tags/" + URLEncoder.encode(foreign, StandardCharsets.UTF_8))
+                .then().statusCode(403)
+                .body("message", equalTo("User is not authorized to perform: dsql:ListTagsForResource on resource: "
+                        + foreign + " because no resource-based policy allows the dsql:ListTagsForResource action"));
+        dsql().delete("/cluster/" + identifier).then().statusCode(200);
     }
 
     @Test
