@@ -1975,7 +1975,8 @@ public class NativeDynamoDbJsonHandler {
         String backupArn = textOrNull(request, "BackupArn");
         DynamoDbBackupArns.parse(backupArn);
         String targetTableName = requireTableNameParameter(request, "TargetTableName");
-        List<String> violations = new ArrayList<>();
+        List<String> violations = new ArrayList<>(throughputViolations(request.path("ProvisionedThroughputOverride"),
+                "provisionedThroughputOverride"));
         JsonNode billingModeOverride = request.path("BillingModeOverride");
         if (billingModeOverride.isTextual() && !"PROVISIONED".equals(billingModeOverride.asText())
                 && !"PAY_PER_REQUEST".equals(billingModeOverride.asText())) {
@@ -1983,6 +1984,17 @@ public class NativeDynamoDbJsonHandler {
                     + "satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]");
         }
         violations.addAll(nameViolations(targetTableName, "targetTableName"));
+        JsonNode gsiOverrides = request.path("GlobalSecondaryIndexOverride");
+        if (gsiOverrides.isArray()) {
+            int position = 0;
+            for (JsonNode gsiOverride : gsiOverrides) {
+                position++;
+                String member = "globalSecondaryIndexOverride." + position + ".member";
+                violations.addAll(restoreIndexNameViolations(gsiOverride.path("IndexName"), member + ".indexName"));
+                violations.addAll(throughputViolations(gsiOverride.path("ProvisionedThroughput"),
+                        member + ".provisionedThroughput"));
+            }
+        }
         throwValidationErrors(violations);
 
         TableBackup backup = dynamoDbService.describeBackup(backupArn, region);
@@ -2072,6 +2084,46 @@ public class NativeDynamoDbJsonHandler {
         }
         if (255 < name.length()) {
             violations.add(value + "Member must have length less than or equal to 255");
+        }
+        return violations;
+    }
+
+    /** AWS lists WriteCapacityUnits before ReadCapacityUnits. */
+    private static List<String> throughputViolations(JsonNode throughput, String memberPath) {
+        List<String> violations = new ArrayList<>();
+        if (!throughput.isObject()) {
+            return violations;
+        }
+        for (String member : List.of("WriteCapacityUnits", "ReadCapacityUnits")) {
+            JsonNode value = throughput.path(member);
+            String constraint = " at '" + memberPath + "." + Character.toLowerCase(member.charAt(0))
+                    + member.substring(1) + "' failed to satisfy constraint: ";
+            if (value.isMissingNode() || value.isNull()) {
+                violations.add("Value null" + constraint + "Member must not be null");
+            } else if (value.asLong() < 1) {
+                violations.add("Value '" + value.asText() + "'" + constraint
+                        + "Member must have value greater than or equal to 1");
+            }
+        }
+        return violations;
+    }
+
+    /** Unlike CreateTable, a restore lists the length violation of an index name before the pattern. */
+    private static List<String> restoreIndexNameViolations(JsonNode indexName, String memberPath) {
+        String constraint = " at '" + memberPath + "' failed to satisfy constraint: ";
+        if (indexName.isMissingNode() || indexName.isNull()) {
+            return List.of("Value null" + constraint + "Member must not be null");
+        }
+        String value = "Value '" + indexName.asText() + "'" + constraint;
+        List<String> violations = new ArrayList<>();
+        if (indexName.asText().length() < 3) {
+            violations.add(value + "Member must have length greater than or equal to 3");
+        }
+        if (255 < indexName.asText().length()) {
+            violations.add(value + "Member must have length less than or equal to 255");
+        }
+        if (!INDEX_NAME_CHARS.matcher(indexName.asText()).matches()) {
+            violations.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
         }
         return violations;
     }

@@ -423,6 +423,55 @@ class DynamoDbBackupIntegrationTest {
     }
 
     @Test
+    void restoreReportsEveryViolationBeforeTheBackupLookup() {
+        String arn = TABLE_ARN_PREFIX + "BackupIT-none/backup/01700000000000-abcdef12";
+        String notNull = "failed to satisfy constraint: Member must not be null";
+        String atLeastOne = "failed to satisfy constraint: Member must have value greater than or equal to 1";
+        ddb("RestoreTableFromBackup", """
+                {"BackupArn": "%s", "TargetTableName": "bad name!", "BillingModeOverride": "BAD",
+                 "ProvisionedThroughputOverride": {},
+                 "GlobalSecondaryIndexOverride": [%s]}
+                """.formatted(arn, gsi1(", \"ProvisionedThroughput\": {}").replace("\"gsi1\"", "\"x!\"")))
+                .statusCode(400)
+                .body("message", equalTo("8 validation errors detected: "
+                        + "Value null at 'provisionedThroughputOverride.writeCapacityUnits' " + notNull + "; "
+                        + "Value null at 'provisionedThroughputOverride.readCapacityUnits' " + notNull + "; "
+                        + "Value 'BAD' at 'billingModeOverride' failed to satisfy constraint: Member must satisfy "
+                        + "enum value set: [PROVISIONED, PAY_PER_REQUEST]; "
+                        + "Value 'bad name!' at 'targetTableName' failed to satisfy constraint: Member must satisfy "
+                        + "regular expression pattern: [a-zA-Z0-9_.-]+; "
+                        + "Value 'x!' at 'globalSecondaryIndexOverride.1.member.indexName' failed to satisfy "
+                        + "constraint: Member must have length greater than or equal to 3; "
+                        + "Value 'x!' at 'globalSecondaryIndexOverride.1.member.indexName' failed to satisfy "
+                        + "constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+; "
+                        + "Value null at 'globalSecondaryIndexOverride.1.member.provisionedThroughput."
+                        + "writeCapacityUnits' " + notNull + "; "
+                        + "Value null at 'globalSecondaryIndexOverride.1.member.provisionedThroughput."
+                        + "readCapacityUnits' " + notNull));
+        ddb("RestoreTableFromBackup", """
+                {"BackupArn": "%s", "TargetTableName": "BackupIT-none-x", "BillingModeOverride": "PROVISIONED",
+                 "ProvisionedThroughputOverride": {"ReadCapacityUnits": 0}}
+                """.formatted(arn))
+                .statusCode(400)
+                .body("message", equalTo("2 validation errors detected: "
+                        + "Value null at 'provisionedThroughputOverride.writeCapacityUnits' " + notNull + "; "
+                        + "Value '0' at 'provisionedThroughputOverride.readCapacityUnits' " + atLeastOne));
+        ddb("RestoreTableFromBackup", """
+                {"BackupArn": "%s", "TargetTableName": "BackupIT-none-x", "BillingModeOverride": "PROVISIONED",
+                 "ProvisionedThroughputOverride": {"ReadCapacityUnits": 0, "WriteCapacityUnits": 1},
+                 "GlobalSecondaryIndexOverride": [%s]}
+                """.formatted(arn, gsi1(", \"ProvisionedThroughput\": {\"ReadCapacityUnits\": 0, "
+                        + "\"WriteCapacityUnits\": 0}")))
+                .statusCode(400)
+                .body("message", equalTo("3 validation errors detected: "
+                        + "Value '0' at 'provisionedThroughputOverride.readCapacityUnits' " + atLeastOne + "; "
+                        + "Value '0' at 'globalSecondaryIndexOverride.1.member.provisionedThroughput."
+                        + "writeCapacityUnits' " + atLeastOne + "; "
+                        + "Value '0' at 'globalSecondaryIndexOverride.1.member.provisionedThroughput."
+                        + "readCapacityUnits' " + atLeastOne));
+    }
+
+    @Test
     void restoreOverridesFollowTheBillingMode() {
         String table = "BackupIT-billing";
         createIndexedTable(table);
