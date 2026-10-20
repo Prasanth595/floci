@@ -4447,6 +4447,36 @@ class Ec2ServiceTest {
         }
     }
 
+    /**
+     * The guard in keyTypeOf covers only records saved before the type was recorded. A reader failure
+     * still surfaces everywhere else: ImportKeyPair fails with it, and a key pair whose type was
+     * recorded is described without consulting the reader at all.
+     */
+    @Test
+    void aReaderFailureIsGuardedOnlyForKeyPairsSavedWithoutAType() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String ed25519 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
+        KeyPair recorded = service.importKeyPair("us-east-1", "recorded", ed25519);
+
+        try (MockedStatic<Ec2KeyMaterial> reader = mockStatic(Ec2KeyMaterial.class,
+                withSettings().mockMaker(MockMakers.INLINE).defaultAnswer(CALLS_REAL_METHODS))) {
+            reader.when(() -> Ec2KeyMaterial.readImportedKey(anyString()))
+                    .thenThrow(new IllegalStateException("a reader that fails"));
+
+            IllegalStateException failure = assertThrows(IllegalStateException.class,
+                    () -> service.importKeyPair("us-east-1", "another", ed25519));
+            assertEquals("a reader that fails", failure.getMessage());
+            assertEquals("ed25519", Ec2Service.keyTypeOf(service.describeKeyPairs("us-east-1",
+                    List.of("recorded"), List.of()).getFirst()));
+            assertEquals(recorded.getKeyPairId(), service.describeKeyPairs("us-east-1", List.of(), List.of(),
+                    Map.of("key-type", List.of("ed25519"))).getFirst().getKeyPairId());
+            reader.verify(() -> Ec2KeyMaterial.readImportedKey(anyString()), times(1));
+        }
+    }
+
     @Test
     void deleteKeyPairByNameRemovesItFromTheStore() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
