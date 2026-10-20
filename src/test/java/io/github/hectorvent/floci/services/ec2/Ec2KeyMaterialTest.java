@@ -22,7 +22,13 @@ import java.util.Random;
 
 import static io.github.hectorvent.floci.core.common.SshPublicKeysTest.blob;
 import static io.github.hectorvent.floci.core.common.SshPublicKeysTest.withTrailing;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.DSA_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ECDSA_P256_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_BLOB;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_FINGERPRINT;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_FINGERPRINT;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -39,18 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class Ec2KeyMaterialTest {
 
-    /** Throwaway keys, kept fixed so their fingerprints can be pinned to known good values. */
-    private static final String RSA_PUBLIC_KEY = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCp7mGC9"
-            + "NkQI+loxf1G9bM6HnCs9iR1nnzZA/f/o7hx/Wv1oDhx03k6H83I+Q49eE1XO56WBPxnr8/2G6UmS9D0R"
-            + "FKe9L+HJrfiZF7oLQ09JwEK91VLNSkD0Bq2zhnfWJe/ULkaPQ7FgHEghRi8aI5PsATH6VCaJDKWxl+2b"
-            + "zM7MWlbKRAo8uuu2evnGrgnu+RmuXJQCRYz6lG+JESVzm6MnHXYxme+UD+7c/tTYwzoswfXh8VN8QVzX"
-            + "mjfHi2Ve3PJ+YuF2X2gKpRMNMf7cLWMCTOhZI2AgXX+NLDlCG0dEUm/DXdSKRTDhm3mIJmF67eGYuff+"
-            + "zHusBZ9cSBkW9i9";
-
-    /** RSA_PUBLIC_KEY's fingerprint: {@code openssl pkey -pubin -outform DER | openssl md5 -c}. */
-    private static final String RSA_FINGERPRINT = "4d:1a:39:2e:6a:18:60:9a:c5:2a:cb:cc:6c:de:22:b5";
-
-    /** RSA_PUBLIC_KEY as RFC 4716, with a header continued onto a second line by a backslash. */
+    /** RSA_KEY as RFC 4716, with a header continued onto a second line by a backslash. */
     private static final String RSA_RFC_4716 = """
             ---- BEGIN SSH2 PUBLIC KEY ----
             Subject: throwaway
@@ -65,7 +60,7 @@ class Ec2KeyMaterialTest {
             ---- END SSH2 PUBLIC KEY ----
             """;
 
-    /** RSA_PUBLIC_KEY as a PEM SubjectPublicKeyInfo. */
+    /** RSA_KEY as a PEM SubjectPublicKeyInfo. */
     private static final String RSA_PEM_SPKI = """
             -----BEGIN PUBLIC KEY-----
             MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqe5hgvTZECPpaMX9RvWz
@@ -78,7 +73,7 @@ class Ec2KeyMaterialTest {
             -----END PUBLIC KEY-----
             """;
 
-    /** RSA_PUBLIC_KEY as the bare PKCS#1 PEM that {@code ssh-keygen -e -m PEM} writes. */
+    /** RSA_KEY as the bare PKCS#1 PEM that {@code ssh-keygen -e -m PEM} writes. */
     private static final String RSA_PEM_PKCS1 = """
             -----BEGIN RSA PUBLIC KEY-----
             MIIBCgKCAQEAqe5hgvTZECPpaMX9RvWzOh5wrPYkdZ582QP3/6O4cf1r9aA4cdN5
@@ -90,14 +85,14 @@ class Ec2KeyMaterialTest {
             -----END RSA PUBLIC KEY-----
             """;
 
-    /** RSA_PUBLIC_KEY as base64 DER, a SubjectPublicKeyInfo. */
+    /** RSA_KEY as base64 DER, a SubjectPublicKeyInfo. */
     private static final String RSA_DER_SPKI = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqe5hgvTZECPpaMX9RvWzOh5"
             + "wrPYkdZ582QP3/6O4cf1r9aA4cdN5Oh/NyPkOPXhNVzuelgT8Z6/P9hulJkvQ9ERSnvS/hya34mRe6C0NPScBCvdVSzUpA9Aats"
             + "4Z31iXv1C5Gj0OxYBxIIUYvGiOT7AEx+lQmiQylsZftm8zOzFpWykQKPLrrtnr5xq4J7vkZrlyUAkWM+pRviRElc5ujJx12MZnvl"
             + "A/u3P7U2MM6LMH14fFTfEFc15o3x4tlXtzyfmLhdl9oCqUTDTH+3C1jAkzoWSNgIF1/jSw5QhtHRFJvw13UikUw4Zt5iCZheu3h"
             + "mLn3/sx7rAWfXEgZFvYvQIDAQAB";
 
-    /** RSA_PUBLIC_KEY as base64 DER, the bare PKCS#1 RSAPublicKey. */
+    /** RSA_KEY as base64 DER, the bare PKCS#1 RSAPublicKey. */
     private static final String RSA_DER_PKCS1 = "MIIBCgKCAQEAqe5hgvTZECPpaMX9RvWzOh5wrPYkdZ582QP3/6O4cf1r9aA4cdN5"
             + "Oh/NyPkOPXhNVzuelgT8Z6/P9hulJkvQ9ERSnvS/hya34mRe6C0NPScBCvdVSzUpA9Aats4Z31iXv1C5Gj0OxYBxIIUYvGiOT7AE"
             + "x+lQmiQylsZftm8zOzFpWykQKPLrrtnr5xq4J7vkZrlyUAkWM+pRviRElc5ujJx12MZnvlA/u3P7U2MM6LMH14fFTfEFc15o3x4t"
@@ -108,18 +103,7 @@ class Ec2KeyMaterialTest {
             + "cQzFZSvmFegy0PHGRK6QNJWIK0eh+dNZ+hckR/X/LQvliDhCndX++/r/n3eZxmD3OXam4yg8RHT5k1Yj9eZCPxC8w1gfdDicoFIpa8"
             + "BZLVUf0/7u3KH6rpgJyW0sH2Fg7nI4WcOfEJRc+qUw== throwaway";
 
-    /** A throwaway DSA key from {@code ssh-keygen -t dsa}. */
-    private static final String DSA_PUBLIC_KEY = "ssh-dss AAAAB3NzaC1kc3MAAACBAOFToDsRbL7Z8AqAZOKXROc1Cy5SA1ZgM5odRC57"
-            + "MSEruUjfUv2//jGbOLemgQBFsqZY1dyKlrpR3dm+tpfXGQR26Pkqm+5BF8kaykQZAYdwCzRhwzM7c8pei36Qi2XJ1s+MeLbIXZ2TTf"
-            + "yvkYhckXSrnf90oVJaMpaTIiDzu/CVAAAAFQCk1LBHtzCpTFHCInI4jnrGMjyyQQAAAIBz+pU2CQ0d8tQyxfQJ71wCCowSoVuUk5Zh"
-            + "1kAnIOoSPOTOuqos4OqicYdSH/AK8G0gKoXbp1BJX8H1yB401LAl8gccL1YbZBheZAtfNjeBd1xOZQZXWSYOEPQWVMcrqkId3un13z"
-            + "55qV0vl6ohU3Mp9ekGjBHuQWhDk8RYGgL9vwAAAIB6eL+huYUrgr06l0ozSlF9pf87rehfJaCLLJPPco8F9uCqx8sYsi/8b6gkbfq4"
-            + "w/k75H62ew8LVhpab9bP3/6/HQodnGrh1rthcapynsUzpFcjS86okexUcDkR3OnPLJ3CNGBS7MM0yw+NeXZN2BkeTdKAfbAdFw1mrb"
-            + "/AKu9GDg== throwaway";
-
-    /** Throwaway ECDSA keys from {@code ssh-keygen -t ecdsa -b 256} and {@code -b 384}. */
-    private static final String ECDSA_P256_PUBLIC_KEY = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAy"
-            + "NTYAAABBBFaxjAHsoCE0FmjbKLGzgVRKfOKFmYj1/JpnSjsuLjy23mHIUPkLJ5thgE47igHp+KufC1V2KqJE4OP5w4EK9SU= throwaway";
+    /** A throwaway ECDSA P-384 key from {@code ssh-keygen -t ecdsa -b 384}. */
     private static final String ECDSA_P384_PUBLIC_KEY = "ecdsa-sha2-nistp384 AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAz"
             + "ODQAAABhBEFD+laPV5eyv8Xz7vR3C2ghLq0L8tSwATYS5Nalon9hyyVbf9+wSWLKJH7rmq374ljT0Uh0vuy47nzXJT9pEVtSthFnpue9"
             + "nxG0TEvsjbQgmcNNCt8vYZPrYWBLc1x7zg== throwaway";
@@ -234,16 +218,16 @@ class Ec2KeyMaterialTest {
         // which is the command AWS gives for verifying an imported RSA key pair. A test that
         // compared the service against fingerprintOf, or that only checked the digest shape,
         // would pass under either scheme and so could not tell them apart.
-        String expected = "4d:1a:39:2e:6a:18:60:9a:c5:2a:cb:cc:6c:de:22:b5";
+        String expected = RSA_FINGERPRINT;
 
-        assertEquals(expected, fingerprintOf(RSA_PUBLIC_KEY));
-        assertEquals(expected, fingerprintOf(RSA_PUBLIC_KEY + " someone@example.com"));
+        assertEquals(expected, fingerprintOf(RSA_KEY));
+        assertEquals(expected, fingerprintOf(RSA_KEY + " someone@example.com"));
 
         // The other candidate scheme for the same key: MD5 over the SSH wire blob, which is
         // what "ssh-keygen -l -E md5" reports. AWS does not use it for imported RSA keys, and
         // it is a different value, which is what makes the assertion above load bearing.
         assertNotEquals("e7:d6:55:60:68:18:8f:b7:4f:2a:72:20:0b:2f:f2:d9",
-                fingerprintOf(RSA_PUBLIC_KEY));
+                fingerprintOf(RSA_KEY));
     }
 
     @Test
@@ -254,7 +238,7 @@ class Ec2KeyMaterialTest {
         // AWS reports the same digest without the prefix and with base64 padding kept.
         String fingerprint = fingerprintOf(ED25519_KEY);
 
-        assertEquals("UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=", fingerprint);
+        assertEquals(ED25519_FINGERPRINT, fingerprint);
         assertEquals(fingerprint,
                 fingerprintOf(ED25519_KEY + " someone@example.com"));
     }
@@ -293,7 +277,7 @@ class Ec2KeyMaterialTest {
 
     /**
      * The same RSA key in each format AWS documents for ImportKeyPair, all read as one key with the
-     * fingerprint pinned above. The exports were made outside this code from RSA_PUBLIC_KEY:
+     * fingerprint pinned above. The exports were made outside this code from RSA_KEY:
      * {@code ssh-keygen -e -m RFC4716}, {@code -m PKCS8} and {@code -m PEM}, and
      * {@code openssl pkey -pubin -outform DER | base64} and {@code openssl rsa -pubin
      * -RSAPublicKey_out -outform DER | base64} for the bare DER.
@@ -304,9 +288,9 @@ class Ec2KeyMaterialTest {
             "der-spki", "der-spki-wrapped", "der-pkcs1"})
     void anRsaKeyIsReadFromEveryFormatAwsDocumentsAsTheSameKey(String format) {
         String material = switch (format) {
-            case "openssh" -> RSA_PUBLIC_KEY;
-            case "openssh-comment" -> RSA_PUBLIC_KEY + " someone@example.com\n";
-            case "openssh-tab-crlf" -> RSA_PUBLIC_KEY.replace(' ', '\t') + "\tsomeone@example.com\r\n";
+            case "openssh" -> RSA_KEY;
+            case "openssh-comment" -> RSA_KEY + " someone@example.com\n";
+            case "openssh-tab-crlf" -> RSA_KEY.replace(' ', '\t') + "\tsomeone@example.com\r\n";
             case "rfc4716" -> RSA_RFC_4716;
             case "pem-spki" -> RSA_PEM_SPKI;
             case "pem-pkcs1" -> RSA_PEM_PKCS1;
@@ -322,7 +306,7 @@ class Ec2KeyMaterialTest {
         assertEquals("rsa", key.keyType());
         assertEquals(RSA_FINGERPRINT, key.fingerprint());
         // One OpenSSH line without a comment, whatever came in: what authorized_keys can read.
-        assertEquals(RSA_PUBLIC_KEY, key.openSshPublicKey());
+        assertEquals(RSA_KEY, key.openSshPublicKey());
     }
 
     @Test
@@ -331,7 +315,7 @@ class Ec2KeyMaterialTest {
 
         assertNotNull(key);
         assertEquals("ed25519", key.keyType());
-        assertEquals("UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=", key.fingerprint());
+        assertEquals(ED25519_FINGERPRINT, key.fingerprint());
         assertEquals(ED25519_KEY, key.openSshPublicKey());
     }
 
@@ -344,8 +328,8 @@ class Ec2KeyMaterialTest {
     @ValueSource(strings = {"dsa", "ecdsa-p256", "ecdsa-p384", "sk-ed25519", "sk-ecdsa", "ed25519-cert", "unknown"})
     void aKeyOfATypeEc2DoesNotImportIsRefused(String type) {
         String material = switch (type) {
-            case "dsa" -> DSA_PUBLIC_KEY;
-            case "ecdsa-p256" -> ECDSA_P256_PUBLIC_KEY;
+            case "dsa" -> DSA_KEY;
+            case "ecdsa-p256" -> ECDSA_P256_KEY;
             case "ecdsa-p384" -> ECDSA_P384_PUBLIC_KEY;
             case "sk-ed25519" -> line("sk-ssh-ed25519@openssh.com", new byte[32], utf8("ssh:"));
             case "sk-ecdsa" -> line("sk-ecdsa-sha2-nistp256@openssh.com", utf8("nistp256"), new byte[65], utf8("ssh:"));
@@ -395,8 +379,8 @@ class Ec2KeyMaterialTest {
             "rsa-trailing-bytes", "ed25519-trailing-bytes", "ed25519-33-bytes", "rsa-negative-modulus",
             "rsa-empty-exponent"})
     void aKeyLineWhoseBlobIsNotExactlyTheKeyItNamesIsRefused(String shape) {
-        byte[] rsaBlob = Base64.getDecoder().decode(RSA_PUBLIC_KEY.split(" ")[1]);
-        byte[] ed25519Blob = Base64.getDecoder().decode(ED25519_KEY.split(" ")[1]);
+        byte[] rsaBlob = Base64.getDecoder().decode(RSA_KEY.split(" ")[1]);
+        byte[] ed25519Blob = Base64.getDecoder().decode(ED25519_BLOB);
         byte[] exponent = BigInteger.valueOf(65537).toByteArray();
         byte[] modulus = BigInteger.ONE.shiftLeft(2047).setBit(0).toByteArray();
         String material = switch (shape) {
@@ -419,8 +403,8 @@ class Ec2KeyMaterialTest {
     /** A key pair holds one key: an instance launched with it would trust every line of the material. */
     @Test
     void materialHoldingASecondKeyLineIsRefused() {
-        assertNull(Ec2KeyMaterial.readImportedKey(ED25519_KEY + " first\n" + RSA_PUBLIC_KEY + " second\n"));
-        assertNull(Ec2KeyMaterial.readImportedKey(RSA_PUBLIC_KEY + "\n\n" + RSA_PUBLIC_KEY));
+        assertNull(Ec2KeyMaterial.readImportedKey(ED25519_KEY + " first\n" + RSA_KEY + " second\n"));
+        assertNull(Ec2KeyMaterial.readImportedKey(RSA_KEY + "\n\n" + RSA_KEY));
     }
 
     /** RFC 4716 and DER are RSA-only formats for ImportKeyPair, and PEM has to label a public key. */
@@ -432,7 +416,7 @@ class Ec2KeyMaterialTest {
         String ecDer = base64(KeyPairGenerator.getInstance("EC").generateKeyPair().getPublic().getEncoded());
         String material = switch (shape) {
             case "rfc4716-ed25519" -> "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"throwaway\"\n"
-                    + ED25519_KEY.split(" ")[1] + "\n---- END SSH2 PUBLIC KEY ----\n";
+                    + ED25519_BLOB + "\n---- END SSH2 PUBLIC KEY ----\n";
             case "rfc4716-unterminated" -> RSA_RFC_4716.replace("---- END SSH2 PUBLIC KEY ----", "");
             case "rfc4716-empty" -> "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"throwaway\"\n---- END SSH2 PUBLIC KEY ----";
             case "pem-private-key" -> Ec2KeyMaterial.generateRsa().privateKeyPem();
@@ -459,9 +443,9 @@ class Ec2KeyMaterialTest {
         assertNull(Ec2KeyMaterial.readImportedKey("not-a-key"));
         assertNull(Ec2KeyMaterial.readImportedKey("ssh-rsa"));
         assertNull(Ec2KeyMaterial.readImportedKey("ssh-rsa !!!not-base64!!!"));
-        assertNull(Ec2KeyMaterial.readImportedKey(base64(utf8(RSA_PUBLIC_KEY))));
+        assertNull(Ec2KeyMaterial.readImportedKey(base64(utf8(RSA_KEY))));
         assertNull(Ec2KeyMaterial.readImportedKey(
-                new String(RSA_PUBLIC_KEY.getBytes(StandardCharsets.UTF_16LE), StandardCharsets.UTF_8)));
+                new String(RSA_KEY.getBytes(StandardCharsets.UTF_16LE), StandardCharsets.UTF_8)));
     }
 
     /**
@@ -471,8 +455,8 @@ class Ec2KeyMaterialTest {
     @Test
     void noMaterialMakesTheReaderThrow() {
         Random random = new Random(20261020L);
-        List<String> valid = List.of(RSA_PUBLIC_KEY + " c", ED25519_KEY, RSA_RFC_4716, RSA_PEM_SPKI,
-                RSA_PEM_PKCS1, RSA_DER_SPKI, RSA_DER_PKCS1, DSA_PUBLIC_KEY, ECDSA_P256_PUBLIC_KEY);
+        List<String> valid = List.of(RSA_KEY + " c", ED25519_KEY, RSA_RFC_4716, RSA_PEM_SPKI,
+                RSA_PEM_PKCS1, RSA_DER_SPKI, RSA_DER_PKCS1, DSA_KEY, ECDSA_P256_KEY);
         for (String material : valid) {
             for (int end = 0; end <= material.length(); end++) {
                 assertDoesNotThrow(material.substring(0, end));
@@ -520,7 +504,7 @@ class Ec2KeyMaterialTest {
     void noByteOfABinaryKeyMakesTheReaderThrow() {
         int[] values = {0, 1, 2, 3, 4, 7, 8, 0x0f, 0x10, 0x1f, 0x30, 0x7f, 0x80, 0x81, 0x82, 0x84, 0xfe, 0xff};
         List<byte[]> binaries = List.of(Base64.getDecoder().decode(RSA_DER_SPKI), Base64.getDecoder().decode(RSA_DER_PKCS1),
-                Base64.getDecoder().decode(RSA_PUBLIC_KEY.split(" ")[1]), Base64.getDecoder().decode(ED25519_KEY.split(" ")[1]));
+                Base64.getDecoder().decode(RSA_KEY.split(" ")[1]), Base64.getDecoder().decode(ED25519_BLOB));
         for (int form = 0; form < binaries.size(); form++) {
             byte[] original = binaries.get(form);
             for (int position = 0; position < original.length; position++) {

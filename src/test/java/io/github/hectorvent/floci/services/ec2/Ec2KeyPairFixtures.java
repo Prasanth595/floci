@@ -8,20 +8,53 @@ import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
 
-/** The key pair calls and the ED25519 key shared by the EC2 key pair tests. */
+/** The key pair calls and the throwaway keys shared by the EC2 key pair tests. */
 final class Ec2KeyPairFixtures {
 
     static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20261020/us-east-1/ec2/aws4_request";
 
+    /** A throwaway 2048-bit RSA key. */
+    static final String RSA_KEY = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCp7mGC9"
+            + "NkQI+loxf1G9bM6HnCs9iR1nnzZA/f/o7hx/Wv1oDhx03k6H83I+Q49eE1XO56WBPxnr8/2G6UmS9D0R"
+            + "FKe9L+HJrfiZF7oLQ09JwEK91VLNSkD0Bq2zhnfWJe/ULkaPQ7FgHEghRi8aI5PsATH6VCaJDKWxl+2b"
+            + "zM7MWlbKRAo8uuu2evnGrgnu+RmuXJQCRYz6lG+JESVzm6MnHXYxme+UD+7c/tTYwzoswfXh8VN8QVzX"
+            + "mjfHi2Ve3PJ+YuF2X2gKpRMNMf7cLWMCTOhZI2AgXX+NLDlCG0dEUm/DXdSKRTDhm3mIJmF67eGYuff+"
+            + "zHusBZ9cSBkW9i9";
+
     /**
-     * A throwaway ED25519 public key as an OpenSSH line without a comment. Ec2KeyMaterialTest pins
-     * its fingerprint to what {@code ssh-keygen -l} reports.
+     * RSA_KEY's fingerprint, the MD5 of its DER as EC2 reports it for an imported RSA key:
+     * {@code openssl pkey -pubin -outform DER | openssl md5 -c}.
      */
+    static final String RSA_FINGERPRINT = "4d:1a:39:2e:6a:18:60:9a:c5:2a:cb:cc:6c:de:22:b5";
+
+    /** A throwaway ED25519 public key as an OpenSSH line without a comment. */
     static final String ED25519_KEY =
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
 
     /** The base64 blob of {@link #ED25519_KEY}. */
     static final String ED25519_BLOB = ED25519_KEY.split(" ")[1];
+
+    /**
+     * ED25519_KEY's fingerprint as EC2 reports it, the base64 SHA-256 with its padding kept:
+     * {@code ssh-keygen -l} prints it as {@code SHA256:UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk}.
+     */
+    static final String ED25519_FINGERPRINT = "UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=";
+
+    /** A throwaway DSA key from {@code ssh-keygen -t dsa}. */
+    static final String DSA_KEY = "ssh-dss AAAAB3NzaC1kc3MAAACBAOFToDsRbL7Z8AqAZOKXROc1Cy5SA1ZgM5odRC57"
+            + "MSEruUjfUv2//jGbOLemgQBFsqZY1dyKlrpR3dm+tpfXGQR26Pkqm+5BF8kaykQZAYdwCzRhwzM7c8pei36Qi2XJ1s+MeLbIXZ2TTf"
+            + "yvkYhckXSrnf90oVJaMpaTIiDzu/CVAAAAFQCk1LBHtzCpTFHCInI4jnrGMjyyQQAAAIBz+pU2CQ0d8tQyxfQJ71wCCowSoVuUk5Zh"
+            + "1kAnIOoSPOTOuqos4OqicYdSH/AK8G0gKoXbp1BJX8H1yB401LAl8gccL1YbZBheZAtfNjeBd1xOZQZXWSYOEPQWVMcrqkId3un13z"
+            + "55qV0vl6ohU3Mp9ekGjBHuQWhDk8RYGgL9vwAAAIB6eL+huYUrgr06l0ozSlF9pf87rehfJaCLLJPPco8F9uCqx8sYsi/8b6gkbfq4"
+            + "w/k75H62ew8LVhpab9bP3/6/HQodnGrh1rthcapynsUzpFcjS86okexUcDkR3OnPLJ3CNGBS7MM0yw+NeXZN2BkeTdKAfbAdFw1mrb"
+            + "/AKu9GDg== throwaway";
+
+    /** A throwaway ECDSA P-256 key from {@code ssh-keygen -t ecdsa -b 256}. */
+    static final String ECDSA_P256_KEY = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAy"
+            + "NTYAAABBBFaxjAHsoCE0FmjbKLGzgVRKfOKFmYj1/JpnSjsuLjy23mHIUPkLJ5thgE47igHp+KufC1V2KqJE4OP5w4EK9SU= throwaway";
+
+    /** The truncated ssh-rsa blob Floci's own tests once imported: a type, an exponent, and part of a modulus. */
+    static final String TRUNCATED_RSA_KEY = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAQQDHnLTTbpnrFWkfVt test@test";
 
     private Ec2KeyPairFixtures() {
     }
@@ -63,6 +96,7 @@ final class Ec2KeyPairFixtures {
         return importedKeyPairId(name, material.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** Deletes the key pair with this id, and checks DeleteKeyPair answered 200. */
     static void deleteKeyPair(String id) {
         ec2("DeleteKeyPair").formParam("KeyPairId", id).post("/").then().statusCode(200);
     }

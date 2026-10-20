@@ -43,6 +43,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_FINGERPRINT;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -604,14 +605,14 @@ class Ec2ServicePersistenceTest {
                   "us-east-1::key-0bbbbbbbbbbbbbbbb": {
                     "keyName": "legacy-imported",
                     "keyPairId": "key-0bbbbbbbbbbbbbbbb",
-                    "keyFingerprint": "UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=",
+                    "keyFingerprint": "%s",
                     "publicKey": %s,
                     "region": "us-east-1",
                     "tags": [{"key": "Team", "value": "blue"}]
                   }
                 }
                 """.formatted(generated.fingerprint(), jsonString(generated.privateKeyPem()),
-                generated.openSshPublicKey(), jsonString(importedKey));
+                generated.openSshPublicKey(), ED25519_FINGERPRINT, jsonString(importedKey));
         Files.writeString(dir.resolve("ec2-key-pairs.json"), legacyJson);
 
         Ec2Service restarted = newService(dir);

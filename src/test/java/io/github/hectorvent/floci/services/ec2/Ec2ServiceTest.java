@@ -105,7 +105,12 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ECDSA_P256_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_FINGERPRINT;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_FINGERPRINT;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.TRUNCATED_RSA_KEY;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -4420,16 +4425,9 @@ class Ec2ServiceTest {
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
 
-        String rsaKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCp7mGC9NkQI+loxf1G9bM6HnCs9iR1nn"
-                + "zZA/f/o7hx/Wv1oDhx03k6H83I+Q49eE1XO56WBPxnr8/2G6UmS9D0RFKe9L+HJrfiZF7oLQ09Jw"
-                + "EK91VLNSkD0Bq2zhnfWJe/ULkaPQ7FgHEghRi8aI5PsATH6VCaJDKWxl+2bzM7MWlbKRAo8uuu2e"
-                + "vnGrgnu+RmuXJQCRYz6lG+JESVzm6MnHXYxme+UD+7c/tTYwzoswfXh8VN8QVzXmjfHi2Ve3PJ+Y"
-                + "uF2X2gKpRMNMf7cLWMCTOhZI2AgXX+NLDlCG0dEUm/DXdSKRTDhm3mIJmF67eGYuff+zHusBZ9cS"
-                + "BkW9i9";
-
-        assertEquals("4d:1a:39:2e:6a:18:60:9a:c5:2a:cb:cc:6c:de:22:b5",
-                service.importKeyPair("us-east-1", "pinned-rsa", rsaKey).getKeyFingerprint());
-        assertEquals("UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=",
+        assertEquals(RSA_FINGERPRINT,
+                service.importKeyPair("us-east-1", "pinned-rsa", RSA_KEY).getKeyFingerprint());
+        assertEquals(ED25519_FINGERPRINT,
                 service.importKeyPair("us-east-1", "pinned-ed25519", ED25519_KEY).getKeyFingerprint());
     }
 
@@ -4586,9 +4584,8 @@ class Ec2ServiceTest {
      */
     @ParameterizedTest
     @ValueSource(strings = {
-            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFaxjAHsoCE0FmjbKLGzgVRKfOKFmYj1"
-                    + "/JpnSjsuLjy23mHIUPkLJ5thgE47igHp+KufC1V2KqJE4OP5w4EK9SU= throwaway",
-            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAQQDHnLTTbpnrFWkfVt test@test"})
+            ECDSA_P256_KEY,
+            TRUNCATED_RSA_KEY})
     void importKeyPairRefusesAKeyEc2DoesNotImport(String material) {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -4740,8 +4737,7 @@ class Ec2ServiceTest {
         Map<String, String> legacy = new LinkedHashMap<>();
         legacy.put("key-created", null);
         legacy.put("key-ed25519", ED25519_KEY + " me\n");
-        legacy.put("key-ecdsa", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFaxjAHsoCE0"
-                + "FmjbKLGzgVRKfOKFmYj1/JpnSjsuLjy23mHIUPkLJ5thgE47igHp+KufC1V2KqJE4OP5w4EK9SU= throwaway");
+        legacy.put("key-ecdsa", ECDSA_P256_KEY);
         legacy.put("key-garbage", "c3NoLXJzYSBBQUFB");
         // A SubjectPublicKeyInfo whose bit string declares an unused bit (byte 23 of a 2048-bit RSA
         // key): the earlier ImportKeyPair stored it, and reading it must not fail the whole listing.

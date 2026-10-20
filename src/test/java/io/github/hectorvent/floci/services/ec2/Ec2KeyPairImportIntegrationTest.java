@@ -16,7 +16,11 @@ import java.util.HexFormat;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.core.common.SshPublicKeysTest.blob;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.DSA_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ECDSA_P256_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_BLOB;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.TRUNCATED_RSA_KEY;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.createKeyPair;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.deleteKeyPair;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ec2;
@@ -33,16 +37,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class Ec2KeyPairImportIntegrationTest {
 
-    /** Throwaway keys from ssh-keygen, of types EC2 does not import. */
-    private static final String DSA_KEY = "ssh-dss AAAAB3NzaC1kc3MAAACBAOFToDsRbL7Z8AqAZOKXROc1Cy5SA1ZgM5odRC57MSEruUj"
-            + "fUv2//jGbOLemgQBFsqZY1dyKlrpR3dm+tpfXGQR26Pkqm+5BF8kaykQZAYdwCzRhwzM7c8pei36Qi2XJ1s+MeLbIXZ2TTfyvkYhckXSrn"
-            + "f90oVJaMpaTIiDzu/CVAAAAFQCk1LBHtzCpTFHCInI4jnrGMjyyQQAAAIBz+pU2CQ0d8tQyxfQJ71wCCowSoVuUk5Zh1kAnIOoSPOTOuqo"
-            + "s4OqicYdSH/AK8G0gKoXbp1BJX8H1yB401LAl8gccL1YbZBheZAtfNjeBd1xOZQZXWSYOEPQWVMcrqkId3un13z55qV0vl6ohU3Mp9ekGjB"
-            + "HuQWhDk8RYGgL9vwAAAIB6eL+huYUrgr06l0ozSlF9pf87rehfJaCLLJPPco8F9uCqx8sYsi/8b6gkbfq4w/k75H62ew8LVhpab9bP3/6/HQ"
-            + "odnGrh1rthcapynsUzpFcjS86okexUcDkR3OnPLJ3CNGBS7MM0yw+NeXZN2BkeTdKAfbAdFw1mrb/AKu9GDg== throwaway";
-    private static final String ECDSA_KEY = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABB"
-            + "BFaxjAHsoCE0FmjbKLGzgVRKfOKFmYj1/JpnSjsuLjy23mHIUPkLJ5thgE47igHp+KufC1V2KqJE4OP5w4EK9SU= throwaway";
-
     /**
      * Each refusal is the error AWS gives an import it cannot read, and stores nothing: DSA and
      * ECDSA keys, an RSA key shorter than 1024 bits, the truncated ssh-rsa blob Floci's tests once
@@ -56,16 +50,16 @@ class Ec2KeyPairImportIntegrationTest {
         String name = "refused-" + UUID.randomUUID();
         String material = switch (shape) {
             case "dsa" -> DSA_KEY;
-            case "ecdsa" -> ECDSA_KEY;
+            case "ecdsa" -> ECDSA_P256_KEY;
             case "rsa-768" -> "ssh-rsa " + base64(blob("ssh-rsa", BigInteger.valueOf(65537).toByteArray(),
                     BigInteger.ONE.shiftLeft(767).setBit(0).toByteArray()));
             // A SubjectPublicKeyInfo whose key bit string declares an unused bit: no whole key.
             case "der-pad-bits" -> base64(withPadBits(Ec2KeyMaterial.generateRsa().openSshPublicKey()));
             // An rsaEncryption SubjectPublicKeyInfo whose key bit string is empty: no key at all.
             case "der-empty-bit-string" -> "MBIwDQYJKoZIhvcNAQEBBQADAQA=";
-            case "truncated-rsa" -> "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAQQDHnLTTbpnrFWkfVt test@test";
+            case "truncated-rsa" -> TRUNCATED_RSA_KEY;
             case "two-lines" -> ED25519_KEY + " first\n" + Ec2KeyMaterial.generateRsa().openSshPublicKey() + " second\n";
-            case "rfc4716-ed25519" -> "---- BEGIN SSH2 PUBLIC KEY ----\n" + ED25519_KEY.split(" ")[1]
+            case "rfc4716-ed25519" -> "---- BEGIN SSH2 PUBLIC KEY ----\n" + ED25519_BLOB
                     + "\n---- END SSH2 PUBLIC KEY ----\n";
             case "private-key" -> Ec2KeyMaterial.generateRsa().privateKeyPem();
             case "double-base64" -> base64(Ec2KeyMaterial.generateRsa().openSshPublicKey()

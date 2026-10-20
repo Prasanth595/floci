@@ -18,7 +18,6 @@ import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
@@ -44,8 +43,6 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2QueryHandlerTest {
-
-    /** The blob of a throwaway ed25519 public key. */
 
     @ParameterizedTest
     @CsvSource({
@@ -283,15 +280,14 @@ class Ec2QueryHandlerTest {
     @NullAndEmptySource
     @ValueSource(strings = {"two\nlines", "carriage\rreturn", "a\ttab"})
     void describeKeyPairsGivesTheKeyNoCommentWhenTheNameCannotBeOne(String name) {
-        String line = ED25519_KEY;
         KeyPair keyPair = new KeyPair();
         keyPair.setKeyPairId("key-0123456789abcdef0");
         keyPair.setKeyName(name);
-        keyPair.setPublicKey(line + " imported-comment");
+        keyPair.setPublicKey(ED25519_KEY + " imported-comment");
 
         String xml = describeKeyPairWithItsPublicKey(keyPair);
 
-        assertTrue(xml.contains("<publicKey>" + line + "</publicKey>"), xml);
+        assertTrue(xml.contains("<publicKey>" + ED25519_KEY + "</publicKey>"), xml);
     }
 
     /**
