@@ -137,8 +137,13 @@ public class AwsQueryController {
     @Produces(MediaType.APPLICATION_XML)
     public Response dispatch(
             @HeaderParam("Authorization") String authorization,
+            @Context UriInfo uriInfo,
             MultivaluedMap<String, String> formParams) {
+        return dispatch(IamEnforcementFilter.requestAuthorization(authorization, uriInfo.getQueryParameters()),
+                formParams);
+    }
 
+    private Response dispatch(String authorization, MultivaluedMap<String, String> formParams) {
         String action = AwsQueryServiceResolver.action(formParams);
         if (action == null) {
             return xmlErrorResponse("MissingAction",

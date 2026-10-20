@@ -90,6 +90,23 @@ class RedshiftGetClusterCredentialsIamEnforcementIntegrationTest {
     }
 
     @Test
+    void getClusterCredentials_presignedWithoutJoinGroup_isDenied() {
+        String cluster = uniqueName("gcc-presigned");
+        String user = uniqueName("gcc-presigned");
+        String accessKeyId = createUser(user);
+        userPolicy(user, allow("redshift:GetClusterCredentials", "*"));
+
+        assertDenied(given()
+                .queryParam("X-Amz-Credential", accessKeyId + "/20261020/us-east-1/redshift/aws4_request")
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetClusterCredentials")
+                .formParam("Version", "2012-12-01")
+                .formParam("ClusterIdentifier", cluster)
+                .formParam("DbUser", "analyst")
+                .formParam("DbGroups.DbGroup.1", "analysts"));
+    }
+
+    @Test
     void getClusterCredentials_withoutOptions_needsOnlyGetClusterCredentials() {
         String cluster = uniqueName("gcc-plain");
         String user = uniqueName("gcc-plain");
