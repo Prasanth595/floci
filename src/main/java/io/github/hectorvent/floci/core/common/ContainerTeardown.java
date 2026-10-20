@@ -3,9 +3,10 @@ package io.github.hectorvent.floci.core.common;
 /**
  * Implemented by services that launch Docker containers whose lifetime is bound to the
  * emulator process (Lambda warm pool, ECS tasks, EC2 instances, in-flight build/job
- * containers). {@link ContainerTeardowns#stopAll} runs every implementation, tolerating
+ * containers). {@link ContainerTeardowns} runs every implementation, tolerating
  * individual failures, and is invoked from two call sites: {@code EmulatorLifecycle.onStop}
- * during the ShutdownEvent phase, before {@code StorageFactory.shutdownAll()}, so teardown
+ * through its process-shutdown hook during the ShutdownEvent phase, before
+ * {@code StorageFactory.shutdownAll()}, so teardown
  * runs at a deterministic point and state changes made while stopping are still captured
  * by the final flush; and {@code EmulatorInfoController} on {@code /state/reset} and
  * {@code /state/nuke}, since those wipe the same tracking state these containers were
@@ -24,4 +25,9 @@ package io.github.hectorvent.floci.core.common;
 public interface ContainerTeardown {
 
     void stopManagedContainers();
+
+    /** Process exit may bound waiting; reset keeps the draining operation before clearing state. */
+    default void stopManagedContainersForShutdown() {
+        stopManagedContainers();
+    }
 }

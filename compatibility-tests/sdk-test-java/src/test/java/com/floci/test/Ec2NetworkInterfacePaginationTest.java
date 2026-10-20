@@ -3,6 +3,7 @@ package com.floci.test;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.*;
+import software.amazon.awssdk.services.ec2.waiters.Ec2Waiter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -55,12 +56,12 @@ class Ec2NetworkInterfacePaginationTest {
         keyName = TestFixtures.uniqueName("pagination-key");
         ec2.createKeyPair(CreateKeyPairRequest.builder().keyName(keyName).build());
 
-        // --- Launch 6 instances to get 6 ENIs ---
+        // Five running vCPUs fit the default quota; a stopped guest retains its ENI.
         RunInstancesResponse runResp = ec2.runInstances(RunInstancesRequest.builder()
                 .imageId("ami-0abcdef1234567890")
                 .instanceType(InstanceType.T2_MICRO)
-                .minCount(6)
-                .maxCount(6)
+                .minCount(5)
+                .maxCount(5)
                 .keyName(keyName)
                 .subnetId(subnetId)
                 .securityGroupIds(List.of(sgId))
@@ -69,6 +70,17 @@ class Ec2NetworkInterfacePaginationTest {
         for (Instance inst : runResp.instances()) {
             instanceIds.add(inst.instanceId());
         }
+        ec2.stopInstances(StopInstancesRequest.builder().instanceIds(instanceIds.get(0)).build());
+        try (Ec2Waiter waiter = ec2.waiter()) {
+            waiter.waitUntilInstanceStopped(request -> request.instanceIds(instanceIds.get(0)))
+                    .matched().response().orElseThrow();
+        }
+        RunInstancesResponse sixth = ec2.runInstances(RunInstancesRequest.builder()
+                .imageId("ami-0abcdef1234567890")
+                .instanceType(InstanceType.T2_MICRO)
+                .minCount(1).maxCount(1)
+                .keyName(keyName).subnetId(subnetId).securityGroupIds(List.of(sgId)).build());
+        sixth.instances().forEach(instance -> instanceIds.add(instance.instanceId()));
         assertThat(instanceIds).hasSize(6);
     }
 

@@ -987,7 +987,7 @@ public class Ec2QueryHandler {
                         null,
                         0,
                         launch.availabilityZone(), launch.metadataOptions(), null, launch.encodedUserData(), false,
-                        null, null, launch.blockDeviceMappings());
+                        null, null, launch.blockDeviceMappings(), "spot".equals(capacityType));
                 Instance instance = reservation.getInstances().get(0);
                 launchedInstanceIds.add(instance.getInstanceId());
                 results.add(new FleetLaunchResult(instance, launch));

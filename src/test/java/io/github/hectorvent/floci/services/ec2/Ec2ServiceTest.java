@@ -4717,6 +4717,11 @@ class Ec2ServiceTest {
                 new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), mock(VpcNetworkManager.class));
 
+        doAnswer(call -> {
+            Instance stopped = call.getArgument(0);
+            stopped.setState(InstanceState.stopped());
+            return null;
+        }).when(containerManager).stopForShutdown(any());
         service.stopManagedContainers();
 
         verify(containerManager).stopForShutdown(argThat(stopped -> "i-other".equals(stopped.getInstanceId())));
@@ -7131,6 +7136,9 @@ class Ec2ServiceTest {
         when(config.defaultAccountId()).thenReturn("000000000000");
         when(config.services()).thenReturn(services);
         when(services.ec2()).thenReturn(ec2);
+        EmulatorConfig.ServiceQuotasServiceConfig quotas = mock(EmulatorConfig.ServiceQuotasServiceConfig.class);
+        when(services.servicequotas()).thenReturn(quotas);
+        when(quotas.standardOnDemandVcpus()).thenReturn(1_000);
         when(ec2.mock()).thenReturn(ec2Mock);
         when(ec2.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.DOCUMENTATION);
         when(ec2.mockPublicAddress()).thenReturn(Optional.empty());
