@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
 import io.github.hectorvent.floci.services.acm.model.CertificateOptions;
+import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.acm.model.ValidationMethod;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -1475,6 +1476,43 @@ class ElbV2HttpsDataPlaneIntegrationTest {
         deleteLoadBalancer(secondLbArn);
         deleteLoadBalancer(httpLbArn);
         deleteTargetGroup(firstTargetGroupArn);
+    }
+
+    @Test
+    @Order(10)
+    void attachedExportableCertificateRefusesRevocationWithoutChangingHttps() {
+        LoadBalancerRef loadBalancer = createLoadBalancer("tls-revoke-guard");
+        Certificate certificate = acmService.requestCertificate(loadBalancer.dnsName(), List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, new CertificateOptions(null, "ENABLED"), Map.of(), REGION);
+        String listener = null;
+        try {
+            listener = createFixedResponseListener(loadBalancer.arn(), "HTTPS", HTTPS_PORT, certificate.getArn(), "revocation");
+            awaitHttpsMaterial(loadBalancer.dnsName(), 200, "revocation", certificate, certificate);
+            Response refusal = given().header("X-Amz-Target", "CertificateManager.RevokeCertificate")
+                    .header("Authorization", AUTH.replace("elasticloadbalancing", "acm"))
+                    .contentType("application/x-amz-json-1.1")
+                    .body(Map.of("CertificateArn", certificate.getArn(), "RevocationReason", "KEY_COMPROMISE"))
+                    .post("/");
+            assertAll(
+                    () -> assertEquals(400, refusal.statusCode()),
+                    () -> assertTrue(String.valueOf(refusal.jsonPath().getString("__type")).endsWith("ResourceInUseException")),
+                    () -> assertEquals(CertificateStatus.ISSUED,
+                            acmService.getCertificate(certificate.getArn(), REGION).getStatus()),
+                    () -> awaitHttpsMaterial(loadBalancer.dnsName(), 200, "revocation", certificate, certificate));
+            deleteListener(listener);
+            listener = null;
+            given().header("X-Amz-Target", "CertificateManager.RevokeCertificate")
+                    .header("Authorization", AUTH.replace("elasticloadbalancing", "acm"))
+                    .contentType("application/x-amz-json-1.1")
+                    .body(Map.of("CertificateArn", certificate.getArn(), "RevocationReason", "KEY_COMPROMISE"))
+                    .post("/").then().statusCode(200);
+            assertEquals(CertificateStatus.REVOKED,
+                    acmService.getCertificate(certificate.getArn(), REGION).getStatus());
+        } finally {
+            deleteListener(listener);
+            deleteLoadBalancer(loadBalancer.arn());
+            acmService.deleteCertificate(certificate.getArn(), REGION);
+        }
     }
 
     private Certificate requestCertificate(String domainName) {

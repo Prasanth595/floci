@@ -161,10 +161,11 @@ public class AcmJsonHandler {
 
         ListResult result = service.listCertificates(statuses, keyTypes, region, maxItems, nextToken);
 
+        Map<String, List<String>> consumers = service.certificateInUseBy(result.certificates());
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaryList = objectMapper.createArrayNode();
         for (Certificate cert : result.certificates()) {
-            summaryList.add(buildCertificateSummary(cert));
+            summaryList.add(buildCertificateSummary(cert, consumers.get(cert.getArn())));
         }
         response.set("CertificateSummaryList", summaryList);
         if (result.nextToken() != null) {
@@ -461,7 +462,7 @@ public class AcmJsonHandler {
         return node;
     }
 
-    private ObjectNode buildCertificateSummary(Certificate cert) {
+    private ObjectNode buildCertificateSummary(Certificate cert, List<String> consumers) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("CertificateArn", cert.getArn());
         node.put("DomainName", cert.getDomainName());
@@ -507,7 +508,7 @@ public class AcmJsonHandler {
         }
 
         node.put("RenewalEligibility", "INELIGIBLE");
-        node.put("InUse", !service.certificateInUseBy(cert).isEmpty());
+        node.put("InUse", !consumers.isEmpty());
 
         return node;
     }

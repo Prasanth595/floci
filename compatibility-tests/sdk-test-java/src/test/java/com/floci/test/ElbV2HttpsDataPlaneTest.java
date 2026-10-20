@@ -5,6 +5,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.acm.AcmClient;
+import software.amazon.awssdk.services.acm.model.CertificateStatus;
+import software.amazon.awssdk.services.acm.model.ResourceInUseException;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Action;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.ActionTypeEnum;
@@ -32,6 +34,7 @@ import java.util.HexFormat;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Local ELBv2 HTTPS listeners")
@@ -93,6 +96,10 @@ class ElbV2HttpsDataPlaneTest {
         String dnsName = loadBalancer.dnsName();
 
         certificateArn = acm.requestCertificate(request -> request.domainName(dnsName)).certificateArn();
+        acm.updateCertificateOptions(request -> request.certificateArn(certificateArn)
+                .options(options -> options.export("ENABLED")));
+        assertThat(acm.describeCertificate(request -> request.certificateArn(certificateArn))
+                .certificate().options().exportAsString()).isEqualTo("ENABLED");
         String certificatePem = acm.getCertificate(request -> request.certificateArn(certificateArn)).certificate();
 
         listenerArn = elb.createListener(request -> request
@@ -128,6 +135,24 @@ class ElbV2HttpsDataPlaneTest {
         assertThat(fingerprint(actual)).isEqualTo(fingerprint(expected));
         assertThat(actual.getSubjectAlternativeNames())
                 .anySatisfy(san -> assertThat(san.get(1)).isEqualTo(dnsName));
+
+        ResourceInUseException refusal = assertThrows(ResourceInUseException.class,
+                () -> acm.revokeCertificate(request -> request.certificateArn(certificateArn)
+                        .revocationReason("KEY_COMPROMISE")));
+        assertThat(refusal.statusCode()).isEqualTo(400);
+        assertThat(acm.describeCertificate(request -> request.certificateArn(certificateArn)).certificate().status())
+                .isEqualTo(CertificateStatus.ISSUED);
+        HttpClient fresh = trustedClient(expected);
+        HttpResponse<String> afterRefusal = awaitHttps(fresh, dnsName);
+        assertThat(afterRefusal.statusCode()).isEqualTo(200);
+        assertThat(afterRefusal.body()).isEqualTo("sdk-tls");
+        assertThat(fingerprint((X509Certificate) afterRefusal.sslSession().orElseThrow().getPeerCertificates()[0]))
+                .isEqualTo(fingerprint(expected));
+        elb.deleteListener(request -> request.listenerArn(listenerArn));
+        listenerArn = null;
+        acm.revokeCertificate(request -> request.certificateArn(certificateArn).revocationReason("KEY_COMPROMISE"));
+        assertThat(acm.describeCertificate(request -> request.certificateArn(certificateArn)).certificate().status())
+                .isEqualTo(CertificateStatus.REVOKED);
     }
 
     private static HttpClient trustedClient(X509Certificate certificate) throws Exception {

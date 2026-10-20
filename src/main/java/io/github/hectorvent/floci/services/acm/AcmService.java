@@ -40,6 +40,7 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -404,21 +405,31 @@ public class AcmService implements ResourceProvider {
 
     /** A captured list row remains serializable if it is deleted before response encoding. */
     public synchronized List<String> certificateInUseBy(Certificate certificate) {
-        String certificateArn = certificate.getArn();
-        Set<String> consumers = new LinkedHashSet<>();
-        if (certificate.getInUseBy() != null) {
-            consumers.addAll(certificate.getInUseBy());
+        return certificateInUseBy(List.of(certificate)).get(certificate.getArn());
+    }
+
+    /** One detached live-reference snapshot for a captured response page, including deleted rows. */
+    public synchronized Map<String, List<String>> certificateInUseBy(List<Certificate> certificates) {
+        Map<String, Set<String>> consumersByArn = new LinkedHashMap<>();
+        for (Certificate certificate : certificates) {
+            Set<String> consumers = consumersByArn.computeIfAbsent(certificate.getArn(), key -> new LinkedHashSet<>());
+            if (certificate.getInUseBy() != null) {
+                consumers.addAll(certificate.getInUseBy());
+            }
         }
-        if (referenceProviders != null) {
+        if (!consumersByArn.isEmpty() && referenceProviders != null) {
             for (AcmCertificateReferenceProvider provider : referenceProviders) {
                 for (AcmCertificateReferenceProvider.CertificateReference reference : provider.acmCertificateReferences()) {
-                    if (certificateArn.equals(reference.certificateArn())) {
+                    Set<String> consumers = consumersByArn.get(reference.certificateArn());
+                    if (consumers != null) {
                         consumers.add(reference.resourceArn());
                     }
                 }
             }
         }
-        return List.copyOf(consumers);
+        Map<String, List<String>> snapshot = new LinkedHashMap<>();
+        consumersByArn.forEach((arn, consumers) -> snapshot.put(arn, List.copyOf(consumers)));
+        return Map.copyOf(snapshot);
     }
 
     // ============ ImportCertificate ============
@@ -621,6 +632,10 @@ public class AcmService implements ResourceProvider {
         if (!exportEnabled) {
             throw new AwsException("ValidationException",
                 "Certificate " + certificateArn + " cannot be revoked because it is not export-enabled.", 400);
+        }
+        if (!certificateInUseBy(cert).isEmpty()) {
+            throw new AwsException("ResourceInUseException",
+                    "Certificate " + certificateArn + " is in use by another service.", 400);
         }
         cert.setStatus(CertificateStatus.REVOKED);
         store.put(regionKey(region, cert.extractCertificateId()), cert);

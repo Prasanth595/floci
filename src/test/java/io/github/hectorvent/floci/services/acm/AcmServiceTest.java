@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.acm;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
@@ -12,6 +14,7 @@ import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.acm.model.CertificateType;
 import io.github.hectorvent.floci.services.acm.model.DomainValidation;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import io.github.hectorvent.floci.services.acm.model.RevocationReason;
 import io.github.hectorvent.floci.services.acm.model.ValidationMethod;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,6 +38,7 @@ import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -46,9 +50,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -138,11 +144,71 @@ class AcmServiceTest {
     }
 
     @Test
+    void attachedExportableCertificateCannotBeRevokedUntilDetached() {
+        Certificate certificate = service.requestCertificate("revoke.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, new CertificateOptions(null, "ENABLED"), Map.of(), REGION);
+        String owner = "arn:aws:cognito-idp:us-east-1:000000000000:userpool/revoke";
+        service.addInUseBy(certificate.getArn(), owner, REGION);
+        AwsException failure = assertThrows(AwsException.class,
+                () -> service.revokeCertificate(certificate.getArn(), RevocationReason.KEY_COMPROMISE, REGION));
+        assertAll(
+                () -> assertEquals("ResourceInUseException", failure.getErrorCode()),
+                () -> assertEquals(400, failure.getHttpStatus()),
+                () -> assertEquals(CertificateStatus.ISSUED, service.getCertificate(certificate.getArn(), REGION).getStatus()),
+                () -> assertEquals(List.of(owner), service.certificateInUseBy(certificate)));
+        service.removeInUseBy(certificate.getArn(), owner, REGION);
+        assertEquals(CertificateStatus.REVOKED,
+                service.revokeCertificate(certificate.getArn(), RevocationReason.KEY_COMPROMISE, REGION).getStatus());
+    }
+
+    @Test
+    void listPageScansLiveConsumersOnceAndRetainsPersistedUses() {
+        Certificate first = service.requestCertificate("first.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, null, Map.of(), REGION);
+        Certificate second = service.requestCertificate("second.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, null, Map.of(), REGION);
+        service.requestCertificate("unused.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, null, Map.of(), REGION);
+        service.addInUseBy(first.getArn(), "persisted-owner", REGION);
+        AtomicInteger scans = new AtomicInteger();
+        AcmCertificateReferenceProvider provider = mock();
+        when(provider.acmCertificateReferences()).thenAnswer(call -> {
+            scans.incrementAndGet();
+            return List.of(new AcmCertificateReferenceProvider.CertificateReference(second.getArn(), "live-owner"));
+        });
+        Instance<AcmCertificateReferenceProvider> providers = mock();
+        when(providers.iterator()).thenAnswer(call -> List.of(provider).iterator());
+        service.referenceProviders = providers;
+        ObjectMapper mapper = new ObjectMapper();
+        AcmJsonHandler handler = new AcmJsonHandler(service, mapper);
+        JsonNode response = (JsonNode) handler.handle("ListCertificates", mapper.createObjectNode(), REGION).getEntity();
+        Map<String, Boolean> uses = new HashMap<>();
+        response.path("CertificateSummaryList").forEach(row -> uses.put(row.path("CertificateArn").asText(),
+                row.path("InUse").asBoolean()));
+        assertAll(
+                () -> assertEquals(1, scans.get()),
+                () -> assertEquals(3, uses.size()),
+                () -> assertEquals(true, uses.get(first.getArn())),
+                () -> assertEquals(true, uses.get(second.getArn())),
+                () -> assertEquals(1L, uses.values().stream().filter(value -> !value).count()));
+        scans.set(0);
+        JsonNode page = (JsonNode) handler.handle("ListCertificates", mapper.createObjectNode().put("MaxItems", 1),
+                REGION).getEntity();
+        assertEquals(1, page.path("CertificateSummaryList").size());
+        assertTrue(page.has("NextToken"));
+        assertEquals(1, scans.get());
+    }
+
+    @Test
     void capturedCertificateSummarySurvivesDeletion() {
         Certificate certificate = service.requestCertificate("list.example.test", List.of(), ValidationMethod.DNS,
                 null, KeyAlgorithm.RSA_2048, null, null, Map.of(), REGION);
         service.deleteCertificate(certificate.getArn(), REGION);
         assertEquals(List.of(), service.certificateInUseBy(certificate));
+        Map<String, List<String>> snapshot = service.certificateInUseBy(List.of(certificate));
+        assertEquals(List.of(), snapshot.get(certificate.getArn()));
+        assertThrows(UnsupportedOperationException.class, () -> snapshot.put("other", List.of()));
+        assertThrows(UnsupportedOperationException.class, () -> snapshot.get(certificate.getArn()).add("other"));
     }
 
     @Test
