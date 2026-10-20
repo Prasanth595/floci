@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -58,6 +59,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.awaitility.Awaitility;
 import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
@@ -114,6 +116,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -4384,7 +4387,8 @@ class Ec2ServiceTest {
 
         Map<String, String> types = new HashMap<>();
         for (KeyPair keyPair : service.describeKeyPairs("us-east-1", List.of(), List.of())) {
-            // The reader itself refuses each of these; keyTypeOf's own guard must not be what passes.
+            // The reader answers each of these itself, without throwing, so keyTypeOf's guard is not
+            // what yields the expected types.
             assertDoesNotThrow(() -> Ec2KeyMaterial.readImportedKey(keyPair.getPublicKey()), keyPair.getKeyPairId());
             types.put(keyPair.getKeyPairId(), Ec2Service.keyTypeOf(keyPair));
             assertNull(keyPair.getKeyType(), "the stored record is not rewritten");
@@ -4403,9 +4407,10 @@ class Ec2ServiceTest {
     }
 
     /**
-     * Should the reader ever fail on what an older record holds, the record is still described, with
-     * no type, and a key-type filter passes over it, rather than every description in the region
-     * failing with it.
+     * Should the reader ever fail on what an older record holds, the record is still described, by
+     * the service and by the handler, with no type, and a key-type filter passes over it, rather than
+     * every description in the region failing with it. The stored key is a valid ed25519 line, so the
+     * type would be ed25519 if the failing reader were not consulted.
      */
     @Test
     void aStoredKeyPairWhoseKeyTheReaderFailsOnIsDescribedWithoutAType() {
@@ -4414,7 +4419,7 @@ class Ec2ServiceTest {
         stored.setKeyPairId("key-unreadable");
         stored.setKeyName("key-unreadable");
         stored.setRegion("us-east-1");
-        stored.setPublicKey("any text an earlier ImportKeyPair stored");
+        stored.setPublicKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj");
         keyPairStore.put("us-east-1::key-unreadable", stored);
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -4431,7 +4436,14 @@ class Ec2ServiceTest {
             assertEquals(List.of("key-unreadable"), described.stream().map(KeyPair::getKeyPairId).toList());
             assertNull(Ec2Service.keyTypeOf(described.getFirst()));
             assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of(),
-                    Map.of("key-type", List.of("rsa"))).isEmpty());
+                    Map.of("key-type", List.of("ed25519"))).isEmpty());
+            String xml = (String) new Ec2QueryHandler(service, mock(EmulatorConfig.class), mock(FlowLogService.class),
+                    mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                    mock(Ec2IpamService.class), new RegionResolver("us-east-1", "000000000000"))
+                    .handle("DescribeKeyPairs", new MultivaluedHashMap<>(), "us-east-1").getEntity();
+            assertTrue(xml.contains("<keyPairId>key-unreadable</keyPairId>"), xml);
+            assertFalse(xml.contains("<keyType>"), xml);
+            reader.verify(() -> Ec2KeyMaterial.readImportedKey(anyString()), atLeastOnce());
         }
     }
 
