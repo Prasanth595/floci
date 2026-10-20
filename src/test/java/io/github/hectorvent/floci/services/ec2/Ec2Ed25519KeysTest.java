@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
-import org.bouncycastle.crypto.util.OpenSSHPublicKeyUtil;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -58,8 +57,8 @@ class Ec2Ed25519KeysTest {
         assertNotEquals(first.openSshPublicKey(), second.openSshPublicKey());
         assertNotEquals(first.fingerprint(), second.fingerprint());
         for (Ec2KeyMaterial.Generated key : List.of(first, second)) {
-            byte[] blob = OpenSSHPublicKeyUtil.encodePublicKey(
-                    Ec2CreateKeyPairIntegrationTest.openSshEd25519Key(key.privateKeyPem()).generatePublicKey());
+            byte[] blob = Ec2CreateKeyPairIntegrationTest.sshEd25519Blob(
+                    Ec2CreateKeyPairIntegrationTest.openSshEd25519Key(key.privateKeyPem()));
             assertEquals("ssh-ed25519 " + Base64.getEncoder().encodeToString(blob), key.openSshPublicKey());
         }
     }

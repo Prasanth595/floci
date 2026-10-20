@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.Digests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
@@ -19,8 +20,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.io.StringReader;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -42,8 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class Ec2CreateKeyPairIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261020/us-east-1/ec2/aws4_request";
+    static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20261020/us-east-1/ec2/aws4_request";
 
     @Test
     void ed25519IsAnOpenSshPrivateKeyFingerprintedWithSha256() throws IOException {
@@ -54,10 +52,10 @@ class Ec2CreateKeyPairIntegrationTest {
             String material = created.getString("CreateKeyPairResponse.keyMaterial");
             assertEquals("-----BEGIN OPENSSH PRIVATE KEY-----", firstLine(material));
             assertTrue(material.endsWith("-----END OPENSSH PRIVATE KEY-----\n"), "the block ends its last line");
-            byte[] blob = OpenSSHPublicKeyUtil.encodePublicKey(openSshEd25519Key(material).generatePublicKey());
+            byte[] blob = sshEd25519Blob(openSshEd25519Key(material));
 
             // "the base64-encoded SHA-256 digest", padded as AWS reports it
-            assertEquals(Base64.getEncoder().encodeToString(sha("SHA-256", blob)),
+            assertEquals(Base64.getEncoder().encodeToString(Digests.sha256(blob)),
                     created.getString("CreateKeyPairResponse.keyFingerprint"));
             assertDescribedAs(name, id, blob, "ed25519");
         } finally {
@@ -80,8 +78,8 @@ class Ec2CreateKeyPairIntegrationTest {
 
             // A key EC2 creates is fingerprinted from the key, whichever format it is returned in.
             String fingerprint = "rsa".equals(keyType)
-                    ? colonHex(sha("SHA-1", file.rsaKey().getEncoded()))
-                    : Base64.getEncoder().encodeToString(sha("SHA-256", sshEd25519Blob(file.ed25519Key())));
+                    ? colonHex(Digests.sha1(file.rsaKey().getEncoded()))
+                    : Base64.getEncoder().encodeToString(Digests.sha256(sshEd25519Blob(file.ed25519Key())));
             assertEquals(fingerprint, created.getString("CreateKeyPairResponse.keyFingerprint"));
             assertDescribedAs(name, id, file.publicBlob(), keyType);
         } finally {
@@ -102,7 +100,7 @@ class Ec2CreateKeyPairIntegrationTest {
                     .getKeyPair((PEMKeyPair) parsed).getPrivate();
             assertEquals(2048, key.getModulus().bitLength());
             // "the SHA-1 digest of the DER encoded private key", PKCS#8 as openssl pkcs8 -topk8 writes it
-            assertEquals(colonHex(sha("SHA-1", key.getEncoded())),
+            assertEquals(colonHex(Digests.sha1(key.getEncoded())),
                     created.getString("CreateKeyPairResponse.keyFingerprint"));
         } finally {
             deleteKeyPair(id);
@@ -174,7 +172,7 @@ class Ec2CreateKeyPairIntegrationTest {
                 .extract().xmlPath();
         String reportedType = described.getString("DescribeKeyPairsResponse.keySet.item.keyType");
         assertTrue(reportedType.isEmpty() || reportedType.equals(keyType),
-                "a " + keyType + " key pair is described as " + reportedType);
+                "an " + keyType + " key pair is described as " + reportedType);
     }
 
     private static void assertNotCreated(String name) {
@@ -185,7 +183,8 @@ class Ec2CreateKeyPairIntegrationTest {
                 .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.NotFound"));
     }
 
-    private static ValidatableResponse createKeyPair(String name, String keyType, String keyFormat) {
+    /** CreateKeyPair with this name, and the KeyType and KeyFormat when they are not null. */
+    static ValidatableResponse createKeyPair(String name, String keyType, String keyFormat) {
         RequestSpecification request = given().header("Authorization", AUTH)
                 .formParam("Action", "CreateKeyPair")
                 .formParam("KeyName", name);
@@ -198,7 +197,7 @@ class Ec2CreateKeyPairIntegrationTest {
         return request.post("/").then();
     }
 
-    private static void deleteKeyPair(String id) {
+    static void deleteKeyPair(String id) {
         given().header("Authorization", AUTH)
                 .formParam("Action", "DeleteKeyPair")
                 .formParam("KeyPairId", id)
@@ -216,16 +215,9 @@ class Ec2CreateKeyPairIntegrationTest {
         }
     }
 
-    private static byte[] sshEd25519Blob(Ed25519PrivateKeyParameters key) throws IOException {
+    /** The OpenSSH public key blob of an ED25519 key. */
+    static byte[] sshEd25519Blob(Ed25519PrivateKeyParameters key) throws IOException {
         return OpenSSHPublicKeyUtil.encodePublicKey(key.generatePublicKey());
-    }
-
-    private static byte[] sha(String algorithm, byte[] data) {
-        try {
-            return MessageDigest.getInstance(algorithm).digest(data);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
     }
 
     private static String colonHex(byte[] digest) {

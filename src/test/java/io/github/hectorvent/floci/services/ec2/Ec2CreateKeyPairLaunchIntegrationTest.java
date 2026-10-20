@@ -6,7 +6,6 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import org.bouncycastle.crypto.util.OpenSSHPublicKeyUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -17,7 +16,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -45,9 +43,6 @@ class Ec2CreateKeyPairLaunchIntegrationTest {
         }
     }
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261020/us-east-1/ec2/aws4_request";
-
     @Inject
     Ec2Service service;
 
@@ -66,16 +61,10 @@ class Ec2CreateKeyPairLaunchIntegrationTest {
     @ValueSource(strings = {"pem", "ppk"})
     void anEd25519KeyPairIsLaunchedWithThePublicHalfOfTheKeyItReturned(String keyFormat) throws Exception {
         String name = "launch-key-" + UUID.randomUUID();
-        String material = given().header("Authorization", AUTH)
-                .formParam("Action", "CreateKeyPair")
-                .formParam("KeyName", name)
-                .formParam("KeyType", "ed25519")
-                .formParam("KeyFormat", keyFormat)
-                .post("/").then().statusCode(200)
-                .extract().path("CreateKeyPairResponse.keyMaterial");
+        String material = Ec2CreateKeyPairIntegrationTest.createKeyPair(name, "ed25519", keyFormat)
+                .statusCode(200).extract().path("CreateKeyPairResponse.keyMaterial");
         byte[] blob = "pem".equals(keyFormat)
-                ? OpenSSHPublicKeyUtil.encodePublicKey(
-                        Ec2CreateKeyPairIntegrationTest.openSshEd25519Key(material).generatePublicKey())
+                ? Ec2CreateKeyPairIntegrationTest.sshEd25519Blob(Ec2CreateKeyPairIntegrationTest.openSshEd25519Key(material))
                 : PuttyKeyFile.parse(material).publicBlob();
 
         Instance instance = service.runInstances("us-east-1", "ami-amazonlinux2023", "t3.micro", 1, 1, name,

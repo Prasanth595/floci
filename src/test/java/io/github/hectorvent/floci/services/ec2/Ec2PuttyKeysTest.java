@@ -1,22 +1,14 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
-import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.io.IOException;
-import java.io.StringWriter;
-import java.math.BigInteger;
-import java.security.KeyFactory;
-import java.security.KeyPairGenerator;
-import java.security.MessageDigest;
 import java.security.interfaces.RSAPrivateCrtKey;
-import java.security.interfaces.RSAPublicKey;
-import java.security.spec.RSAPrivateCrtKeySpec;
-import java.security.spec.RSAPublicKeySpec;
 import java.util.HexFormat;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -73,10 +65,9 @@ class Ec2PuttyKeysTest {
      */
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
-    void anRsaFileHoldsTheKeyOfThePemWithTheLargerPrimeFirst(boolean largerPrimeFirst) throws Exception {
-        RSAPrivateCrtKey generated = rsaKeyWithLargerPrimeFirst(largerPrimeFirst);
-        Ec2KeyMaterial.Generated pem = new Ec2KeyMaterial.Generated(pkcs1Pem(generated),
-                SshPublicKeys.toOpenSsh(publicHalf(generated)), "fingerprint of the PEM key");
+    void anRsaFileHoldsTheKeyOfThePemWithTheLargerPrimeFirst(boolean largerPrimeFirstInThePem) throws Exception {
+        Ec2KeyMaterial.Generated pem = rsaPemWithLargerPrimeFirst(largerPrimeFirstInThePem);
+        RSAPrivateCrtKey generated = (RSAPrivateCrtKey) Pem.parsePrivateKey(pem.privateKeyPem());
 
         Ec2KeyMaterial.Generated ppk = Ec2PuttyKeys.of(pem, "rsa-name");
         PuttyKeyFile file = PuttyKeyFile.parse(ppk.privateKeyPem());
@@ -91,18 +82,20 @@ class Ec2PuttyKeysTest {
         assertEquals(generated.getPrimeP().max(generated.getPrimeQ()), written.getPrimeP());
         assertArrayEquals(SshPublicKeys.decodeBlob(pem.openSshPublicKey()), file.publicBlob());
         assertEquals(pem.openSshPublicKey(), ppk.openSshPublicKey());
-        assertEquals(HexFormat.of().withDelimiter(":").formatHex(
-                MessageDigest.getInstance("SHA-1").digest(written.getEncoded())), ppk.fingerprint());
+        assertEquals(colonHex(Digests.sha1(written.getEncoded())), ppk.fingerprint());
+        if (largerPrimeFirstInThePem) {
+            // The same key with the same DER, so the fingerprint CreateKeyPair gives the PEM.
+            assertEquals(pem.fingerprint(), ppk.fingerprint());
+        }
     }
 
     @Test
     void aGeneratedRsaKeyFileHoldsA2048BitKeyFingerprintedAsWritten() throws Exception {
         Ec2KeyMaterial.Generated ppk = Ec2KeyMaterial.generate("rsa", "ppk", "name");
-        PuttyKeyFile file = PuttyKeyFile.parse(ppk.privateKeyPem());
+        RSAPrivateCrtKey key = PuttyKeyFile.parse(ppk.privateKeyPem()).rsaKey();
 
-        assertEquals(2048, file.rsaKey().getModulus().bitLength());
-        assertEquals(HexFormat.of().withDelimiter(":").formatHex(
-                MessageDigest.getInstance("SHA-1").digest(file.rsaKey().getEncoded())), ppk.fingerprint());
+        assertEquals(2048, key.getModulus().bitLength());
+        assertEquals(colonHex(Digests.sha1(key.getEncoded())), ppk.fingerprint());
     }
 
     @Test
@@ -115,31 +108,19 @@ class Ec2PuttyKeysTest {
         assertTrue(file.macIsValid());
     }
 
-    private static RSAPrivateCrtKey rsaKeyWithLargerPrimeFirst(boolean largerPrimeFirst) throws Exception {
-        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-        generator.initialize(2048);
-        RSAPrivateCrtKey key = (RSAPrivateCrtKey) generator.generateKeyPair().getPrivate();
-        if ((key.getPrimeP().compareTo(key.getPrimeQ()) > 0) == largerPrimeFirst) {
-            return key;
+    /** A key from generateRsa with its primes in the given order, which Java's generator picks at random. */
+    private static Ec2KeyMaterial.Generated rsaPemWithLargerPrimeFirst(boolean largerPrimeFirst) {
+        for (int attempt = 0; attempt < 64; attempt++) {
+            Ec2KeyMaterial.Generated pem = Ec2KeyMaterial.generateRsa();
+            RSAPrivateCrtKey key = (RSAPrivateCrtKey) Pem.parsePrivateKey(pem.privateKeyPem());
+            if ((key.getPrimeP().compareTo(key.getPrimeQ()) > 0) == largerPrimeFirst) {
+                return pem;
+            }
         }
-        BigInteger p = key.getPrimeQ();
-        BigInteger q = key.getPrimeP();
-        BigInteger d = key.getPrivateExponent();
-        return (RSAPrivateCrtKey) KeyFactory.getInstance("RSA").generatePrivate(new RSAPrivateCrtKeySpec(
-                key.getModulus(), key.getPublicExponent(), d, p, q, d.mod(p.subtract(BigInteger.ONE)),
-                d.mod(q.subtract(BigInteger.ONE)), q.modInverse(p)));
+        throw new AssertionError("64 generated keys in a row had their primes in the same order");
     }
 
-    private static RSAPublicKey publicHalf(RSAPrivateCrtKey key) throws Exception {
-        return (RSAPublicKey) KeyFactory.getInstance("RSA").generatePublic(
-                new RSAPublicKeySpec(key.getModulus(), key.getPublicExponent()));
-    }
-
-    private static String pkcs1Pem(RSAPrivateCrtKey key) throws IOException {
-        StringWriter out = new StringWriter();
-        try (JcaPEMWriter writer = new JcaPEMWriter(out)) {
-            writer.writeObject(key);
-        }
-        return out.toString();
+    private static String colonHex(byte[] digest) {
+        return HexFormat.of().withDelimiter(":").formatHex(digest);
     }
 }
