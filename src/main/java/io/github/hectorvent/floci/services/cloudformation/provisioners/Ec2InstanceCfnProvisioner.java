@@ -113,7 +113,8 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
                 props != null ? Ec2CfnMetadataOptions.read("MetadataOptions", props.get("MetadataOptions"),
                         Ec2CfnMetadataOptions.INSTANCE_SHAPE, engine) : null);
         // Checked before anything changes: a reused instance gets its options last, after its
-        // type, groups, user data and profile, so a bad value found there would leave it half updated.
+        // type, groups, user data, profile and tags, so a bad value found there would leave it half
+        // updated.
         Ec2Service.validateMetadataOptions(metadataOptions);
         if (instanceType == null || instanceType.isBlank()) {
             instanceType = "t3.micro";

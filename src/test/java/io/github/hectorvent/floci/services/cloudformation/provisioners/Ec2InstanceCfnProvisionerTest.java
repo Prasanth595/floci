@@ -807,6 +807,49 @@ class Ec2InstanceCfnProvisionerTest {
         assertFalse(r.getAttributes().containsKey("__FlociPriorMetadataOptions"));
     }
 
+    /** A tag change in the same update has no rollback either, so the options go back and the rollback reports it. */
+    @Test
+    void aRolledBackUpdateThatAlsoChangedTagsPutsTheOptionsBackButReportsItUndone() throws Exception {
+        launchRequiringTokens();
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
+                """), ctx(null));
+
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "optional"},
+                 "Tags": [{"Key": "env", "Value": "prod"}]}
+                """), ctx("i-1"));
+        assertFalse(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<LaunchTemplateData.MetadataOptions> applied =
+                ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
+        verify(ec2, times(2)).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), applied.capture());
+        assertEquals("required", applied.getAllValues().get(1).getHttpTokens());
+    }
+
+    /**
+     * The options are the update's last change: when the tags fail first, the engine restores the
+     * resource without a saved copy, so the options must not have changed.
+     */
+    @Test
+    void aTagFailureInAnInPlaceUpdateLeavesTheMetadataOptionsAlone() throws Exception {
+        launchRequiringTokens();
+        StackResource r = resource("Server");
+        provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
+                """), ctx(null));
+        doThrow(new AwsException("InternalError", "tags failed", 500))
+                .when(ec2).createTags(eq("us-east-1"), eq(List.of("i-1")), anyList());
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "optional"},
+                 "Tags": [{"Key": "env", "Value": "prod"}]}
+                """), ctx("i-1")));
+
+        verify(ec2, never()).modifyInstanceMetadataOptions(any(), any(), any());
+    }
+
     /** An update that leaves the options as they are saves nothing to put back. */
     @Test
     void anInPlaceUpdateThatKeepsTheMetadataOptionsSavesNoCopy() throws Exception {
