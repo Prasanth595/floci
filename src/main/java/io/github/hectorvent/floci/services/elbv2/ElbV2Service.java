@@ -407,7 +407,26 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         persistRegion(loadBalancers, region);
     }
 
-    /** Under EC2's subnet lock for the same reason as {@link #createLoadBalancer}. */
+    /**
+     * The SetSubnets action. A request with neither {@code Subnets} nor {@code SubnetMappings} is
+     * refused and the balancer stays on its subnets, with the error CreateLoadBalancer gives a balancer
+     * of its type with neither; AWS gives a Network Load Balancer that error for SetSubnets too. The
+     * balancer is looked up first, as the message depends on its type. A request that names subnets is
+     * checked by {@link #setSubnets}, as before.
+     */
+    public void setRequestedSubnets(String region, String arn, List<String> subnets) {
+        LoadBalancer lb = requireLoadBalancer(region, arn);
+        if (subnets.isEmpty()) {
+            requireSubnets(lb.getType(), subnets);
+        }
+        setSubnets(region, arn, subnets);
+    }
+
+    /**
+     * Under EC2's subnet lock for the same reason as {@link #createLoadBalancer}. Unlike the SetSubnets
+     * action, this takes an empty list: a CloudFormation rollback moves a balancer an earlier version
+     * saved without subnets back onto none.
+     */
     public void setSubnets(String region, String arn, List<String> subnets) {
         ec2Service.runWithSubnetReferencesHeld(region, () -> {
             LoadBalancer lb = requireLoadBalancer(region, arn);
