@@ -17,7 +17,9 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -35,9 +37,10 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String INSTANCE = "AWS::EC2::Instance";
 
-    // Declared values of createOnly properties the launch does not apply to the instance, recorded
-    // so a later update can tell a genuine change from the instance's auto-assigned value. The
-    // __Floci prefix keeps them off the published Fn::GetAtt attributes.
+    // Declared values of createOnly properties, recorded so a later update compares against what
+    // the template declared rather than what the instance carries: the launch does not apply
+    // AvailabilityZone, and an instance a stack launched before PrivateIpAddress was applied holds
+    // an auto-assigned address. The __Floci prefix keeps them off the published Fn::GetAtt attributes.
     private static final String DECLARED_PRIVATE_IP_ATTR = "__FlociDeclaredPrivateIpAddress";
     private static final String DECLARED_AZ_ATTR = "__FlociDeclaredAvailabilityZone";
     // The instance profile the template declared last time, so an update that drops the property
@@ -132,12 +135,12 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         // On update, keep the existing instance unless a createOnly property changed: a changed
         // ImageId, SubnetId or KeyName replaces it (compared against the instance, which carries
         // them), as does a changed PrivateIpAddress or AvailabilityZone (compared against the value
-        // declared last time, since the launch does not apply those to the instance). A mutable-only
-        // change (tags, and the like) reuses it. Launching unconditionally would leak the prior
-        // instance every update. A changed LaunchTemplate reuses it too, where AWS replaces the
-        // instance: the change-set preview and the template's own versioning would have to agree on
-        // that property first. What the template declares is reconciled in place instead, unless
-        // the ImageId or KeyName it supplies changed, which replaces the instance as above.
+        // declared last time, see DECLARED_PRIVATE_IP_ATTR). A mutable-only change (tags, and the
+        // like) reuses it. Launching unconditionally would leak the prior instance every update. A
+        // changed LaunchTemplate reuses it too, where AWS replaces the instance: the change-set
+        // preview and the template's own versioning would have to agree on that property first.
+        // What the template declares is reconciled in place instead, unless the ImageId or KeyName
+        // it supplies changed, which replaces the instance as above.
         Instance prior = ctx.isUpdate() ? findInstance(region, ctx.priorPhysicalId()) : null;
         if (prior != null && !createOnlyChanged(prior, imageId, subnetId, keyName)
                 && !declaredCreateOnlyChanged(attributesBefore, privateIpAddress, availabilityZone)) {
@@ -190,9 +193,15 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         if (ctx.isUpdate()) {
             r.getAttributes().put(PRIOR_DECLARATIONS_ATTR, declarations(attributesBefore));
         }
+        // The options a template cannot set keep the defaults the shorter runInstances overloads
+        // give them. A replacement that keeps its PrivateIpAddress fails with InvalidIPAddress.InUse
+        // while the prior instance still holds it, as on AWS, which creates the replacement first.
+        String encodedUserData = userData == null ? null
+                : Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8));
         Reservation reservation = ec2Service.runInstances(region, imageId, instanceType, 1, 1, keyName,
                 securityGroupIds, subnetId, null, tags, userData, iamInstanceProfileArn,
-                associatePublicIp, null, 0, null, metadataOptions);
+                associatePublicIp, null, 0, null, metadataOptions, null, encodedUserData, false, null, null, null,
+                false, privateIpAddress);
         Instance instance = reservation.getInstances().get(0);
         r.setPhysicalId(instance.getInstanceId());
         r.getAttributes().put("InstanceId", instance.getInstanceId());
@@ -353,12 +362,12 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Whether a createOnly property the launch does not apply to the instance (PrivateIpAddress,
-     * AvailabilityZone) changed since the last provision. It is compared against the value declared
-     * then and recorded on the resource, not the instance's auto-assigned value, which never matches
-     * a declared one. A property with no recorded prior value is not treated as changed, so adopting
-     * this behavior does not replace instances whose template did not actually change; the value is
-     * recorded from this provision on, and a later change to it then forces replacement.
+     * Whether a createOnly property recorded as declared (PrivateIpAddress, AvailabilityZone) changed
+     * since the last provision. It is compared against the value declared then and recorded on the
+     * resource, not the instance's own, for the reasons given at {@link #DECLARED_PRIVATE_IP_ATTR}.
+     * A property with no recorded prior value is not treated as changed, so adopting this behavior
+     * does not replace instances whose template did not actually change; the value is recorded from
+     * this provision on, and a later change to it then forces replacement.
      */
     private static boolean declaredCreateOnlyChanged(Map<String, String> priorAttributes,
                                                      String privateIpAddress, String availabilityZone) {

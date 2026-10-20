@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.ListNetworksCmd;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -106,6 +107,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -3736,6 +3738,381 @@ class Ec2ServiceTest {
         assertNotNull(address, cidr);
         assertTrue(Ipv4Cidrs.contains(cidr, address + "/32"), address + " must lie inside " + cidr);
         assertFalse(Ipv4Cidrs.isSubnetReserved(cidr, address + "/32"), address + " is reserved in " + cidr);
+    }
+
+    @Test
+    void runInstancesGivesTheInstanceAndItsInterfaceTheRequestedPrivateIp() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = privateIpSubnet(service);
+
+        for (String requested : List.of("10.50.1.50", "10.50.1.60")) {
+            String id = launchWithPrivateIp(service, subnetId, 1, requested).getInstances().getFirst().getInstanceId();
+
+            Instance described = service.describeInstances("us-east-1", List.of(id), Map.of())
+                    .getFirst().getInstances().getFirst();
+            assertEquals(requested, described.getPrivateIpAddress());
+            assertEquals("ip-" + requested.replace('.', '-') + ".ec2.internal", described.getPrivateDnsName());
+            assertEquals(requested, described.getNetworkInterfaces().getFirst().getPrivateIpAddress());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"10.50.2.50", "10.50.1.0", "10.50.1.3", "10.50.1.255", "10.50.1.256", "not-an-ip"})
+    void runInstancesRejectsARequestedPrivateIpTheSubnetCannotAssign(String requested) {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = privateIpSubnet(service);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> launchWithPrivateIp(service, subnetId, 1, requested));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertTrue(instancesIn(service, subnetId).isEmpty(), "a rejected launch must store nothing");
+    }
+
+    @Test
+    void runInstancesRejectsARequestedPrivateIpAnotherResourceHolds() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.50.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.50.1.0/24", "us-east-1a").getSubnetId();
+        launchWithPrivateIp(service, subnetId, 1, "10.50.1.50");
+        String assigned = launchAddresses(service, subnetId, 1).getFirst();
+        service.createNetworkInterface("us-east-1", subnetId, "holder", "10.50.1.70",
+                List.of(), List.of(), List.of());
+        service.createVpcEndpoint("us-east-1", vpcId, "com.amazonaws.us-east-1.ecs",
+                "Interface", List.of(), List.of(subnetId), List.of(), null, null, List.of());
+        String endpointAddress = endpointAddressesBySubnet(service).get(subnetId);
+        assertNotNull(endpointAddress);
+
+        for (String taken : List.of("10.50.1.50", assigned, "10.50.1.70", endpointAddress)) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> launchWithPrivateIp(service, subnetId, 1, taken));
+            assertEquals("InvalidIPAddress.InUse", error.getErrorCode());
+            assertEquals("Address " + taken + " is in use.", error.getMessage());
+        }
+        assertEquals(2, instancesIn(service, subnetId).size());
+    }
+
+    @Test
+    void aTerminatedInstancesPrivateIpCanBeRequestedAgain() {
+        // Terraform replaces an aws_instance whose private_ip is fixed by terminating the old one
+        // and launching its successor at the same address.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = privateIpSubnet(service);
+        String first = launchWithPrivateIp(service, subnetId, 1, "10.50.1.50").getInstances().getFirst().getInstanceId();
+
+        service.terminateInstances("us-east-1", List.of(first));
+
+        assertEquals("10.50.1.50", launchWithPrivateIp(service, subnetId, 1, "10.50.1.50")
+                .getInstances().getFirst().getPrivateIpAddress());
+    }
+
+    @Test
+    void anAddressPickedByTheSubnetStepsAroundARequestedOne() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = privateIpSubnet(service);
+        // A fresh subnet hands out .10, .11, .12 on its own, so .11 is the next one but the first.
+        launchWithPrivateIp(service, subnetId, 1, "10.50.1.11");
+
+        assertEquals(List.of("10.50.1.10"), launchAddresses(service, subnetId, 1));
+        assertEquals(List.of("10.50.1.12"), launchAddresses(service, subnetId, 1));
+    }
+
+    @Test
+    void aZeroPaddedRequestedPrivateIpIsStoredCanonicallySoItStillConflicts() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = privateIpSubnet(service);
+
+        assertEquals("10.50.1.50", launchWithPrivateIp(service, subnetId, 1, "10.50.1.050")
+                .getInstances().getFirst().getPrivateIpAddress());
+        assertEquals("InvalidIPAddress.InUse", assertThrows(AwsException.class,
+                () -> launchWithPrivateIp(service, subnetId, 1, "10.50.1.50")).getErrorCode());
+    }
+
+    @Test
+    void aZeroPaddedAddressAnInterfaceWasCreatedWithStillHoldsTheRequestedPrivateIp() {
+        // CreateNetworkInterface keeps its address as given, so the in-use check compares
+        // canonical forms or a zero-padded octet would make one address look like two.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = privateIpSubnet(service);
+        NetworkInterface padded = service.createNetworkInterface("us-east-1", subnetId, "padded", "10.50.1.050",
+                List.of(), List.of(), List.of());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> launchWithPrivateIp(service, subnetId, 1, "10.50.1.50"));
+
+        assertEquals("InvalidIPAddress.InUse", error.getErrorCode());
+        assertEquals("10.50.1.050", padded.getPrivateIpAddress());
+        assertTrue(instancesIn(service, subnetId).isEmpty(), "a rejected launch must store nothing");
+    }
+
+    @Test
+    void aRequestedPrivateIpNeedsASingleInstanceThatCreatesItsOwnInterface() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = privateIpSubnet(service);
+        String eniId = service.createNetworkInterface("us-east-1", subnetId, "primary", null,
+                List.of(), List.of(), List.of()).getNetworkInterfaceId();
+
+        AwsException twoInstances = assertThrows(AwsException.class,
+                () -> launchWithPrivateIp(service, subnetId, 2, "10.50.1.50"));
+        AwsException upToTwoInstances = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, 2, null,
+                        List.of(), subnetId, null, List.of(), null, null, null, null, 0, null, null, null, null,
+                        false, null, null, null, false, "10.50.1.50"));
+        AwsException existingInterface = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, 1, null,
+                        List.of(), null, null, List.of(), null, null, null, eniId, 0, null, null, null, null,
+                        false, null, null, null, false, "10.50.1.50"));
+
+        assertEquals("InvalidParameterCombination", twoInstances.getErrorCode());
+        assertEquals("InvalidParameterCombination", upToTwoInstances.getErrorCode());
+        assertEquals("InvalidParameterCombination", existingInterface.getErrorCode());
+        assertTrue(instancesIn(service, subnetId).isEmpty());
+    }
+
+    @Test
+    void aRequestedPrivateIpIsLeasedOnTheVpcNetworkInsteadOfTheNextFreeAddress() {
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), vpcNetworks);
+        String subnetId = privateIpSubnet(service);
+        when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.0/24"));
+        when(vpcNetworks.claimPrivateIp("us-east-1", subnetId, "10.50.1.50")).thenReturn(true);
+
+        assertEquals("10.50.1.50", launchWithPrivateIp(service, subnetId, 1, "10.50.1.50")
+                .getInstances().getFirst().getPrivateIpAddress());
+
+        verify(vpcNetworks).claimPrivateIp("us-east-1", subnetId, "10.50.1.50");
+        verify(vpcNetworks, never()).reservePrivateIp(anyString(), anyString(), anyString());
+        verify(vpcNetworks, never()).allocatePrivateIp(anyString(), anyString());
+    }
+
+    @Test
+    void aRefusedLeaseDoesNotTurnAFreeAddressIntoOneInUse() {
+        // DeleteNetworkInterface does not return its lease, so the lease table can outlive the
+        // resource that took one. With nothing in any account holding the address any more, the
+        // stale lease must not fail the launch.
+        RequestContext context = new RequestContext();
+        Ec2Service service = realVpcNetworkService(context);
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        context.setAccountId("111122223333");
+        service.describeSubnets("us-east-1", List.of(), Map.of());
+        NetworkInterface deleted = service.createNetworkInterface("us-east-1", subnetId, "deleted", null,
+                List.of(), List.of(), List.of());
+        service.deleteNetworkInterface("us-east-1", deleted.getNetworkInterfaceId());
+        String stale = deleted.getPrivateIpAddress();
+
+        context.setAccountId("000000000000");
+
+        assertEquals(stale, launchWithPrivateIp(service, subnetId, 1, stale)
+                .getInstances().getFirst().getPrivateIpAddress());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"instance", "network-interface", "nat-gateway"})
+    void aRequestedPrivateIpAnotherAccountHoldsOnASharedVpcNetworkIsInUse(String holder) {
+        // Default VPC and subnet ids are the same in every account, so their Docker network and
+        // lease table are shared while the stored-resource check sees only the caller's account.
+        // Claiming the address anyway would give the other account's lease away.
+        RequestContext context = new RequestContext();
+        Ec2Service service = realVpcNetworkService(context);
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        context.setAccountId("111122223333");
+        service.describeSubnets("us-east-1", List.of(), Map.of());
+        String held = switch (holder) {
+            case "instance" -> launchAddresses(service, subnetId, 1).getFirst();
+            case "network-interface" -> service.createNetworkInterface("us-east-1", subnetId, "holder", null,
+                    List.of(), List.of(), List.of()).getPrivateIpAddress();
+            default -> service.createNatGateway("us-east-1", subnetId, null, "private", List.of())
+                    .getNatGatewayAddresses().getFirst().getPrivateIp();
+        };
+        assertEquals("172.31.0.10", held, "the shared network's first address, leased by the other account");
+
+        context.setAccountId("000000000000");
+        AwsException error = assertThrows(AwsException.class,
+                () -> launchWithPrivateIp(service, subnetId, 1, held));
+
+        assertEquals("InvalidIPAddress.InUse", error.getErrorCode());
+        assertEquals("Address " + held + " is in use.", error.getMessage());
+        assertTrue(instancesIn(service, subnetId).isEmpty(), "a rejected launch must store nothing");
+    }
+
+    @Test
+    void anAddressAnotherAccountsInterfaceWasCreatedWithIsInUseOnASharedVpcNetwork() {
+        // CreateNetworkInterface with its own address takes no lease, so only the stored
+        // interface says the shared network's address is held.
+        RequestContext context = new RequestContext();
+        Ec2Service service = realVpcNetworkService(context);
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        context.setAccountId("111122223333");
+        service.describeSubnets("us-east-1", List.of(), Map.of());
+        service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.50",
+                List.of(), List.of(), List.of());
+
+        context.setAccountId("000000000000");
+        AwsException error = assertThrows(AwsException.class,
+                () -> launchWithPrivateIp(service, subnetId, 1, "172.31.0.50"));
+
+        assertEquals("InvalidIPAddress.InUse", error.getErrorCode());
+        assertTrue(instancesIn(service, subnetId).isEmpty(), "a rejected launch must store nothing");
+    }
+
+    @Test
+    void anotherAccountsNatGatewayStillHoldsItsAddressAfterARestartEmptiesTheLeaseTable() {
+        // A restart re-leases only instances' addresses, so a persisted NAT gateway's address is
+        // held by the stored gateway alone.
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        NatGatewayAddress address = new NatGatewayAddress();
+        address.setPrivateIp("172.31.0.10");
+        NatGateway natGateway = new NatGateway();
+        natGateway.setNatGatewayId("nat-other");
+        natGateway.setSubnetId(subnetId);
+        natGateway.setState("available");
+        natGateway.setNatGatewayAddresses(List.of(address));
+        AccountAwareStorageBackend<NatGateway> natGatewayStore = AccountAwareStorageBackend.inMemory("000000000000");
+        natGatewayStore.putForAccount("111122223333", "us-east-1::nat-other", natGateway);
+        RequestContext context = new RequestContext();
+        context.setAccountId("000000000000");
+        Ec2Service service = realVpcNetworkService(context, Map.of("ec2-nat-gateways.json", natGatewayStore));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> launchWithPrivateIp(service, subnetId, 1, "172.31.0.10"));
+
+        assertEquals("InvalidIPAddress.InUse", error.getErrorCode());
+        assertTrue(instancesIn(service, subnetId).isEmpty(), "a rejected launch must store nothing");
+    }
+
+    @Test
+    void anotherAccountsInstanceOutsideASubstitutedRangeDoesNotHoldTheRequestedPrivateIp() {
+        // A substituted subnet never leases an address outside its effective range, so no
+        // container holds it on the shared network and each account keeps it as it would on AWS.
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        instanceStore.putForAccount("111122223333", "us-east-1::i-other",
+                defaultSubnetInstance("i-other", "172.31.0.50", InstanceState.running()));
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of("10.240.0.0/20"));
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), vpcNetworks);
+
+        assertEquals("172.31.0.50", launchWithPrivateIp(service, subnetId, 1, "172.31.0.50")
+                .getInstances().getFirst().getPrivateIpAddress());
+    }
+
+    @Test
+    void aRequestedPrivateIpIsLeasedSoTheRealVpcNetworkDoesNotHandItOutAgain() {
+        // The manager's allocator consults only its own lease table. Without the lease it would
+        // hand a fresh /24's first address, offset 10, to the next launch as well.
+        Ec2Service service = realVpcNetworkService(new RequestContext());
+        String subnetId = privateIpSubnet(service);
+
+        assertEquals("10.50.1.10", launchWithPrivateIp(service, subnetId, 1, "10.50.1.10")
+                .getInstances().getFirst().getPrivateIpAddress());
+
+        assertEquals(List.of("10.50.1.11"), launchAddresses(service, subnetId, 1));
+    }
+
+    @Test
+    void aRequestedPrivateIpLeavesTheRealVpcNetworksAllocationOrderAlone() {
+        // Claiming a high address must not move the network's cursor past it, or the next
+        // automatic address would be .251 instead of a fresh /24's first one.
+        Ec2Service service = realVpcNetworkService(new RequestContext());
+        String subnetId = privateIpSubnet(service);
+
+        launchWithPrivateIp(service, subnetId, 1, "10.50.1.250");
+
+        assertEquals(List.of("10.50.1.10"), launchAddresses(service, subnetId, 1));
+    }
+
+    @Test
+    void aDryRunWithARequestedPrivateIpLeasesNothing() {
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), vpcNetworks);
+        String subnetId = privateIpSubnet(service);
+
+        AwsException dryRun = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, 1, null,
+                        List.of(), subnetId, null, List.of(), null, null, null, null, 0, null, null, null, null,
+                        true, null, null, null, false, "10.50.1.50"));
+
+        assertEquals("DryRunOperation", dryRun.getErrorCode());
+        verify(vpcNetworks, never()).claimPrivateIp(anyString(), anyString(), anyString());
+        assertTrue(instancesIn(service, subnetId).isEmpty());
+    }
+
+    private static String privateIpSubnet(Ec2Service service) {
+        String vpcId = service.createVpc("us-east-1", "10.50.0.0/16", false).getVpcId();
+        return service.createSubnet("us-east-1", vpcId, "10.50.1.0/24", "us-east-1a").getSubnetId();
+    }
+
+    private static Reservation launchWithPrivateIp(Ec2Service service, String subnetId, int count,
+                                                   String privateIp) {
+        return service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", count, count, null,
+                List.of(), subnetId, null, List.of(), null, null, null, null, 0, null, null, null, null,
+                false, null, null, null, false, privateIp);
+    }
+
+    private static Ec2Service realVpcNetworkService(RequestContext context) {
+        return realVpcNetworkService(context, Map.of());
+    }
+
+    /**
+     * Ec2Service in container mode over a real VpcNetworkManager, whose Docker daemon has no
+     * networks yet, with the caller's account taken from {@code context} and {@code stores}
+     * standing in for what a previous run persisted.
+     */
+    private static Ec2Service realVpcNetworkService(RequestContext context,
+                                                    Map<String, AccountAwareStorageBackend<?>> stores) {
+        EmulatorConfig config = mockConfig(false);
+        EmulatorConfig.VpcNetworksConfig networks = mock(EmulatorConfig.VpcNetworksConfig.class);
+        when(config.services().ec2().vpcNetworks()).thenReturn(networks);
+        when(networks.enabled()).thenReturn(true);
+        DockerClient docker = mock(DockerClient.class);
+        ListNetworksCmd listNetworks = mock(ListNetworksCmd.class, RETURNS_SELF);
+        when(listNetworks.exec()).thenReturn(List.of());
+        when(docker.listNetworksCmd()).thenReturn(listNetworks);
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        @SuppressWarnings("unchecked")
+        jakarta.enterprise.inject.Instance<RequestContext> contexts = mock(jakarta.enterprise.inject.Instance.class);
+        when(contexts.isResolvable()).thenReturn(true);
+        when(contexts.get()).thenReturn(context);
+        return new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class), images,
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(stores, contexts),
+                contexts, new VpcNetworkManager(config, docker, null), null, null, null);
+    }
+
+    private static Instance defaultSubnetInstance(String instanceId, String privateIp, InstanceState state) {
+        Instance instance = persistedInstance(instanceId, privateIp, state);
+        instance.setVpcId(Ec2Service.defaultVpcId("us-east-1"));
+        instance.setSubnetId(Ec2Service.defaultSubnetId("us-east-1", "a"));
+        return instance;
+    }
+
+    private static List<Instance> instancesIn(Ec2Service service, String subnetId) {
+        return service.describeInstances("us-east-1", List.of(), Map.of("subnet-id", List.of(subnetId))).stream()
+                .flatMap(reservation -> reservation.getInstances().stream())
+                .toList();
     }
 
     private static EndpointAddressFixture endpointAddressFixture(String firstCidr, String secondCidr) {
