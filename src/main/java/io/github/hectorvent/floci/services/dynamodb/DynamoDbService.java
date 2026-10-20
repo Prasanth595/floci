@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -16,6 +17,7 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
@@ -28,6 +30,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -46,6 +49,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -98,6 +102,7 @@ public class DynamoDbService {
     private final StorageBackend<String, Map<String, JsonNode>> itemStore;
     private final StorageBackend<String, ExportDescription> exportStore;
     private final StorageBackend<String, ImportTableDescription> importStore;
+    private final StorageBackend<String, TableBackup> backupStore;
     // Items stored per table: storageKey -> Map<itemKey, item>
     // itemKey is "pk" or "pk#sk" depending on table schema
     private final ConcurrentHashMap<String, ConcurrentSkipListMap<String, JsonNode>> itemsByTable = new ConcurrentHashMap<>();
@@ -163,6 +168,8 @@ public class DynamoDbService {
                 new TypeReference<Map<String, ExportDescription>>() {}),
              storageFactory.create("dynamodb", "dynamodb-imports.json",
                 new TypeReference<Map<String, ImportTableDescription>>() {}),
+             storageFactory.create("dynamodb", "dynamodb-backups.json",
+                new TypeReference<Map<String, TableBackup>>() {}),
              regionResolver, streamService, kinesisForwarder, s3Service, objectMapper,
              config.services().dynamodb().vectorIndexAllocationSeconds(),
              config.services().dynamodb().vectorIndexBackfillSeconds());
@@ -215,10 +222,28 @@ public class DynamoDbService {
                     ObjectMapper objectMapper,
                     int vectorIndexAllocationSeconds,
                     int vectorIndexBackfillSeconds) {
+        this(tableStore, itemStore, exportStore, importStore, new InMemoryStorage<>(), regionResolver,
+             streamService, kinesisForwarder, s3Service, objectMapper,
+             vectorIndexAllocationSeconds, vectorIndexBackfillSeconds);
+    }
+
+    DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
+                    StorageBackend<String, Map<String, JsonNode>> itemStore,
+                    StorageBackend<String, ExportDescription> exportStore,
+                    StorageBackend<String, ImportTableDescription> importStore,
+                    StorageBackend<String, TableBackup> backupStore,
+                    RegionResolver regionResolver,
+                    DynamoDbStreamService streamService,
+                    KinesisStreamingForwarder kinesisForwarder,
+                    S3Service s3Service,
+                    ObjectMapper objectMapper,
+                    int vectorIndexAllocationSeconds,
+                    int vectorIndexBackfillSeconds) {
         this.tableStore = tableStore;
         this.itemStore = itemStore;
         this.exportStore = exportStore;
         this.importStore = importStore;
+        this.backupStore = backupStore;
         this.regionResolver = regionResolver;
         this.streamService = streamService;
         this.kinesisForwarder = kinesisForwarder;
@@ -4779,6 +4804,124 @@ public class DynamoDbService {
 
     private static String newJobId() {
         return System.currentTimeMillis() + "-" + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    // --- Backup Operations ---
+
+    // The live table object is shared and later mutated in place, so a backup keeps its own copy.
+    private static final ObjectMapper SNAPSHOT_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
+
+    private static final Comparator<TableBackup> BACKUP_ORDER = Comparator
+            .comparing(TableBackup::getCreationDateTime)
+            .thenComparing(TableBackup::getBackupArn);
+
+    public record ListBackupsResult(List<TableBackup> backups, String lastEvaluatedBackupArn) {}
+
+    public TableBackup createBackup(String tableName, String backupName, String region) {
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .filter(t -> !"CREATING".equals(t.getTableStatus()))
+                .orElseThrow(() -> new AwsException("TableNotFoundException",
+                        "Table not found: " + canonicalTableName, 400));
+        ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedItemsKey(storageKey));
+        List<JsonNode> snapshot = new ArrayList<>();
+        if (items != null) {
+            items.values().forEach(item -> snapshot.add(item.deepCopy()));
+        }
+        TableDefinition source = snapshotOf(table);
+        source.setItemCount(snapshot.size());
+
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        TableBackup backup = new TableBackup();
+        backup.setBackupArn(DynamoDbBackupArns.mint(table.getTableArn(), now));
+        backup.setBackupName(backupName);
+        backup.setBackupType("USER");
+        backup.setCreationDateTime(now);
+        backup.setSizeBytes(source.getTableSizeBytes());
+        backup.setRegion(region);
+        backup.setTable(source);
+        backup.setItems(snapshot);
+        backupStore.put(backup.getBackupArn(), backup);
+        LOG.infov("Created backup {0} of table {1}", backup.getBackupArn(), canonicalTableName);
+        return backup;
+    }
+
+    public TableBackup describeBackup(String backupArn, String region) {
+        DynamoDbBackupArns.BackupArn arn = DynamoDbBackupArns.parse(backupArn);
+        if (!arn.accountId().equals(regionResolver.getAccountId())) {
+            throw new AwsException("AccessDeniedException", "Access is denied", 400);
+        }
+        return backupStore.get(backupArn)
+                .filter(backup -> backup.getRegion().equals(region))
+                .orElseThrow(() -> new AwsException("BackupNotFoundException",
+                        "Backup not found: " + backupArn, 400));
+    }
+
+    public TableBackup deleteBackup(String backupArn, String region) {
+        TableBackup backup = describeBackup(backupArn, region);
+        backupStore.delete(backupArn);
+        LOG.infov("Deleted backup {0}", backupArn);
+        return backup;
+    }
+
+    /**
+     * Backups in creation order. AWS resumes after the position an ExclusiveStartBackupArn names,
+     * even when no such backup exists, so the position comes from the ARN itself.
+     */
+    public ListBackupsResult listBackups(String tableName, Integer limit, Instant lowerBound, Instant upperBound,
+                                         String exclusiveStartBackupArn, String backupType, String region) {
+        DynamoDbBackupArns.BackupArn start = exclusiveStartBackupArn != null
+                ? DynamoDbBackupArns.parse(exclusiveStartBackupArn) : null;
+        Set<String> types = "ALL".equals(backupType) ? Set.of("USER", "SYSTEM") : Set.of(backupType);
+        List<TableBackup> matching = backupStore.scan(key -> true).stream()
+                .filter(backup -> backup.getRegion().equals(region))
+                .filter(backup -> tableName == null || tableName.equals(backup.getTable().getTableName()))
+                .filter(backup -> types.contains(backup.getBackupType()))
+                .filter(backup -> lowerBound == null || !backup.getCreationDateTime().isBefore(lowerBound))
+                .filter(backup -> upperBound == null || backup.getCreationDateTime().isBefore(upperBound))
+                .filter(backup -> start == null || isAfter(backup, start))
+                .sorted(BACKUP_ORDER)
+                .toList();
+        if (limit == null || matching.size() <= limit) {
+            return new ListBackupsResult(matching, null);
+        }
+        List<TableBackup> page = matching.subList(0, limit);
+        return new ListBackupsResult(page, page.getLast().getBackupArn());
+    }
+
+    static TableDefinition snapshotOf(TableDefinition table) {
+        return SNAPSHOT_MAPPER.convertValue(table, TableDefinition.class);
+    }
+
+    void requireRestoreTarget(String tableName, String region) {
+        tableStore.get(regionKey(region, tableName)).ifPresent(table -> {
+            if ("CREATING".equals(table.getTableStatus())) {
+                throw new AwsException("TableInUseException",
+                        "Table is in the process of being created: " + tableName, 400);
+            }
+            throw new AwsException("TableAlreadyExistsException", "Table already exists: " + tableName, 400);
+        });
+    }
+
+    /** Loads the restored items into the table a restore created and makes it ACTIVE. */
+    public void finishRestore(String tableName, List<JsonNode> items, String region) {
+        String storageKey = regionKey(region, tableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> resourceNotFoundException(tableName));
+        ConcurrentSkipListMap<String, JsonNode> restored = new ConcurrentSkipListMap<>();
+        for (JsonNode item : items) {
+            restored.put(buildItemKey(table, item), item.deepCopy());
+        }
+        itemsByTable.put(scopedItemsKey(storageKey), restored);
+        persistItems(storageKey);
+        activateTable(tableName, region);
+        LOG.infov("Restored {0} items into table {1}", items.size(), tableName);
+    }
+
+    private static boolean isAfter(TableBackup backup, DynamoDbBackupArns.BackupArn start) {
+        int byTime = Long.compare(backup.getCreationDateTime().toEpochMilli(), start.creationMillis());
+        return 0 < byTime || (byTime == 0 && 0 < backup.getBackupArn().compareTo(start.arn()));
     }
 
     // --- Import Operations ---

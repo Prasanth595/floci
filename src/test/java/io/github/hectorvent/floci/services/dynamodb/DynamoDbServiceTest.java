@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -8,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
@@ -16,16 +18,19 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -4586,5 +4591,35 @@ class DynamoDbServiceTest {
         assertEquals("FAILED", restarted.describeImport(importDesc.getImportArn()).getImportStatus());
         assertEquals("InterruptedByRestart", restarted.describeImport(importDesc.getImportArn()).getFailureCode());
         assertEquals("FAILED", restarted.describeExport(exportDesc.getExportArn()).getExportStatus());
+    }
+
+    @Test
+    void backupKeepsItsSnapshotAcrossLaterWritesAndARestart(@TempDir Path dir) {
+        RegionResolver resolver = new RegionResolver("us-east-1", "000000000000");
+        StorageBackend<String, TableDefinition> tables = new InMemoryStorage<>();
+        StorageBackend<String, Map<String, JsonNode>> items = new InMemoryStorage<>();
+        Path backupFile = dir.resolve("dynamodb-backups.json");
+        TypeReference<Map<String, TableBackup>> backupType = new TypeReference<>() {};
+        DynamoDbService before = new DynamoDbService(tables, items, null, null,
+                new PersistentStorage<>(backupFile, backupType), resolver, null, null, null, mapper, 0, 0);
+        before.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        before.putItem("Users", item("userId", "u1"), null, null, null, "us-east-1", null);
+        TableBackup backup = before.createBackup("Users", "nightly", "us-east-1");
+        before.putItem("Users", item("userId", "u2"), null, null, null, "us-east-1", null);
+        before.updateTimeToLive("Users", "expiresAt", true, "us-east-1");
+        assertFalse(before.describeBackup(backup.getBackupArn(), "us-east-1").getTable().isTtlEnabled());
+
+        PersistentStorage<String, TableBackup> reloadedBackups = new PersistentStorage<>(backupFile, backupType);
+        reloadedBackups.load();
+        DynamoDbService restarted = new DynamoDbService(tables, items, null, null, reloadedBackups, resolver,
+                null, null, null, mapper, 0, 0);
+        TableBackup reloaded = restarted.describeBackup(backup.getBackupArn(), "us-east-1");
+
+        assertEquals("nightly", reloaded.getBackupName());
+        assertEquals(backup.getCreationDateTime(), reloaded.getCreationDateTime());
+        assertEquals(List.of("u1"), reloaded.getItems().stream().map(i -> i.path("userId").path("S").asText()).toList());
+        assertEquals(1, reloaded.getTable().getItemCount());
+        assertFalse(reloaded.getTable().isTtlEnabled());
     }
 }
