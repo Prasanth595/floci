@@ -1,0 +1,204 @@
+package io.github.hectorvent.floci.services.dsql;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.dsql.model.DsqlCluster;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * The control plane in isolation, with the answers measured on AWS (eu-west-1, 2026-10-20):
+ * policy versions and refusals, the lockout check, tag calls on what is no cluster of the Region,
+ * multi-Region peering, and updates that leave out a member.
+ */
+class DsqlServiceTest {
+
+    private static final String ACCOUNT = "111122223333";
+    private static final String REGION = "eu-west-1";
+    private static final String ROOT = "arn:aws:iam::" + ACCOUNT + ":root";
+
+    private final DsqlPrincipals principals = mock(DsqlPrincipals.class);
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final DsqlService service = new DsqlService(
+            new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
+            new RegionResolver(REGION, ACCOUNT), "localhost.floci.io", new DsqlDataPlane(), principals,
+            new IamPolicyEvaluator(mapper), mapper);
+
+    @BeforeEach
+    void caller() {
+        when(principals.caller()).thenReturn(CallerArns.accountRoot(ROOT, ACCOUNT));
+        when(principals.exists(anyString())).thenAnswer(call -> call.getArgument(0, String.class).endsWith(":root"));
+    }
+
+    @Test
+    void aPolicyVersionIsWhenThePolicyWasSet() {
+        String id = cluster().getIdentifier();
+        long before = Instant.now().toEpochMilli();
+
+        String first = service.putClusterPolicy(REGION, id, deny("dsql:DbConnect"), null, false);
+        String second = service.putClusterPolicy(REGION, id, deny("dsql:DbConnect"), first, false);
+
+        assertTrue(Long.parseLong(first) >= before);
+        assertTrue(Long.parseLong(second) > Long.parseLong(first));
+        assertEquals(second, service.getClusterPolicy(REGION, id).getPolicyVersion());
+        assertEquals(second, service.deleteClusterPolicy(REGION, id, null));
+        AwsException none = assertThrows(AwsException.class, () -> service.getClusterPolicy(REGION, id));
+        assertEquals("ResourceNotFoundException", none.getErrorCode());
+        assertEquals("Aurora DSQL can't find the policy for the resource " + id + ". Verify that the policy exists.",
+                none.getMessage());
+        assertEquals(Map.of("resourceId", id, "resourceType", "policy"), none.getExtendedData());
+    }
+
+    @Test
+    void aVersionThatIsNotTheCurrentPolicysIsRefused() {
+        String id = cluster().getIdentifier();
+        String noVersion = "Aurora DSQL can't find policy version 1 for resource " + id
+                + ". Verify that the policy exists and that the version is correct.";
+
+        AwsException noPolicy = assertThrows(AwsException.class,
+                () -> service.putClusterPolicy(REGION, id, deny("dsql:DbConnect"), "1", false));
+        assertEquals("ResourceNotFoundException", noPolicy.getErrorCode());
+        assertEquals(noVersion, noPolicy.getMessage());
+        service.putClusterPolicy(REGION, id, deny("dsql:DbConnect"), null, false);
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> service.putClusterPolicy(REGION, id, deny("dsql:DbConnect"), "1", false));
+        assertEquals("ConflictException", conflict.getErrorCode());
+        assertEquals(noVersion, conflict.getMessage());
+        assertEquals("cluster", conflict.getExtendedData().get("resourceType"));
+        AwsException delete = assertThrows(AwsException.class, () -> service.deleteClusterPolicy(REGION, id, "1"));
+        assertEquals("ResourceNotFoundException", delete.getErrorCode());
+        assertEquals("policy", delete.getExtendedData().get("resourceType"));
+    }
+
+    @Test
+    void aPolicyThatLocksTheCallerOutOfBothPolicyActionsIsRefused() {
+        String id = cluster().getIdentifier();
+
+        AwsException lockout = assertThrows(AwsException.class, () -> service.putClusterPolicy(REGION, id,
+                deny("[\"dsql:PutClusterPolicy\",\"dsql:DeleteClusterPolicy\"]"), null, false));
+        assertEquals(DsqlService.LOCKOUT, lockout.getMessage());
+        service.putClusterPolicy(REGION, id, deny("\"dsql:PutClusterPolicy\""), null, false);
+        service.putClusterPolicy(REGION, id, deny("\"*\""), null, true);
+        AwsException onCreate = assertThrows(AwsException.class, () -> service.createCluster(REGION, false, null,
+                null, null, null, null, deny("\"*\""), false));
+        assertEquals(DsqlService.LOCKOUT, onCreate.getMessage());
+    }
+
+    @Test
+    void aPublicPolicyIsRefused() {
+        AwsException refused = assertThrows(AwsException.class, () -> service.createCluster(REGION, false, null, null,
+                null, null, null, "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\","
+                        + "\"Action\":\"dsql:DbConnect\",\"Resource\":\"*\"}]}", false));
+
+        assertEquals(DsqlClusterPolicies.PUBLIC, refused.getMessage());
+        assertEquals(0, service.listClusters(REGION, null, null).clusters().size());
+    }
+
+    @Test
+    void aTagCallRefusesWhatIsNoClusterOfTheRegion() {
+        DsqlCluster cluster = cluster();
+        String missing = "arn:aws:dsql:" + REGION + ":" + ACCOUNT + ":cluster/aaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> service.listTags(REGION, "arn:aws:dsql:" + REGION + ":" + ACCOUNT + ":cluster/abc"));
+        assertEquals("AccessDeniedException", invalid.getErrorCode());
+        assertEquals(403, invalid.getHttpStatus());
+        assertEquals("Invalid input for 'resourceArn'. The cluster ARN that you specified isn't valid. Provide the"
+                + " cluster ARN in the format 'arn:partition:dsql:region:account-id:cluster/cluster-id' and try"
+                + " again.User: " + ROOT + " is not authorized to perform: dsql:ListTagsForResource on resource: *"
+                + " with an explicit deny in a resource-based policy", invalid.getMessage());
+        AwsException otherRegion = assertThrows(AwsException.class,
+                () -> service.tagResource("us-east-1", cluster.getArn(), Map.of("k", "v")));
+        assertEquals("BadRequestException", otherRegion.getErrorCode());
+        assertEquals("Invalid input resource arn: expected region us-east-1", otherRegion.getMessage());
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.untagResource(REGION, missing, List.of("k")));
+        assertEquals("NotFoundException", notFound.getErrorCode());
+        assertEquals("Resource was not found", notFound.getMessage());
+    }
+
+    @Test
+    void multiRegionClustersWaitUntilEachNamesTheOther() {
+        DsqlCluster first = service.createCluster(REGION, false, null, null, null, "eu-west-2", null, null, false);
+        DsqlCluster second = service.createCluster("eu-west-3", false, null, null, null, "eu-west-2", null, null, false);
+        assertEquals(DsqlService.PENDING_SETUP, first.getStatus());
+        assertEquals(List.of(first.getArn()), first.getLinkedClusterArns());
+
+        service.updateCluster(REGION, first.getIdentifier(), null, null, null, List.of(second.getArn()));
+        assertEquals(List.of(second.getArn(), first.getArn()),
+                service.getCluster(REGION, first.getIdentifier()).getLinkedClusterArns());
+        assertEquals(DsqlService.PENDING_SETUP, service.getCluster(REGION, first.getIdentifier()).getStatus());
+
+        service.updateCluster("eu-west-3", second.getIdentifier(), null, null, null, List.of(first.getArn()));
+        assertEquals(DsqlService.ACTIVE, service.getCluster(REGION, first.getIdentifier()).getStatus());
+        assertEquals(DsqlService.ACTIVE, service.getCluster("eu-west-3", second.getIdentifier()).getStatus());
+        assertEquals(List.of(first.getArn(), second.getArn()),
+                service.getCluster("eu-west-3", second.getIdentifier()).getLinkedClusterArns());
+    }
+
+    @Test
+    void anUpdateLeavesWhatItDoesNotNameAsItWas() {
+        DsqlCluster cluster = service.createCluster(REGION, false, "arn:aws:kms:eu-west-1:" + ACCOUNT + ":key/k",
+                null, null, "eu-west-2", null, null, false);
+
+        service.updateCluster(REGION, cluster.getIdentifier(), null, null, null, null);
+
+        DsqlCluster updated = service.getCluster(REGION, cluster.getIdentifier());
+        assertEquals(false, updated.isDeletionProtectionEnabled());
+        assertEquals("arn:aws:kms:eu-west-1:" + ACCOUNT + ":key/k", updated.getKmsEncryptionKey());
+        assertEquals("eu-west-2", updated.getWitnessRegion());
+        assertEquals(List.of(cluster.getArn()), updated.getLinkedClusterArns());
+    }
+
+    @Test
+    void aCloudFormationUpdateKeepsAPolicyItAlreadyHas() {
+        String id = cluster().getIdentifier();
+        String version = service.putClusterPolicy(REGION, id, deny("\"dsql:DbConnect\""), null, false);
+
+        service.replaceClusterPolicy(REGION, id, deny("[\"dsql:DbConnect\"]"));
+        assertEquals(version, service.getCluster(REGION, id).getPolicyVersion());
+        service.replaceClusterPolicy(REGION, id, null);
+        assertNull(service.getCluster(REGION, id).getPolicy());
+    }
+
+    @Test
+    void listingRefusesWhatItCannotPage() {
+        AwsException token = assertThrows(AwsException.class, () -> service.listClusters(REGION, null, "garbage"));
+        assertEquals("Invalid pagination token. Request a new token and try again.", token.getMessage());
+        assertEquals(Map.of("reason", "fieldValidationFailed", "fieldList", List.of(Map.of("name", "next-token",
+                "message", "Invalid pagination token. Request a new token and try again."))), token.getExtendedData());
+        AwsException tooMany = assertThrows(AwsException.class, () -> service.listClusters(REGION, 101, null));
+        assertEquals("1 validation error detected: Value at 'maxResults' failed to satisfy constraint: Member must"
+                + " have value less than or equal to 100", tooMany.getMessage());
+        assertNull(tooMany.getExtendedData());
+    }
+
+    private DsqlCluster cluster() {
+        return service.createCluster(REGION, false, null, null, null, null, null, null, false);
+    }
+
+    /** A Deny to everyone outside one VPC, which the caller is not in. */
+    private static String deny(String action) {
+        String actions = action.startsWith("[") || action.startsWith("\"") ? action : "\"" + action + "\"";
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Principal\":{\"AWS\":\"*\"},"
+                + "\"Action\":" + actions + ",\"Resource\":\"*\",\"Condition\":{\"StringNotEquals\":"
+                + "{\"aws:SourceVpc\":\"vpc-0123456789abcdef0\"}}}]}";
+    }
+}

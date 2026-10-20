@@ -35,16 +35,16 @@ public class DsqlTagHandler implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
-        return service.listTags(arn);
+        return service.listTags(region, arn);
     }
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        service.tagResource(arn, tags);
+        service.tagResource(region, arn, tags);
     }
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        service.untagResource(arn, tagKeys);
+        service.untagResource(region, arn, tagKeys);
     }
 }

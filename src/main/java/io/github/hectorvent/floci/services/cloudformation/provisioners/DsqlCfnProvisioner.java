@@ -20,16 +20,22 @@ import java.util.Set;
 
 /**
  * CloudFormation provisioning for {@code AWS::DSQL::Cluster}. {@code Ref} is the cluster's
- * identifier, the schema's primary identifier, and every read-only property is an attribute. As
- * CloudFormation's handler does, create waits for the cluster to be ACTIVE.
+ * identifier, the schema's primary identifier, and every read-only property but
+ * {@code EncryptionDetails}, an object, is an attribute. Properties are read against the resource
+ * schema, so a value of the wrong type fails the resource as on AWS. As CloudFormation's handler
+ * does, create waits for the cluster to be ACTIVE, or PENDING_SETUP for a multi-Region one, and an
+ * update leaves a property the template no longer sets as it was, but for the tags and the policy,
+ * which go (measured, eu-west-1, 2026-10-20).
  */
 @ApplicationScoped
 public class DsqlCfnProvisioner implements CfnResourceProvisioner {
 
+    private static final String TYPE = "AWS::DSQL::Cluster";
     private static final Duration READY_TIMEOUT = Duration.ofMinutes(5);
     /** Measured: {@code 2026-10-16T15:49:38.488Z}, milliseconds always written. */
     private static final DateTimeFormatter CREATION_TIME =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+    private static final Set<String> SETTLED = Set.of("ACTIVE", "PENDING_SETUP");
 
     private final DsqlService dsqlService;
 
@@ -40,62 +46,55 @@ public class DsqlCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::DSQL::Cluster");
+        return Set.of(TYPE);
     }
 
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
         String region = ctx.region();
-        // AWS::NoValue leaves a property out, so it takes its default rather than reading as false.
-        String protection = ctx.resolveOrDefault(props, "DeletionProtectionEnabled", null);
-        Boolean deletionProtection = protection == null ? null : Boolean.valueOf(protection);
-        String kmsKey = props != null && props.has("KmsEncryptionKey")
-                ? ctx.engine().resolve(props.get("KmsEncryptionKey")) : null;
-        JsonNode multiRegion = props == null ? null : ctx.engine().resolveNodeOmittingNoValue(props.get("MultiRegionProperties"));
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(ctx.engine());
+        JsonNode protection = read(types, props, "DeletionProtectionEnabled");
+        JsonNode kmsKey = read(types, props, "KmsEncryptionKey");
+        JsonNode multiRegion = read(types, props, "MultiRegionProperties");
+        JsonNode tagList = read(types, props, "Tags");
+        JsonNode policyDocument = read(types, props, "PolicyDocument");
+        types.finish();
+        Boolean deletionProtection = protection == null ? null : protection.booleanValue();
+        String kms = kmsKey == null ? null : kmsKey.asText();
         String witnessRegion = multiRegion != null && multiRegion.hasNonNull("WitnessRegion")
                 ? multiRegion.get("WitnessRegion").asText() : null;
         List<String> linkedClusters = multiRegion != null && multiRegion.path("Clusters").isArray()
                 ? strings(multiRegion.get("Clusters")) : null;
-        Map<String, String> tags = tags(props, ctx);
-        String policy = props != null && props.has("PolicyDocument")
-                ? policyText(ctx.engine().resolveNodeOmittingNoValue(props.get("PolicyDocument"))) : null;
+        Map<String, String> tags = tags(tagList);
+        String policy = policyDocument == null ? null : policyDocument.asText();
 
         DsqlCluster cluster;
         if (ctx.priorPhysicalId() != null) {
             String identifier = ctx.priorPhysicalId();
-            // A property the template no longer sets goes back to its default, multi-Region ones included.
-            dsqlService.updateCluster(region, identifier,
-                    deletionProtection == null ? Boolean.TRUE : deletionProtection,
-                    kmsKey == null ? "" : kmsKey, witnessRegion == null ? "" : witnessRegion,
-                    linkedClusters == null ? List.of() : linkedClusters);
-            reconcileTags(dsqlService.getCluster(region, identifier), tags);
-            DsqlCluster current = dsqlService.getCluster(region, identifier);
-            if (policy != null && !policy.equals(current.getPolicy())) {
-                dsqlService.putClusterPolicy(region, identifier, policy, null);
-            } else if (policy == null && current.getPolicy() != null) {
-                dsqlService.deleteClusterPolicy(region, identifier, null);
-            }
+            dsqlService.updateCluster(region, identifier, deletionProtection, kms, witnessRegion, linkedClusters);
+            reconcileTags(region, dsqlService.getCluster(region, identifier), tags);
+            dsqlService.replaceClusterPolicy(region, identifier, policy);
             cluster = dsqlService.getCluster(region, identifier);
         } else {
-            cluster = dsqlService.createCluster(region, deletionProtection, kmsKey, tags, null, witnessRegion,
-                    linkedClusters, policy);
-            cluster = awaitActive(region, cluster.getIdentifier());
+            cluster = dsqlService.createCluster(region, deletionProtection, kms, tags, null, witnessRegion,
+                    linkedClusters, policy, false);
+            cluster = awaitSettled(region, cluster.getIdentifier());
         }
 
         resource.setPhysicalId(cluster.getIdentifier());
-        Map<String, String> attributes = resource.getAttributes();
-        attributes.put("Identifier", cluster.getIdentifier());
-        attributes.put("ResourceArn", cluster.getArn());
-        attributes.put("CreationTime", CREATION_TIME.format(cluster.getCreationTime()));
-        attributes.put("Status", cluster.getStatus());
-        attributes.put("Endpoint", cluster.getEndpoint());
-        attributes.put("VpcEndpoint", dsqlService.clusterVpcEndpoint(region, cluster.getIdentifier()));
-        attributes.put("VpcEndpointServiceName", dsqlService.vpcEndpointServiceName(region, cluster.getIdentifier()));
-        // Measured: PolicyVersion exists only with a policy, and EncryptionDetails is no attribute.
-        if (cluster.getPolicyVersion() != null && cluster.getPolicy() != null) {
-            attributes.put("PolicyVersion", cluster.getPolicyVersion());
+        resource.getAttributes().put("Identifier", cluster.getIdentifier());
+        resource.getAttributes().put("ResourceArn", cluster.getArn());
+        resource.getAttributes().put("CreationTime", CREATION_TIME.format(cluster.getCreationTime()));
+        resource.getAttributes().put("Status", cluster.getStatus());
+        resource.getAttributes().put("Endpoint", cluster.getEndpoint());
+        resource.getAttributes().put("VpcEndpoint", dsqlService.clusterVpcEndpoint(region, cluster.getIdentifier()));
+        resource.getAttributes().put("VpcEndpointServiceName",
+                dsqlService.vpcEndpointServiceName(region, cluster.getIdentifier()));
+        // Measured: PolicyVersion exists only with a policy.
+        if (cluster.getPolicy() != null) {
+            resource.getAttributes().put("PolicyVersion", cluster.getPolicyVersion());
         } else {
-            attributes.remove("PolicyVersion");
+            resource.getAttributes().remove("PolicyVersion");
         }
     }
 
@@ -105,11 +104,16 @@ public class DsqlCfnProvisioner implements CfnResourceProvisioner {
                 () -> dsqlService.deleteCluster(region, physicalId), "ResourceNotFoundException");
     }
 
-    private DsqlCluster awaitActive(String region, String identifier) {
+    private static JsonNode read(CfnPropertyTypes.Reader types, JsonNode props, String property) {
+        return props == null ? null
+                : types.read(property, props.get(property), CfnPropertyTypes.propertyShape(TYPE, property));
+    }
+
+    private DsqlCluster awaitSettled(String region, String identifier) {
         Instant deadline = Instant.now().plus(READY_TIMEOUT);
         while (true) {
             DsqlCluster cluster = dsqlService.getCluster(region, identifier);
-            if ("ACTIVE".equals(cluster.getStatus())) {
+            if (SETTLED.contains(cluster.getStatus())) {
                 return cluster;
             }
             if ("FAILED".equals(cluster.getStatus()) || Instant.now().isAfter(deadline)) {
@@ -126,7 +130,7 @@ public class DsqlCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private void reconcileTags(DsqlCluster cluster, Map<String, String> wanted) {
+    private void reconcileTags(String region, DsqlCluster cluster, Map<String, String> wanted) {
         List<String> removed = new ArrayList<>();
         for (String key : cluster.getTags().keySet()) {
             if (!wanted.containsKey(key)) {
@@ -134,34 +138,21 @@ public class DsqlCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         if (!removed.isEmpty()) {
-            dsqlService.untagResource(cluster.getArn(), removed);
+            dsqlService.untagResource(region, cluster.getArn(), removed);
         }
         if (!wanted.isEmpty()) {
-            dsqlService.tagResource(cluster.getArn(), wanted);
+            dsqlService.tagResource(region, cluster.getArn(), wanted);
         }
     }
 
-    private static Map<String, String> tags(JsonNode props, ProvisionContext ctx) {
+    private static Map<String, String> tags(JsonNode tagList) {
         Map<String, String> tags = new LinkedHashMap<>();
-        if (props == null || !props.has("Tags")) {
-            return tags;
-        }
-        JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(props.get("Tags"));
-        if (resolved != null && resolved.isArray()) {
-            for (JsonNode tag : resolved) {
-                if (tag.hasNonNull("Key")) {
-                    tags.put(tag.get("Key").asText(), tag.path("Value").asText(""));
-                }
+        if (tagList != null && tagList.isArray()) {
+            for (JsonNode tag : tagList) {
+                tags.put(tag.path("Key").asText(), tag.path("Value").asText(""));
             }
         }
         return tags;
-    }
-
-    private static String policyText(JsonNode policy) {
-        if (policy == null || policy.isNull() || policy.isMissingNode()) {
-            return null;
-        }
-        return policy.isTextual() ? policy.asText() : policy.toString();
     }
 
     private static List<String> strings(JsonNode array) {

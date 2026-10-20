@@ -32,6 +32,8 @@ import java.util.Map;
 @Consumes(MediaType.APPLICATION_JSON)
 public class DsqlController {
 
+    private static final int MAX_POLICY_LENGTH = 20480;
+
     private final DsqlService service;
     private final RegionResolver regionResolver;
 
@@ -46,14 +48,20 @@ public class DsqlController {
     public Response createCluster(@Context HttpHeaders headers, Map<String, Object> body) {
         Map<String, Object> request = body == null ? Map.of() : body;
         Map<String, Object> multiRegion = map(request.get("multiRegionProperties"));
+        String policy = string(request.get("policy"));
+        if (policy != null) {
+            requirePolicyLength(policy);
+        }
         DsqlCluster cluster = service.createCluster(regionResolver.resolveRegion(headers),
                 deletionProtection(request.get("deletionProtectionEnabled")), string(request.get("kmsEncryptionKey")),
                 stringMap(request.get("tags")), string(request.get("clientToken")),
                 multiRegion == null ? null : string(multiRegion.get("witnessRegion")),
-                multiRegion == null ? null : strings(multiRegion.get("clusters")), string(request.get("policy")));
-        // Measured: the answer reports the cluster being created, however soon it is ACTIVE.
+                multiRegion == null ? null : strings(multiRegion.get("clusters")), policy,
+                Boolean.TRUE.equals(request.get("bypassPolicyLockoutSafetyCheck")));
+        // Measured: the answer reports the cluster being created, however soon it is ACTIVE, and a
+        // multi-Region one waiting for its peers.
         Map<String, Object> response = summary(cluster);
-        response.put("status", DsqlService.CREATING);
+        response.put("status", cluster.getWitnessRegion() != null ? DsqlService.PENDING_SETUP : DsqlService.CREATING);
         putMultiRegion(response, cluster);
         response.put("encryptionDetails", encryptionDetails(cluster));
         response.put("deletionProtectionEnabled", cluster.isDeletionProtectionEnabled());
@@ -122,7 +130,8 @@ public class DsqlController {
                                   @QueryParam("client-token") String clientToken) {
         DsqlCluster cluster = service.deleteCluster(regionResolver.resolveRegion(headers), identifier);
         Map<String, Object> response = summary(cluster);
-        response.put("status", DsqlService.DELETING);
+        // Measured: a multi-Region cluster's deletion first waits on its peers.
+        response.put("status", cluster.getWitnessRegion() != null ? DsqlService.PENDING_DELETE : DsqlService.DELETING);
         return Response.ok(response).build();
     }
 
@@ -143,12 +152,13 @@ public class DsqlController {
                                      Map<String, Object> body) {
         Map<String, Object> request = body == null ? Map.of() : body;
         String policy = string(request.get("policy"));
-        if (policy == null || policy.isEmpty()) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value at 'policy' failed"
-                    + " to satisfy constraint: Member must not be null", 400);
+        if (policy == null) {
+            throw policyConstraint("Member must not be null");
         }
+        requirePolicyLength(policy);
         String version = service.putClusterPolicy(regionResolver.resolveRegion(headers), identifier, policy,
-                string(request.get("expectedPolicyVersion")));
+                string(request.get("expectedPolicyVersion")),
+                Boolean.TRUE.equals(request.get("bypassPolicyLockoutSafetyCheck")));
         return Response.ok(Map.of("policyVersion", version)).build();
     }
 
@@ -236,6 +246,21 @@ public class DsqlController {
             throw serialization("NUMBER_VALUE cannot be converted to Boolean");
         }
         throw serialization(value instanceof Map<?, ?> ? "Start of structure or map found where not expected" : "");
+    }
+
+    /** The model's bounds on a policy, refused with the texts measured on DSQL. */
+    private static void requirePolicyLength(String policy) {
+        if (policy.isEmpty()) {
+            throw policyConstraint("Member must have length greater than or equal to 1");
+        }
+        if (policy.length() > MAX_POLICY_LENGTH) {
+            throw policyConstraint("Member must have length less than or equal to " + MAX_POLICY_LENGTH);
+        }
+    }
+
+    private static AwsException policyConstraint(String constraint) {
+        return new AwsException("ValidationException", "1 validation error detected: Value at 'policy' failed to"
+                + " satisfy constraint: " + constraint, 400);
     }
 
     private static AwsException serialization(String message) {

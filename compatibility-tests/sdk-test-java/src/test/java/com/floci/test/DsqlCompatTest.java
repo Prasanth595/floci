@@ -11,7 +11,9 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dsql.DsqlClient;
 import software.amazon.awssdk.services.dsql.model.ClusterStatus;
 import software.amazon.awssdk.services.dsql.model.CreateClusterResponse;
+import software.amazon.awssdk.services.dsql.model.GetClusterPolicyResponse;
 import software.amazon.awssdk.services.dsql.model.GetClusterResponse;
+import software.amazon.awssdk.services.dsql.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.dsql.model.ValidationException;
 
 import java.time.Duration;
@@ -22,7 +24,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Aurora DSQL's control plane through the real AWS SDK and its waiters: a cluster created,
- * described, listed, tagged, protected from deletion and deleted.
+ * described, listed, tagged, protected from deletion, given a policy and deleted.
  */
 @DisplayName("Aurora DSQL")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -82,5 +84,27 @@ class DsqlCompatTest {
                 .hasMessageContaining("Deletion protection is enabled");
 
         dsql.updateCluster(b -> b.identifier(identifier).deletionProtectionEnabled(false));
+    }
+
+    @Test
+    @Order(3)
+    void aPolicyIsKeptInDsqlsFormAndAPublicOneRefused() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Principal\":"
+                + "{\"AWS\":\"*\"},\"Action\":[\"dsql:DbConnect\"],\"Resource\":\"*\",\"Condition\":"
+                + "{\"StringNotEquals\":{\"aws:SourceVpc\":\"vpc-0123456789abcdef0\"}}}]}";
+
+        String version = dsql.putClusterPolicy(b -> b.identifier(identifier).policy(policy)).policyVersion();
+        GetClusterPolicyResponse kept = dsql.getClusterPolicy(b -> b.identifier(identifier));
+        assertThat(version).matches("\\d{13}");
+        assertThat(kept.policyVersion()).isEqualTo(version);
+        assertThat(kept.policy()).contains("\"Action\" : \"dsql:DbConnect\"");
+        assertThatThrownBy(() -> dsql.putClusterPolicy(b -> b.identifier(identifier).policy(
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\","
+                        + "\"Action\":\"dsql:DbConnect\",\"Resource\":\"*\"}]}")))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining("it grants public access");
+        assertThat(dsql.deleteClusterPolicy(b -> b.identifier(identifier)).policyVersion()).isEqualTo(version);
+        assertThatThrownBy(() -> dsql.getClusterPolicy(b -> b.identifier(identifier)))
+                .isInstanceOf(ResourceNotFoundException.class);
     }
 }

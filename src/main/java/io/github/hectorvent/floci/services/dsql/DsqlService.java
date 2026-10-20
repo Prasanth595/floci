@@ -1,15 +1,21 @@
 package io.github.hectorvent.floci.services.dsql;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dsql.model.DsqlCluster;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
+import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -20,19 +26,23 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Aurora DSQL's control plane: clusters, their tags and resource policies. Each cluster's
  * database is run by {@link DsqlDataPlane}, which reports when it is ready; until then a cluster
- * is {@code CREATING}, as on AWS. Errors carry the messages measured on AWS (eu-west-1,
- * 2026-10-16).
+ * is {@code CREATING}, as on AWS. A multi-Region cluster waits in {@code PENDING_SETUP} until it
+ * and each of its peers name one another. Errors carry the messages measured on AWS (eu-west-1,
+ * 2026-10-16 and 2026-10-20).
  */
 @ApplicationScoped
 public class DsqlService implements Resettable {
@@ -44,35 +54,52 @@ public class DsqlService implements Resettable {
     static final String UPDATING = "UPDATING";
     static final String DELETING = "DELETING";
     static final String FAILED = "FAILED";
+    static final String PENDING_SETUP = "PENDING_SETUP";
+    static final String PENDING_DELETE = "PENDING_DELETE";
 
     private static final int MAX_RESULTS = 100;
+    private static final String PUT_POLICY = "dsql:PutClusterPolicy";
+    private static final String DELETE_POLICY = "dsql:DeleteClusterPolicy";
+    private static final String INVALID_PAGE_TOKEN = "Invalid pagination token. Request a new token and try again.";
+    static final String LOCKOUT = "The new policy would result in the calling principal being unable to further"
+            + " update and delete this cluster's policy. Set the 'bypassPolicyLockoutSafetyCheck' parameter to"
+            + " 'true' to confirm this intent.";
 
     private final AccountAwareStorageBackend<DsqlCluster> clusters;
     private final RegionResolver regionResolver;
     private final String endpointSuffix;
     private final DsqlDataPlane dataPlane;
+    private final DsqlPrincipals principals;
+    private final IamPolicyEvaluator policyEvaluator;
+    private final ObjectMapper objectMapper;
     private final Map<String, Object> locks = new ConcurrentHashMap<>();
 
     @Inject
     public DsqlService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                       DsqlDataPlane dataPlane) {
+                       DsqlDataPlane dataPlane, DsqlPrincipals principals, IamPolicyEvaluator policyEvaluator,
+                       ObjectMapper objectMapper) {
         this(storageFactory.create("dsql", "dsql-clusters.json", new TypeReference<>() {}), regionResolver,
-                config.services().dsql().endpointSuffix(), dataPlane);
+                config.services().dsql().endpointSuffix(), dataPlane, principals, policyEvaluator, objectMapper);
     }
 
     DsqlService(AccountAwareStorageBackend<DsqlCluster> clusters, RegionResolver regionResolver,
-                String endpointSuffix, DsqlDataPlane dataPlane) {
+                String endpointSuffix, DsqlDataPlane dataPlane, DsqlPrincipals principals,
+                IamPolicyEvaluator policyEvaluator, ObjectMapper objectMapper) {
         this.clusters = clusters;
         this.regionResolver = regionResolver;
         this.endpointSuffix = endpointSuffix;
         this.dataPlane = dataPlane;
+        this.principals = principals;
+        this.policyEvaluator = policyEvaluator;
+        this.objectMapper = objectMapper;
     }
 
     // ── Clusters ──────────────────────────────────────────────────────────────
 
     public DsqlCluster createCluster(String region, Boolean deletionProtectionEnabled, String kmsEncryptionKey,
                                      Map<String, String> tags, String clientToken, String witnessRegion,
-                                     List<String> linkedClusterArns, String policy) {
+                                     List<String> linkedClusterArns, String policy,
+                                     boolean bypassPolicyLockoutSafetyCheck) {
         String accountId = regionResolver.getAccountId();
         synchronized (lockFor(accountId + "::" + region)) {
             String request = clientRequest(deletionProtectionEnabled, kmsEncryptionKey, tags, witnessRegion,
@@ -91,12 +118,14 @@ public class DsqlService implements Resettable {
                 }
             }
             String identifier = DsqlIdentifiers.newId();
+            String arn = clusterArn(region, identifier);
+            String keptPolicy = policy == null ? null
+                    : checkedPolicy(policy, arn, region, bypassPolicyLockoutSafetyCheck);
             DsqlCluster cluster = new DsqlCluster();
             cluster.setIdentifier(identifier);
-            cluster.setArn(regionResolver.buildArn("dsql", region, "cluster/" + identifier));
+            cluster.setArn(arn);
             cluster.setAccountId(accountId);
             cluster.setRegion(region);
-            cluster.setStatus(CREATING);
             cluster.setCreationTime(Instant.now());
             // Measured: a cluster created without the member has deletion protection.
             cluster.setDeletionProtectionEnabled(deletionProtectionEnabled == null || deletionProtectionEnabled);
@@ -106,11 +135,13 @@ public class DsqlService implements Resettable {
             cluster.setClientToken(clientToken);
             cluster.setClientRequest(clientToken == null ? null : request);
             cluster.setWitnessRegion(blankToNull(witnessRegion));
-            cluster.setLinkedClusterArns(linkedClusterArns == null || linkedClusterArns.isEmpty()
-                    ? null : List.copyOf(linkedClusterArns));
-            if (policy != null) {
-                cluster.setPolicy(policy);
-                cluster.setPolicyVersion("1");
+            cluster.setLinkedClusterArns(linkedClusters(arn, cluster.getWitnessRegion(), linkedClusterArns));
+            // Measured: a multi-Region cluster waits for its peers, a single-Region one is being created.
+            cluster.setStatus(cluster.getWitnessRegion() != null ? PENDING_SETUP : CREATING);
+            if (keptPolicy != null) {
+                cluster.setPolicy(keptPolicy);
+                // Measured: a policy's version is when it was set, in epoch milliseconds.
+                cluster.setPolicyVersion(String.valueOf(cluster.getCreationTime().toEpochMilli()));
             }
             clusters.put(key(region, identifier), cluster);
             LOG.infov("Created DSQL cluster {0} in {1}", identifier, region);
@@ -127,8 +158,9 @@ public class DsqlService implements Resettable {
 
     public Page listClusters(String region, Integer maxResults, String nextToken) {
         if (maxResults != null && (maxResults < 1 || maxResults > MAX_RESULTS)) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value '" + maxResults
-                    + "' at 'maxResults' failed to satisfy constraint: Member must have value "
+            // Measured: unlike other model checks, this one does not quote the value.
+            throw new AwsException("ValidationException", "1 validation error detected: Value at 'maxResults'"
+                    + " failed to satisfy constraint: Member must have value "
                     + (maxResults < 1 ? "greater than or equal to 1" : "less than or equal to 100"), 400);
         }
         List<DsqlCluster> all = new ArrayList<>(clusters.scan(key -> key.startsWith(region + "::")));
@@ -154,6 +186,7 @@ public class DsqlService implements Resettable {
         return new Page(all.subList(start, end), next);
     }
 
+    /** A member left null keeps its value. */
     public DsqlCluster updateCluster(String region, String identifier, Boolean deletionProtectionEnabled,
                                      String kmsEncryptionKey, String witnessRegion, List<String> linkedClusterArns) {
         DsqlCluster cluster = getCluster(region, identifier);
@@ -168,10 +201,12 @@ public class DsqlService implements Resettable {
                 cluster.setWitnessRegion(blankToNull(witnessRegion));
             }
             if (linkedClusterArns != null) {
-                cluster.setLinkedClusterArns(linkedClusterArns.isEmpty() ? null : List.copyOf(linkedClusterArns));
+                cluster.setLinkedClusterArns(linkedClusters(cluster.getArn(), cluster.getWitnessRegion(),
+                        linkedClusterArns));
             }
             clusters.put(key(region, identifier), cluster);
         }
+        completePeering(cluster);
         return cluster;
     }
 
@@ -227,12 +262,23 @@ public class DsqlService implements Resettable {
 
     // ── Resource policy ───────────────────────────────────────────────────────
 
-    public String putClusterPolicy(String region, String identifier, String policy, String expectedPolicyVersion) {
+    public String putClusterPolicy(String region, String identifier, String policy, String expectedPolicyVersion,
+                                   boolean bypassPolicyLockoutSafetyCheck) {
+        requireIdentifier(identifier);
+        String arn = clusterArn(region, identifier);
+        String keptPolicy = checkedPolicy(policy, arn, region, bypassPolicyLockoutSafetyCheck);
         DsqlCluster cluster = getCluster(region, identifier);
         synchronized (lockFor(cluster.getArn())) {
-            requireExpectedVersion(cluster, expectedPolicyVersion);
-            cluster.setPolicy(policy);
-            cluster.setPolicyVersion(String.valueOf(currentVersion(cluster) + 1));
+            if (expectedPolicyVersion != null && !expectedPolicyVersion.equals(cluster.getPolicyVersion())) {
+                // Measured: a version that is not the current policy's conflicts, one with no policy is not found.
+                if (cluster.getPolicy() == null) {
+                    throw policyVersionNotFound(identifier, expectedPolicyVersion);
+                }
+                throw new AwsException("ConflictException", policyVersionMessage(identifier, expectedPolicyVersion),
+                        409, Map.of("resourceId", identifier, "resourceType", "cluster"));
+            }
+            cluster.setPolicy(keptPolicy);
+            cluster.setPolicyVersion(nextPolicyVersion(cluster));
             clusters.put(key(region, identifier), cluster);
             return cluster.getPolicyVersion();
         }
@@ -241,44 +287,90 @@ public class DsqlService implements Resettable {
     public DsqlCluster getClusterPolicy(String region, String identifier) {
         DsqlCluster cluster = getCluster(region, identifier);
         if (cluster.getPolicy() == null) {
-            throw notFound(cluster.getArn(), identifier);
+            throw policyNotFound(identifier);
         }
         return cluster;
     }
 
+    /** Answers the version of the policy deleted, as DSQL does (measured). */
     public String deleteClusterPolicy(String region, String identifier, String expectedPolicyVersion) {
         DsqlCluster cluster = getCluster(region, identifier);
         synchronized (lockFor(cluster.getArn())) {
             if (cluster.getPolicy() == null) {
-                throw notFound(cluster.getArn(), identifier);
+                throw policyNotFound(identifier);
             }
-            requireExpectedVersion(cluster, expectedPolicyVersion);
+            if (expectedPolicyVersion != null && !expectedPolicyVersion.equals(cluster.getPolicyVersion())) {
+                throw policyVersionNotFound(identifier, expectedPolicyVersion);
+            }
+            String version = cluster.getPolicyVersion();
             cluster.setPolicy(null);
-            cluster.setPolicyVersion(String.valueOf(currentVersion(cluster) + 1));
             clusters.put(key(region, identifier), cluster);
-            return cluster.getPolicyVersion();
+            return version;
         }
+    }
+
+    /**
+     * Gives the cluster {@code policy}, or none when it is null, as CloudFormation's update does
+     * (measured): a policy the cluster already keeps is left as it is, version included.
+     */
+    public void replaceClusterPolicy(String region, String identifier, String policy) {
+        DsqlCluster cluster = getCluster(region, identifier);
+        if (policy == null) {
+            if (cluster.getPolicy() != null) {
+                deleteClusterPolicy(region, identifier, null);
+            }
+            return;
+        }
+        if (!checkedPolicy(policy, cluster.getArn(), region, false).equals(cluster.getPolicy())) {
+            putClusterPolicy(region, identifier, policy, null, false);
+        }
+    }
+
+    /** The policy as DSQL keeps it in its own form, once it has passed every check DSQL makes. */
+    String checkedPolicy(String policy, String clusterArn, String region, boolean bypassPolicyLockoutSafetyCheck) {
+        String kept = DsqlClusterPolicies.canonical(objectMapper, policy, regionResolver.getPartition(),
+                principals::exists);
+        if (DsqlClusterPolicies.grantsPublicAccess(objectMapper, kept)) {
+            throw new AwsException("ValidationException", DsqlClusterPolicies.PUBLIC, 400);
+        }
+        if (!bypassPolicyLockoutSafetyCheck && deniesCaller(kept, clusterArn, region, PUT_POLICY)
+                && deniesCaller(kept, clusterArn, region, DELETE_POLICY)) {
+            // Measured: refused only when the caller could neither replace nor delete the policy.
+            throw new AwsException("ValidationException", LOCKOUT, 400);
+        }
+        return kept;
+    }
+
+    private boolean deniesCaller(String policy, String clusterArn, String region, String action) {
+        CallerArns caller = principals.caller();
+        Map<String, List<String>> context = new HashMap<>();
+        caller.putPrincipalKeys(context);
+        String accountId = regionResolver.getAccountId();
+        Map<String, List<String>> effective = IamConditionContextResolver.withGlobalContext(
+                context, clusterArn, region, accountId, accountId);
+        return policyEvaluator.evaluateResourcePolicyFor(List.of(policy), RequestPrincipal.caller(caller),
+                action, clusterArn, effective) == ResourcePolicyDecision.EXPLICIT_DENY;
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
 
-    public Map<String, String> listTags(String arn) {
-        DsqlCluster cluster = clusterForArn(arn, "ListTagsForResource");
+    public Map<String, String> listTags(String region, String arn) {
+        DsqlCluster cluster = clusterForArn(region, arn, "ListTagsForResource");
         synchronized (lockFor(cluster.getArn())) {
             return new LinkedHashMap<>(cluster.getTags());
         }
     }
 
-    public void tagResource(String arn, Map<String, String> tags) {
-        DsqlCluster cluster = clusterForArn(arn, "TagResource");
+    public void tagResource(String region, String arn, Map<String, String> tags) {
+        DsqlCluster cluster = clusterForArn(region, arn, "TagResource");
         synchronized (lockFor(cluster.getArn())) {
             cluster.getTags().putAll(tags == null ? Map.of() : tags);
             clusters.put(key(cluster.getRegion(), cluster.getIdentifier()), cluster);
         }
     }
 
-    public void untagResource(String arn, List<String> tagKeys) {
-        DsqlCluster cluster = clusterForArn(arn, "UntagResource");
+    public void untagResource(String region, String arn, List<String> tagKeys) {
+        DsqlCluster cluster = clusterForArn(region, arn, "UntagResource");
         synchronized (lockFor(cluster.getArn())) {
             (tagKeys == null ? List.<String>of() : tagKeys).forEach(cluster.getTags()::remove);
             clusters.put(key(cluster.getRegion(), cluster.getIdentifier()), cluster);
@@ -305,25 +397,105 @@ public class DsqlService implements Resettable {
         });
     }
 
-    private DsqlCluster clusterForArn(String arn, String action) {
+    /**
+     * A multi-Region cluster's clusters as DSQL lists them (measured): its peers as given, then
+     * itself. A single-Region cluster has none.
+     */
+    private static List<String> linkedClusters(String arn, String witnessRegion, List<String> peers) {
+        List<String> linked = new ArrayList<>();
+        if (peers != null) {
+            peers.stream().filter(peer -> !peer.equals(arn) && !linked.contains(peer)).forEach(linked::add);
+        }
+        if (witnessRegion == null && linked.isEmpty()) {
+            return null;
+        }
+        linked.add(arn);
+        return List.copyOf(linked);
+    }
+
+    /**
+     * Brings out of {@code PENDING_SETUP} every cluster of {@code cluster}'s group once each names
+     * every other, as DSQL does when the last peer is updated (measured: both ACTIVE after about
+     * 100 s; here at once).
+     */
+    private void completePeering(DsqlCluster cluster) {
+        if (cluster.getLinkedClusterArns() == null) {
+            return;
+        }
+        List<DsqlCluster> group = new ArrayList<>();
+        for (String arn : cluster.getLinkedClusterArns()) {
+            Optional<DsqlCluster> member = clusterOfArn(arn);
+            if (member.isEmpty()) {
+                return;
+            }
+            group.add(member.get());
+        }
+        Set<String> names = new HashSet<>(cluster.getLinkedClusterArns());
+        if (group.size() < 2 || group.stream().anyMatch(member -> member.getWitnessRegion() == null
+                || !names.equals(new HashSet<>(member.getLinkedClusterArns())))) {
+            return;
+        }
+        for (DsqlCluster member : group) {
+            synchronized (lockFor(member.getArn())) {
+                if (PENDING_SETUP.equals(member.getStatus())) {
+                    member.setStatus(ACTIVE);
+                    clusters.put(key(member.getRegion(), member.getIdentifier()), member);
+                }
+            }
+        }
+    }
+
+    private Optional<DsqlCluster> clusterOfArn(String arn) {
+        AwsArnUtils.Arn parsed = clusterArnOrNull(arn);
+        if (parsed == null || !regionResolver.getAccountId().equals(parsed.accountId())) {
+            return Optional.empty();
+        }
+        return clusters.get(key(parsed.region(), parsed.resource().substring("cluster/".length())));
+    }
+
+    /**
+     * The cluster a tag call names, refused as DSQL refuses it (measured): an ARN that is not a
+     * well-formed cluster ARN as access denied, another account's as not authorized, another
+     * Region's as a bad request, and one of no cluster as not found.
+     */
+    private DsqlCluster clusterForArn(String region, String arn, String action) {
+        AwsArnUtils.Arn parsed = clusterArnOrNull(arn);
+        String caller = principals.caller().callerArn();
+        if (parsed == null) {
+            throw new AwsException("AccessDeniedException", "Invalid input for 'resourceArn'. The cluster ARN that you"
+                    + " specified isn't valid. Provide the cluster ARN in the format"
+                    + " 'arn:partition:dsql:region:account-id:cluster/cluster-id' and try again.User: " + caller
+                    + " is not authorized to perform: dsql:" + action + " on resource: * with an explicit deny in a"
+                    + " resource-based policy", 403);
+        }
+        if (!regionResolver.getAccountId().equals(parsed.accountId())) {
+            // Measured: another account's cluster is refused, not looked up in the caller's.
+            throw new AwsException("AccessDeniedException", "User: " + caller + " is not authorized to perform: dsql:"
+                    + action + " on resource: " + arn + " because no resource-based policy allows the dsql:" + action
+                    + " action", 403);
+        }
+        if (!region.equals(parsed.region())) {
+            throw new AwsException("BadRequestException", "Invalid input resource arn: expected region " + region, 400);
+        }
+        return clusters.get(key(region, parsed.resource().substring("cluster/".length())))
+                .orElseThrow(() -> new AwsException("NotFoundException", "Resource was not found", 404));
+    }
+
+    /** {@code arn} parsed when it is a cluster ARN with a cluster id DSQL accepts, else null. */
+    private static AwsArnUtils.Arn clusterArnOrNull(String arn) {
         AwsArnUtils.Arn parsed;
         try {
             parsed = AwsArnUtils.parse(arn);
         } catch (IllegalArgumentException e) {
-            throw new AwsException("ValidationException", "Invalid resource ARN: " + arn, 400);
+            return null;
         }
         String resource = parsed.resource();
         if (!"dsql".equals(parsed.service()) || !resource.startsWith("cluster/")) {
-            throw notFound(arn, resource);
-        }
-        if (!regionResolver.getAccountId().equals(parsed.accountId())) {
-            // Measured: another account's cluster is refused, not looked up in the caller's.
-            throw new AwsException("AccessDeniedException", "User is not authorized to perform: dsql:" + action
-                    + " on resource: " + arn + " because no resource-based policy allows the dsql:" + action
-                    + " action", 403);
+            return null;
         }
         String identifier = resource.substring("cluster/".length());
-        return clusters.get(key(parsed.region(), identifier)).orElseThrow(() -> notFound(arn, identifier));
+        return DsqlIdentifiers.CLUSTER_ID.matcher(identifier).matches()
+                && DsqlIdentifiers.decode(identifier).isPresent() ? parsed : null;
     }
 
     private String endpointFor(String identifier, String region) {
@@ -371,19 +543,30 @@ public class DsqlService implements Resettable {
                 Map.of("resourceId", identifier, "resourceType", "cluster"));
     }
 
-    private static void requireExpectedVersion(DsqlCluster cluster, String expected) {
-        if (expected != null && !expected.equals(cluster.getPolicyVersion())) {
-            throw new AwsException("ConflictException", "The expected policy version " + expected
-                    + " does not match the current version " + cluster.getPolicyVersion() + ".", 409,
-                    Map.of("resourceId", cluster.getIdentifier(), "resourceType", "cluster"));
-        }
+    private static AwsException policyNotFound(String identifier) {
+        return new AwsException("ResourceNotFoundException", "Aurora DSQL can't find the policy for the resource "
+                + identifier + ". Verify that the policy exists.", 404,
+                Map.of("resourceId", identifier, "resourceType", "policy"));
     }
 
-    private static int currentVersion(DsqlCluster cluster) {
+    private static AwsException policyVersionNotFound(String identifier, String version) {
+        return new AwsException("ResourceNotFoundException", policyVersionMessage(identifier, version), 404,
+                Map.of("resourceId", identifier, "resourceType", "policy"));
+    }
+
+    private static String policyVersionMessage(String identifier, String version) {
+        return "Aurora DSQL can't find policy version " + version + " for resource " + identifier
+                + ". Verify that the policy exists and that the version is correct.";
+    }
+
+    /** When the policy is set, in epoch milliseconds, after the version it replaces. */
+    private static String nextPolicyVersion(DsqlCluster cluster) {
+        long now = Instant.now().toEpochMilli();
         try {
-            return cluster.getPolicyVersion() == null ? 0 : Integer.parseInt(cluster.getPolicyVersion());
+            return String.valueOf(cluster.getPolicyVersion() == null ? now
+                    : Math.max(now, Long.parseLong(cluster.getPolicyVersion()) + 1));
         } catch (NumberFormatException e) {
-            return 0;
+            return String.valueOf(now);
         }
     }
 
@@ -429,7 +612,10 @@ public class DsqlService implements Resettable {
         } catch (IllegalArgumentException | DateTimeParseException invalid) {
             // Refused below.
         }
-        throw new AwsException("ValidationException", "Invalid nextToken", 400);
+        // Measured: the one refusal here that says which member and why.
+        throw new AwsException("ValidationException", INVALID_PAGE_TOKEN, 400, Map.of(
+                "reason", "fieldValidationFailed",
+                "fieldList", List.of(Map.of("name", "next-token", "message", INVALID_PAGE_TOKEN))));
     }
 
     /** One page of ListClusters. */
