@@ -611,7 +611,7 @@ See [Web Console](../ui/index.md) for running the console and swapping in a thir
 | `FLOCI_SERVICES_CODEPIPELINE_SOURCE_POLL_INTERVAL_MS` | `500` | How often (ms) the CodePipeline S3 source poller checks a configured `S3Bucket`/`S3ObjectKey` for a new object revision |
 | `FLOCI_SERVICES_NETWORKFIREWALL_ENABLED` | `true` | Enable the AWS Network Firewall service |
 | `FLOCI_SERVICES_SERVICEQUOTAS_ENABLED` | `true` | Enable the Service Quotas service |
-| `FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` | `5` | Non-negative Standard On-Demand vCPU limit per account and region; EC2 launches and starts reserve capacity against this applied limit |
+| `FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` | `5` | Non-negative applied Standard On-Demand vCPU quota reported per account and region; EC2 checks current running usage against it only when `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS` is `true` |
 | `FLOCI_SERVICES_RAM_ENABLED` | `true` | Enable the AWS RAM service |
 | `FLOCI_SERVICES_BACKUP_ENABLED` | `true` | Enable the AWS Backup service |
 | `FLOCI_SERVICES_BACKUP_JOB_COMPLETION_DELAY_SECONDS` | `3` | Simulated delay before backup jobs transition to `COMPLETED` |
