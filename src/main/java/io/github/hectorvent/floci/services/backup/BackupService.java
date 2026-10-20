@@ -641,6 +641,7 @@ public class BackupService {
         job.setBackupJobId(jobId);
         job.setBackupVaultName(vaultName);
         job.setBackupVaultArn(vault.getBackupVaultArn());
+        job.setBackupVaultCreationDate(vault.getCreationDate());
         job.setResourceArn(resourceArn);
         job.setResourceType(inferResourceType(resourceArn));
         job.setIamRoleArn(iamRoleArn);
@@ -724,20 +725,22 @@ public class BackupService {
      * passes would be describing AWS behaviour that needs a specific permission to reproduce.
      */
     public void deleteRecoveryPoint(String vaultName, String recoveryPointArn, String region) {
-        BackupVault vault = describeBackupVault(vaultName, region);
-        RecoveryPoint rp = describeRecoveryPoint(vaultName, recoveryPointArn, region);
-        if (vault.isLocked() && vault.getMinRetentionDays() != null) {
-            long ageDays = ChronoUnit.DAYS.between(
-                    Instant.ofEpochSecond(rp.getCreationDate()), Instant.now());
-            if (ageDays < vault.getMinRetentionDays()) {
-                throw new AwsException("InvalidRequestException",
-                        "Recovery point is protected by a vault lock until its minimum retention of "
-                                + vault.getMinRetentionDays() + " day(s) has elapsed: " + recoveryPointArn,
-                        400);
+        synchronized (lockFor(vaultKey(region, vaultName))) {
+            BackupVault vault = describeBackupVault(vaultName, region);
+            RecoveryPoint rp = describeRecoveryPoint(vaultName, recoveryPointArn, region);
+            if (vault.isLocked() && vault.getMinRetentionDays() != null) {
+                long ageDays = ChronoUnit.DAYS.between(
+                        Instant.ofEpochSecond(rp.getCreationDate()), Instant.now());
+                if (ageDays < vault.getMinRetentionDays()) {
+                    throw new AwsException("InvalidRequestException",
+                            "Recovery point is protected by a vault lock until its minimum retention of "
+                                    + vault.getMinRetentionDays() + " day(s) has elapsed: " + recoveryPointArn,
+                            400);
+                }
             }
+            recoveryStore.delete(recoveryPointArn);
+            decrementVaultCount(vaultName, region);
         }
-        recoveryStore.delete(recoveryPointArn);
-        decrementVaultCount(vaultName, region);
     }
 
     // ── Tags ───────────────────────────────────────────────────────────────────
@@ -783,7 +786,13 @@ public class BackupService {
                 synchronized (lockFor(vaultKey(region, vaultName))) {
                     long now = Instant.now().getEpochSecond();
                     Optional<BackupVault> vault = vaultStore.get(vaultKey(region, vaultName));
-                    if (vault.isEmpty() || !vault.get().getBackupVaultArn().equals(job.getBackupVaultArn())) {
+                    // Null preserves legacy jobs only when the vault is not newer than the job.
+                    // Epoch-second incarnation dates cannot distinguish same-second delete/recreate.
+                    Long vaultCreationDate = job.getBackupVaultCreationDate();
+                    if (vault.isEmpty() || !vault.get().getBackupVaultArn().equals(job.getBackupVaultArn())
+                            || (vaultCreationDate == null
+                                    ? vault.get().getCreationDate() > job.getCreationDate()
+                                    : vaultCreationDate != vault.get().getCreationDate())) {
                         job.setState("FAILED");
                         job.setStatusMessage("Backup vault no longer exists: " + vaultName);
                         job.setCompletionDate(now);
@@ -793,6 +802,7 @@ public class BackupService {
                     // A retry after writing the point but before the terminal job write reuses it.
                     String rpArn = job.getRecoveryPointArn() != null ? job.getRecoveryPointArn()
                             : regionResolver.buildArn("backup", region, "recovery-point:" + jobId);
+                    BackupVault currentVault = vault.get();
                     if (recoveryStore.get(rpArn).isEmpty()) {
                         RecoveryPoint rp = new RecoveryPoint();
                         rp.setRecoveryPointArn(rpArn);
@@ -808,10 +818,11 @@ public class BackupService {
                         rp.setStorageClass("WARM");
                         rp.setEncrypted(false);
                         recoveryStore.put(rpArn, rp);
+                        currentVault.setNumberOfRecoveryPoints(currentVault.getNumberOfRecoveryPoints() + 1);
+                    } else {
+                        currentVault.setNumberOfRecoveryPoints((int) recoveryStore.scan(k -> true).stream()
+                                .filter(point -> currentVault.getBackupVaultArn().equals(point.getBackupVaultArn())).count());
                     }
-                    BackupVault currentVault = vault.get();
-                    currentVault.setNumberOfRecoveryPoints((int) recoveryStore.scan(k -> true).stream()
-                            .filter(point -> currentVault.getBackupVaultArn().equals(point.getBackupVaultArn())).count());
                     vaultStore.put(vaultKey(region, vaultName), currentVault);
                     job.setState("COMPLETED");
                     job.setPercentDone("100.0");

@@ -36,6 +36,8 @@ class BackupJobRecoveryTest {
         RegionResolver resolver = new RegionResolver("us-east-1", ACCOUNT);
         BackupService first = new BackupService(storage, config, resolver, new ObjectMapper());
         BackupVault vault = first.createBackupVault("shared", null, null, Map.of(), REGION);
+        // The vault incarnation must predate the synthetic legacy jobs created below.
+        vault.setCreationDate(Instant.now().getEpochSecond() - 60);
         BackupJob original = first.startBackupJob("shared", "arn:aws:s3:::bucket", "role", null, REGION);
         first.shutdown();
 

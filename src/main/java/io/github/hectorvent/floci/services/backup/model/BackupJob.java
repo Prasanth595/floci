@@ -19,6 +19,9 @@ public class BackupJob {
     @JsonProperty("BackupVaultArn")
     private String backupVaultArn;
 
+    @JsonProperty("BackupVaultCreationDate")
+    private Long backupVaultCreationDate;
+
     @JsonProperty("RecoveryPointArn")
     private String recoveryPointArn;
 
@@ -71,6 +74,9 @@ public class BackupJob {
 
     public String getBackupVaultArn() { return backupVaultArn; }
     public void setBackupVaultArn(String backupVaultArn) { this.backupVaultArn = backupVaultArn; }
+
+    public Long getBackupVaultCreationDate() { return backupVaultCreationDate; }
+    public void setBackupVaultCreationDate(Long backupVaultCreationDate) { this.backupVaultCreationDate = backupVaultCreationDate; }
 
     public String getRecoveryPointArn() { return recoveryPointArn; }
     public void setRecoveryPointArn(String recoveryPointArn) { this.recoveryPointArn = recoveryPointArn; }
