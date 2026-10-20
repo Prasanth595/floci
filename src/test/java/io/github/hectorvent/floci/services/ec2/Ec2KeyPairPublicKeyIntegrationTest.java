@@ -10,6 +10,7 @@ import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
@@ -120,14 +121,30 @@ class Ec2KeyPairPublicKeyIntegrationTest {
     }
 
     /**
+     * IncludePublicKey is a boolean, read as true or false in any case, as the EC2 handler reads its
+     * other strictly parsed booleans; a value that is neither is refused rather than read as false.
+     */
+    @ParameterizedTest
+    @CsvSource({"true, 1", "TRUE, 1", "True, 1", "false, 0", "FALSE, 0"})
+    void includePublicKeyIsReadAsTrueOrFalseInAnyCase(String include, int publicKeys) {
+        describeWithIncludePublicKey(include, response -> response.statusCode(200)
+                .body("DescribeKeyPairsResponse.keySet.item.publicKey.size()", equalTo(publicKeys)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"invalid", "yes", "1", "truee"})
+    void anIncludePublicKeyThatIsNeitherTrueNorFalseIsRefused(String include) {
+        describeWithIncludePublicKey(include, response -> response.statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+                .body("Response.Errors.Error.Message", equalTo("IncludePublicKey is not a valid boolean.")));
+    }
+
+    /**
      * Imports the material under the given name, describes the key pair with IncludePublicKey=true
      * and hands the response to the check, then deletes the key pair whatever the check found.
      */
     private static void describeImported(String name, byte[] material, Consumer<ValidatableResponse> check) {
-        String id = given().header("Authorization", AUTH)
-                .formParam("Action", "ImportKeyPair").formParam("KeyName", name)
-                .formParam("PublicKeyMaterial", Base64.getEncoder().encodeToString(material))
-                .post("/").then().statusCode(200).extract().path("ImportKeyPairResponse.keyPairId");
+        String id = importKey(name, material);
         try {
             check.accept(given().header("Authorization", AUTH).formParam("Action", "DescribeKeyPairs")
                     .formParam("KeyPairId.1", id).formParam("IncludePublicKey", "true")
@@ -136,6 +153,28 @@ class Ec2KeyPairPublicKeyIntegrationTest {
         } finally {
             deleteKeyPair(id);
         }
+    }
+
+    /**
+     * Imports an ed25519 key, describes it by id with this IncludePublicKey value, whatever the
+     * answer, and hands the response to the check, then deletes the key pair.
+     */
+    private static void describeWithIncludePublicKey(String includePublicKey, Consumer<ValidatableResponse> check) {
+        String id = importKey("public-key-" + UUID.randomUUID(), utf8("ssh-ed25519 " + ED25519_BLOB));
+        try {
+            check.accept(given().header("Authorization", AUTH).formParam("Action", "DescribeKeyPairs")
+                    .formParam("KeyPairId.1", id).formParam("IncludePublicKey", includePublicKey)
+                    .post("/").then());
+        } finally {
+            deleteKeyPair(id);
+        }
+    }
+
+    private static String importKey(String name, byte[] material) {
+        return given().header("Authorization", AUTH)
+                .formParam("Action", "ImportKeyPair").formParam("KeyName", name)
+                .formParam("PublicKeyMaterial", Base64.getEncoder().encodeToString(material))
+                .post("/").then().statusCode(200).extract().path("ImportKeyPairResponse.keyPairId");
     }
 
     private static void deleteKeyPair(String id) {

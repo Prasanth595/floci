@@ -323,13 +323,14 @@ which is what `RunInstances` copies into `authorized_keys`. `CreateKeyPair` and 
 take a `KeyName` of up to 255 ASCII characters with no leading or trailing space, and answer any
 other with `InvalidParameterValue`.
 
-`DescribeKeyPairs` returns each key pair's `keyType` and `createTime`. It filters by
-`key-pair-id`, `key-name`, `fingerprint`, `tag-key` and `tag:<key>`, as AWS documents, and also by
-`key-type`, which AWS does not document; `*` and `?` are wildcards, and any other filter name is
-`InvalidParameterValue`. It omits the public key unless `IncludePublicKey=true`. When requested,
-it returns the OpenSSH public key with the key-pair name as its comment, whatever comment the key
-was imported with; a name holding a control character, such as a line break, is left off. It
-never returns private key material.
+`DescribeKeyPairs` returns each key pair's `keyType` and `createTime`. It filters by `key-pair-id`,
+`key-name`, `fingerprint`, `tag-key` and `tag:<key>`, as AWS documents, and also by `key-type`,
+which AWS does not document; `*` and `?` are wildcards, and any other filter name is
+`InvalidParameterValue`. It omits the public key unless `IncludePublicKey=true`, read as `true` or
+`false` in any case; any other value is `InvalidParameterValue`. When requested, it returns the
+OpenSSH public key with the key-pair name as its comment, whatever comment the key was imported
+with; a name holding a control character, such as a line break, is left off. It never returns
+private key material.
 
 A key pair saved by an earlier version of Floci is described from what it stored. It has no
 `createTime`, and its `keyType` is read from the stored key: `rsa` for a created key pair,
