@@ -749,6 +749,8 @@ class EcsCfnProvisionerTest {
 
         assertThrows(AwsException.class, () -> provisioner.provision(r, clusterWithInsights("enabled"), ctx()));
 
+        // Without an id, neither a create rollback nor an update that added this resource deletes it.
+        assertNull(r.getPhysicalId());
         verify(ecs, never()).deleteCluster(anyString(), anyString());
         assertFalse(r.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
     }
@@ -788,6 +790,8 @@ class EcsCfnProvisionerTest {
         when(ecs.updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enhanced")), REGION))
                 .thenThrow(failure);
         StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+        // An update hands the provisioner the resource with its prior physical id.
+        r.setPhysicalId("web");
 
         AwsException thrown = assertThrows(AwsException.class,
                 () -> provisioner.provision(r, clusterWithInsights("enhanced"), ctx("web")));
@@ -809,6 +813,8 @@ class EcsCfnProvisionerTest {
         AwsException restoreFailure = new AwsException("ServerException", "still failing", 500);
         when(ecs.updateClusterSettings(eq("web"), any(), eq(REGION))).thenThrow(failure, restoreFailure);
         StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+        // An update hands the provisioner the resource with its prior physical id.
+        r.setPhysicalId("web");
 
         AwsException thrown = assertThrows(AwsException.class,
                 () -> provisioner.provision(r, clusterWithInsights("enhanced"), ctx("web")));

@@ -190,8 +190,6 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         // behind; an existing one (this resource's own on an update, or one the idempotent create
         // returned) has them applied below.
         EcsCluster cluster = ecsService.createCluster(clusterName, null, settings, ctx.region());
-        r.setPhysicalId(cluster.getClusterName());
-        r.getAttributes().put("Arn", cluster.getClusterArn());
         if (!settings.isEmpty() && !settings.equals(cluster.getSettings())) {
             boolean snapshotted = ctx.reusesPriorEntity(clusterName);
             if (snapshotted) {
@@ -199,6 +197,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 snapshot.set("settings", MAPPER.valueToTree(cluster.getSettings()));
                 r.getAttributes().put(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR, snapshot.toString());
             }
+            // Before the id is set: a cluster the idempotent create returned for a resource this
+            // update adds was not created by the stack, and a failed update deletes an added
+            // resource that carries an id. An update of this resource's own cluster keeps its id.
             try {
                 ecsService.updateClusterSettings(clusterName, settings, ctx.region());
             } catch (RuntimeException failure) {
@@ -208,6 +209,8 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 throw failure;
             }
         }
+        r.setPhysicalId(cluster.getClusterName());
+        r.getAttributes().put("Arn", cluster.getClusterArn());
     }
 
     /**

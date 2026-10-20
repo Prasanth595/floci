@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * A cluster whose CloudFormation {@code ClusterSettings} enable Container Insights publishes its
@@ -122,6 +123,42 @@ class EcsContainerInsightsIntegrationTest {
         cloudFormation("ContinueUpdateRollback", cluster, null);
         awaitStackStatus(cluster, "UPDATE_ROLLBACK_COMPLETE");
         assertInsightsSetting(cluster, "disabled");
+    }
+
+    /**
+     * An update that adds a cluster under the name of one created outside the stack gets that
+     * cluster back from the idempotent create. When its settings then fail to apply, the update
+     * rollback deletes what the update added, so the resource must not have claimed the cluster.
+     */
+    @Test
+    void aFailedUpdateLeavesAClusterItFoundRatherThanCreated() {
+        String name = "insights-pre-" + Long.toString(System.nanoTime(), 36);
+        given().contentType("application/x-amz-json-1.1")
+                .header("X-Amz-Target", "AmazonEC2ContainerServiceV20141113.CreateCluster")
+                .body("{\"clusterName\": \"" + name + "\"}")
+                .post("/").then().statusCode(200);
+        String parameter = """
+            "Param": {"Type": "AWS::SSM::Parameter", "Properties": {"Type": "String", "Value": "v"}}""";
+        cloudFormation("CreateStack", name, "{\"Resources\": {" + parameter + "}}");
+        awaitStackStatus(name, "CREATE_COMPLETE");
+
+        doThrow(new IllegalStateException("simulated settings write failure"))
+                .when(ecsService).updateClusterSettings(anyString(), anyList(), anyString());
+        try {
+            cloudFormation("UpdateStack", name, """
+                {"Resources": {%s, "Cluster": {"Type": "AWS::ECS::Cluster", "Properties": {"ClusterName": "%s",
+                  "ClusterSettings": [{"Name": "containerInsights", "Value": "enabled"}]}}}}
+                """.formatted(parameter, name));
+            awaitStackStatus(name, "UPDATE_ROLLBACK_COMPLETE");
+        } finally {
+            doCallRealMethod().when(ecsService).updateClusterSettings(anyString(), anyList(), anyString());
+        }
+
+        given().contentType("application/x-amz-json-1.1")
+                .header("X-Amz-Target", "AmazonEC2ContainerServiceV20141113.DescribeClusters")
+                .body("{\"clusters\": [\"" + name + "\"]}")
+                .post("/").then().statusCode(200)
+                .body("clusters[0].status", equalTo("ACTIVE"));
     }
 
     private static void cloudFormation(String action, String stack, String template) {
