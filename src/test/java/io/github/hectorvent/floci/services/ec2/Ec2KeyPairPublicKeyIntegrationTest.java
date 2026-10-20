@@ -14,7 +14,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.io.StringReader;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Base64;
@@ -23,7 +22,6 @@ import java.util.function.Consumer;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
 class Ec2KeyPairPublicKeyIntegrationTest {
@@ -105,76 +103,20 @@ class Ec2KeyPairPublicKeyIntegrationTest {
     }
 
     /**
-     * ImportKeyPair keeps material it cannot read as it was given, so the key pair is described
-     * without a public key rather than with a rewrite of text that is not an OpenSSH line. A UTF-16
-     * file decodes to text with NUL characters, which XML cannot carry at all.
+     * ImportKeyPair reads an RSA key from RFC 4716 and stores it as its OpenSSH line, so the key
+     * pair is described with that line and its name, as one imported as an OpenSSH line would be.
+     * The material ImportKeyPair refuses can only be held by a key pair saved by an earlier version;
+     * Ec2QueryHandlerTest describes those.
      */
-    @ParameterizedTest
-    @ValueSource(strings = {"rfc4716", "utf16"})
-    void materialThatIsNotAnOpenSshLineIsDescribedWithoutAPublicKey(String format) {
+    @Test
+    void anRfc4716KeyIsDescribedAsItsOpenSshLine() {
         String name = "public-key-" + UUID.randomUUID();
         String openSsh = Ec2KeyMaterial.generateRsa().openSshPublicKey();
-        byte[] material = "rfc4716".equals(format)
-                ? utf8("---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"" + name + "\"\n" + openSsh.split(" ")[1]
-                        + "\n---- END SSH2 PUBLIC KEY ----\n")
-                : (openSsh + " " + name).getBytes(StandardCharsets.UTF_16LE);
+        byte[] material = utf8("---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"" + name + "\"\n" + openSsh.split(" ")[1]
+                + "\n---- END SSH2 PUBLIC KEY ----\n");
         describeImported(name, material, response -> response
                 .body("DescribeKeyPairsResponse.keySet.item.keyName", equalTo(name))
-                .body("DescribeKeyPairsResponse.keySet.item.keyFingerprint", startsWith("00:00"))
-                .body("DescribeKeyPairsResponse.keySet.item.publicKey.size()", equalTo(0)));
-    }
-
-    /**
-     * A blob that declares a key type but lacks a field that type requires, here an ssh-rsa type
-     * with no exponent or modulus and an ed25519 key one byte short, is not a public key.
-     */
-    @ParameterizedTest
-    @ValueSource(strings = {"AAAAB3NzaC1yc2E=", "AAAAC3NzaC1lZDI1NTE5AAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="})
-    void aBlobMissingAFieldItsTypeRequiresIsDescribedWithoutAPublicKey(String blob) {
-        String name = "public-key-" + UUID.randomUUID();
-        String type = blob.startsWith("AAAAB3") ? "ssh-rsa" : "ssh-ed25519";
-        describeImported(name, utf8(type + " " + blob + " " + name), response -> response
-                .body("DescribeKeyPairsResponse.keySet.item.publicKey.size()", equalTo(0)));
-    }
-
-    /**
-     * A blob with anything after its key, here a whole extra field or three stray bytes after an
-     * ed25519 key, is one OpenSSH refuses, so it is not described as a key either.
-     */
-    @ParameterizedTest
-    @ValueSource(strings = {"field", "bytes"})
-    void aBlobWithAnythingAfterItsKeyIsDescribedWithoutAPublicKey(String trailing) {
-        String name = "public-key-" + UUID.randomUUID();
-        byte[] key = Base64.getDecoder().decode(ED25519_BLOB);
-        byte[] extra = "field".equals(trailing) ? new byte[] {0, 0, 0, 5, 'e', 'x', 't', 'r', 'a'} : new byte[] {1, 2, 3};
-        String blob = Base64.getEncoder().encodeToString(
-                ByteBuffer.allocate(key.length + extra.length).put(key).put(extra).array());
-        describeImported(name, utf8("ssh-ed25519 " + blob + " " + name), response -> response
-                .body("DescribeKeyPairsResponse.keySet.item.publicKey.size()", equalTo(0)));
-    }
-
-    /**
-     * A line that names another type than its blob declares, here a whole ssh-rsa blob labelled
-     * ssh-ed25519, is not described as the RSA key its blob holds.
-     */
-    @Test
-    void aLineLabelledWithAnotherTypeThanItsBlobIsDescribedWithoutAPublicKey() {
-        String name = "public-key-" + UUID.randomUUID();
-        String rsaBlob = Ec2KeyMaterial.generateRsa().openSshPublicKey().split(" ")[1];
-        describeImported(name, utf8("ssh-ed25519 " + rsaBlob + " " + name), response -> response
-                .body("DescribeKeyPairsResponse.keySet.item.publicKey.size()", equalTo(0)));
-    }
-
-    /**
-     * Material holding several key lines is not one key pair's key: an instance launched with it
-     * trusts every line, so describing only the first would hide the others.
-     */
-    @Test
-    void materialHoldingSeveralKeysIsDescribedWithoutAPublicKey() {
-        String name = "public-key-" + UUID.randomUUID();
-        String second = Ec2KeyMaterial.generateRsa().openSshPublicKey();
-        describeImported(name, utf8("ssh-ed25519 " + ED25519_BLOB + " first\n" + second + " second\n"),
-                response -> response.body("DescribeKeyPairsResponse.keySet.item.publicKey.size()", equalTo(0)));
+                .body("DescribeKeyPairsResponse.keySet.item.publicKey", equalTo(openSsh + " " + name)));
     }
 
     /**

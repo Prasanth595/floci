@@ -13,11 +13,16 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -28,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -36,6 +42,9 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2QueryHandlerTest {
+
+    /** The blob of a throwaway ed25519 public key. */
+    private static final String ED25519_BLOB = "AAAAC3NzaC1lZDI1NTE5AAAAIIj7azlDjVHAsSxgcpCRZ3oWnTm0nAFM64y9jd22ioI/";
 
     @ParameterizedTest
     @CsvSource({
@@ -278,16 +287,63 @@ class Ec2QueryHandlerTest {
         keyPair.setKeyPairId("key-0123456789abcdef0");
         keyPair.setKeyName(name);
         keyPair.setPublicKey(line + " imported-comment");
+
+        String xml = describeKeyPairWithItsPublicKey(keyPair);
+
+        assertTrue(xml.contains("<publicKey>" + line + "</publicKey>"), xml);
+    }
+
+    /**
+     * ImportKeyPair now refuses material that is not exactly one whole key, but a key pair saved by
+     * an earlier version kept what it was given, so its description must still leave out a public
+     * key it does not hold: an ssh-rsa type with no exponent or modulus, an ed25519 key one byte
+     * short, an ed25519 blob followed by an extra field or by stray bytes, an RSA blob labelled
+     * ssh-ed25519, two key lines, RFC 4716 text, and a UTF-16 file read as text.
+     */
+    @ParameterizedTest
+    @MethodSource("storedMaterialThatIsNotOneWholeKey")
+    void aKeyPairSavedWithMaterialThatIsNotOneWholeKeyIsDescribedWithoutAPublicKey(String material) {
+        KeyPair keyPair = new KeyPair();
+        keyPair.setKeyPairId("key-0123456789abcdef0");
+        keyPair.setKeyName("saved-earlier");
+        keyPair.setPublicKey(material);
+
+        String xml = describeKeyPairWithItsPublicKey(keyPair);
+
+        assertTrue(xml.contains("<keyName>saved-earlier</keyName>"), xml);
+        assertFalse(xml.contains("<publicKey>"), xml);
+    }
+
+    static Stream<String> storedMaterialThatIsNotOneWholeKey() {
+        byte[] ed25519 = Base64.getDecoder().decode(ED25519_BLOB);
+        String rsaBlob = Ec2KeyMaterial.generateRsa().openSshPublicKey().split(" ")[1];
+        return Stream.of(
+                "ssh-rsa AAAAB3NzaC1yc2E= saved-earlier",
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= saved-earlier",
+                "ssh-ed25519 " + Base64.getEncoder().encodeToString(concat(ed25519, new byte[] {0, 0, 0, 5, 'e', 'x', 't', 'r', 'a'})),
+                "ssh-ed25519 " + Base64.getEncoder().encodeToString(concat(ed25519, new byte[] {1, 2, 3})),
+                "ssh-ed25519 " + rsaBlob + " saved-earlier",
+                "ssh-ed25519 " + ED25519_BLOB + " first\n" + Ec2KeyMaterial.generateRsa().openSshPublicKey() + " second\n",
+                "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"saved-earlier\"\n" + rsaBlob + "\n---- END SSH2 PUBLIC KEY ----\n",
+                new String(("ssh-ed25519 " + ED25519_BLOB + " saved-earlier").getBytes(StandardCharsets.UTF_16LE),
+                        StandardCharsets.UTF_8));
+    }
+
+    /** DescribeKeyPairs with IncludePublicKey=true over a service that holds only this key pair. */
+    private String describeKeyPairWithItsPublicKey(KeyPair keyPair) {
         Ec2Service service = mock(Ec2Service.class);
-        when(service.describeKeyPairs(eq("us-east-1"), anyList(), anyList())).thenReturn(List.of(keyPair));
+        when(service.describeKeyPairs(eq("us-east-1"), anyList(), anyList(), anyMap())).thenReturn(List.of(keyPair));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("IncludePublicKey", "true");
 
         Response response = handler(service).handle("DescribeKeyPairs", params, "us-east-1");
 
         assertEquals(200, response.getStatus());
-        String xml = (String) response.getEntity();
-        assertTrue(xml.contains("<publicKey>" + line + "</publicKey>"), xml);
+        return (String) response.getEntity();
+    }
+
+    private static byte[] concat(byte[] first, byte[] second) {
+        return ByteBuffer.allocate(first.length + second.length).put(first).put(second).array();
     }
 
     private String describeRegions(RegionResolver regionResolver, String region) {

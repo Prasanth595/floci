@@ -312,16 +312,35 @@ private gateway lifecycles are not modelled.
 
 ### Key Pairs
 
-`DescribeKeyPairs` omits the public key unless `IncludePublicKey=true`. When requested,
-it returns the OpenSSH public key with the key-pair name as its comment, including for
-imported keys, whatever comment they were imported with; a name holding a control character,
-such as a line break, is left off. It never returns private key material. `ImportKeyPair`
-stores the material as it was given, and a key pair whose material is not exactly one whole
-OpenSSH public key is described without one: PEM, DER or RFC 4716 text, material of more than
-one line, a line whose blob lacks a field its type requires (such as an `ssh-rsa` blob with no
-modulus), has bytes after its key or declares a different type than the line names, and a
-key of any type but `ssh-rsa`, `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`,
-`ecdsa-sha2-nistp521`, `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`.
+`ImportKeyPair` takes the key types and formats AWS documents: an RSA or ED25519 key as an
+OpenSSH public key line, and an RSA key also as an RFC 4716 file or as base64 DER, bare or in
+PEM armour. AWS lists 1024, 2048 and 4096 bits as the supported RSA lengths; Floci takes any
+length from 1024 to 16384 bits, the range OpenSSH reads, because AWS also imports others, such
+as ssh-keygen's default of 3072. A DSA, ECDSA, security-key or certificate key, a key line whose
+blob is incomplete, has bytes after its key or declares another type, and material holding more
+than one key line are refused with `InvalidKey.Format`. The key is stored as one OpenSSH line,
+which is what `RunInstances` copies into `authorized_keys`. `CreateKeyPair` and `ImportKeyPair`
+take a `KeyName` of up to 255 ASCII characters with no leading or trailing space, and answer any
+other with `InvalidParameterValue`.
+
+`DescribeKeyPairs` returns each key pair's `keyType` and `createTime`. It filters by
+`key-pair-id`, `key-name`, `fingerprint`, `tag-key` and `tag:<key>`, as AWS documents, and also by
+`key-type`, which AWS does not document; `*` and `?` are wildcards, and any other filter name is
+`InvalidParameterValue`. It omits the public key unless `IncludePublicKey=true`. When requested,
+it returns the OpenSSH public key with the key-pair name as its comment, whatever comment the key
+was imported with; a name holding a control character, such as a line break, is left off. It
+never returns private key material.
+
+A key pair saved by an earlier version of Floci is described from what it stored. It has no
+`createTime`, and its `keyType` is read from the stored key: `rsa` for a created key pair,
+otherwise the type of the imported key, left out when that material would not import now. Its
+imported material is kept as it was given, and is what `RunInstances` copies into
+`authorized_keys`. Material that is not exactly one whole OpenSSH public key is described without
+one: PEM, DER or RFC 4716 text, material of more than one line, a line whose blob lacks a field
+its type requires (such as an `ssh-rsa` blob with no modulus), has bytes after its key or
+declares a different type than the line names, and a key of any type but `ssh-rsa`,
+`ssh-ed25519`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`,
+`sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`.
 
 | Action | Description |
 |--------|-------------|
@@ -329,22 +348,6 @@ key of any type but `ssh-rsa`, `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ecdsa-sha2
 | DescribeKeyPairs | Lists or returns stored key pairs. |
 | DeleteKeyPair | Deletes a key pair from the local EC2 store. |
 | ImportKeyPair | Imports a public key as a local key pair. |
-
-`ImportKeyPair` takes the key types and formats AWS documents: an RSA or ED25519 key as an
-OpenSSH public key line, and an RSA key also as an RFC 4716 file or as base64 DER, bare or in
-PEM armour. RSA keys must be 1024 to 16384 bits. A DSA, ECDSA, security-key or certificate key, a
-key line whose blob is incomplete, has bytes after its key or declares another type, and material
-holding more than one key line are refused with `InvalidKey.Format`. The key is stored as one
-OpenSSH line, which is what `RunInstances` copies into `authorized_keys`. `CreateKeyPair` and
-`ImportKeyPair` take a `KeyName` of up to 255 ASCII characters with no leading or trailing space,
-and answer any other with `InvalidParameterValue`.
-
-`DescribeKeyPairs` returns each key pair's `keyType` and `createTime`, and filters by
-`key-pair-id`, `key-name`, `fingerprint`, `key-type`, `tag-key` and `tag:<key>`, with `*` and `?`
-wildcards; any other filter name is `InvalidParameterValue`. A key pair stored before Floci
-recorded these fields has no `createTime`, and its `keyType` is read from the stored key: `rsa`
-for a created key pair, otherwise the type of the imported key, left out when that key would no
-longer import.
 
 ### AMIs
 

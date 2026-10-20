@@ -3423,13 +3423,14 @@ public class Ec2QueryHandler {
 
     /**
      * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
-     * DescribeKeyPairs reports for created and imported keys alike. ImportKeyPair keeps what it was
-     * given, so this is null unless the material is a single OpenSSH line whose blob is a whole key
-     * of the type the line names: a partial blob, a line labelled with another type and material of
-     * more than one line are not one key to report. PEM, DER and RFC 4716 bodies are not converted,
-     * since ImportKeyPair does not read those formats yet. The line is rebuilt from the blob's type,
-     * the blob and the name rather than copied, so no character of the stored text, such as a NUL
-     * that XML cannot carry, reaches the response.
+     * DescribeKeyPairs reports for created and imported keys alike. ImportKeyPair stores one OpenSSH
+     * line, but a key pair saved by an earlier version kept the material it was given, so this is
+     * null unless the material is a single OpenSSH line whose blob is a whole key of the type the
+     * line names: a partial blob, a line labelled with another type and material of more than one
+     * line are not one key to report, and PEM, DER and RFC 4716 bodies saved that way are not
+     * converted here. The line is rebuilt from the blob's type, the blob and the name rather than
+     * copied, so no character of the stored text, such as a NUL that XML cannot carry, reaches the
+     * response.
      */
     private static String openSshPublicKeyNamedFor(KeyPair kp) {
         String material = kp.getPublicKey();
