@@ -110,7 +110,8 @@ class Ec2KeyPairDescribeIntegrationTest {
      * The key pairs DescribeKeyPairs returns for the given filter, a name and its values, ANDed with
      * a key-name filter of {@code prefix-*}: their names without the prefix, sorted. Without that
      * second filter every key pair this application holds would come back. A key-name filter under
-     * test is sent alone, with values that carry the prefix, since a request names a filter once.
+     * test is sent alone, with values that carry the prefix: Floci reads one filter per name, so a
+     * second key-name filter would replace the first rather than narrow it.
      */
     private static List<String> described(String prefix, String... filter) {
         RequestSpecification request = given().header("Authorization", AUTH)

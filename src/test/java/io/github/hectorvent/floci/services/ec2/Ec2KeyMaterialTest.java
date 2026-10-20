@@ -359,9 +359,9 @@ class Ec2KeyMaterialTest {
 
     /**
      * AWS lists 1024, 2048 and 4096 bits as the supported RSA lengths but imports others too, an
-     * 8192-bit key among them (terraform-aws-modules/terraform-aws-key-pair#16), so Floci takes the
-     * range OpenSSH reads, up to 16384 bits, which also covers ssh-keygen's default of 3072. The
-     * moduli are synthetic: the length is what is checked, not whether the key factors.
+     * 8192-bit key among them (https://github.com/terraform-aws-modules/terraform-aws-key-pair/issues/16),
+     * so Floci takes the range OpenSSH reads, up to 16384 bits, which also covers ssh-keygen's default
+     * of 3072. The moduli are synthetic: the length is what is checked, not whether the key factors.
      */
     @ParameterizedTest
     @CsvSource({"512, false", "1023, false", "1024, true", "2048, true", "3072, true", "4096, true",
