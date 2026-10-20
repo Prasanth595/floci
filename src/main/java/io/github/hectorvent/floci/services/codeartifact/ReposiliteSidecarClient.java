@@ -264,6 +264,78 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * Enumerates every version directory beneath the artifact itself (the same {@code files}
+     * array {@link #listPackageVersionAssetNames} already reads one level down, here kept to its
+     * {@code DIRECTORY} entries, inverted from that method's own {@code FILE}-only filter), then
+     * asks each version's own details page (again the same endpoint {@link #packageVersionExists}
+     * already confirms existence through) for a representative publish time: the latest {@code
+     * lastModifiedTime} among its files, since a real {@code mvn deploy} writes the POM and the
+     * main artifact as two separate PUTs a moment apart and the later one is the more accurate
+     * "when this version became complete." A version directory with no {@code FILE} entries at
+     * all (never happens through a real deploy, but not assumed impossible) reports no timestamp
+     * rather than guessing one.
+     */
+    @Override
+    public List<PackageVersionTimestamp> listPackageVersions(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName) {
+        String baseUrl = manager.ensureReady();
+        String artifactPath = "/api/maven/details" + packageDirectoryPath(repositoryContainerId, namespace,
+                packageName);
+        HttpRequest artifactRequest = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
+                        artifactPath))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<String> artifactResponse = send(artifactRequest, BodyHandlers.ofString());
+        if (artifactResponse.statusCode() == 404) {
+            return List.of();
+        }
+        if (artifactResponse.statusCode() != 200) {
+            throw new IllegalStateException("Could not list versions of " + packageName + " on the Reposilite "
+                    + "sidecar: upstream returned " + artifactResponse.statusCode());
+        }
+        List<PackageVersionTimestamp> result = new ArrayList<>();
+        for (JsonNode entry : readTree(artifactResponse.body()).path("files")) {
+            if (!"DIRECTORY".equals(entry.path("type").asText())) {
+                continue;
+            }
+            String version = entry.path("name").asText();
+            result.add(new PackageVersionTimestamp(version, latestFileTimestamp(baseUrl,
+                    versionDetailsPath(repositoryContainerId, namespace, packageName, version))));
+        }
+        return result;
+    }
+
+    private Instant latestFileTimestamp(String baseUrl, String versionDetailsPath) {
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), versionDetailsPath))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<String> response = send(request, BodyHandlers.ofString());
+        if (response.statusCode() == 404) {
+            return null;
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not read publish times for " + versionDetailsPath + " on the "
+                    + "Reposilite sidecar: upstream returned " + response.statusCode());
+        }
+        Instant latest = null;
+        for (JsonNode file : readTree(response.body()).path("files")) {
+            if (!"FILE".equals(file.path("type").asText()) || !file.has("lastModifiedTime")) {
+                continue;
+            }
+            double epochSeconds = file.path("lastModifiedTime").asDouble();
+            Instant timestamp = Instant.ofEpochMilli(Math.round(epochSeconds * 1000.0));
+            if (latest == null || timestamp.isAfter(latest)) {
+                latest = timestamp;
+            }
+        }
+        return latest;
+    }
+
+    /**
      * Writes {@code content} straight to this version's {@code assetName} path, for {@code
      * CopyPackageVersions}'s destination write. Unlike {@link #deployArtifact}, this never
      * short-circuits on an existing byte-identical match and never leaves Reposilite's own {@code

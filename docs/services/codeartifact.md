@@ -45,6 +45,7 @@ behind them yet.
 | `DescribePackageVersion` | Returns a package version's status, revision, and origin. |
 | `GetPackageVersionAsset` | Downloads one asset from a package version by name, optionally pinned to a specific revision. |
 | `ListPackageVersionAssets` | Lists the assets of a package version, with size and hashes. |
+| `ListPackageVersions` | Lists a package's versions with status, revision, and origin, paginated and sorted most recently published first; `defaultDisplayVersion` is `dist-tags.latest` for npm, the most recently published version otherwise. |
 | `GetPackageVersionReadme` | Returns the readme text for a package version; `npm`, `pypi`, and `nuget` only, matching AWS's own restriction for this action. |
 | `CopyPackageVersions` | Copies one or more versions of a package from one repository to another in the same domain. |
 | `TagResource` | Adds or updates tags on a domain or repository ARN. |
@@ -253,11 +254,12 @@ state.
   that is not the caller's own account looks up that account's domain/repository with no
   trust-policy or permissions-policy enforcement, consistent with Floci's IAM enforcement being
   opt-in elsewhere, but worth knowing if you rely on domain-sharing semantics.
-- **Package management beyond publish/describe/get-asset/list-assets isn't implemented.**
-  `ListPackages`, `ListPackageVersions`, `DeletePackageVersions`, `DisposePackageVersions`, and
+- **Package management beyond publish/describe/get-asset/list-assets/list-versions isn't
+  implemented.** `ListPackages`, `DeletePackageVersions`, `DisposePackageVersions`, and
   `UpdatePackageVersionsStatus` don't exist yet; the only way to move a version from `Unfinished`
   to `Published` today is a follow-up `PublishPackageVersion` call that omits the `unfinished`
-  flag.
+  flag. Every version `ListPackageVersions` reports is `Published` or `Unfinished` for this same
+  reason: nothing yet produces `Unlisted`, `Archived`, or `Disposed`.
 - **`CopyPackageVersions` has no full cross-call rollback on a mid-copy sidecar failure.**
   (`generic`, `maven`, `npm`, `pypi`, and `nuget` are all supported — matching real AWS, which
   places no `format` restriction on this action at all, unlike `PublishPackageVersion`'s own

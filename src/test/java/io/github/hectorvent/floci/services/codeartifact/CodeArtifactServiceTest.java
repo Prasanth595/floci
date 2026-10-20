@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -32,6 +33,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -3249,6 +3251,273 @@ class CodeArtifactServiceTest {
         AwsException missingVersion = assertThrows(AwsException.class, () -> service.listPackageVersionAssets(REGION,
                 "dom", null, "repo", "generic", "ns", "my-pkg", null, null, null));
         assertEquals("ValidationException", missingVersion.getErrorCode());
+    }
+
+    // ----------------------------------------------------- ListPackageVersions
+
+    @Test
+    void listPackageVersionsReturnsEveryPublishedVersionForAGenericPackage() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+        publishGeneric("repo", "my-pkg", "2.0.0", "b".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", null, null, null, null, null);
+
+        assertEquals(2, result.versions().size());
+        Set<String> versions = result.versions().stream().map(CodeArtifactService.PackageVersionSummary::version)
+                .collect(Collectors.toSet());
+        assertEquals(Set.of("1.0.0", "2.0.0"), versions);
+        result.versions().forEach(v -> assertEquals("Published", v.status()));
+    }
+
+    @Test
+    void listPackageVersionsIncludesUnfinishedByDefaultButAnExplicitStatusFiltersExactly() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "2.0.0", "b.txt",
+                Digests.sha256Hex("b".getBytes(StandardCharsets.UTF_8)), "true", "b".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.ListPackageVersionsResult all = service.listPackageVersions(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg", null, null, null, null, null);
+        assertEquals(2, all.versions().size());
+
+        CodeArtifactService.ListPackageVersionsResult publishedOnly = service.listPackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "Published", null, null, null, null);
+        assertEquals(1, publishedOnly.versions().size());
+        assertEquals("1.0.0", publishedOnly.versions().get(0).version());
+
+        CodeArtifactService.ListPackageVersionsResult unfinishedOnly = service.listPackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "Unfinished", null, null, null, null);
+        assertEquals(1, unfinishedOnly.versions().size());
+        assertEquals("2.0.0", unfinishedOnly.versions().get(0).version());
+    }
+
+    @Test
+    void listPackageVersionsFailsNotFoundForAGenericPackageThatWasNeverPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", null, null, null, null, null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionsReturnsAnEmptyListForAnOriginConfigOnlyPackage() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "BLOCK");
+
+        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", null, null, null, null, null);
+
+        assertTrue(result.versions().isEmpty());
+        assertEquals(null, result.defaultDisplayVersion());
+    }
+
+    @Test
+    void listPackageVersionsBridgesToReposiliteForMavenOrderedMostRecentFirstWithPagination() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000)),
+                        new RepositorySidecarManager.PackageVersionTimestamp("2.0", Instant.ofEpochSecond(2000))));
+
+        CodeArtifactService.ListPackageVersionsResult page1 = service.listPackageVersions(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", null, null, 1, null, null);
+        assertEquals(1, page1.versions().size());
+        assertEquals("2.0", page1.versions().get(0).version());
+        assertEquals("Published", page1.versions().get(0).status());
+        assertTrue(page1.versions().get(0).revision() != null && !page1.versions().get(0).revision().isBlank());
+        assertEquals("2.0", page1.defaultDisplayVersion());
+        assertTrue(page1.nextToken() != null);
+
+        CodeArtifactService.ListPackageVersionsResult page2 = service.listPackageVersions(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", null, null, 1, page1.nextToken(), null);
+        assertEquals(1, page2.versions().size());
+        assertEquals("1.0", page2.versions().get(0).version());
+        assertTrue(page2.nextToken() == null);
+    }
+
+    /**
+     * A sidecar that could not supply a timestamp for any version (every {@code
+     * PackageVersionTimestamp.publishedTime} is {@code null}) must still report a deterministic
+     * default rather than omitting {@code defaultDisplayVersion} entirely: it should be whichever
+     * {@code Published} version the list itself puts first.
+     */
+    @Test
+    void listPackageVersionsPicksADeterministicDefaultWhenNoVersionHasAPublishedTime() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", null),
+                        new RepositorySidecarManager.PackageVersionTimestamp("2.0", null)));
+
+        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", null, null, null, null, null);
+
+        assertEquals("1.0", result.versions().get(0).version());
+        assertEquals("1.0", result.defaultDisplayVersion());
+    }
+
+    /**
+     * {@code packageVersionSortCursor} and {@code defaultDisplayVersion} must break a same-second
+     * publish tie the same direction: the first {@code Published} version the list returns is
+     * always the default, never a different one a separate lexicographic comparison would have
+     * picked (which, for versions like {@code 9.0} and {@code 10.0}, disagrees with list order).
+     */
+    @Test
+    void listPackageVersionsDefaultDisplayVersionAgreesWithListOrderOnASameSecondTie() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("9.0", Instant.ofEpochSecond(1000)),
+                        new RepositorySidecarManager.PackageVersionTimestamp("10.0", Instant.ofEpochSecond(1000))));
+
+        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", null, null, null, null, null);
+
+        assertEquals(result.versions().get(0).version(), result.defaultDisplayVersion());
+    }
+
+    @Test
+    void listPackageVersionsRoutesEveryContainerBackedFormatToTheSidecarBridge() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(verdaccioClient.listPackageVersions(eq(created.getSidecarContainerIds().get("npm")), eq("dom"),
+                eq("repo"), isNull(), eq("my-pkg"))).thenReturn(
+                        List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+        when(pypiserverClient.listPackageVersions(eq(created.getSidecarContainerIds().get("pypi")), eq("dom"),
+                eq("repo"), isNull(), eq("my-pkg"))).thenReturn(
+                        List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+        when(bagetterClient.listPackageVersions(eq(created.getSidecarContainerIds().get("nuget")), eq("dom"),
+                eq("repo"), isNull(), eq("my-pkg"))).thenReturn(
+                        List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+
+        for (String format : List.of("npm", "pypi", "nuget")) {
+            CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                    "repo", format, null, "my-pkg", null, null, null, null, null);
+            assertEquals(1, result.versions().size());
+            assertEquals("1.0.0", result.versions().get(0).version());
+            assertEquals("Published", result.versions().get(0).status());
+        }
+    }
+
+    @Test
+    void listPackageVersionsFailsNotFoundForAContainerBackedPackageThatWasNeverPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", null, null, null, null, null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionsOriginTypeExternalOrUnknownReturnsEmptyButKeepsDefaultDisplayVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+
+        for (String originType : List.of("EXTERNAL", "UNKNOWN")) {
+            CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                    "repo", "generic", "ns", "my-pkg", null, null, null, null, originType);
+            assertTrue(result.versions().isEmpty());
+            assertEquals("1.0.0", result.defaultDisplayVersion());
+        }
+    }
+
+    @Test
+    void listPackageVersionsDefaultDisplayVersionPrefersNpmDistTagLatestOverMostRecentlyPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000)),
+                        new RepositorySidecarManager.PackageVersionTimestamp("2.0.0", Instant.ofEpochSecond(2000))));
+        when(verdaccioClient.preferredDisplayVersion(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"))).thenReturn(Optional.of("1.0.0"));
+
+        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", null, null, null, null, null);
+
+        assertEquals("1.0.0", result.defaultDisplayVersion());
+    }
+
+    @Test
+    void listPackageVersionsRejectsAFormatAwsDoesNotSupport() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION, "dom", null,
+                "repo", "not-a-real-format", null, "my-pkg", null, null, null, null, null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionsRequiresANamespaceForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION, "dom", null,
+                "repo", "maven", null, "a", null, null, null, null, null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionsRejectsANamespaceForPypiAndNuGet() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        for (String format : List.of("pypi", "nuget")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION, "dom", null,
+                    "repo", format, "a-namespace", "my-pkg", null, null, null, null, null));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void listPackageVersionsRequiresDomainAndRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException missingDomain = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION,
+                null, null, "repo", "generic", "ns", "my-pkg", null, null, null, null, null));
+        assertEquals("ValidationException", missingDomain.getErrorCode());
+
+        AwsException missingRepository = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION,
+                "dom", null, null, "generic", "ns", "my-pkg", null, null, null, null, null));
+        assertEquals("ValidationException", missingRepository.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionsRejectsAnInvalidStatusSortByOrOriginType() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+
+        AwsException badStatus = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "NotAStatus", null, null, null, null));
+        assertEquals("ValidationException", badStatus.getErrorCode());
+
+        AwsException badSortBy = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", null, "NOT_A_SORT", null, null, null));
+        assertEquals("ValidationException", badSortBy.getErrorCode());
+
+        AwsException badOriginType = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", null, null, null, null, "NOT_AN_ORIGIN"));
+        assertEquals("ValidationException", badOriginType.getErrorCode());
     }
 
     // --------------------------------------------- NuGet revision normalization

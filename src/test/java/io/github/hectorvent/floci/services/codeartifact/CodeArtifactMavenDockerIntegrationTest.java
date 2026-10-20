@@ -571,6 +571,26 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     /**
+     * Bridges to the same real Reposilite sidecar {@link #listPackageVersionAssetsBridgesToTheRealReposiliteSidecar}
+     * already confirmed holds {@code spike}'s {@code 1.0.0}, walking the artifact-level directory
+     * listing one level up from that test's own version directory.
+     */
+    @Test
+    @Order(21)
+    void listPackageVersionsBridgesToTheRealReposiliteSidecar() {
+        given().header("Authorization", AUTH)
+                .post("/v1/package/versions?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike")
+                .then().statusCode(200)
+                .body("package", equalTo("spike"))
+                .body("defaultDisplayVersion", equalTo("1.0.0"))
+                .body("versions.size()", equalTo(1))
+                .body("versions[0].version", equalTo("1.0.0"))
+                .body("versions[0].status", equalTo("Published"))
+                .body("versions[0].origin.originType", equalTo("INTERNAL"));
+    }
+
+    /**
      * A throwaway groupId/artifactId, not {@link #GAV}: deleting it exercises Reposilite's real
      * directory delete (confirmed live before this was built: a single {@code DELETE} on the
      * group/artifact path removes everything beneath it), and must not disturb the artifact every

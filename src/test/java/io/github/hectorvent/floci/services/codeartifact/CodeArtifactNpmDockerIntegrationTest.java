@@ -770,6 +770,26 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     /**
+     * Bridges to the same real Verdaccio sidecar {@link #listPackageVersionAssetsBridgesToTheRealVerdaccioSidecar}
+     * already confirmed holds {@link #PACKAGE_NAME}'s {@code 1.0.0}, reading the packument's own
+     * {@code versions}/{@code time} maps instead of one version's {@code dist} entry.
+     */
+    @Test
+    @Order(21)
+    void listPackageVersionsBridgesToTheRealVerdaccioSidecar() {
+        given().header("Authorization", AUTH)
+                .post("/v1/package/versions?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + PACKAGE_NAME)
+                .then().statusCode(200)
+                .body("package", equalTo(PACKAGE_NAME))
+                .body("defaultDisplayVersion", equalTo("1.0.0"))
+                .body("versions.size()", equalTo(1))
+                .body("versions[0].version", equalTo("1.0.0"))
+                .body("versions[0].status", equalTo("Published"))
+                .body("versions[0].origin.originType", equalTo("INTERNAL"));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code VerdaccioSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container, not the repository-record

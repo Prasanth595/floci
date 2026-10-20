@@ -452,6 +452,49 @@ public class CodeArtifactController {
         return ok(response);
     }
 
+    @POST
+    @Path("/v1/package/versions")
+    @Consumes(MediaType.WILDCARD)
+    public Response listPackageVersions(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                         @QueryParam("domain-owner") String domainOwner,
+                                         @QueryParam("repository") String repository,
+                                         @QueryParam("format") String format,
+                                         @QueryParam("namespace") String namespace,
+                                         @QueryParam("package") String packageName,
+                                         @QueryParam("status") String status,
+                                         @QueryParam("sortBy") String sortBy,
+                                         @QueryParam("max-results") String maxResults,
+                                         @QueryParam("next-token") String nextToken,
+                                         @QueryParam("originType") String originType) {
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(region, domain,
+                domainOwner, repository, format, namespace, packageName, status, sortBy,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken, originType);
+        ObjectNode response = objectMapper.createObjectNode();
+        if (result.defaultDisplayVersion() != null) {
+            response.put("defaultDisplayVersion", result.defaultDisplayVersion());
+        }
+        response.put("format", result.format());
+        if (result.namespace() != null) {
+            response.put("namespace", result.namespace());
+        }
+        response.put("package", result.packageName());
+        ArrayNode versions = response.putArray("versions");
+        result.versions().forEach(summary -> {
+            ObjectNode node = versions.addObject();
+            node.put("version", summary.version());
+            node.put("revision", summary.revision());
+            node.put("status", summary.status());
+            ObjectNode origin = node.putObject("origin");
+            origin.put("originType", "INTERNAL");
+            origin.putObject("domainEntryPoint").put("repositoryName", repository);
+        });
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return ok(response);
+    }
+
     @GET
     @Path("/v1/package/version/readme")
     public Response getPackageVersionReadme(@Context HttpHeaders headers, @QueryParam("domain") String domain,

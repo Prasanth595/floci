@@ -40,6 +40,7 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -90,6 +91,12 @@ public class CodeArtifactService implements Resettable {
      * than silently 404ing the way an unimplemented capability elsewhere here might.
      */
     private static final Set<String> README_FORMATS = Set.of("npm", "pypi", "nuget");
+    /** The real {@code PackageVersionStatus} wire enum, confirmed against {@code service-2.json}. */
+    private static final Set<String> PACKAGE_VERSION_STATUSES =
+            Set.of("Published", "Unfinished", "Unlisted", "Archived", "Disposed", "Deleted");
+    /** The real {@code PackageVersionOriginType} wire enum. Floci never ingests from an external
+     * connection, so every version {@link #listPackageVersions} ever reports is {@code INTERNAL}. */
+    private static final Set<String> ORIGIN_TYPES = Set.of("INTERNAL", "EXTERNAL", "UNKNOWN");
 
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
@@ -137,6 +144,14 @@ public class CodeArtifactService implements Resettable {
     public record AssetSummary(String name, long size, Map<String, String> hashes) {}
     public record PackageVersionAssetsListResult(String format, String namespace, String packageName,
             String version, String versionRevision, List<AssetSummary> assets, String nextToken) {}
+    public record PackageVersionSummary(String version, String revision, String status) {}
+    public record ListPackageVersionsResult(String format, String namespace, String packageName,
+            String defaultDisplayVersion, List<PackageVersionSummary> versions, String nextToken) {}
+    /** Internal working shape shared by the generic and container-backed branches of {@link
+     * #listPackageVersions} before status/origin filtering and pagination are applied.
+     * {@code publishedEpochSeconds} is {@code null} when nothing is known to order by. */
+    private record PackageVersionEntry(String version, String revision, String status,
+            Long publishedEpochSeconds) {}
     public record AuthorizationToken(String token, long expirationEpochSeconds) {}
     public record AuthorizationTokenScope(String owner, String region) {}
     private record AuthorizationTokenRecord(String owner, String region, String domain, Instant expiration) {}
@@ -881,6 +896,167 @@ public class CodeArtifactService implements Resettable {
         }
         return new PackageVersionAssetsListResult(format, namespace, packageName, version, revision, page.items(),
                 page.nextToken());
+    }
+
+    /**
+     * Lists every version of one package. For {@code generic}, reads straight from the stored
+     * {@link CodeArtifactPackageVersion} records {@link #genericPackageVersions} already groups by
+     * package; container-backed formats have no such record (same reason {@link
+     * #describePackageVersion} bridges them), so this reuses each sidecar's own new {@link
+     * RepositorySidecarManager#listPackageVersions}.
+     *
+     * <p>Existence follows the exact same rule {@link #describePackage} already uses (a version
+     * published somewhere, or an origin configuration set with {@link
+     * #putPackageOriginConfiguration} even with zero versions behind it), rather than
+     * {@code genericPackageVersions}/the sidecar's own list being empty on its own: a package
+     * origin-config'd but never published to genuinely exists with zero versions, which is an
+     * empty {@code versions} list here, not a 404, the same distinction {@code describePackage}
+     * already draws.
+     *
+     * <p>Real AWS returns every status by default ("Package versions of all statuses will be
+     * returned by default," the operation's own doc), but two of its own sibling actions'
+     * documentation names this exact operation as the one place {@code Archived} and {@code
+     * Disposed} versions are hidden unless the caller filters by that exact status
+     * (DeletePackageVersions: "Archived packages... don't show up with list package APIs (for
+     * example, ListPackageVersions)"; DisposePackageVersions: pass {@code status=Disposed} "to
+     * view all disposed package versions"). {@code Unlisted} stays included by default: its own
+     * status description only talks about exclusion from each format's own native package-manager
+     * listing (a different mechanism, never this management API). Resolved this way rather than
+     * guessed, since the two sibling pages directly contradict the general doc's "all statuses"
+     * line for exactly these two statuses.
+     *
+     * <p>{@code sortBy=PUBLISHED_TIME}, the only value {@code PackageVersionSortType} has, is
+     * always applied (most recently published first) regardless of whether the caller passes it:
+     * there is no other sort mode for an omitted value to mean instead. {@code originType} other
+     * than {@code INTERNAL} always answers empty: Floci has no external-connection ingestion for
+     * any format, so nothing it ever lists is {@code EXTERNAL} or {@code UNKNOWN}.
+     *
+     * <p>{@code defaultDisplayVersion} is computed over every {@code Published} version
+     * regardless of the {@code status}/{@code originType} filters applied to the returned {@code
+     * versions} page, the same way {@code describePackage}'s own fields aren't scoped by anything
+     * caller-supplied either: it represents the package's one real default, not a property of
+     * this particular request's filters.
+     */
+    public ListPackageVersionsResult listPackageVersions(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String status, String sortBy,
+            Integer maxResults, String nextToken, String originType) {
+        validatePackageCoordinates(format, namespace, packageName, "listing the versions of");
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        if (status != null && !PACKAGE_VERSION_STATUSES.contains(status)) {
+            throw validation("status must be one of " + PACKAGE_VERSION_STATUSES + ".");
+        }
+        if (sortBy != null && !"PUBLISHED_TIME".equals(sortBy)) {
+            throw validation("sortBy must be PUBLISHED_TIME.");
+        }
+        if (originType != null && !ORIGIN_TYPES.contains(originType)) {
+            throw validation("originType must be one of " + ORIGIN_TYPES + ".");
+        }
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+
+        String originKey = packageKey(region, domain, repository, format, namespace, packageName);
+        boolean hasOriginConfig = packageOriginConfigs.getForAccount(owner, originKey).isPresent();
+        List<PackageVersionEntry> entries;
+        String preferredDisplayVersion = null;
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+            RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                    .orElseThrow(() -> notFound("Package '" + packageName + "' was not found.", packageName,
+                            "package"));
+            List<RepositorySidecarManager.PackageVersionTimestamp> raw;
+            try {
+                raw = manager.listPackageVersions(repoId, domain, repository, namespace, packageName);
+            } catch (UnsupportedOperationException e) {
+                throw new AwsException("InternalServerException", "Listing " + format + " package versions is not "
+                        + "yet supported by this emulator.", 500);
+            }
+            if (raw.isEmpty() && !hasOriginConfig) {
+                throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
+            }
+            entries = raw.stream()
+                    .map(v -> new PackageVersionEntry(v.version(),
+                            synthesizeContainerBackedRevision(format, repoId, namespace, packageName, v.version()),
+                            "Published", v.publishedTime() == null ? null : v.publishedTime().getEpochSecond()))
+                    .toList();
+            preferredDisplayVersion = manager.preferredDisplayVersion(repoId, domain, repository, namespace,
+                    packageName).orElse(null);
+        } else {
+            List<CodeArtifactPackageVersion> versions = genericPackageVersions(region, domain, owner, repository,
+                    format, namespace, packageName);
+            if (versions.isEmpty() && !hasOriginConfig) {
+                throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
+            }
+            entries = versions.stream()
+                    .map(pv -> new PackageVersionEntry(pv.getVersion(), pv.getRevision(), pv.getStatus(),
+                            pv.getPublishedTime()))
+                    .toList();
+        }
+
+        String preferredVersion = preferredDisplayVersion;
+        String defaultDisplayVersion = preferredVersion != null
+                && entries.stream().anyMatch(e -> e.version().equals(preferredVersion)
+                        && "Published".equals(e.status()))
+                ? preferredVersion
+                : mostRecentlyPublishedVersion(entries);
+
+        List<PackageVersionEntry> matchingOrigin = originType != null && !"INTERNAL".equals(originType)
+                ? List.of()
+                : entries;
+        List<PackageVersionEntry> filtered = status != null
+                ? matchingOrigin.stream().filter(e -> status.equals(e.status())).toList()
+                : matchingOrigin.stream()
+                        .filter(e -> !"Archived".equals(e.status()) && !"Disposed".equals(e.status()))
+                        .toList();
+
+        PaginatedResult<PackageVersionEntry> page = Pagination.paginate(filtered,
+                CodeArtifactService::packageVersionSortCursor, maxResults, nextToken, 50, 1000,
+                "ValidationException");
+        List<PackageVersionSummary> summaries = page.items().stream()
+                .map(e -> new PackageVersionSummary(e.version(), e.revision(), e.status()))
+                .toList();
+        return new ListPackageVersionsResult(format, namespace, packageName, defaultDisplayVersion, summaries,
+                page.nextToken());
+    }
+
+    /**
+     * {@link Pagination#paginate} always sorts ascending by this cursor, but {@code
+     * ListPackageVersions} is always most-recently-published-first (see {@link
+     * #listPackageVersions}'s own javadoc): the publish time is inverted into a fixed-width,
+     * zero-padded decimal so its own ascending string order is the descending time order this
+     * needs, with the version itself as a deterministic tie-break for two versions published in
+     * the same second (or, for a {@code generic} {@code Unfinished} version, two with no publish
+     * time at all). Fine as an opaque cursor: nothing ever decodes this value back into its parts,
+     * the same way every other paginated action here only ever compares whole tokens.
+     */
+    private static String packageVersionSortCursor(PackageVersionEntry entry) {
+        long effectiveSeconds = entry.publishedEpochSeconds() == null ? 0 : entry.publishedEpochSeconds();
+        return String.format("%020d:%s", Long.MAX_VALUE - effectiveSeconds, entry.version());
+    }
+
+    /**
+     * AWS documents Maven and PyPI's {@code defaultDisplayVersion} as simply "the most recently
+     * published package version," and this codebase's own research found no stated rule at all
+     * for {@code generic} or {@code nuget} — applying the same fallback to those two is the
+     * best-justified inference available, not an AWS-confirmed rule for them specifically. Only
+     * {@code Published} versions are eligible: an {@code Unfinished} one was never actually
+     * completed, so it can never be "the" default to show. {@code null} when nothing qualifies
+     * (every version is {@code Unfinished}).
+     *
+     * <p>Picks the first {@code Published} entry under {@link #packageVersionSortCursor}'s own
+     * ordering, rather than independently re-deriving "most recent" from the raw timestamp: a
+     * second tie-break computed here that disagreed with the cursor's could list one version
+     * first while naming a different one the default. Reusing the cursor also means a sidecar
+     * that could not supply a timestamp for any version (so every {@code publishedEpochSeconds}
+     * is {@code null}) still gets a deterministic default — whichever {@code Published} version
+     * the cursor's own tie-break puts first — instead of reporting none at all.
+     */
+    private static String mostRecentlyPublishedVersion(List<PackageVersionEntry> entries) {
+        return entries.stream()
+                .filter(e -> "Published".equals(e.status()))
+                .min(Comparator.comparing(CodeArtifactService::packageVersionSortCursor))
+                .map(PackageVersionEntry::version)
+                .orElse(null);
     }
 
     /**

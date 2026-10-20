@@ -652,6 +652,27 @@ class CodeArtifactPypiDockerIntegrationTest {
     }
 
     /**
+     * Bridges to the same real pypiserver sidecar {@link #listPackageVersionAssetsBridgesToTheRealPypiserverSidecar}
+     * already uploaded {@code list-assets-pypi-pkg}'s {@code 1.0.0} to, reading the per-project
+     * JSON listing's {@code releases} keys plus a {@code HEAD} on the file's own URL for its
+     * publish time, instead of one release's file entries.
+     */
+    @Test
+    @Order(19)
+    void listPackageVersionsBridgesToTheRealPypiserverSidecar() {
+        given().header("Authorization", AUTH)
+                .post("/v1/package/versions?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=list-assets-pypi-pkg")
+                .then().statusCode(200)
+                .body("package", equalTo("list-assets-pypi-pkg"))
+                .body("defaultDisplayVersion", equalTo("1.0.0"))
+                .body("versions.size()", equalTo(1))
+                .body("versions[0].version", equalTo("1.0.0"))
+                .body("versions[0].status", equalTo("Published"))
+                .body("versions[0].origin.originType", equalTo("INTERNAL"));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code PypiserverSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container.

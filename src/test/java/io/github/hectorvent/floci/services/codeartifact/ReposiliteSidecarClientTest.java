@@ -638,6 +638,24 @@ class ReposiliteSidecarClientTest {
                 () -> client.listPackageVersionAssetNames("dom--repo", "dom", "repo", "com.example", "a", "1.0"));
     }
 
+    /**
+     * A transient error on one version's own details page (auth failure, Reposilite briefly
+     * unavailable) must surface as a real error, the same way a non-404 failure on the
+     * artifact-level listing just above already does, rather than being treated identically to
+     * "this version has no files yet" and silently reporting no publish time for it.
+     */
+    @Test
+    void listPackageVersionsThrowsWhenAVersionsDetailsPageFailsWithARealError() {
+        server.createContext("/api/maven/details/dom--repo/com/example/a",
+                exchange -> respond(exchange, 200, "{\"name\":\"a\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"1.0\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/example/a/1.0",
+                exchange -> respond(exchange, 500, "{\"status\":500,\"message\":\"internal error\"}"));
+
+        assertThrows(IllegalStateException.class,
+                () -> client.listPackageVersions("dom--repo", "dom", "repo", "com.example", "a"));
+    }
+
     @Test
     void storePackageVersionAssetPutsTheBytesDirectlyEvenWhenDifferingContentAlreadyExists() throws Exception {
         // deployArtifact's own redeployment:false preflight would refuse this; storePackageVersionAsset

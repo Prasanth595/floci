@@ -19,6 +19,9 @@ import java.net.http.HttpResponse.BodyHandlers;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
@@ -112,6 +115,59 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         return fetchPackageDocument(baseUrl, namespace, packageName)
                 .map(document -> document.path("versions").has(version))
                 .orElse(false);
+    }
+
+    /**
+     * Verdaccio's own packument already lists every version it holds, each keyed in the
+     * top-level {@code time} map by the same version string {@code versions} itself uses
+     * (confirmed live: it auto-populates this on every publish, even though Floci's own publish
+     * payload never sends one). A version present in {@code versions} but missing from {@code
+     * time} (never observed live, but not assumed impossible) reports no timestamp rather than
+     * guessing one; {@code time} also carries two non-version keys of its own ({@code created},
+     * {@code modified}) that {@code versions} never does, so only looking a version up by that
+     * exact key, never iterating {@code time}'s own fields, keeps those two out of the result.
+     */
+    @Override
+    public List<PackageVersionTimestamp> listPackageVersions(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        Optional<JsonNode> document = fetchPackageDocument(baseUrl, namespace, packageName);
+        if (document.isEmpty()) {
+            return List.of();
+        }
+        JsonNode time = document.get().path("time");
+        List<PackageVersionTimestamp> result = new ArrayList<>();
+        document.get().path("versions").fieldNames().forEachRemaining(version -> {
+            String publishedText = time.path(version).asText(null);
+            Instant published = null;
+            if (publishedText != null) {
+                try {
+                    published = Instant.parse(publishedText);
+                } catch (DateTimeParseException e) {
+                    // Leave unset: CodeArtifactService falls back to a deterministic tie-break
+                    // rather than guessing a time from text that didn't parse.
+                }
+            }
+            result.add(new PackageVersionTimestamp(version, published));
+        });
+        return result;
+    }
+
+    /**
+     * npm's own {@code dist-tags.latest}, AWS's documented preference for npm's {@code
+     * defaultDisplayVersion} ahead of the most-recently-published fallback every other format
+     * uses. {@code empty()} both when the package doesn't exist and when it exists but carries no
+     * {@code latest} tag (a real npm publish always sets one, but an empty packument with no
+     * versions at all, reachable only via {@code PutPackageOriginConfiguration}, has none),
+     * letting {@code CodeArtifactService} fall back to the same most-recently-published rule in
+     * either case.
+     */
+    @Override
+    public Optional<String> preferredDisplayVersion(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        return fetchPackageDocument(baseUrl, namespace, packageName)
+                .map(document -> document.path("dist-tags").path("latest").asText(null));
     }
 
     /**

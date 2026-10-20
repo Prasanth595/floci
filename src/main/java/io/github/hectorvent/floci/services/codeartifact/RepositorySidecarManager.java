@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -189,5 +190,45 @@ public interface RepositorySidecarManager {
      */
     default void recordVersionAvailable(String repositoryContainerId, String domain, String repository,
             String namespace, String packageName, String version) {
+    }
+
+    /**
+     * One version this sidecar holds for a package, paired with when it was published, for
+     * {@link #listPackageVersions}. {@code publishedTime} is {@code null} when this sidecar's own
+     * protocol has no timestamp for that version at all; {@code CodeArtifactService} then falls
+     * back to a deterministic tie-break (the version string itself) rather than treating it as
+     * more or less recent than any other version.
+     */
+    record PackageVersionTimestamp(String version, Instant publishedTime) {}
+
+    /**
+     * Every version this sidecar holds of the named package, for bridging {@code
+     * ListPackageVersions} when there is no generic-format record to list versions from, the same
+     * reason {@link #listPackageVersionAssetNames} exists for one version's own assets. Unlike
+     * that method, there is no existing "list everything under this package" primitive to lean
+     * on: each implementation needs its own new, format-specific enumeration. The default throws
+     * {@link UnsupportedOperationException}, the same convention {@link #deletePackage} already
+     * uses for a capability not every sidecar backs; every container-backed format's own client
+     * overrides this.
+     */
+    default List<PackageVersionTimestamp> listPackageVersions(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName) {
+        throw new UnsupportedOperationException(format() + " package versions cannot be listed through this "
+                + "sidecar");
+    }
+
+    /**
+     * This format's own preferred "default display" version for a package, independent of publish
+     * recency, for {@code ListPackageVersions}' {@code defaultDisplayVersion}. {@code empty()} by
+     * default: every sidecar Floci currently backs besides npm has no such separate preference of
+     * its own (AWS documents Maven and PyPI's default display version as simply "the most recently
+     * published package version," which {@code CodeArtifactService} already falls back to on an
+     * empty result here). {@code VerdaccioSidecarClient} overrides this: npm's own {@code
+     * dist-tags.latest} is exactly this preference, and AWS documents the same most-recently-
+     * published fallback for npm only when that tag isn't set.
+     */
+    default Optional<String> preferredDisplayVersion(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName) {
+        return Optional.empty();
     }
 }

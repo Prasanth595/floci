@@ -14,6 +14,9 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -135,6 +138,74 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
             String namespace, String packageName, String version) {
         String baseUrl = ensureReady(repositoryContainerId, null);
         return packageFiles(baseUrl, packageName).stream().anyMatch(file -> file.version().equals(version));
+    }
+
+    /**
+     * pypiserver's own per-project JSON listing ({@link #packageFiles}'s source, read directly
+     * here by the {@code releases} map's own keys instead) has no timestamp field of its own
+     * (confirmed against a live container), so this follows each version's first listed file's
+     * download URL with a plain {@code HEAD} and reads the real {@code Last-Modified} response
+     * header it returns. Only one file per version needs checking: every file of the same release
+     * lands on disk within the same upload, close enough that picking "the first one" over "the
+     * most recently modified one" makes no practical difference, and the JSON listing gives no
+     * way to know which upload order they actually arrived in regardless.
+     */
+    @Override
+    public List<PackageVersionTimestamp> listPackageVersions(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        String normalized = normalizePackageName(packageName);
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + SidecarUriUtils.encodeSegment(normalized)
+                + "/json");
+        HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofString());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the pypiserver sidecar to list versions of "
+                    + packageName, e);
+        }
+        if (response.statusCode() == 404) {
+            return List.of();
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not list versions of " + packageName + " on the pypiserver "
+                    + "sidecar: upstream returned " + response.statusCode());
+        }
+        JsonNode releases;
+        try {
+            releases = mapper.readTree(response.body()).path("releases");
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not parse pypiserver's version listing for " + packageName, e);
+        }
+        List<PackageVersionTimestamp> result = new ArrayList<>();
+        releases.fieldNames().forEachRemaining(version -> {
+            JsonNode files = releases.path(version);
+            String fileUrl = files.isEmpty() ? "" : files.get(0).path("url").asText("");
+            result.add(new PackageVersionTimestamp(version, fileUrl.isEmpty() ? null : lastModified(fileUrl)));
+        });
+        return result;
+    }
+
+    private Instant lastModified(String fileUrl) {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(fileUrl)).timeout(Duration.ofSeconds(10))
+                .method("HEAD", BodyPublishers.noBody()).build();
+        HttpResponse<Void> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.discarding());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the pypiserver sidecar to check " + fileUrl, e);
+        }
+        if (response.statusCode() != 200) {
+            return null;
+        }
+        return response.headers().firstValue("Last-Modified").flatMap(value -> {
+            try {
+                return Optional.of(Instant.from(DateTimeFormatter.RFC_1123_DATE_TIME.parse(value)));
+            } catch (DateTimeParseException e) {
+                return Optional.empty();
+            }
+        }).orElse(null);
     }
 
     /**
