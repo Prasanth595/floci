@@ -167,8 +167,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The cluster name is create-only and the physical id, so an unnamed cluster keeps the name its
      * first execution generated. createCluster is idempotent, which is what makes an unchanged
-     * update a no-op here. Declared {@code ClusterSettings} are applied when they differ, and an
-     * update snapshots the prior ones for its rollback.
+     * update a no-op here. A new cluster is created with its declared {@code ClusterSettings}; an
+     * existing one has them applied when they differ, and an update snapshots the prior ones for
+     * its rollback.
      */
     private void provisionCluster(StackResource r, JsonNode props, ProvisionContext ctx) {
         r.getAttributes().remove(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR);
@@ -185,7 +186,10 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 }
             }
         }
-        EcsCluster cluster = ecsService.createCluster(clusterName, ctx.region());
+        // A new cluster takes its settings at creation, so no later call can fail and leave it
+        // behind; an existing one (this resource's own on an update, or one the idempotent create
+        // returned) has them applied below.
+        EcsCluster cluster = ecsService.createCluster(clusterName, null, settings, ctx.region());
         r.setPhysicalId(cluster.getClusterName());
         r.getAttributes().put("Arn", cluster.getClusterArn());
         if (!settings.isEmpty() && !settings.equals(cluster.getSettings())) {
