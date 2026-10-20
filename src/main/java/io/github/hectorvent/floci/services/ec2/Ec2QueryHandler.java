@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ec2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -3391,6 +3392,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeKeyPairs(MultivaluedMap<String, String> p, String region) {
+        boolean includePublicKey = Boolean.parseBoolean(p.getFirst("IncludePublicKey"));
         List<String> keyNames = getList(p, "KeyName");
         List<String> keyPairIds = getList(p, "KeyPairId");
         List<KeyPair> kps = service.describeKeyPairs(region, keyNames, keyPairIds);
@@ -3402,12 +3404,37 @@ public class Ec2QueryHandler {
             xml.start("item")
                     .elem("keyPairId", kp.getKeyPairId())
                     .elem("keyName", kp.getKeyName())
-                    .elem("keyFingerprint", kp.getKeyFingerprint())
-                    .raw(tagSetXml(kp.getTags()))
-                    .end("item");
+                    .elem("keyFingerprint", kp.getKeyFingerprint());
+            if (includePublicKey) {
+                xml.elem("publicKey", openSshPublicKeyNamedFor(kp));
+            }
+            xml.raw(tagSetXml(kp.getTags())).end("item");
         }
         xml.end("keySet").end("DescribeKeyPairsResponse");
         return xmlResponse(xml.build());
+    }
+
+    /**
+     * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
+     * DescribeKeyPairs reports for created and imported keys alike. Null unless the stored material
+     * is an OpenSSH line whose blob is a whole key of the type the line names: ImportKeyPair keeps
+     * what it was given, and rewriting a PEM or RFC 4716 body, a partial blob or a line labelled
+     * with another type would report a key that was never imported. The line is rebuilt from the
+     * blob's type, the blob and the name rather than copied, so no character of the stored text,
+     * such as a NUL that XML cannot carry, reaches the response.
+     */
+    private static String openSshPublicKeyNamedFor(KeyPair kp) {
+        String material = kp.getPublicKey();
+        byte[] blob = SshPublicKeys.decodeBlob(material);
+        if (!SshPublicKeys.carriesAKey(blob)) {
+            return null;
+        }
+        // decodeBlob took the blob from the second field; the first has to name the same type.
+        String type = SshPublicKeys.keyType(blob);
+        if (!type.equals(material.trim().split("\\s+", 2)[0])) {
+            return null;
+        }
+        return type + " " + Base64.getEncoder().encodeToString(blob) + " " + kp.getKeyName();
     }
 
     private Response handleDeleteKeyPair(MultivaluedMap<String, String> p, String region) {

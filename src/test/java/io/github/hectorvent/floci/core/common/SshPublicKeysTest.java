@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPairGenerator;
 import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPublicKey;
@@ -187,5 +188,69 @@ class SshPublicKeysTest {
     void theTypeIsReadFromTheBlob() {
         assertEquals("ssh-rsa", SshPublicKeys.keyType(
                 SshPublicKeys.decodeBlob(SshPublicKeys.toOpenSsh(KEY))));
+    }
+
+    /**
+     * A blob carries a key only when it has every field its type requires: a type field alone, an
+     * RSA exponent and modulus that make no usable key, or an ed25519 key or ECDSA point of the
+     * wrong size or form, is not a public key, and neither is a type other than RSA, ed25519, ECDSA
+     * and their security-key forms.
+     */
+    @Test
+    void aBlobCarriesAKeyOnlyWithEveryFieldItsTypeRequires() {
+        byte[] exponent = {1, 0, 1};
+        assertTrue(SshPublicKeys.carriesAKey(SshPublicKeys.openSshBlob(KEY)));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-rsa")));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-rsa", exponent)));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-rsa", new byte[0], new byte[] {1})));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-rsa", exponent, new byte[] {1})));
+        assertFalse(SshPublicKeys.carriesAKey(
+                blob("ssh-dss", new byte[] {1}, new byte[] {1}, new byte[] {1}, new byte[] {1})));
+
+        assertTrue(SshPublicKeys.carriesAKey(blob("ssh-ed25519", new byte[32])));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-ed25519", new byte[31])));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-ed25519")));
+        assertTrue(SshPublicKeys.carriesAKey(blob("sk-ssh-ed25519@openssh.com", new byte[32], ascii("ssh:"))));
+        assertFalse(SshPublicKeys.carriesAKey(blob("sk-ssh-ed25519@openssh.com", new byte[32])));
+
+        assertTrue(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp256", ascii("nistp256"), point(32))));
+        assertTrue(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp384", ascii("nistp384"), point(48))));
+        assertTrue(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp521", ascii("nistp521"), point(66))));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp256", ascii("nistp384"), point(32))));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp384", ascii("nistp384"), point(32))));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp256", ascii("nistp256"), new byte[64])));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp256", ascii("nistp256"), new byte[65])));
+        assertTrue(SshPublicKeys.carriesAKey(
+                blob("sk-ecdsa-sha2-nistp256@openssh.com", ascii("nistp256"), point(32), ascii("ssh:"))));
+        assertFalse(SshPublicKeys.carriesAKey(
+                blob("sk-ecdsa-sha2-nistp256@openssh.com", ascii("nistp256"), point(32))));
+
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-unknown", new byte[32])));
+        assertFalse(SshPublicKeys.carriesAKey(null));
+    }
+
+    /** An uncompressed EC point, {@code 0x04} and then both coordinates of the given size. */
+    private static byte[] point(int coordinateLength) {
+        byte[] point = new byte[1 + 2 * coordinateLength];
+        point[0] = 4;
+        return point;
+    }
+
+    private static byte[] ascii(String value) {
+        return value.getBytes(StandardCharsets.US_ASCII);
+    }
+
+    /** An OpenSSH blob of the given type followed by the given fields, each length-prefixed. */
+    private static byte[] blob(String type, byte[]... fields) {
+        byte[] typeBytes = type.getBytes(StandardCharsets.US_ASCII);
+        int length = Integer.BYTES + typeBytes.length;
+        for (byte[] field : fields) {
+            length += Integer.BYTES + field.length;
+        }
+        ByteBuffer buffer = ByteBuffer.allocate(length).putInt(typeBytes.length).put(typeBytes);
+        for (byte[] field : fields) {
+            buffer.putInt(field.length).put(field);
+        }
+        return buffer.array();
     }
 }
