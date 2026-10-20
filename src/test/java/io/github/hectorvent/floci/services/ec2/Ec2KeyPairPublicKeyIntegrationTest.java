@@ -94,6 +94,17 @@ class Ec2KeyPairPublicKeyIntegrationTest {
     }
 
     /**
+     * ImportKeyPair takes a name with a line break, and as a comment that name would turn the one
+     * key into lines an authorized_keys file reads as further keys, so the key is described bare.
+     */
+    @Test
+    void aNameWithALineBreakIsNotUsedAsTheComment() {
+        String name = "public-key-" + UUID.randomUUID() + "\nssh-ed25519 " + ED25519_BLOB + " another";
+        describeImported(name, utf8("ssh-ed25519 " + ED25519_BLOB), response -> response
+                .body("DescribeKeyPairsResponse.keySet.item.publicKey", equalTo("ssh-ed25519 " + ED25519_BLOB)));
+    }
+
+    /**
      * ImportKeyPair keeps material it cannot read as it was given, so the key pair is described
      * without a public key rather than with a rewrite of text that is not an OpenSSH line. A UTF-16
      * file decodes to text with NUL characters, which XML cannot carry at all.

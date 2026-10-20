@@ -3418,8 +3418,8 @@ public class Ec2QueryHandler {
      * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
      * DescribeKeyPairs reports for created and imported keys alike. ImportKeyPair keeps what it was
      * given, so this is null unless the material is a single OpenSSH line whose blob is a whole key
-     * of the type the line names: a partial blob, a line labelled with another type and several key
-     * lines are not one key to report. PEM and RFC 4716 bodies are not converted either, since
+     * of the type the line names: a partial blob, a line labelled with another type and material of
+     * more than one line are not one key to report. PEM and RFC 4716 bodies are not converted, since
      * ImportKeyPair does not read those formats yet. The line is rebuilt from the blob's type, the
      * blob and the name rather than copied, so no character of the stored text, such as a NUL that
      * XML cannot carry, reaches the response.
@@ -3431,16 +3431,17 @@ public class Ec2QueryHandler {
             return null;
         }
         String line = material.trim();
-        // decodeBlob took the blob from the second field; the first has to name the same type, and
-        // a line break means more keys than this one, since authorized_keys takes one per line.
+        // decodeBlob took the blob from the second field; the first has to name the same type. More
+        // than one line is not taken apart: authorized_keys reads each line as a key of its own.
         String type = SshPublicKeys.keyType(blob);
         if (line.indexOf('\n') >= 0 || !type.equals(line.split("\\s+", 2)[0])) {
             return null;
         }
-        // A key pair stored before KeyName was required has no name, and so no comment.
+        // A key pair stored before KeyName was required has no name, and a name holding a control
+        // character, such as a line break that would split this line in two, is no comment either.
         String name = kp.getKeyName();
-        String comment = name == null || name.isBlank() ? "" : " " + name;
-        return type + " " + Base64.getEncoder().encodeToString(blob) + comment;
+        boolean nameIsAComment = name != null && !name.isBlank() && name.chars().noneMatch(Character::isISOControl);
+        return type + " " + Base64.getEncoder().encodeToString(blob) + (nameIsAComment ? " " + name : "");
     }
 
     private Response handleDeleteKeyPair(MultivaluedMap<String, String> p, String region) {

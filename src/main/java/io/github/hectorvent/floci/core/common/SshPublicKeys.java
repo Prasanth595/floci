@@ -163,8 +163,9 @@ public final class SshPublicKeys {
      * of the size of the curve an ECDSA type names, each with the application field a security-key
      * type adds. A type field alone, or a field of the wrong size, is not a key, and neither is a
      * type other than these, such as {@code ssh-dss} or a certificate. Unlike {@link #rsaKeyOf},
-     * which reads only the fields it needs, nothing may follow the key: OpenSSH refuses a blob with
-     * trailing data, so describing one as a key would hand out a line no SSH client reads.
+     * which reads only the fields it needs, nothing may follow the key, as OpenSSH requires. The
+     * check is of the format alone: it does not ask whether an RSA modulus is long enough for
+     * OpenSSH or whether an EC point lies on its curve.
      */
     public static boolean carriesAKey(byte[] blob) {
         if (blob == null) {
@@ -179,12 +180,19 @@ public final class SshPublicKeys {
                     yield true;
                 }
                 case "ssh-ed25519" -> reader.readField().length == ED25519_KEY_LENGTH;
-                case "sk-ssh-ed25519@openssh.com" ->
-                        reader.readField().length == ED25519_KEY_LENGTH && hasAnotherField(reader);
-                case "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521" ->
-                        carriesAPointOn(reader, type.substring("ecdsa-sha2-".length()));
-                case "sk-ecdsa-sha2-nistp256@openssh.com" ->
-                        carriesAPointOn(reader, "nistp256") && hasAnotherField(reader);
+                case "sk-ssh-ed25519@openssh.com" -> {
+                    boolean key = reader.readField().length == ED25519_KEY_LENGTH;
+                    reader.readField(); // the application, which only has to be there
+                    yield key;
+                }
+                case "ecdsa-sha2-nistp256" -> carriesAPointOn(reader, "nistp256", 32);
+                case "ecdsa-sha2-nistp384" -> carriesAPointOn(reader, "nistp384", 48);
+                case "ecdsa-sha2-nistp521" -> carriesAPointOn(reader, "nistp521", 66);
+                case "sk-ecdsa-sha2-nistp256@openssh.com" -> {
+                    boolean point = carriesAPointOn(reader, "nistp256", 32);
+                    reader.readField(); // the application, which only has to be there
+                    yield point;
+                }
                 default -> false;
             };
             return keyFields && reader.atEnd();
@@ -194,26 +202,14 @@ public final class SshPublicKeys {
         }
     }
 
-    /** Whether the blob has a further well-formed field, such as a security key's application. */
-    private static boolean hasAnotherField(Reader reader) {
-        try {
-            reader.readField();
-            return true;
-        } catch (SshPublicKeyException ignored) {
-            return false;
-        }
-    }
-
-    /** Whether the next fields name the curve and hold an uncompressed point of its size. */
-    private static boolean carriesAPointOn(Reader reader, String curve) {
+    /**
+     * Whether the next fields name the curve and hold an uncompressed point of its size:
+     * {@code 0x04} and then both coordinates, each {@code coordinateLength} bytes long.
+     */
+    private static boolean carriesAPointOn(Reader reader, String curve, int coordinateLength) {
         if (!curve.equals(new String(reader.readField(), StandardCharsets.UTF_8))) {
             return false;
         }
-        int coordinateLength = switch (curve) {
-            case "nistp256" -> 32;
-            case "nistp384" -> 48;
-            default -> 66;
-        };
         byte[] point = reader.readField();
         return point.length == 1 + 2 * coordinateLength && point[0] == 4;
     }

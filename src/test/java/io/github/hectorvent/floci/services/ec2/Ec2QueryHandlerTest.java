@@ -13,6 +13,7 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
@@ -262,17 +263,22 @@ class Ec2QueryHandlerTest {
     }
 
     /**
-     * A key pair stored before KeyName was required has no name, so its public key is described
-     * without a comment rather than with the word {@code null} as one.
+     * The key-pair name becomes the comment only when it can be one. A key pair stored before
+     * KeyName was required has no name, which would otherwise read {@code null}, and a name with a
+     * line break or another control character would split the key into lines an authorized_keys
+     * file reads as further keys (XML turns a carriage return into a line feed on the way).
      */
-    @Test
-    void describeKeyPairsGivesTheKeyOfANamelessKeyPairNoComment() {
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"two\nlines", "carriage\rreturn", "a\ttab"})
+    void describeKeyPairsGivesTheKeyNoCommentWhenTheNameCannotBeOne(String name) {
         String line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIj7azlDjVHAsSxgcpCRZ3oWnTm0nAFM64y9jd22ioI/";
-        KeyPair nameless = new KeyPair();
-        nameless.setKeyPairId("key-0123456789abcdef0");
-        nameless.setPublicKey(line + " imported-comment");
+        KeyPair keyPair = new KeyPair();
+        keyPair.setKeyPairId("key-0123456789abcdef0");
+        keyPair.setKeyName(name);
+        keyPair.setPublicKey(line + " imported-comment");
         Ec2Service service = mock(Ec2Service.class);
-        when(service.describeKeyPairs(eq("us-east-1"), anyList(), anyList())).thenReturn(List.of(nameless));
+        when(service.describeKeyPairs(eq("us-east-1"), anyList(), anyList())).thenReturn(List.of(keyPair));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("IncludePublicKey", "true");
 
