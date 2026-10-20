@@ -1180,6 +1180,15 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void aStreamingInvokeResolvesItsQualifiedFunctionAsAnInvokeDoes() {
+        // A streaming invoke is an invoke: its qualifier and the account its function ARN names count.
+        when(uriInfo.getPath()).thenReturn("/2021-11-15/functions/my-function/response-streaming-invocations");
+        queryParams.putSingle("Qualifier", "prod");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function:prod",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
     void lambdaRoutesOtherThanInvokeAreCheckedAgainstTheCallersUnqualifiedFunction() {
         when(uriInfo.getPath()).thenReturn(
                 "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function:1/code");

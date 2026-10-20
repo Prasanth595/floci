@@ -660,7 +660,8 @@ public class ResourceArnBuilder {
         // path: /2015-03-31/functions/name or similar
         String name = extractSegmentAfter(path, "functions");
         if (name == null) return "*";
-        boolean invoke = path.endsWith("/functions/" + name + "/invocations");
+        boolean invoke = path.endsWith("/functions/" + name + "/invocations")
+                || path.endsWith("/functions/" + name + "/response-streaming-invocations");
         try {
             if (!invoke) {
                 LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(name);

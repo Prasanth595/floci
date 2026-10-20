@@ -29,7 +29,20 @@ public class IamActionRegistry {
 
     private static final Logger LOG = Logger.getLogger(IamActionRegistry.class);
 
-    private record ActionRule(String service, String method, Pattern pathPattern, String action) {}
+    /**
+     * A route and the action it is checked as. A rule naming a query parameter matches only a request
+     * carrying it with that value, as {@code GET /layers?find=LayerVersion} is GetLayerVersionByArn
+     * where {@code GET /layers} is ListLayers.
+     */
+    private record ActionRule(String service, String method, Pattern pathPattern, String queryParameter,
+                              String queryValue, String action) {
+
+        boolean matches(String scope, String requestMethod, String path, ContainerRequestContext ctx) {
+            return service.equals(scope) && method.equals(requestMethod) && pathPattern.matcher(path).find()
+                    && (queryParameter == null
+                    || queryValue.equals(ctx.getUriInfo().getQueryParameters().getFirst(queryParameter)));
+        }
+    }
 
     private static final List<ActionRule> RULES = List.of(
         // ── S3 ─────────────────────────────────────────────────────────────────
@@ -99,6 +112,10 @@ public class IamActionRegistry {
         rule("lambda", "PUT",    "^/2025-03-07/resource-policy/.+",                   "lambda:PutResourcePolicy"),
         rule("lambda", "GET",    "^/2025-03-07/resource-policy/.+",                   "lambda:GetResourcePolicy"),
         rule("lambda", "DELETE", "^/2025-03-07/resource-policy/.+",                   "lambda:DeleteResourcePolicy"),
+        // InvokeWithResponseStream and GetLayerVersionByArn are authorized as the action they share with
+        // Invoke and GetLayerVersion (iam-authorized-actions.json).
+        rule("lambda", "POST",   ".*/functions/[^/]+/response-streaming-invocations$", "lambda:InvokeFunction"),
+        rule("lambda", "GET",    "^/2018-10-31/layers$", "find", "LayerVersion",     "lambda:GetLayerVersion"),
 
         // ── DynamoDB (JSON 1.1, action from X-Amz-Target handled separately) ──
         // Handled via Query-style action extraction in the filter
@@ -112,15 +129,17 @@ public class IamActionRegistry {
         rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
 
         // ── API Gateway ────────────────────────────────────────────────────────
-        rule("apigateway", "GET",    ".*/account$",                       "apigateway:GET"),
-        rule("apigateway", "PATCH",  ".*/account$",                       "apigateway:PATCH"),
-        rule("apigateway", "GET",    ".*/restapis$",                        "apigateway:GET"),
-        rule("apigateway", "POST",   ".*/restapis$",                        "apigateway:POST"),
-        rule("apigateway", "GET",    ".*/restapis/.+",                      "apigateway:GET"),
-        rule("apigateway", "PUT",    ".*/restapis/.+",                      "apigateway:PUT"),
-        rule("apigateway", "PATCH",  ".*/restapis/.+",                      "apigateway:PATCH"),
-        rule("apigateway", "DELETE", ".*/restapis/.+",                      "apigateway:DELETE"),
-        rule("apigateway", "POST",   ".*/restapis/.+",                      "apigateway:POST"),
+        // The management API, v1 and v2, is authorized by HTTP method on the resource path:
+        // apigateway:GET, POST, PUT, PATCH or DELETE. Two operations have an action of their own. The
+        // others AWS authorizes only by an action of their own name, the v2 routing rules, portals and
+        // portal products, are not served by Floci and need their own rules when they are.
+        rule("apigateway", "POST",   "^/rejectdomainnameaccessassociations$",       "apigateway:RejectAccessAssociation"),
+        rule("apigateway", "PUT",    "^/v2/domainnames/[^/]+/routingrules/[^/]+$",  "apigateway:UpdateRoutingRule"),
+        rule("apigateway", "GET",    ".*",                                          "apigateway:GET"),
+        rule("apigateway", "POST",   ".*",                                          "apigateway:POST"),
+        rule("apigateway", "PUT",    ".*",                                          "apigateway:PUT"),
+        rule("apigateway", "PATCH",  ".*",                                          "apigateway:PATCH"),
+        rule("apigateway", "DELETE", ".*",                                          "apigateway:DELETE"),
 
         // ── SES v2 ─────────────────────────────────────────────────────────────
         // SES v1 is a Query API and resolves from its Action like any other; v2 is REST-JSON under
@@ -255,7 +274,13 @@ public class IamActionRegistry {
     );
 
     private static ActionRule rule(String service, String method, String path, String action) {
-        return new ActionRule(service, method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), action);
+        return rule(service, method, path, null, null, action);
+    }
+
+    private static ActionRule rule(String service, String method, String path, String queryParameter,
+                                   String queryValue, String action) {
+        return new ActionRule(service, method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), queryParameter,
+                queryValue, action);
     }
 
     /**
@@ -319,9 +344,7 @@ public class IamActionRegistry {
         }
 
         for (ActionRule rule : RULES) {
-            if (rule.service().equals(credentialScope)
-                    && rule.method().equals(method)
-                    && rule.pathPattern().matcher(path).find()) {
+            if (rule.matches(credentialScope, method, path, ctx)) {
                 return rule.action();
             }
         }

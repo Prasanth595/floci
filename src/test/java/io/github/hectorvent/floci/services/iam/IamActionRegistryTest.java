@@ -242,6 +242,20 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void aRuleNamingAQueryParameterMatchesOnlyARequestCarryingItWithItsValue() {
+        // GET /layers?find=LayerVersion is GetLayerVersionByArn, while GET /layers is ListLayers.
+        MultivaluedHashMap<String, String> byArn = new MultivaluedHashMap<>();
+        byArn.putSingle("find", "LayerVersion");
+        assertEquals("lambda:GetLayerVersion", registry.resolveRoute("lambda",
+                mockCtx("GET", "/2018-10-31/layers", byArn, MediaType.APPLICATION_JSON_TYPE, "{}")));
+        MultivaluedHashMap<String, String> other = new MultivaluedHashMap<>();
+        other.putSingle("find", "Layer");
+        assertNull(registry.resolveRoute("lambda",
+                mockCtx("GET", "/2018-10-31/layers", other, MediaType.APPLICATION_JSON_TYPE, "{}")));
+        assertNull(lambdaAction("GET", "/2018-10-31/layers"));
+    }
+
+    @Test
     void durableExecutionRoutesResolveToTheirActions() {
         String arn = "arn%3Aaws%3Alambda%3Aus-east-1%3A000000000000%3Afunction%3Af%3A%24LATEST"
                 + "%2Fdurable-execution%2Fname%2Fid";
