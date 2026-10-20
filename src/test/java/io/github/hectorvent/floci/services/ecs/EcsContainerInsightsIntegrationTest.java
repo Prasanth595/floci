@@ -1,18 +1,26 @@
 package io.github.hectorvent.floci.services.ecs;
 
+import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
 
 /**
  * A cluster whose CloudFormation {@code ClusterSettings} enable Container Insights publishes its
@@ -22,6 +30,9 @@ import static org.hamcrest.Matchers.hasItem;
  */
 @QuarkusTest
 class EcsContainerInsightsIntegrationTest {
+
+    @InjectSpy
+    EcsService ecsService;
 
     private static final String CLOUDWATCH_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260908/us-east-1/monitoring/aws4_request";
@@ -75,5 +86,69 @@ class EcsContainerInsightsIntegrationTest {
                         Instant.now().plusSeconds(60).getEpochSecond()))
                 .post("/").then().statusCode(200)
                 .body("Datapoints.Maximum", hasItem(1.0f)));
+    }
+
+    /**
+     * The update's settings land and the call still fails, and the provisioner's own restore fails
+     * too, so the stack ends in UPDATE_ROLLBACK_FAILED with the new setting live. The snapshot
+     * survives on the resource the stack keeps, so ContinueUpdateRollback puts the prior setting
+     * back rather than reporting a rollback with nothing left to do.
+     */
+    @Test
+    void continueUpdateRollbackRetriesASettingsRestoreThatFailed() {
+        String cluster = "insights-rb-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+            {"Resources": {"Cluster": {"Type": "AWS::ECS::Cluster", "Properties": {"ClusterName": "%s",
+              "ClusterSettings": [{"Name": "containerInsights", "Value": "%s"}]}}}}
+            """;
+        cloudFormation("CreateStack", cluster, template.formatted(cluster, "disabled"));
+        awaitStackStatus(cluster, "CREATE_COMPLETE");
+
+        List<ClusterSetting> enabled = List.of(new ClusterSetting("containerInsights", "enabled"));
+        doAnswer(invocation -> {
+            if (enabled.equals(invocation.getArgument(1))) {
+                invocation.callRealMethod();
+            }
+            throw new IllegalStateException("simulated settings write failure");
+        }).when(ecsService).updateClusterSettings(anyString(), anyList(), anyString());
+        try {
+            cloudFormation("UpdateStack", cluster, template.formatted(cluster, "enabled"));
+            awaitStackStatus(cluster, "UPDATE_ROLLBACK_FAILED");
+        } finally {
+            doCallRealMethod().when(ecsService).updateClusterSettings(anyString(), anyList(), anyString());
+        }
+        assertInsightsSetting(cluster, "enabled");
+
+        cloudFormation("ContinueUpdateRollback", cluster, null);
+        awaitStackStatus(cluster, "UPDATE_ROLLBACK_COMPLETE");
+        assertInsightsSetting(cluster, "disabled");
+    }
+
+    private static void cloudFormation(String action, String stack, String template) {
+        RequestSpecification request = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", action)
+                .formParam("StackName", stack);
+        if (template != null) {
+            request.formParam("TemplateBody", template);
+        }
+        request.post("/").then().statusCode(200);
+    }
+
+    private static void awaitStackStatus(String stack, String status) {
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stack)
+                .post("/").then().statusCode(200)
+                .body(containsString("<StackStatus>" + status + "</StackStatus>")));
+    }
+
+    private static void assertInsightsSetting(String cluster, String value) {
+        given().contentType("application/x-amz-json-1.1")
+                .header("X-Amz-Target", "AmazonEC2ContainerServiceV20141113.DescribeClusters")
+                .body("{\"clusters\": [\"" + cluster + "\"], \"include\": [\"SETTINGS\"]}")
+                .post("/").then().statusCode(200)
+                .body("clusters[0].settings[0].value", equalTo(value));
     }
 }

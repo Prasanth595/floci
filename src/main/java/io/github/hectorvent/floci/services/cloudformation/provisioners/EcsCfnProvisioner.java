@@ -118,6 +118,20 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * When a settings update and its own restore both failed, the snapshot is left on the attempted
+     * resource only, and the engine puts back the resource it held before. Carried over, it lets
+     * ContinueUpdateRollback retry the restore through {@link #rollbackUpdate} instead of finding
+     * nothing to put back. A restore that succeeded removed it, so it is here only after a failed one.
+     */
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        String snapshot = attempted.getAttributes().get(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR);
+        if (snapshot != null) {
+            previous.getAttributes().put(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR, snapshot);
+        }
+    }
+
+    /**
      * A replacement is undone through the cleanup record. Without one, a cluster puts back the
      * settings snapshot its update took; with no snapshot the update changed no settings, and the
      * name is create-only, so the idempotent create changed nothing. A service without a record was

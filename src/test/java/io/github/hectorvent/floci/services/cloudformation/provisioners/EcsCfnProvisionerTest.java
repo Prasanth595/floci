@@ -782,6 +782,50 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
+    void aRestoreThatFailedIsRetriedWhenTheRollbackIsContinued() {
+        List<ClusterSetting> priorSettings = List.of(new ClusterSetting("containerInsights", "disabled"));
+        EcsCluster prior = cluster("web");
+        prior.setSettings(priorSettings);
+        when(ecs.createCluster("web", REGION)).thenReturn(prior);
+        when(ecs.updateClusterSettings(eq("web"), any(), eq(REGION)))
+                .thenThrow(new AwsException("ServerException", "write failed", 500))
+                .thenThrow(new AwsException("ServerException", "still failing", 500))
+                .thenReturn(prior);
+        StackResource previous = resource("AWS::ECS::Cluster", "Cluster");
+        previous.setPhysicalId("web");
+        StackResource attempted = resource("AWS::ECS::Cluster", "Cluster");
+        attempted.setPhysicalId("web");
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(attempted, clusterWithInsights("enhanced"), ctx("web")));
+
+        // The engine puts the previous resource back after the failed provision, and the first
+        // rollback walk reports the recorded failure without calling rollbackUpdate.
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+        // ContinueUpdateRollback then asks for the restore again.
+        assertTrue(provisioner.rollbackUpdate(previous));
+
+        verify(ecs, times(2)).updateClusterSettings("web", priorSettings, REGION);
+        assertFalse(previous.getAttributes().containsKey(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aRestoreThatSucceededLeavesNothingToCarryOver() {
+        EcsCluster prior = cluster("web");
+        prior.setSettings(List.of(new ClusterSetting("containerInsights", "disabled")));
+        when(ecs.createCluster("web", REGION)).thenReturn(prior);
+        when(ecs.updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enhanced")), REGION))
+                .thenThrow(new AwsException("ServerException", "write failed", 500));
+        StackResource previous = resource("AWS::ECS::Cluster", "Cluster");
+        StackResource attempted = resource("AWS::ECS::Cluster", "Cluster");
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(attempted, clusterWithInsights("enhanced"), ctx("web")));
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        assertFalse(previous.getAttributes().containsKey(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR));
+    }
+
+    @Test
     void aCommittedSettingsUpdateDropsItsSnapshot() {
         EcsCluster prior = cluster("web");
         prior.setSettings(List.of(new ClusterSetting("containerInsights", "disabled")));
