@@ -49,6 +49,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -61,6 +62,8 @@ import java.util.stream.Stream;
 public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
+
+    private static final String MARKER_PREFIX = "after:";
 
     /** {@code MaxItems} on the readers that page through {@link #paginate}: "defaults to 100", range 1 to 1000. */
     private static final int DEFAULT_MAX_ITEMS = 100;
@@ -460,7 +463,8 @@ public class IamQueryHandler {
      */
     private Response handleListVirtualMFADevices(MultivaluedMap<String, String> params) {
         Page<VirtualMfaDevice> page = paginate(
-                iamService.listVirtualMfaDevices(getParam(params, "AssignmentStatus")), params);
+                iamService.listVirtualMfaDevices(getParam(params, "AssignmentStatus")),
+                VirtualMfaDevice::getSerialNumber, params);
         XmlBuilder xml = new XmlBuilder().start("VirtualMFADevices");
         for (VirtualMfaDevice device : page.items()) {
             xml.start("member").elem("SerialNumber", device.getSerialNumber());
@@ -509,7 +513,7 @@ public class IamQueryHandler {
 
     private Response handleListMFADevices(MultivaluedMap<String, String> params, String authorization) {
         String userName = resolveUserName(params, authorization);
-        Page<VirtualMfaDevice> page = paginate(iamService.listMfaDevices(userName), params);
+        Page<VirtualMfaDevice> page = paginate(iamService.listMfaDevices(userName), VirtualMfaDevice::getSerialNumber, params);
         XmlBuilder xml = new XmlBuilder().start("MFADevices");
         for (VirtualMfaDevice device : page.items()) {
             xml.start("member")
@@ -543,7 +547,7 @@ public class IamQueryHandler {
      */
     private Response handleListMFADeviceTags(MultivaluedMap<String, String> params) {
         Map<String, String> tags = new TreeMap<>(iamService.listMfaDeviceTags(getParam(params, "SerialNumber")));
-        Page<Map.Entry<String, String>> page = paginate(List.copyOf(tags.entrySet()), params);
+        Page<Map.Entry<String, String>> page = paginate(List.copyOf(tags.entrySet()), Map.Entry::getKey, params);
         XmlBuilder xml = new XmlBuilder().start("Tags");
         for (Map.Entry<String, String> tag : page.items()) {
             xml.start("member").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("member");
@@ -840,7 +844,8 @@ public class IamQueryHandler {
      */
     private Response handleListServerCertificates(MultivaluedMap<String, String> params) {
         Page<ServerCertificate> page = paginate(
-                iamService.listServerCertificates(getParam(params, "PathPrefix")), params);
+                iamService.listServerCertificates(getParam(params, "PathPrefix")),
+                ServerCertificate::getServerCertificateName, params);
         XmlBuilder xml = new XmlBuilder().start("ServerCertificateMetadataList");
         for (ServerCertificate certificate : page.items()) {
             xml.start("member").raw(serverCertificateMetadataXml(certificate)).end("member");
@@ -883,7 +888,8 @@ public class IamQueryHandler {
         String userName = allUsers ? null : resolveUserName(params, authorization);
         Page<ServiceSpecificCredential> page = paginate(
                 iamService.listServiceSpecificCredentials(
-                        userName, getParam(params, "ServiceName"), allUsers), params);
+                        userName, getParam(params, "ServiceName"), allUsers),
+                ServiceSpecificCredential::getServiceSpecificCredentialId, params);
         XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredentials");
         for (ServiceSpecificCredential credential : page.items()) {
             xml.start("member").raw(serviceCredentialXml(credential, false)).end("member");
@@ -1006,7 +1012,8 @@ public class IamQueryHandler {
     private Response handleListSshPublicKeys(MultivaluedMap<String, String> params,
                                              String authorization) {
         Page<SshPublicKey> page = paginate(
-                iamService.listSshPublicKeys(resolveUserName(params, authorization)), params);
+                iamService.listSshPublicKeys(resolveUserName(params, authorization)),
+                SshPublicKey::getSshPublicKeyId, params);
         XmlBuilder xml = new XmlBuilder().start("SSHPublicKeys");
         for (SshPublicKey key : page.items()) {
             xml.start("member")
@@ -1067,7 +1074,8 @@ public class IamQueryHandler {
     private Response handleListSigningCertificates(MultivaluedMap<String, String> params,
                                                    String authorization) {
         Page<SigningCertificate> page = paginate(
-                iamService.listSigningCertificates(resolveUserName(params, authorization)), params);
+                iamService.listSigningCertificates(resolveUserName(params, authorization)),
+                SigningCertificate::getCertificateId, params);
         XmlBuilder xml = new XmlBuilder().start("Certificates");
         for (SigningCertificate certificate : page.items()) {
             xml.start("member").raw(signingCertificateXml(certificate)).end("member");
@@ -1120,7 +1128,7 @@ public class IamQueryHandler {
     private Response handleListServerCertificateTags(MultivaluedMap<String, String> params) {
         Map<String, String> tags = new TreeMap<>(iamService.listServerCertificateTags(
                 getParam(params, "ServerCertificateName")));
-        Page<Map.Entry<String, String>> page = paginate(List.copyOf(tags.entrySet()), params);
+        Page<Map.Entry<String, String>> page = paginate(List.copyOf(tags.entrySet()), Map.Entry::getKey, params);
         XmlBuilder xml = new XmlBuilder().start("Tags");
         for (Map.Entry<String, String> tag : page.items()) {
             xml.start("member").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("member");
@@ -1405,7 +1413,7 @@ public class IamQueryHandler {
     }
 
     private Response handleListRoles(MultivaluedMap<String, String> params) {
-        Page<IamRole> page = paginate(iamService.listRoles(getParam(params, "PathPrefix")), params);
+        Page<IamRole> page = paginate(iamService.listRoles(getParam(params, "PathPrefix")), IamRole::getRoleName, params);
         XmlBuilder xml = new XmlBuilder().start("Roles");
         for (IamRole r : page.items()) {
             xml.start("member").raw(roleXml(r, false)).end("member");
@@ -1493,7 +1501,7 @@ public class IamQueryHandler {
 
     private Response handleListPolicies(MultivaluedMap<String, String> params) {
         Page<IamPolicy> page = paginate(iamService.listPolicies(
-                getParam(params, "Scope"), getParam(params, "PathPrefix")), params);
+                getParam(params, "Scope"), getParam(params, "PathPrefix")), IamQueryHandler::policyKey, params);
         XmlBuilder xml = new XmlBuilder().start("Policies");
         for (IamPolicy p : page.items()) {
             xml.start("member").raw(policyXml(p, false)).end("member");
@@ -2280,7 +2288,7 @@ public class IamQueryHandler {
                                                          String authorization) {
         ServiceLastAccessedJob job = serviceLastAccessedService.get(
                 accountResolver.resolve(authorization), requireParam(params, "JobId"));
-        Page<String> page = paginate(job.getServiceNamespaces(), params);
+        Page<String> page = paginate(job.getServiceNamespaces(), Function.identity(), params);
         XmlBuilder xml = new XmlBuilder()
                 .elem("JobStatus", "COMPLETED")
                 .elem("JobType", job.getGranularity())
@@ -2357,7 +2365,7 @@ public class IamQueryHandler {
                        .build())).build();
         }
         List<String> namespaces = sortedByKey(job.getServiceNamespaces(), sortKey);
-        Page<String> page = paginate(namespaces, params);
+        Page<String> page = paginate(namespaces, Function.identity(), params);
         xml.elem("NumberOfServicesAccessible", namespaces.size())
            .elem("NumberOfServicesNotAccessed", namespaces.size())
            .start("AccessDetails");
@@ -2427,7 +2435,7 @@ public class IamQueryHandler {
         // The report named the services it covers, so an entity is only reported for one of those.
         List<ServiceLastAccessedEntity> reported = job.getServiceNamespaces().contains(namespace)
                 ? job.getEntities() : List.of();
-        Page<ServiceLastAccessedEntity> page = paginate(reported, params);
+        Page<ServiceLastAccessedEntity> page = paginate(reported, ServiceLastAccessedEntity::getArn, params);
         XmlBuilder xml = new XmlBuilder()
                 .elem("JobStatus", "COMPLETED")
                 .elem("JobCreationDate", isoDate(job.getJobCreationDate()))
@@ -2468,7 +2476,7 @@ public class IamQueryHandler {
         List<GrantingPolicy> candidates = policiesForIdentity(accountId, arn);
         // The response list carries one entry per requested namespace, so that is what a Marker
         // walks through.
-        Page<String> page = paginateByMarker(namespaces, params);
+        Page<String> page = paginateByMarker(namespaces, Function.identity(), params);
         XmlBuilder xml = new XmlBuilder().start("PoliciesGrantingServiceAccess");
         for (String namespace : page.items()) {
             xml.start("member").elem("ServiceNamespace", namespace).start("Policies");
@@ -2601,7 +2609,8 @@ public class IamQueryHandler {
 
     private Response handleListDelegationRequests(MultivaluedMap<String, String> params) {
         Page<DelegationRequest> page = paginate(delegationRequestService.list(
-                regionResolver.getAccountId(), getParam(params, "OwnerId")), params);
+                regionResolver.getAccountId(), getParam(params, "OwnerId")),
+                DelegationRequest::getDelegationRequestId, params);
         XmlBuilder xml = new XmlBuilder().start("DelegationRequests");
         for (DelegationRequest request : page.items()) {
             xml.start("member").raw(delegationRequestXml(request)).end("member");
@@ -2768,12 +2777,13 @@ public class IamQueryHandler {
     private record Page<T>(List<T> items, boolean truncated, String marker) {}
 
     /**
-     * Applies {@code MaxItems} and {@code Marker}. The marker is the index the next page starts at,
-     * which is all a caller is meant to do with it: AWS documents it as opaque and only ever hands
-     * back one it produced itself.
+     * Applies {@code MaxItems} and {@code Marker}. The marker names the last item of the page
+     * before by {@code keyOf}, so the next page continues after that item wherever it now sits:
+     * the API reference documents it as the place "where the next call should start", and an item
+     * created or deleted ahead of it skips nothing and repeats nothing.
      */
-    private <T> Page<T> paginate(List<T> items, MultivaluedMap<String, String> params) {
-        return paginate(items, params, true);
+    private <T> Page<T> paginate(List<T> items, Function<T, String> keyOf, MultivaluedMap<String, String> params) {
+        return paginate(items, keyOf, params, true);
     }
 
     /**
@@ -2781,14 +2791,16 @@ public class IamQueryHandler {
      * {@code Marker} but no {@code MaxItems}, and honouring a member AWS does not declare would be
      * inventing one.
      */
-    private <T> Page<T> paginateByMarker(List<T> items, MultivaluedMap<String, String> params) {
-        return paginate(items, params, false);
+    private <T> Page<T> paginateByMarker(List<T> items, Function<T, String> keyOf,
+                                         MultivaluedMap<String, String> params) {
+        return paginate(items, keyOf, params, false);
     }
 
-    private <T> Page<T> paginate(List<T> items, MultivaluedMap<String, String> params, boolean maxItemsModeled) {
+    private <T> Page<T> paginate(List<T> items, Function<T, String> keyOf, MultivaluedMap<String, String> params,
+                                 boolean maxItemsModeled) {
         // Every input is validated before the bounds check, so a malformed request is rejected
         // rather than answered emptily just because the marker happens to sit past the end.
-        int from = markerIndex(params);
+        int from = resumeIndex(items, keyOf, params);
         // An omitted MaxItems is not "no limit": the API reference states the count "defaults to
         // 100" on each reader paged here, so a list wider than that is truncated with a Marker as
         // it would be against AWS. Operations that model no MaxItems at all pass through whole.
@@ -2820,15 +2832,64 @@ public class IamQueryHandler {
         int to = from + Math.min(limit, items.size() - from);
         boolean truncated = to < items.size();
         return new Page<>(List.copyOf(items.subList(from, to)), truncated,
-                truncated ? Integer.toString(to) : null);
+                truncated ? issueMarker(keyOf.apply(items.get(to - 1))) : null);
     }
 
-    /** The index a {@code Marker} resumes at. Only a marker this handler produced is valid. */
-    private int markerIndex(MultivaluedMap<String, String> params) {
+    private static String issueMarker(String key) {
+        return Base64Url.encode(MARKER_PREFIX + key);
+    }
+
+    /**
+     * Where a {@code Marker} resumes: after the item it names. When that item is gone, at the first
+     * item whose key sorts after it, since every list whose items can be deleted is ordered by the
+     * key its reader passes. A marker this handler did not issue is read as an index, as before.
+     */
+    private <T> int resumeIndex(List<T> items, Function<T, String> keyOf, MultivaluedMap<String, String> params) {
         String marker = params.getFirst("Marker");
         if (marker == null || marker.isBlank()) {
             return 0;
         }
+        String anchor = issuedMarkerKey(marker.trim());
+        if (anchor == null) {
+            return markerIndex(marker);
+        }
+        for (int i = 0; i < items.size(); i++) {
+            if (keyOf.apply(items.get(i)).equals(anchor)) {
+                return i + 1;
+            }
+        }
+        for (int i = 0; i < items.size(); i++) {
+            if (keyOf.apply(items.get(i)).compareTo(anchor) > 0) {
+                return i;
+            }
+        }
+        return items.size();
+    }
+
+    /** The key an issued marker names, or null for a marker this handler did not issue. */
+    private static String issuedMarkerKey(String marker) {
+        String decoded;
+        try {
+            decoded = new String(Base64.getUrlDecoder().decode(marker), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException notIssued) {
+            // Not base64url, so not a marker this handler issued; the caller reads it as an index.
+            return null;
+        }
+        return decoded.startsWith(MARKER_PREFIX) ? decoded.substring(MARKER_PREFIX.length()) : null;
+    }
+
+    /**
+     * ListPolicies lists customer-managed policies by name, then the AWS-managed catalog, which
+     * never changes. The key keeps that order, so a deleted customer-managed policy resumes at the
+     * next one, and names the managed policy by ARN, as a customer policy may share its name.
+     */
+    private static String policyKey(IamPolicy policy) {
+        return AwsManagedPolicies.isManagedPolicyArn(policy.getArn())
+                ? "1" + policy.getArn() : "0" + policy.getPolicyName();
+    }
+
+    /** The index a marker this handler did not issue resumes at, as markers were read before. */
+    private static int markerIndex(String marker) {
         int index;
         try {
             index = Integer.parseInt(marker.trim());

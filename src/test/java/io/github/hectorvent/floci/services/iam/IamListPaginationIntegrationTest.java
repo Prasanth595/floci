@@ -243,4 +243,77 @@ class IamListPaginationIntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
         }
     }
+
+    /**
+     * The API reference documents Marker as the place "where the next call should start", so a
+     * continuation returns the roles after the ones already seen, whatever happened ahead of it.
+     */
+    @Test
+    void aRoleDeletedAheadOfTheMarkerSkipsNoRoleOnTheNextPage() {
+        String tag = suffix();
+        String path = "/pg-anchor-deleted-" + tag + "/";
+        List<String> names = roleNames(tag, 5);
+        names.forEach(name -> createRole(name, path));
+        List<String> remaining = new ArrayList<>(names);
+        try {
+            Page first = rolePage(path, "2", null);
+            assertEquals(names.subList(0, 2), first.names());
+
+            deleteRole(names.getFirst());
+            remaining.remove(names.getFirst());
+
+            assertEquals(names.subList(2, 5), flatten(walk(marker -> rolePage(path, "2",
+                    marker == null ? first.marker() : marker))));
+        } finally {
+            remaining.forEach(IamListPaginationIntegrationTest::deleteRole);
+        }
+    }
+
+    @Test
+    void aRoleCreatedAheadOfTheMarkerReturnsNoRoleTwice() {
+        String tag = suffix();
+        String path = "/pg-anchor-created-" + tag + "/";
+        List<String> names = roleNames(tag, 5);
+        names.subList(1, 5).forEach(name -> createRole(name, path));
+        try {
+            Page first = rolePage(path, "2", null);
+            assertEquals(names.subList(1, 3), first.names());
+
+            createRole(names.getFirst(), path);
+
+            assertEquals(names.subList(3, 5), flatten(walk(marker -> rolePage(path, "2",
+                    marker == null ? first.marker() : marker))));
+        } finally {
+            names.forEach(IamListPaginationIntegrationTest::deleteRole);
+        }
+    }
+
+    @Test
+    void theLastRoleOfAPageDeletedBeforeTheNextPageSkipsNoRole() {
+        String tag = suffix();
+        String path = "/pg-anchor-gone-" + tag + "/";
+        List<String> names = roleNames(tag, 5);
+        names.forEach(name -> createRole(name, path));
+        List<String> remaining = new ArrayList<>(names);
+        try {
+            Page first = rolePage(path, "2", null);
+            assertEquals(names.subList(0, 2), first.names());
+
+            deleteRole(names.get(1));
+            remaining.remove(names.get(1));
+
+            assertEquals(names.subList(2, 5), flatten(walk(marker -> rolePage(path, "2",
+                    marker == null ? first.marker() : marker))));
+        } finally {
+            remaining.forEach(IamListPaginationIntegrationTest::deleteRole);
+        }
+    }
+
+    private static List<String> roleNames(String tag, int count) {
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            names.add("pg-anchor-" + tag + "-" + i);
+        }
+        return names;
+    }
 }
