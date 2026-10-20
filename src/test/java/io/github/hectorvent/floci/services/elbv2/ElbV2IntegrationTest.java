@@ -504,10 +504,12 @@ class ElbV2IntegrationTest {
                 .extract()
                 .path("CreateSubnetResponse.subnet.subnetId");
 
-        String subnetlessLbArn = given()
+        String duplicateAzLbArn = given()
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", "set-duplicate-az-lb")
                 .formParam("Type", "application")
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -518,7 +520,7 @@ class ElbV2IntegrationTest {
 
         given()
                 .formParam("Action", "SetSubnets")
-                .formParam("LoadBalancerArn", subnetlessLbArn)
+                .formParam("LoadBalancerArn", duplicateAzLbArn)
                 .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
                 .formParam("Subnets.member.2", secondSubnetId)
                 .header("Authorization", AUTH)
@@ -529,9 +531,14 @@ class ElbV2IntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("InvalidConfigurationRequest"));
     }
 
+    /**
+     * A load balancer stays in the VPC it was created in. A balancer saved without one, before
+     * CreateLoadBalancer required subnets, takes the VPC of its first SetSubnets instead
+     * ({@code ElbV2ServiceTest}).
+     */
     @Test
     @Order(15)
-    void setSubnetsAfterSubnetlessCreateCanAdoptCustomVpc() {
+    void setSubnetsInAnotherVpcIsRefused() {
         String customVpcId = given()
                 .formParam("Action", "CreateVpc")
                 .formParam("CidrBlock", "10.2.0.0/16")
@@ -569,10 +576,12 @@ class ElbV2IntegrationTest {
                 .extract()
                 .path("CreateSubnetResponse.subnet.subnetId");
 
-        String subnetlessLbArn = given()
+        String otherVpcLbArn = given()
                 .formParam("Action", "CreateLoadBalancer")
-                .formParam("Name", "subnetless-adopt-vpc-lb")
+                .formParam("Name", "other-vpc-subnets-lb")
                 .formParam("Type", "application")
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -583,27 +592,29 @@ class ElbV2IntegrationTest {
 
         given()
                 .formParam("Action", "SetSubnets")
-                .formParam("LoadBalancerArn", subnetlessLbArn)
+                .formParam("LoadBalancerArn", otherVpcLbArn)
                 .formParam("Subnets.member.1", customSubnetAId)
                 .formParam("Subnets.member.2", customSubnetBId)
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
             .then()
-                .statusCode(200);
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidConfigurationRequest"))
+                .body("ErrorResponse.Error.Message", equalTo("All subnets must belong to the load balancer VPC."));
 
         given()
                 .formParam("Action", "DescribeLoadBalancers")
-                .formParam("LoadBalancerArns.member.1", subnetlessLbArn)
+                .formParam("LoadBalancerArns.member.1", otherVpcLbArn)
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
             .then()
                 .statusCode(200)
                 .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.VpcId",
-                        equalTo(customVpcId))
-                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.size()",
-                        equalTo(2));
+                        equalTo(Ec2Service.defaultVpcId("us-east-1")))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
+                        contains(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
     }
 
     @Test
@@ -1279,6 +1290,8 @@ class ElbV2IntegrationTest {
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", "lb-set-subnets")
                 .formParam("Type", "application")
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
                 .header("Authorization", AUTH)
             .when()
                 .post("/")

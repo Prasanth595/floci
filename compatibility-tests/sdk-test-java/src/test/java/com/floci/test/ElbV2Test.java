@@ -137,6 +137,7 @@ class ElbV2Test {
                 .type(LoadBalancerTypeEnum.APPLICATION)
                 .scheme(LoadBalancerSchemeEnum.INTERNET_FACING)
                 .ipAddressType(IpAddressType.IPV4)
+                .subnets(TestFixtures.defaultVpcSubnets())
                 .build());
 
         assertThat(resp.loadBalancers()).hasSize(1);
@@ -510,6 +511,7 @@ class ElbV2Test {
                 .type(LoadBalancerTypeEnum.APPLICATION)
                 .scheme(LoadBalancerSchemeEnum.INTERNAL)
                 .ipAddressType(IpAddressType.IPV4)
+                .subnets(TestFixtures.defaultVpcSubnets())
                 .build()).loadBalancers().get(0).loadBalancerArn();
         String otherListenerArn = null;
         String otherRuleArn = null;

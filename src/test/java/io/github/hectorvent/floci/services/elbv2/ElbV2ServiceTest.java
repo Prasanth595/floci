@@ -13,7 +13,9 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
+import io.github.hectorvent.floci.services.elbv2.model.AvailabilityZone;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
+import io.github.hectorvent.floci.services.elbv2.model.LoadBalancer;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
 import io.github.hectorvent.floci.services.elbv2.model.RuleCondition;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
@@ -834,5 +836,31 @@ class ElbV2ServiceTest {
         assertFalse(afterDelete.hasVpcDependency(REGION, "vpc-a"));
         assertEquals(targetGroup, afterDelete.describeTargetGroups(REGION, null,
                 List.of(targetGroup), null).getFirst().getTargetGroupArn());
+    }
+
+    /**
+     * A balancer saved before CreateLoadBalancer required subnets has no zones and no VPC. Its first
+     * SetSubnets gives it both, taking the VPC of those subnets, since it has none of its own to keep.
+     */
+    @Test
+    void aBalancerSavedWithoutSubnetsTakesTheVpcOfItsFirstSetSubnets() {
+        LoadBalancer saved = service.createLoadBalancer(REGION, "saved-subnetless", "internal", "application",
+                "ipv4", ALB_SUBNETS, List.of(), Map.of());
+        saved.setAvailabilityZones(new ArrayList<>());
+        saved.setVpcId(null);
+        Subnet subnetC = subnet("subnet-c", REGION + "a");
+        subnetC.setVpcId("vpc-b");
+        Subnet subnetD = subnet("subnet-d", REGION + "b");
+        subnetD.setVpcId("vpc-b");
+        when(ec2Service.describeSubnets(REGION, List.of("subnet-c", "subnet-d"), Map.of()))
+                .thenReturn(List.of(subnetC, subnetD));
+
+        service.setSubnets(REGION, saved.getLoadBalancerArn(), List.of("subnet-c", "subnet-d"));
+
+        LoadBalancer moved = service.describeLoadBalancers(REGION, List.of(saved.getLoadBalancerArn()), null,
+                null, null).getFirst();
+        assertEquals("vpc-b", moved.getVpcId());
+        assertEquals(List.of("subnet-c", "subnet-d"),
+                moved.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
     }
 }
