@@ -217,6 +217,7 @@ class CloudWatchMetricsJsonHandlerTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> handler.handle("PutMetricData", req, REGION));
         assertEquals("MissingParameter", e.getErrorCode());
+        assertEquals("MissingRequiredParameterException", e.jsonType());
         assertEquals(400, e.getHttpStatus());
         assertEquals("The parameter EntityMetricData.member.1.MetricData.member.2.MetricName is required.",
                 e.getMessage());

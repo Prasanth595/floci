@@ -195,6 +195,7 @@ class CloudWatchMetricsQueryHandlerTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> handler.handle("PutMetricData", params, REGION));
         assertEquals("MissingParameter", e.getErrorCode());
+        assertEquals("MissingRequiredParameterException", e.jsonType());
         assertEquals(400, e.getHttpStatus());
         assertEquals("The parameter MetricData.member.1.MetricName is required.", e.getMessage());
         verify(metricsService, never()).putMetricData(any(), any(), any());

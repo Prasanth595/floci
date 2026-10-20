@@ -233,4 +233,20 @@ class CloudWatchTest {
         assertThat(stats.datapoints()).hasSize(1);
         assertThat(stats.datapoints().get(0).sum()).isEqualTo(6.5);
     }
+
+    @Test
+    @DisplayName("PutMetricData without MetricName throws MissingRequiredParameterException")
+    void testPutMetricDataWithoutMetricNameIsRejected() {
+        String namespace = "JavaTestMissingMetricName";
+
+        assertThatThrownBy(() -> cloudWatchClient.putMetricData(request -> request
+                .namespace(namespace)
+                .entityMetricData(entityMetricData -> entityMetricData
+                        .metricData(MetricDatum.builder().value(1.0).build()))))
+                .isInstanceOf(MissingRequiredParameterException.class)
+                .satisfies(e -> assertThat(((MissingRequiredParameterException) e).awsErrorDetails().errorCode())
+                        .isEqualTo("MissingParameter"));
+
+        assertThat(cloudWatchClient.listMetrics(request -> request.namespace(namespace)).metrics()).isEmpty();
+    }
 }

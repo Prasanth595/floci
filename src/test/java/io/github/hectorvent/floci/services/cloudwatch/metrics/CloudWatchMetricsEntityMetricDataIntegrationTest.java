@@ -17,7 +17,6 @@ import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
-import static org.hamcrest.Matchers.startsWith;
 
 /**
  * PutMetricData datums nested under EntityMetricData, as the CloudWatch Agent sends them,
@@ -167,7 +166,8 @@ class CloudWatchMetricsEntityMetricDataIntegrationTest {
         .when().post("/")
         .then()
                 .statusCode(400)
-                .header("x-amzn-query-error", startsWith("MissingParameter;"))
+                .header("x-amzn-query-error", equalTo("MissingParameter;Sender"))
+                .body("__type", equalTo("MissingRequiredParameterException"))
                 .body("message", equalTo(
                         "The parameter EntityMetricData.member.1.MetricData.member.1.MetricName is required."));
 

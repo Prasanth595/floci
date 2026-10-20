@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.model.Dashboard;
@@ -621,8 +620,7 @@ public class CloudWatchMetricsJsonHandler {
             index++;
             JsonNode metricName = item.path("MetricName");
             if (!metricName.isTextual() || metricName.asText().isEmpty()) {
-                throw new AwsException("MissingParameter",
-                        "The parameter " + listPath + ".member." + index + ".MetricName is required.", 400);
+                throw CloudWatchMetricsException.missingParameter(listPath + ".member." + index + ".MetricName");
             }
             MetricDatum datum = new MetricDatum();
             datum.setMetricName(metricName.asText());

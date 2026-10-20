@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -624,8 +623,7 @@ public class CloudWatchMetricsQueryHandler {
                 if (metricName == null && params.keySet().stream().noneMatch(key -> key.startsWith(memberPrefix))) {
                     break;
                 }
-                throw new AwsException("MissingParameter",
-                        "The parameter " + memberPrefix + "MetricName is required.", 400);
+                throw CloudWatchMetricsException.missingParameter(memberPrefix + "MetricName");
             }
             MetricDatum datum = new MetricDatum();
             datum.setMetricName(metricName);
