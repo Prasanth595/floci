@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -27,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class CognitoOptionalTotpMfaIntegrationTest {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String PASSWORD = "Perm1234!";
 
     @Inject
@@ -247,6 +250,79 @@ class CognitoOptionalTotpMfaIntegrationTest {
                 """.formatted(clientId, challenged.path("Session").asText(),
                 parameters.path("USER_ID_FOR_SRP").asText(), CognitoTotp.code(secret, clock.instant())));
         assertFalse(signedIn.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
+    }
+
+    @Test
+    void verifySoftwareTokenRejectsAnOverLongFriendlyDeviceName() throws Exception {
+        String poolId = createOptionalPool();
+        String clientId = createClient(poolId);
+        String username = "long-name-" + UUID.randomUUID();
+        createUser(poolId, username);
+        String accessToken = cognitoJson("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"%s","PASSWORD":"%s"}}
+                """.formatted(clientId, username, PASSWORD)).path("AuthenticationResult").path("AccessToken").asText();
+        String secret = cognitoJson("AssociateSoftwareToken", accessTokenBody(accessToken))
+                .path("SecretCode").asText();
+        String tooLong = "d".repeat(CognitoAuthFlowHandler.MAX_FRIENDLY_DEVICE_NAME_LENGTH + 1);
+
+        cognitoAction("VerifySoftwareToken", """
+                {"AccessToken":"%s","UserCode":"%s","FriendlyDeviceName":"%s"}
+                """.formatted(accessToken, CognitoTotp.code(secret, clock.instant()), tooLong))
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("1 validation error detected: Value '" + tooLong
+                        + "' at 'friendlyDeviceName' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 131072"));
+        cognitoAction("SetUserMFAPreference", """
+                {"AccessToken":"%s","SoftwareTokenMfaSettings":{"Enabled":true}}
+                """.formatted(accessToken))
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"));
+    }
+
+    @Test
+    void friendlyDeviceNameOfSupplementaryCharactersIsLimitedByCharacterCount() throws Exception {
+        String poolId = createOptionalPool();
+        String clientId = createClient(poolId);
+        String username = "emoji-name-" + UUID.randomUUID();
+        createUser(poolId, username);
+        String loginRequest = """
+                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"%s","PASSWORD":"%s"}}
+                """.formatted(clientId, username, PASSWORD);
+        String accessToken = cognitoJson("InitiateAuth", loginRequest)
+                .path("AuthenticationResult").path("AccessToken").asText();
+        int limit = CognitoAuthFlowHandler.MAX_FRIENDLY_DEVICE_NAME_LENGTH;
+        // JSON escapes keep the request ASCII whatever charset the client encodes it with.
+        String escapedEmoji = "\\uD83D\\uDE00";
+
+        String rejectedSecret = cognitoJson("AssociateSoftwareToken", accessTokenBody(accessToken))
+                .path("SecretCode").asText();
+        Response rejected = cognitoAction("VerifySoftwareToken", """
+                {"AccessToken":"%s","UserCode":"%s","FriendlyDeviceName":"%s"}
+                """.formatted(accessToken, CognitoTotp.code(rejectedSecret, clock.instant()),
+                escapedEmoji.repeat(limit + 1)));
+        assertEquals(400, rejected.statusCode());
+        JsonNode error = JSON.readTree(rejected.asByteArray());
+        assertEquals("InvalidParameterException", error.path("__type").asText());
+        assertEquals("1 validation error detected: Value '" + "\uD83D\uDE00".repeat(limit + 1)
+                + "' at 'friendlyDeviceName' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 131072", error.path("message").asText());
+
+        String secret = cognitoJson("AssociateSoftwareToken", accessTokenBody(accessToken))
+                .path("SecretCode").asText();
+        assertEquals("SUCCESS", cognitoJson("VerifySoftwareToken", """
+                {"AccessToken":"%s","UserCode":"%s","FriendlyDeviceName":"%s"}
+                """.formatted(accessToken, CognitoTotp.code(secret, clock.instant()), escapedEmoji.repeat(limit)))
+                .path("Status").asText());
+        cognitoAction("SetUserMFAPreference", """
+                {"AccessToken":"%s","SoftwareTokenMfaSettings":{"Enabled":true,"PreferredMfa":true}}
+                """.formatted(accessToken))
+                .then().statusCode(200);
+        JsonNode challenged = JSON.readTree(cognitoAction("InitiateAuth", loginRequest).asByteArray());
+        assertEquals("\uD83D\uDE00".repeat(limit),
+                challenged.path("ChallengeParameters").path("FRIENDLY_DEVICE_NAME").asText());
     }
 
     private static String createOptionalPool() throws Exception {
