@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalanci
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Action;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.ActionTypeEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.AddTagsRequest;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.AvailabilityZone;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.CreateListenerRequest;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.CreateListenerResponse;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.CreateLoadBalancerRequest;
@@ -225,6 +226,29 @@ class ElbV2Test {
         boolean found = resp.attributes().stream()
                 .anyMatch(a -> "deletion_protection.enabled".equals(a.key()) && "true".equals(a.value()));
         assertThat(found).isTrue();
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("SetSubnets - neither Subnets nor SubnetMappings is a ValidationError")
+    void setSubnetsWithoutSubnets() {
+        List<String> subnets = TestFixtures.defaultVpcSubnets();
+        String arn = elb.createLoadBalancer(r -> r.name(TestFixtures.uniqueName("sdk-set-none"))
+                .type(LoadBalancerTypeEnum.NETWORK).subnets(subnets))
+                .loadBalancers().get(0).loadBalancerArn();
+        try {
+            assertThatThrownBy(() -> elb.setSubnets(r -> r.loadBalancerArn(arn)))
+                    .isInstanceOfSatisfying(ElasticLoadBalancingV2Exception.class, e -> {
+                        assertThat(e.statusCode()).isEqualTo(400);
+                        assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                        assertThat(e.awsErrorDetails().errorMessage()).isEqualTo("At least one subnet must be specified");
+                    });
+            assertThat(elb.describeLoadBalancers(r -> r.loadBalancerArns(arn)).loadBalancers().get(0).availabilityZones())
+                    .extracting(AvailabilityZone::subnetId)
+                    .containsExactlyInAnyOrderElementsOf(subnets);
+        } finally {
+            elb.deleteLoadBalancer(r -> r.loadBalancerArn(arn));
+        }
     }
 
     @Test

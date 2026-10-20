@@ -495,6 +495,42 @@ class ElbV2CfnProvisionerTest {
         assertEquals(Set.of("subnet-1", "subnet-2"), usedSubnets(moved));
     }
 
+    /**
+     * An update whose template names neither {@code Subnets} nor {@code SubnetMappings} leaves the kept
+     * load balancer on its subnets without a SetSubnets, which refuses a request with neither.
+     */
+    @Test
+    void anUpdateThatNamesNoSubnetsLeavesTheKeptLoadBalancerOnItsSubnets() {
+        when(elb.createLoadBalancer(eq(REGION), eq("web"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
+                .thenThrow(new AwsException("DuplicateLoadBalancerName", "exists", 400));
+        when(elb.describeLoadBalancers(REGION, null, List.of("web"), null, null))
+                .thenReturn(List.of(loadBalancerOn("web", "subnet-1", "subnet-2")));
+        StackResource lb = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        lb.getAttributes().put("LoadBalancerName", "web");
+
+        provisioner.provision(lb, mapper.createObjectNode().put("Name", "web"), ctx(LB_ARN));
+
+        assertEquals(Set.of("subnet-1", "subnet-2"), usedSubnets(lb));
+        assertTrue(provisioner.rollbackUpdate(lb));
+        verify(elb, never()).setSubnets(anyString(), anyString(), anyList());
+    }
+
+    /**
+     * A load balancer an earlier version saved without subnets is moved back onto none when an update
+     * that gave it subnets rolls back: the move back goes through ElbV2Service.setSubnets, which takes
+     * an empty list, where the SetSubnets action refuses one.
+     */
+    @Test
+    void aRollbackMovesALoadBalancerSavedWithoutSubnetsBackOntoNone() {
+        StackResource lb = keptLoadBalancerUpdatedTo(loadBalancerOn("web"), "subnet-1", "subnet-2");
+        verify(elb).setSubnets(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
+
+        assertTrue(provisioner.rollbackUpdate(lb));
+
+        verify(elb).setSubnets(REGION, LB_ARN, List.of());
+        assertEquals(Set.of(), usedSubnets(lb));
+    }
+
     @Test
     void theSameSubnetsInAnotherOrderLeaveTheKeptLoadBalancerAlone() {
         StackResource lb = keptLoadBalancerUpdatedTo(loadBalancerOn("web", "subnet-1", "subnet-2"),
