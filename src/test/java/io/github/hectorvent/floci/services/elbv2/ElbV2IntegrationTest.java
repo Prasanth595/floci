@@ -493,7 +493,7 @@ class ElbV2IntegrationTest {
     /** A Network or Gateway Load Balancer can be in a single Availability Zone. */
     @ParameterizedTest
     @CsvSource({"network", "gateway"})
-    @Order(12)
+    @Order(78)
     void createLoadBalancerOnOneSubnetIsAllowedForNetworkAndGatewayLoadBalancers(String type) {
         String arn = given()
                 .formParam("Action", "CreateLoadBalancer")
