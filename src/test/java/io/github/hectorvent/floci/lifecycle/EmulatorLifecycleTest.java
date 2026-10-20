@@ -585,18 +585,6 @@ class EmulatorLifecycleTest {
     }
 
     @Test
-    void actualShutdownSelectsProcessTeardownBeforeTheFinalStorageShutdown() {
-        ContainerTeardown teardown = Mockito.mock(ContainerTeardown.class);
-        when(containerTeardowns.iterator()).thenReturn(java.util.List.of(teardown).iterator());
-        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
-        InOrder order = Mockito.inOrder(storageFactory, teardown);
-        order.verify(storageFactory).flushAll();
-        order.verify(teardown).stopManagedContainersForShutdown();
-        order.verify(storageFactory).shutdownAll();
-        verify(teardown, never()).stopManagedContainers();
-    }
-
-    @Test
     @DisplayName("onStop flushes storage BEFORE the slow container teardown, and shuts it down last")
     void shouldFlushStorageBeforeContainerTeardown() {
         emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));

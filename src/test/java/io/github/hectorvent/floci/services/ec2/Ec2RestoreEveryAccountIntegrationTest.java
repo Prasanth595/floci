@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.RequestScopes;
-import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -43,7 +42,6 @@ class Ec2RestoreEveryAccountIntegrationTest {
         @Override
         public Map<String, String> getConfigOverrides() {
             return Map.of("floci.services.ec2.mock", "false",
-                    "floci.services.servicequotas.standard-on-demand-vcpus", "1000",
                     "floci.network.security-group-enforcement.enabled", "true");
         }
     }
@@ -116,7 +114,6 @@ class Ec2RestoreEveryAccountIntegrationTest {
         doAnswer(invocation -> {
             Instance stopped = invocation.getArgument(0);
             if (isSame(stopped, instance)) {
-                stopped.setState(InstanceState.stopped());
                 stopped.getPublishedPorts().clear();
                 persister.get().accept(stopped);
             }
@@ -144,25 +141,6 @@ class Ec2RestoreEveryAccountIntegrationTest {
 
         assertEquals(List.of(instance.getInstanceId()), RequestScopes.callAs(OTHER_ACCOUNT,
                 () -> describe(instance.getInstanceId()).stream().map(Instance::getInstanceId).toList()));
-        assertFalse(RequestScopes.callAs("000000000000", () -> describe(null).stream()
-                .anyMatch(listed -> listed.getInstanceId().equals(instance.getInstanceId()))));
-    }
-
-    @Test
-    void failedFirewallRestoreDoesNotReleaseAnUnconfirmedPhysicalStop() throws Throwable {
-        Instance instance = runningInstanceOf(OTHER_ACCOUNT);
-        instance.setSecurityGroups(List.of(new GroupIdentifier("sg-missing-on-restore", "missing")));
-        doAnswer(invocation -> {
-            Instance pendingStop = invocation.getArgument(0);
-            pendingStop.setState(InstanceState.stopping());
-            return null;
-        }).when(containerManager).stopForShutdown(argThat(stopped -> isSame(stopped, instance)));
-        restoreOutsideAnyRequest();
-        verify(containerManager).stopForShutdown(argThat(stopped -> isSame(stopped, instance)));
-        Instance stored = RequestScopes.callAs(OTHER_ACCOUNT,
-                () -> describe(instance.getInstanceId()).getFirst());
-        assertEquals("stopping", stored.getState().getName());
-        assertEquals(instance.getDockerContainerId(), stored.getDockerContainerId());
         assertFalse(RequestScopes.callAs("000000000000", () -> describe(null).stream()
                 .anyMatch(listed -> listed.getInstanceId().equals(instance.getInstanceId()))));
     }

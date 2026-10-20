@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
@@ -13,9 +12,7 @@ import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.command.PingCmd;
-import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
-import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerConfig;
@@ -26,7 +23,6 @@ import com.github.dockerjava.api.model.NetworkSettings;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -37,10 +33,8 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
-import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
@@ -80,12 +74,12 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -93,11 +87,10 @@ import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -465,8 +458,6 @@ class Ec2ContainerManagerTest {
         when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
 
         DockerClient dockerClient = mock(DockerClient.class);
-        StopContainerCmd cleanupStop = mock(StopContainerCmd.class, RETURNS_SELF);
-        when(dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(cleanupStop);
         when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
                 .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
         // A workload in the helper's namespace has no Docker attachment of its own, so there is
@@ -788,58 +779,6 @@ class Ec2ContainerManagerTest {
 
         assertEquals(null, manager.reachablePublicAddress(new Instance()));
         assertEquals(null, manager.reachablePublicAddress(null));
-    }
-
-    @ParameterizedTest
-    @CsvSource({"terminate", "elastic", "container", "generation"})
-    void aCompletedReachabilityProbeCannotPublishOverANewerOwner(String change) throws Exception {
-        ContainerNetworkReachability reachability = mock(ContainerNetworkReachability.class);
-        CountDownLatch probing = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        when(reachability.isContainerIpRoutable("192.168.215.2")).thenAnswer(call -> {
-            probing.countDown();
-            assertTrue(release.await(3, TimeUnit.SECONDS));
-            return true;
-        });
-        Ec2ContainerManager manager = managerWithReachability(reachability);
-        Instance instance = new Instance();
-        instance.setInstanceId("i-address-owner");
-        instance.setState(InstanceState.running());
-        instance.setDockerContainerId("original-container");
-        instance.setContainerBridgeIp("192.168.215.2");
-        String expected = "elastic".equals(change) ? "198.51.100.20" : null;
-        ExecutorService worker = Executors.newSingleThreadExecutor();
-        try {
-            Future<?> publication = worker.submit(() -> manager.exposeReachablePublicAddress(instance));
-            assertTrue(probing.await(2, TimeUnit.SECONDS));
-            switch (change) {
-                case "terminate" -> instance.setState(InstanceState.terminated());
-                case "elastic" -> {
-                    // An intervening writer changes both fields, even if a later writer restores them.
-                    instance.setPublicIpAddress("198.51.100.19");
-                    instance.setPublicDnsName("198.51.100.19");
-                    instance.setPublicIpAddress(expected);
-                    instance.setPublicDnsName(expected);
-                }
-                case "container" -> {
-                    instance.setDockerContainerId("replacement-container");
-                    instance.setContainerBridgeIp("192.168.215.3");
-                }
-                case "generation" -> {
-                    instance.setState(InstanceState.stopped());
-                    instance.setState(InstanceState.running());
-                }
-                default -> throw new IllegalArgumentException(change);
-            }
-            release.countDown();
-            publication.get(2, TimeUnit.SECONDS);
-            assertEquals(expected, instance.getPublicIpAddress());
-            assertEquals(expected, instance.getPublicDnsName());
-        } finally {
-            release.countDown();
-            worker.shutdownNow();
-            assertTrue(worker.awaitTermination(3, TimeUnit.SECONDS));
-        }
     }
 
     private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {
@@ -1272,556 +1211,10 @@ class Ec2ContainerManagerTest {
         harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
 
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
-        verify(harness.lifecycleManager, timeout(2_000)).removeIfExistsStrict(TEST_CONTAINER_ID);
+        verify(harness.lifecycleManager, timeout(2_000)).removeIfExists(TEST_CONTAINER_ID);
         verify(harness.portAllocator, timeout(2_000)).release(2201);
         assertNull(instance.getDockerContainerId());
         verify(harness.metadataServer, never()).registerContainer(anyString(), anyString(), any());
-    }
-
-    @ParameterizedTest
-    @CsvSource({"false", "true"})
-    void stopDuringFirstCreateThenStartStillPerformsInitialGuestSetup(boolean beforeDispatch) throws Exception {
-        Ec2ContainerManager.containerBridgeIpAttempts = 1;
-        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
-        ExecutorService worker = Executors.newSingleThreadExecutor();
-        LaunchHarness harness = launchHarness(worker, Duration.ofSeconds(1));
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        when(harness.lifecycleManager.create(any(ContainerSpec.class))).thenAnswer(call -> {
-            entered.countDown();
-            assertTrue(release.await(5, TimeUnit.SECONDS));
-            return TEST_CONTAINER_ID;
-        });
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        InspectContainerResponse ready = inspectResponse("172.18.0.61");
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        when(inspect.exec()).thenReturn(ready);
-        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
-        StartContainerCmd start = mock(StartContainerCmd.class);
-        when(harness.dockerClient.startContainerCmd(TEST_CONTAINER_ID)).thenReturn(start);
-        RemoveContainerCmd removal = mock(RemoveContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.removeContainerCmd(TEST_CONTAINER_ID)).thenReturn(removal);
-        CountDownLatch userDataStarted = new CountDownLatch(1);
-        harness.stubSuccessfulExecs(userDataStarted, new CountDownLatch(0));
-        Instance instance = instance("i-first-boot-stopped");
-        instance.setUserData("#!/bin/sh\necho first-boot");
-        instance.setRegion("us-west-2");
-        instance.setVpcId("vpc-first-boot");
-        instance.setSubnetId("subnet-first-boot");
-        instance.setPrivateIpAddress("10.0.0.61");
-        try {
-            if (beforeDispatch) {
-                instance.setState(InstanceState.pending());
-                instance.beginInitialSetup();
-                harness.manager.stop(instance);
-            }
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            assertTrue(entered.await(5, TimeUnit.SECONDS));
-            if (!beforeDispatch) {
-                harness.manager.stop(instance);
-            }
-            assertEquals("stopping", instance.getState().getName());
-            release.countDown();
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertEquals("stopped", instance.getState().getName());
-            harness.manager.start(instance);
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertEquals("running", instance.getState().getName());
-            org.junit.jupiter.api.Assertions.assertAll(
-                    () -> assertEquals(0, userDataStarted.getCount(),
-                            "a stop before first boot must not discard never-attempted UserData"),
-                    () -> verify(harness.vpcNetworkManager).attach("us-west-2", "vpc-first-boot",
-                            "subnet-first-boot", TEST_CONTAINER_ID, "10.0.0.61"),
-                    () -> assertTrue(commandIndex(harness.executedCommands,
-                            Ec2ContainerManager.sshdInstallProbeCommand()) >= 0,
-                            "the first boot must not skip its SSH setup after an intervening stop"));
-            harness.manager.stop(instance);
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            harness.manager.start(instance);
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertEquals(1, harness.executedCommands.stream()
-                    .filter(command -> command.length == 1 && "/var/lib/user-data.sh".equals(command[0])).count());
-        } finally {
-            release.countDown();
-            harness.manager.terminate(instance);
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            worker.shutdownNow();
-            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void firstUserDataDispatchIntentSurvivesJsonWithoutReplayingLegacyRows() throws Exception {
-        ObjectMapper mapper = new ObjectMapper();
-        Instance pending = instance("i-first-script-intent");
-        pending.setState(InstanceState.pending());
-        pending.beginInitialSetup();
-        Instance restoredPending = mapper.readValue(mapper.writeValueAsBytes(pending), Instance.class);
-        assertTrue(restoredPending.claimInitialUserData());
-        assertFalse(restoredPending.claimInitialUserData());
-        Instance restoredAttempted = mapper.readValue(mapper.writeValueAsBytes(restoredPending), Instance.class);
-        assertFalse(restoredAttempted.claimInitialUserData());
-        Instance legacy = mapper.readValue("{\"instanceId\":\"i-legacy\"}", Instance.class);
-        assertFalse(legacy.claimInitialUserData());
-    }
-
-    @ParameterizedTest
-    @CsvSource({"false", "true"})
-    void stopOnEitherSideOfInitialSetupHandoffAlwaysStopsTheGuest(boolean beforeHandoff) throws Exception {
-        Ec2ContainerManager.containerBridgeIpAttempts = 1;
-        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
-        ExecutorService worker = Executors.newSingleThreadExecutor();
-        LaunchHarness harness = launchHarness(worker, Duration.ofSeconds(1));
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        InspectContainerResponse ready = inspectResponse("172.18.0.63");
-        when(inspect.exec()).thenReturn(ready);
-        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
-        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
-        Instance instance = spy(instance("i-stop-handoff"));
-        AtomicBoolean first = new AtomicBoolean(true);
-        CountDownLatch handoff = new CountDownLatch(1);
-        doAnswer(call -> {
-            if (!first.getAndSet(false)) {
-                return call.callRealMethod();
-            }
-            if (beforeHandoff) {
-                harness.manager.stop(instance);
-            }
-            boolean shouldStop = (boolean) call.callRealMethod();
-            if (!beforeHandoff) {
-                harness.manager.stop(instance);
-            }
-            handoff.countDown();
-            return shouldStop;
-        }).when(instance).completeInitialSetup(org.mockito.ArgumentMatchers.anyLong());
-        try {
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            assertTrue(handoff.await(5, TimeUnit.SECONDS));
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertEquals("stopped", instance.getState().getName());
-            assertFalse(instance.initialSetupPending());
-            verify(stop).exec();
-        } finally {
-            worker.shutdownNow();
-            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @ParameterizedTest
-    @CsvSource({"persistent", "hybrid", "wal"})
-    void processShutdownSettlesAQueuedRestartBeforeItsWorkerIsDiscarded(String mode, @TempDir Path directory)
-            throws Exception {
-        ExecutorService worker = Executors.newSingleThreadExecutor();
-        LaunchHarness harness = launchHarness(worker, Duration.ofSeconds(1));
-        CountDownLatch occupied = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        worker.submit(() -> {
-            occupied.countDown();
-            try {
-                release.await();
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        assertTrue(occupied.await(2, TimeUnit.SECONDS));
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.defaultAccountId()).thenReturn("000000000000");
-        when(config.storage().persistentPath()).thenReturn(directory.toString());
-        when(config.storage().wal().compactionIntervalMs()).thenReturn(60000L);
-        when(config.services().servicequotas().standardOnDemandVcpus()).thenReturn(2);
-        ServiceConfigAccess access = mock(ServiceConfigAccess.class);
-        when(access.storageMode("ec2")).thenReturn(mode);
-        when(access.storageFlushInterval("ec2")).thenReturn(60000L);
-        StorageFactory storage = new StorageFactory(config, access);
-        try {
-            Ec2Service service = new Ec2Service(config, harness.manager, harness.portForwardManager,
-                    mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(), storage);
-            Instance instance = instance("i-queued-exit");
-            instance.setInstanceType("t3.micro");
-            instance.setRegion("us-east-1");
-            instance.setOwnerId("000000000000");
-            instance.setState(InstanceState.stopped());
-            instance.setDockerContainerId(TEST_CONTAINER_ID);
-            service.putInstanceForTest(instance);
-            StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-            when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
-            service.startInstances("us-east-1", List.of(instance.getInstanceId()));
-            assertEquals("pending", instance.getState().getName());
-            service.stopManagedContainersForShutdown();
-            worker.shutdownNow();
-            release.countDown();
-            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
-            assertEquals("stopped", instance.getState().getName());
-            verify(stop).exec();
-            verify(harness.dockerClient, never()).startContainerCmd(anyString());
-        } finally {
-            release.countDown();
-            worker.shutdownNow();
-            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
-            storage.shutdownAll();
-        }
-        StorageFactory reloaded = new StorageFactory(config, access);
-        try {
-            Ec2ContainerManager nextManager = mock(Ec2ContainerManager.class);
-            Ec2Service next = new Ec2Service(config, nextManager, harness.portForwardManager,
-                    mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(), reloaded);
-            Instance restored = next.describeInstances("us-east-1", List.of("i-queued-exit"), Map.of())
-                    .getFirst().getInstances().getFirst();
-            assertEquals("stopped", restored.getState().getName());
-            assertEquals(TEST_CONTAINER_ID, restored.getDockerContainerId());
-            next.startInstances("us-east-1", List.of("i-queued-exit"));
-            verify(nextManager).start(eq(restored), any(), anyLong());
-        } finally {
-            reloaded.shutdownAll();
-        }
-    }
-
-    @Test
-    void processShutdownReturnsWithItsInitialSetupHoldInsteadOfWaitingIndefinitely() throws Exception {
-        ExecutorService worker = Executors.newSingleThreadExecutor();
-        ExecutorService caller = Executors.newSingleThreadExecutor();
-        LaunchHarness harness = launchHarness(worker, Duration.ofSeconds(1));
-        CountDownLatch creating = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        when(harness.lifecycleManager.create(any(ContainerSpec.class))).thenAnswer(call -> {
-            creating.countDown();
-            assertTrue(release.await(10, TimeUnit.SECONDS));
-            return TEST_CONTAINER_ID;
-        });
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        InspectContainerResponse ready = inspectResponse("172.18.0.65");
-        when(inspect.exec()).thenReturn(ready);
-        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
-        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
-        Instance instance = instance("i-bounded-process-shutdown");
-        boolean returned;
-        boolean held;
-        try {
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            assertTrue(creating.await(2, TimeUnit.SECONDS));
-            Future<?> shutdown = caller.submit(() -> harness.manager.stopForProcessShutdown(instance));
-            try {
-                shutdown.get(6, TimeUnit.SECONDS);
-                returned = true;
-            } catch (java.util.concurrent.TimeoutException unbounded) {
-                returned = false;
-            }
-            held = "stopping".equals(instance.getState().getName()) && instance.initialSetupPending();
-            release.countDown();
-            shutdown.get(5, TimeUnit.SECONDS);
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertTrue(returned, "process shutdown must not wait indefinitely for initial setup");
-            assertTrue(held, "timeout must preserve the pending physical operation and admission hold");
-            assertEquals("stopped", instance.getState().getName());
-            verify(stop, atLeastOnce()).exec();
-        } finally {
-            release.countDown();
-            worker.shutdownNow();
-            caller.shutdownNow();
-            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
-            assertTrue(caller.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @ParameterizedTest
-    @CsvSource({"false", "true"})
-    void processShutdownUsesOneWaitBudgetAndPreservesPhysicalOwnershipForRetry(boolean initialSetup) throws Exception {
-        LaunchHarness harness = launchHarness();
-        Instance instance = instance("i-bounded-physical-wait");
-        if (initialSetup) {
-            instance.setState(InstanceState.pending());
-            instance.beginInitialSetup();
-        } else {
-            instance.setState(InstanceState.running());
-        }
-        long original = instance.stateTransition();
-        instance.setDockerContainerId(TEST_CONTAINER_ID);
-        instance.setSshHostPort(2201);
-        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
-        ExecutorService caller = Executors.newSingleThreadExecutor();
-        instance.lifecycleLock().lock();
-        try {
-            Future<?> shutdown = caller.submit(() -> harness.manager.stopForProcessShutdown(instance));
-            awaitUntil(() -> "stopping".equals(instance.getState().getName()), Duration.ofSeconds(2));
-            if (initialSetup) {
-                assertTrue(instance.initialSetupPending());
-                Thread.sleep(2000);
-                instance.completeInitialSetup(original);
-            } else {
-                awaitUntil(() -> instance.lifecycleLock().hasQueuedThreads(), Duration.ofSeconds(2));
-            }
-            // A fresh five-second budget after setup would exceed the remaining four seconds.
-            shutdown.get(initialSetup ? 4 : 6, TimeUnit.SECONDS);
-            assertEquals("stopping", instance.getState().getName());
-            assertEquals(TEST_CONTAINER_ID, instance.getDockerContainerId());
-            assertEquals(2201, instance.getSshHostPort());
-            verify(stop, never()).exec();
-            instance.lifecycleLock().unlock();
-            harness.manager.stopForProcessShutdown(instance);
-            assertEquals("stopped", instance.getState().getName());
-            verify(stop).exec();
-        } finally {
-            if (instance.lifecycleLock().isHeldByCurrentThread()) {
-                instance.lifecycleLock().unlock();
-            }
-            caller.shutdownNow();
-            assertTrue(caller.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void shutdownWaitsForInitialGuestSetupOutsideTheLaunchPool() throws Exception {
-        Ec2ContainerManager.containerBridgeIpAttempts = 1;
-        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
-        ExecutorService worker = Executors.newSingleThreadExecutor();
-        ExecutorService shutdownCaller = Executors.newSingleThreadExecutor();
-        LaunchHarness harness = launchHarness(worker, Duration.ofSeconds(1));
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        when(harness.lifecycleManager.create(any(ContainerSpec.class))).thenAnswer(call -> {
-            entered.countDown();
-            assertTrue(release.await(5, TimeUnit.SECONDS));
-            return TEST_CONTAINER_ID;
-        });
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        InspectContainerResponse ready = inspectResponse("172.18.0.64");
-        when(inspect.exec()).thenReturn(ready);
-        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
-        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
-        Instance instance = instance("i-shutdown-first-boot");
-        try {
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            assertTrue(entered.await(5, TimeUnit.SECONDS));
-            Future<?> shutdown = shutdownCaller.submit(() -> harness.manager.stopForShutdown(instance));
-            awaitUntil(() -> "stopping".equals(instance.getState().getName()), Duration.ofSeconds(2));
-            assertFalse(shutdown.isDone());
-            Instance unrelated = instance("i-shutdown-independent");
-            unrelated.setState(InstanceState.stopped());
-            harness.manager.start(unrelated);
-            assertEquals("running", unrelated.getState().getName());
-            release.countDown();
-            shutdown.get(5, TimeUnit.SECONDS);
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertEquals("stopped", instance.getState().getName());
-            assertFalse(instance.initialSetupPending());
-            assertTrue(commandIndex(harness.executedCommands,
-                    Ec2ContainerManager.sshdInstallProbeCommand()) >= 0);
-            verify(stop, atLeastOnce()).exec();
-        } finally {
-            release.countDown();
-            worker.shutdownNow();
-            shutdownCaller.shutdownNow();
-            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
-            assertTrue(shutdownCaller.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void completedTerminationCannotBeFollowedByStaleLaunchMetadataPublication() throws Exception {
-        Ec2ContainerManager.containerBridgeIpAttempts = 1;
-        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
-        ExecutorService workers = Executors.newFixedThreadPool(2);
-        LaunchHarness harness = launchHarness(workers, Duration.ofSeconds(1));
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        AtomicBoolean first = new AtomicBoolean(true);
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        InspectContainerResponse ready = inspectResponse("172.18.0.62");
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        when(inspect.exec()).thenAnswer(call -> {
-            if (first.getAndSet(false)) {
-                entered.countDown();
-                assertTrue(release.await(5, TimeUnit.SECONDS));
-            }
-            return ready;
-        });
-        RemoveContainerCmd removal = mock(RemoveContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.removeContainerCmd(TEST_CONTAINER_ID)).thenReturn(removal);
-        Instance instance = instance("i-stale-bridge-after-terminate");
-        try {
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            assertTrue(entered.await(5, TimeUnit.SECONDS));
-            harness.manager.terminate(instance);
-            awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
-            assertNull(instance.getDockerContainerId());
-            assertNull(instance.getContainerBridgeIp());
-            Instance unrelated = instance("i-independent-metadata-progress");
-            unrelated.setState(InstanceState.stopped());
-            harness.manager.start(unrelated);
-            assertEquals("running", unrelated.getState().getName());
-            release.countDown();
-            workers.shutdown();
-            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
-            org.junit.jupiter.api.Assertions.assertAll(
-                    () -> assertEquals("terminated", instance.getState().getName()),
-                    () -> assertNull(instance.getDockerContainerId()),
-                    () -> assertNull(instance.getContainerBridgeIp()),
-                    () -> verify(harness.metadataServer, never()).registerContainer(
-                            "172.18.0.62", instance.getInstanceId(), instance));
-        } finally {
-            release.countDown();
-            workers.shutdownNow();
-            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void failedLaunchRetainsOwnershipWhenTheRealRemovalHelperCannotConfirmCleanup() throws Exception {
-        Ec2ContainerManager.containerBridgeIpAttempts = 1;
-        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
-        ExecutorService worker = Executors.newSingleThreadExecutor();
-        LaunchHarness harness = launchHarness(worker, Duration.ofSeconds(1));
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        InspectContainerResponse noIp = inspectResponse(null);
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        when(inspect.exec()).thenReturn(noIp);
-        RemoveContainerCmd removal = mock(RemoveContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.removeContainerCmd(TEST_CONTAINER_ID)).thenReturn(removal);
-        doThrow(new RuntimeException("Docker cleanup unavailable")).when(removal).exec();
-        ContainerLifecycleManager realCleanup = new ContainerLifecycleManager(harness.dockerClient, null, null, harness.config);
-        doAnswer(call -> {
-            realCleanup.removeIfExists(call.getArgument(0));
-            return null;
-        }).when(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
-        doAnswer(call -> {
-            realCleanup.removeIfExistsStrict(call.getArgument(0));
-            return null;
-        }).when(harness.lifecycleManager).removeIfExistsStrict(TEST_CONTAINER_ID);
-        Instance instance = instance("i-uncertain-cleanup");
-        try {
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            verify(removal).exec();
-            org.junit.jupiter.api.Assertions.assertAll(
-                    () -> assertEquals("shutting-down", instance.getState().getName()),
-                    () -> assertEquals(TEST_CONTAINER_ID, instance.getDockerContainerId()),
-                    () -> assertEquals(2201, instance.getSshHostPort()),
-                    () -> verify(harness.portAllocator, never()).release(2201));
-            doNothing().when(removal).exec();
-            harness.manager.terminate(instance);
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertEquals("terminated", instance.getState().getName());
-            assertNull(instance.getDockerContainerId());
-            verify(harness.portAllocator).release(2201);
-        } finally {
-            worker.shutdownNow();
-            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void failedStartRetainsOwnershipWhenDockerCannotRemoveTheCreatedGuest() throws Exception {
-        Ec2ContainerManager.containerBridgeIpAttempts = 1;
-        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
-        ExecutorService worker = Executors.newSingleThreadExecutor();
-        LaunchHarness harness = launchHarness(worker, Duration.ofSeconds(1));
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        InspectContainerResponse noIp = inspectResponse(null);
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        when(inspect.exec()).thenReturn(noIp);
-        when(harness.lifecycleManager.startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class)))
-                .thenThrow(new RuntimeException("start failed"));
-        RemoveContainerCmd removal = mock(RemoveContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.removeContainerCmd(TEST_CONTAINER_ID)).thenReturn(removal);
-        doThrow(new RuntimeException("Docker cleanup unavailable")).when(removal).exec();
-        ContainerLifecycleManager realCleanup = new ContainerLifecycleManager(harness.dockerClient, null, null, harness.config);
-        doAnswer(call -> {
-            realCleanup.removeIfExists(call.getArgument(0));
-            return null;
-        }).when(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
-        doAnswer(call -> {
-            realCleanup.removeIfExistsStrict(call.getArgument(0));
-            return null;
-        }).when(harness.lifecycleManager).removeIfExistsStrict(TEST_CONTAINER_ID);
-        Instance instance = instance("i-start-uncertain-cleanup");
-        try {
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            verify(removal).exec();
-            org.junit.jupiter.api.Assertions.assertAll(
-                    () -> assertEquals("shutting-down", instance.getState().getName()),
-                    () -> assertEquals(TEST_CONTAINER_ID, instance.getDockerContainerId()),
-                    () -> assertEquals(2201, instance.getSshHostPort()),
-                    () -> verify(harness.portAllocator, never()).release(2201));
-            doNothing().when(removal).exec();
-            harness.manager.terminate(instance);
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertEquals("terminated", instance.getState().getName());
-            assertNull(instance.getDockerContainerId());
-            verify(harness.portAllocator).release(2201);
-        } finally {
-            worker.shutdownNow();
-            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void cancelledCreateRetainsLateOwnershipUntilStrictRemovalSucceeds() throws Exception {
-        Ec2ContainerManager.containerBridgeIpAttempts = 1;
-        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
-        ExecutorService worker = Executors.newSingleThreadExecutor();
-        LaunchHarness harness = launchHarness(worker, Duration.ofSeconds(1));
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        InspectContainerResponse noIp = inspectResponse(null);
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        when(inspect.exec()).thenReturn(noIp);
-        RemoveContainerCmd removal = mock(RemoveContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.removeContainerCmd(TEST_CONTAINER_ID)).thenReturn(removal);
-        doThrow(new RuntimeException("Docker cleanup unavailable")).when(removal).exec();
-        ContainerLifecycleManager realCleanup = new ContainerLifecycleManager(harness.dockerClient, null, null, harness.config);
-        doAnswer(call -> {
-            realCleanup.removeIfExists(call.getArgument(0));
-            return null;
-        }).when(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
-        doAnswer(call -> {
-            realCleanup.removeIfExistsStrict(call.getArgument(0));
-            return null;
-        }).when(harness.lifecycleManager).removeIfExistsStrict(TEST_CONTAINER_ID);
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        when(harness.lifecycleManager.create(any(ContainerSpec.class))).thenAnswer(call -> {
-            entered.countDown();
-            assertTrue(release.await(5, TimeUnit.SECONDS));
-            return TEST_CONTAINER_ID;
-        });
-        Instance instance = instance("i-late-uncertain-cleanup");
-        try {
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            assertTrue(entered.await(5, TimeUnit.SECONDS));
-            assertTrue(harness.manager.cancelLaunch(instance));
-            String stateWhileCreating = instance.getState().getName();
-            Instance unrelated = instance("i-unrelated-metadata");
-            unrelated.setState(InstanceState.stopped());
-            harness.manager.start(unrelated);
-            assertEquals("running", unrelated.getState().getName());
-            release.countDown();
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            verify(removal).exec();
-            assertEquals("shutting-down", stateWhileCreating);
-            org.junit.jupiter.api.Assertions.assertAll(
-                    () -> assertEquals("shutting-down", instance.getState().getName()),
-                    () -> assertEquals(TEST_CONTAINER_ID, instance.getDockerContainerId()),
-                    () -> assertEquals(2201, instance.getSshHostPort()),
-                    () -> verify(harness.portAllocator, never()).release(2201));
-            doNothing().when(removal).exec();
-            harness.manager.terminate(instance);
-            worker.submit(() -> { }).get(5, TimeUnit.SECONDS);
-            assertEquals("terminated", instance.getState().getName());
-            assertNull(instance.getDockerContainerId());
-            verify(harness.portAllocator).release(2201);
-        } finally {
-            release.countDown();
-            worker.shutdownNow();
-            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
-        }
     }
 
     @Test
@@ -1847,7 +1240,7 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         assertEquals(2202, instance.getSshHostPort());
-        verify(harness.lifecycleManager).removeIfExistsStrict("container-conflict");
+        verify(harness.lifecycleManager).removeIfExists("container-conflict");
         verify(harness.portAllocator).release(2201);
         verify(harness.portAllocator, never()).markReserved(anyInt());
         verify(harness.builder).withPortBinding(22, 2201);
@@ -1878,18 +1271,14 @@ class Ec2ContainerManagerTest {
             cancelled.set(harness.manager.cancelLaunch(instance));
             dockerGone.set(true);
             return null;
-        }).when(harness.lifecycleManager).removeIfExistsStrict(TEST_CONTAINER_ID);
+        }).when(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
 
-        try {
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            awaitUntil(cancelled::get, Duration.ofSeconds(2));
-            awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
-            assertTrue(cancelled.get(), "the launch should be cancelled while the refused container is removed");
-            assertEquals("terminated", instance.getState().getName());
-        } finally {
-            launchExecutor.shutdownNow();
-            assertTrue(launchExecutor.awaitTermination(5, TimeUnit.SECONDS), "launch worker should finish");
-        }
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+        launchExecutor.shutdown();
+        assertTrue(launchExecutor.awaitTermination(5, TimeUnit.SECONDS), "launch worker should finish");
+
+        assertTrue(cancelled.get(), "the launch should be cancelled while the refused container is removed");
+        assertEquals("terminated", instance.getState().getName());
     }
 
     @Test
@@ -1902,7 +1291,7 @@ class Ec2ContainerManagerTest {
         harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
 
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
-        verify(harness.lifecycleManager).removeIfExistsStrict(TEST_CONTAINER_ID);
+        verify(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
         verify(harness.portAllocator).release(2201);
     }
 
@@ -1937,11 +1326,10 @@ class Ec2ContainerManagerTest {
 
         assertTrue(startEntered.await(2, TimeUnit.SECONDS), "container startup should begin");
         assertTrue(harness.manager.cancelLaunch(instance));
-        assertEquals("shutting-down", instance.getState().getName());
-        allowStart.countDown();
-        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
-        verify(harness.lifecycleManager).removeIfExistsStrict(TEST_CONTAINER_ID);
+        verify(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
         verify(harness.portAllocator).release(2201);
+
+        allowStart.countDown();
         verify(harness.portAllocator, after(500).times(1)).release(2201);
     }
 
@@ -1961,13 +1349,13 @@ class Ec2ContainerManagerTest {
 
         assertTrue(createEntered.await(2, TimeUnit.SECONDS), "container creation should begin");
         assertTrue(harness.manager.cancelLaunch(instance));
-        assertEquals("shutting-down", instance.getState().getName());
+        assertEquals("terminated", instance.getState().getName());
 
         allowCreate.countDown();
-        verify(harness.lifecycleManager, timeout(2_000)).removeIfExistsStrict(TEST_CONTAINER_ID);
+        verify(harness.lifecycleManager, timeout(2_000)).removeIfExists(TEST_CONTAINER_ID);
         verify(harness.portAllocator, timeout(2_000)).release(2201);
         verify(harness.lifecycleManager, never()).startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class));
-        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        assertEquals("terminated", instance.getState().getName());
     }
 
     @Test
@@ -1992,34 +1380,6 @@ class Ec2ContainerManagerTest {
         assertFalse(finishUserData.await(10, TimeUnit.MILLISECONDS), "user data should still be blocked");
         finishUserData.countDown();
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
-    }
-
-    @Test
-    void aRunningGuestCanTerminateWhileUserDataIsBlocked() throws Exception {
-        LaunchHarness harness = launchHarness();
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        InspectContainerResponse response = inspectResponse("172.18.0.10");
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        when(inspect.exec()).thenReturn(response);
-        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.removeContainerCmd(TEST_CONTAINER_ID)).thenReturn(remove);
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        harness.stubSuccessfulExecs(entered, release);
-        Instance instance = instance("i-userdata-termination");
-        instance.setUserData("#!/bin/sh\necho ready\n");
-        try {
-            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
-            assertTrue(entered.await(2, TimeUnit.SECONDS));
-            assertEquals("running", instance.getState().getName());
-            harness.manager.terminate(instance);
-            verify(remove, timeout(2000)).exec();
-            awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
-            assertEquals(1, release.getCount(), "termination must not wait for user data");
-        } finally {
-            release.countDown();
-            harness.manager.stop();
-        }
     }
 
     @Test
@@ -2339,147 +1699,6 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         return execCreate;
     }
-
-    @Test
-    void aQueuedStartCannotRunAfterANewerStopCompleted() {
-        ExecutorService executor = mock(ExecutorService.class);
-        List<Runnable> queued = new ArrayList<>();
-        when(executor.submit(any(Runnable.class))).thenAnswer(call -> {
-            queued.add(call.getArgument(0));
-            return mock(Future.class);
-        });
-        LaunchHarness harness = launchHarness(executor, Duration.ofSeconds(1));
-        AtomicBoolean physicalRunning = new AtomicBoolean(false);
-        StartContainerCmd start = mock(StartContainerCmd.class);
-        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.startContainerCmd(TEST_CONTAINER_ID)).thenReturn(start);
-        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
-        doAnswer(call -> { physicalRunning.set(true); return null; }).when(start).exec();
-        doAnswer(call -> { physicalRunning.set(false); return null; }).when(stop).exec();
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        InspectContainerResponse response = inspectResponse("172.17.0.9");
-        when(inspect.exec()).thenReturn(response);
-        Instance instance = new Instance();
-        instance.setInstanceId("i-reordered");
-        instance.setDockerContainerId(TEST_CONTAINER_ID);
-        instance.setState(InstanceState.stopped());
-        harness.manager.start(instance);
-        harness.manager.stop(instance);
-        assertEquals(2, queued.size());
-        queued.get(1).run();
-        assertEquals("stopped", instance.getState().getName());
-        queued.get(0).run();
-        assertFalse(physicalRunning.get(), "a stale worker must not restart a guest after its reservation was released");
-        verify(start, never()).exec();
-    }
-
-    @Test
-    void anInFlightStartIsStoppedBeforeCapacityIsReleasedAndUnrelatedInstancesProgress() throws Exception {
-        QueuedLifecycle fixture = queuedLifecycle();
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        doAnswer(call -> {
-            entered.countDown();
-            assertTrue(release.await(5, TimeUnit.SECONDS));
-            fixture.running.set(true);
-            return null;
-        }).when(fixture.start).exec();
-        ExecutorService workers = Executors.newFixedThreadPool(2);
-        AtomicReference<Thread> stopping = new AtomicReference<>();
-        try {
-            fixture.harness.manager.start(fixture.instance);
-            Future<?> starting = workers.submit(fixture.queued.get(0));
-            assertTrue(entered.await(2, TimeUnit.SECONDS));
-            fixture.harness.manager.stop(fixture.instance);
-            Future<?> stopped = workers.submit(() -> {
-                stopping.set(Thread.currentThread());
-                fixture.queued.get(1).run();
-            });
-            awaitUntil(() -> stopping.get() != null && fixture.instance.lifecycleLock().hasQueuedThread(stopping.get()),
-                    Duration.ofSeconds(2));
-            assertEquals("stopping", fixture.instance.getState().getName());
-            Instance unrelated = new Instance();
-            unrelated.setInstanceId("i-unrelated-progress");
-            unrelated.setState(InstanceState.stopped());
-            fixture.harness.manager.start(unrelated);
-            assertEquals("running", unrelated.getState().getName());
-            release.countDown();
-            starting.get(3, TimeUnit.SECONDS);
-            stopped.get(3, TimeUnit.SECONDS);
-            assertEquals("stopped", fixture.instance.getState().getName());
-            assertFalse(fixture.running.get());
-        } finally {
-            release.countDown();
-            workers.shutdownNow();
-            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void aFailedStopRetainsCapacityUntilItsRetryStopsTheGuest() {
-        QueuedLifecycle fixture = queuedLifecycle();
-        fixture.instance.setState(InstanceState.running());
-        fixture.running.set(true);
-        doThrow(new IllegalStateException("controlled stop failure")).when(fixture.stop).exec();
-        fixture.harness.manager.stop(fixture.instance);
-        fixture.queued.get(0).run();
-        assertEquals("stopping", fixture.instance.getState().getName());
-        assertTrue(fixture.running.get());
-        doAnswer(call -> { fixture.running.set(false); return null; }).when(fixture.stop).exec();
-        fixture.harness.manager.stop(fixture.instance);
-        fixture.queued.get(1).run();
-        assertEquals("stopped", fixture.instance.getState().getName());
-        assertFalse(fixture.running.get());
-    }
-
-    @Test
-    void aFailedStartCannotReleaseCapacityWhenItsCleanupAlsoFails() {
-        QueuedLifecycle fixture = queuedLifecycle();
-        doAnswer(call -> {
-            fixture.running.set(true);
-            throw new IllegalStateException("controlled start failure");
-        }).when(fixture.start).exec();
-        doThrow(new IllegalStateException("controlled cleanup failure")).when(fixture.stop).exec();
-        fixture.harness.manager.start(fixture.instance);
-        fixture.queued.get(0).run();
-        assertTrue(fixture.running.get());
-        assertEquals("stopping", fixture.instance.getState().getName());
-        doAnswer(call -> { fixture.running.set(false); return null; }).when(fixture.stop).exec();
-        fixture.harness.manager.stop(fixture.instance);
-        fixture.queued.get(1).run();
-        assertFalse(fixture.running.get());
-        assertEquals("stopped", fixture.instance.getState().getName());
-    }
-
-    private static QueuedLifecycle queuedLifecycle() {
-        ExecutorService executor = mock(ExecutorService.class);
-        List<Runnable> queued = new ArrayList<>();
-        when(executor.submit(any(Runnable.class))).thenAnswer(call -> {
-            queued.add(call.getArgument(0));
-            return mock(Future.class);
-        });
-        LaunchHarness harness = launchHarness(executor, Duration.ofSeconds(1));
-        AtomicBoolean running = new AtomicBoolean();
-        StartContainerCmd start = mock(StartContainerCmd.class);
-        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
-        when(harness.dockerClient.startContainerCmd(TEST_CONTAINER_ID)).thenReturn(start);
-        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
-        doAnswer(call -> { running.set(true); return null; }).when(start).exec();
-        doAnswer(call -> { running.set(false); return null; }).when(stop).exec();
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        InspectContainerResponse response = inspectResponse("172.17.0.9");
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        when(inspect.exec()).thenReturn(response);
-        Instance instance = new Instance();
-        instance.setInstanceId("i-physical-lifecycle");
-        instance.setDockerContainerId(TEST_CONTAINER_ID);
-        instance.setState(InstanceState.stopped());
-        return new QueuedLifecycle(harness, queued, running, start, stop, instance);
-    }
-
-    private record QueuedLifecycle(LaunchHarness harness, List<Runnable> queued, AtomicBoolean running,
-                                   StartContainerCmd start, StopContainerCmd stop, Instance instance) { }
 
     private static LaunchHarness launchHarness() {
         return launchHarness(null, Duration.ofMinutes(30));
@@ -2880,14 +2099,8 @@ class Ec2ContainerManagerTest {
 
         harness.manager().terminate(instance, () -> ran.set(true));
 
-        verify(harness.dockerClient(), timeout(2000)).removeContainerCmd("c-stuck");
-        assertEquals("shutting-down", instance.getState().getName(), "a live guest retains its admission");
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
         assertFalse(ran.get(), "the hook must not run when the container is still present");
-        RemoveContainerCmd retry = mock(RemoveContainerCmd.class, RETURNS_SELF);
-        doReturn(retry).when(harness.dockerClient()).removeContainerCmd("c-stuck");
-        harness.manager().terminate(instance, () -> ran.set(true));
-        awaitUntil(ran::get, Duration.ofSeconds(2));
-        assertEquals("terminated", instance.getState().getName());
     }
 
     @Test

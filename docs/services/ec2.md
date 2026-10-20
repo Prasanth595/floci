@@ -22,57 +22,37 @@ By default, Docker containers launched for EC2 instances are bounded to the CPU 
 
 - **CPU limit**: Each vCPU corresponds to 1024 CPU units (Docker nanoCPUs = `vcpu * 1_000_000_000`). If the host machine has fewer physical cores than requested, Floci clamps execution to available host CPUs and warns (since Docker refuses a nanoCPUs value exceeding the host CPU count).
 - **Memory limit**: Container memory is bounded to the exact MiB value specified for the instance type in the catalog.
-- **Types outside the full catalog**: Docker CPU and memory limits are not applied when the full catalog lacks a type. Standard On-Demand admission still requires a known default vCPU count, as described below.
+- **Types outside the full catalog**: Docker CPU and memory limits are not applied when the full catalog lacks a type. When opted in, Standard On-Demand admission requires a known default vCPU count, as described below.
 - **Configuration knob**: To disable container resource limits (for example, running a large instance type on a developer machine with limited resources), set `floci.services.ec2.instance-resource-limits: false` (or environment variable `FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS=false`).
 
 ## Standard On-Demand admission
 
-`RunInstances` and `StartInstances` enforce the applied Standard On-Demand quota
-(`L-1216C47A`) separately for each account and region. Set
-`FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` to a nonnegative integer
-(default `5`); `0` refuses additional Standard capacity. The same value is
-reported by Service Quotas, even if that service's endpoint is disabled.
+Quota admission is opt-in. Set `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS=true` to
+check `RunInstances` and `StartInstances` against the applied Standard On-Demand
+quota (`L-1216C47A`) for the caller's account and region. The flag defaults to
+`false`, including mock mode. Disabled admission does not refuse a type merely
+because its default vCPU count is absent from the snapshot.
 
-Admission uses each type's default vCPU count, independently of Docker CPU
-clamping or custom CPU options. A batch launch may return fewer than `MaxCount`
-when capacity permits at least `MinCount`; otherwise it returns
-`VcpuLimitExceeded` before publishing the batch. A refused start leaves stopped
-instances unchanged. Spot requests through `RunInstances`, including inherited launch-template
-market options, retain their Spot classification; explicit request market options override
-the template. Spot instances and dedicated hosts do not consume this
-Standard bucket; other instance families retain their separate bucket semantics.
+`FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` supplies the applied value
+(default `5`). Service Quotas reports this value independently of admission.
+With admission enabled, a launch batch can return fewer than `MaxCount` when at
+least `MinCount` fits, otherwise it returns `VcpuLimitExceeded`. A refused start
+leaves stopped instances unchanged. Types in the Standard bucket require a
+known default vCPU count; the separate CPU-only snapshot supplements the full
+instance metadata catalog without inventing memory sizes or regional availability.
 
-Floci reserves capacity while a launch or start is pending. It also retains
-capacity during stopping and shutting down until physical cleanup succeeds.
-These are conservative internal admission holds, not a simulation of AWS's
-reported running-instance usage. Failed workload removal retains its identity
-and reservation so a later teardown can retry safely. Process exit uses one
-five-second budget for initial-setup and physical-gate waiting, retaining an
-unfinished stopping hold when it expires. This does not bound Docker transport
-latency or total shutdown time. State reset retains the draining teardown path
-before clearing its tracking data. An interrupted teardown can be retried with
-`StopInstances` or `TerminateInstances`; once stopped, `StartInstances` can retry a
-start. Startup does not automatically complete every interrupted lifecycle operation.
+Only current `running` Standard On-Demand instances count. Pending, stopping,
+stopped, shutting-down and terminated instances do not reserve capacity. Spot
+and dedicated-host instances do not consume this bucket. RunInstances retains
+direct or inherited launch-template Spot selection; explicit request market
+options override the template. Requests for Spot through the other supported
+launch APIs retain that provenance too.
 
-CloudFormation type and user-data updates stop a previously active instance before
-modification and restart it through normal quota admission. If that restart is refused,
-the changed instance remains stopped. The stack reports `UPDATE_ROLLBACK_FAILED`
-when the prior physical state was not restored.
-
-The separate `ec2/instance-type-vcpus.yaml` resource supplements the full
-network/architecture catalog for quota accounting only. It contains explicit
-`DefaultVCpus` captured with `DescribeInstanceTypes` on October 20, 2026,
-including types unsupported in the capture region, plus the documented
-`p6e-gb200.36xlarge` count. It does not add those types to
-`DescribeInstanceTypes`, infer other metadata, or establish regional launchability.
-
-A Standard type without known CPU metadata is unsupported for quota-enforced
-launches and starts: Floci returns `InvalidParameterValue` before mutation.
-An active legacy record of such a type also prevents new Standard admission
-until it is stopped or terminated. Stop and Terminate remain available.
-This is a local support limitation; the error text is not a captured AWS
-`RunInstances` response. The snapshot is finite and does not guess counts for
-unknown or future types.
+These are checks of running usage at request admission, not a reservation ledger
+or an eventual running ceiling. Accepted pending operations can complete after
+other work consumes capacity, and changing a running instance's type is not
+covered by the Run/Start checks. Admission does not change guest cleanup,
+restart, user-data, public-address or CloudFormation lifecycle behavior.
 
 ## AMI to Docker Image Mapping
 

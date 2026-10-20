@@ -3,12 +3,8 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
 import java.util.List;
@@ -29,15 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * doesn't pollute the shared in-memory Ec2Service state asserted by us-east-1 EC2 tests.
  */
 @QuarkusTest
-@TestProfile(CloudFormationEc2InstanceIntegrationTest.CapacityProfile.class)
 class CloudFormationEc2InstanceIntegrationTest {
-
-    public static class CapacityProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.servicequotas.standard-on-demand-vcpus", "1000");
-        }
-    }
 
     @Inject
     Ec2Service ec2;
@@ -236,13 +224,11 @@ class CloudFormationEc2InstanceIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<instanceType>t3.small</instanceType>"))
-            .body(containsString("<name>running</name>"));
+            .body(containsString("<instanceType>t3.small</instanceType>"));
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"t3.micro", "t3.small"})
-    void updateStackAppliesUserDataAndIamInstanceProfileInPlace(String updatedType) {
+    @Test
+    void updateStackAppliesUserDataAndIamInstanceProfileInPlace() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-ec2-inplace-" + suffix;
         String firstProfile = "cfn-inplace-" + suffix;
@@ -269,11 +255,10 @@ class CloudFormationEc2InstanceIntegrationTest {
             assertUserData(instanceId, "Zmlyc3QgYm9vdA==");
             assertInstanceProfile(instanceId, firstArn);
 
-            cfn("UpdateStack", stackName,
-                    template.replace("t3.micro", updatedType).formatted("second boot", secondProfile));
+            cfn("UpdateStack", stackName, template.formatted("second boot", secondProfile));
             String updateXml = describeStacks(stackName, "UPDATE_COMPLETE");
 
-            // Type, user data and profile changes retain the same instance.
+            // Both properties are mutable: the same instance carries the new values.
             assertTrue(updateXml.contains("<OutputValue>" + instanceId + "</OutputValue>"),
                     "instance id changed on update, so it was replaced not updated in place: " + updateXml);
             assertUserData(instanceId, "c2Vjb25kIGJvb3Q=");
@@ -284,8 +269,7 @@ class CloudFormationEc2InstanceIntegrationTest {
                 .formParam("Action", "DescribeInstances")
                 .formParam("InstanceId.1", instanceId)
             .when().post("/").then().statusCode(200)
-                .body(containsString("<name>running</name>"))
-                .body(containsString("<instanceType>" + updatedType + "</instanceType>"));
+                .body(containsString("<name>running</name>"));
         } finally {
             deleteInstanceProfile(firstProfile);
             deleteInstanceProfile(secondProfile);

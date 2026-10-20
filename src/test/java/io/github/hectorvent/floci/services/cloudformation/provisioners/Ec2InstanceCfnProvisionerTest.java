@@ -22,7 +22,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,7 +33,6 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -111,7 +109,6 @@ class Ec2InstanceCfnProvisionerTest {
         Instance instance = new Instance();
         instance.setInstanceId("i-stateless");
         stubLaunch(instance);
-        instance.setState(null);
         StackResource r = resource("Server");
         r.getAttributes().put("State.Code", "80");
         r.getAttributes().put("State.Name", "stopped");
@@ -391,9 +388,6 @@ class Ec2InstanceCfnProvisionerTest {
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);
         instance.setImageId("ami-1");
-        instance.setInstanceType("t3.micro");
-        instance.setState(InstanceState.running());
-        stubLifecycle(instance);
         when(ec2.describeInstances("us-east-1", List.of(instanceId), null))
                 .thenReturn(List.of(reservationOf(instance)));
         return instance;
@@ -705,235 +699,10 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     private void stubLaunch(Instance instance) {
-        if (instance.getState() == null) {
-            instance.setState(InstanceState.running());
-        }
-        if (instance.getInstanceType() == null) {
-            instance.setInstanceType("t3.micro");
-        }
-        stubLifecycle(instance);
         Reservation reservation = new Reservation();
         reservation.getInstances().add(instance);
         when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
                 any(), any(), anyList(), any(), any(), any())).thenReturn(reservation);
-    }
-
-    private void stubLifecycle(Instance instance) {
-        when(ec2.stopInstances("us-east-1", List.of(instance.getInstanceId()))).thenAnswer(invocation -> {
-            instance.setState(InstanceState.stopped());
-            return List.of();
-        });
-        when(ec2.startInstances("us-east-1", List.of(instance.getInstanceId()))).thenAnswer(invocation -> {
-            instance.setState(InstanceState.running());
-            return List.of();
-        });
-    }
-
-    @Test
-    void combinedResizeAndUserDataWaitForStoppedAndShareOneInterruption() throws Exception {
-        Instance instance = reusable("i-1");
-        instance.setUserData("old");
-        AtomicInteger stoppedReads = new AtomicInteger();
-        doAnswer(invocation -> {
-            instance.setState(InstanceState.stopping());
-            return List.of();
-        }).when(ec2).stopInstances("us-east-1", List.of("i-1"));
-        when(ec2.describeInstances("us-east-1", List.of("i-1"), null)).thenAnswer(invocation -> {
-            if ("stopping".equals(instance.getState().getName()) && stoppedReads.incrementAndGet() == 3) {
-                instance.setState(InstanceState.stopped());
-            }
-            return List.of(reservationOf(instance));
-        });
-        doAnswer(invocation -> {
-            assertEquals(3, stoppedReads.get());
-            assertEquals("stopped", instance.getState().getName());
-            instance.setInstanceType(invocation.getArgument(3));
-            return null;
-        }).when(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.small");
-        doAnswer(invocation -> {
-            assertEquals("stopped", instance.getState().getName());
-            instance.setUserData(invocation.getArgument(2));
-            return null;
-        }).when(ec2).modifyInstanceUserData("us-east-1", "i-1", "new");
-        provisioner.stopPollMillis = 1;
-
-        provisioner.provision(resource("Server"),
-                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\",\"UserData\":\"new\"}"), ctx("i-1"));
-
-        assertEquals("t3.small", instance.getInstanceType());
-        assertEquals("new", instance.getUserData());
-        InOrder order = inOrder(ec2);
-        order.verify(ec2).stopInstances("us-east-1", List.of("i-1"));
-        order.verify(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.small");
-        order.verify(ec2).modifyInstanceUserData("us-east-1", "i-1", "new");
-        order.verify(ec2).startInstances("us-east-1", List.of("i-1"));
-        order.verify(ec2).awaitContainerLaunch(instance);
-        verify(ec2, times(1)).stopInstances("us-east-1", List.of("i-1"));
-        verify(ec2, times(1)).startInstances("us-east-1", List.of("i-1"));
-    }
-
-    @Test
-    void stoppedCombinedUpdateDoesNotRestartTheInstance() throws Exception {
-        Instance instance = reusable("i-1");
-        instance.setState(InstanceState.stopped());
-        instance.setUserData("old");
-
-        provisioner.provision(resource("Server"),
-                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\",\"UserData\":\"new\"}"), ctx("i-1"));
-
-        verify(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.small");
-        verify(ec2).modifyInstanceUserData("us-east-1", "i-1", "new");
-        verify(ec2, never()).stopInstances(anyString(), anyList());
-        verify(ec2, never()).startInstances(anyString(), anyList());
-        verify(ec2, never()).awaitContainerLaunch(any());
-    }
-
-    @Test
-    void failedStopCannotModifyOrRestartTheInstance() throws Exception {
-        reusable("i-1");
-        doThrow(new AwsException("IncorrectInstanceState", "stop refused", 400))
-                .when(ec2).stopInstances("us-east-1", List.of("i-1"));
-        assertThrows(AwsException.class, () -> provisioner.provision(resource("Server"),
-                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
-        verifyNoStoppedMutationOrStart();
-    }
-
-    @Test
-    void uncertainStopTimesOutWithoutModifyingOrRestartingTheInstance() throws Exception {
-        Instance instance = reusable("i-1");
-        doAnswer(invocation -> {
-            instance.setState(InstanceState.stopping());
-            return List.of();
-        }).when(ec2).stopInstances("us-east-1", List.of("i-1"));
-        provisioner.stopTimeoutMillis = 5;
-        provisioner.stopPollMillis = 1;
-        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource("Server"),
-                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
-        assertTrue(failure.getMessage().contains("did not reach stopped"));
-        assertEquals("stopping", instance.getState().getName());
-        verifyNoStoppedMutationOrStart();
-    }
-
-    @Test
-    void terminatedWhileStoppingCannotBeModifiedOrRestarted() throws Exception {
-        Instance instance = reusable("i-1");
-        doAnswer(invocation -> {
-            instance.setState(InstanceState.shuttingDown());
-            return List.of();
-        }).when(ec2).stopInstances("us-east-1", List.of("i-1"));
-        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource("Server"),
-                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
-        assertTrue(failure.getMessage().contains("became unavailable"));
-        verifyNoStoppedMutationOrStart();
-    }
-
-    @Test
-    void interruptionPreservesTheFlagAndPreventsMutationAndRestart() throws Exception {
-        reusable("i-1");
-        Thread.currentThread().interrupt();
-        try {
-            assertThrows(AwsException.class, () -> provisioner.provision(resource("Server"),
-                    props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
-            assertTrue(Thread.currentThread().isInterrupted());
-            verifyNoStoppedMutationOrStart();
-        } finally {
-            Thread.interrupted();
-        }
-    }
-
-    @Test
-    void restartQuotaRefusalKeepsTheStoppedUpdateAndDoesNotAwaitALaunch() throws Exception {
-        Instance instance = reusable("i-1");
-        doAnswer(invocation -> {
-            instance.setInstanceType(invocation.getArgument(3));
-            return null;
-        }).when(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.small");
-        doThrow(new AwsException("VcpuLimitExceeded", "quota refused", 400))
-                .when(ec2).startInstances("us-east-1", List.of("i-1"));
-        StackResource resource = resource("Server");
-        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource,
-                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
-        assertEquals("VcpuLimitExceeded", failure.getErrorCode());
-        assertTrue(resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR).contains("not restored"));
-        assertEquals("stopped", instance.getState().getName());
-        assertEquals("t3.small", instance.getInstanceType());
-        verify(ec2, never()).awaitContainerLaunch(any());
-    }
-
-    @Test
-    void aRefusedStopThatChangedNothingDoesNotClaimPhysicalRollbackFailed() throws Exception {
-        Instance instance = reusable("i-1");
-        StackResource resource = resource("Server");
-        doThrow(new AwsException("OperationNotPermitted", "stop refused", 400))
-                .when(ec2).stopInstances("us-east-1", List.of("i-1"));
-        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource,
-                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
-        assertEquals("OperationNotPermitted", failure.getErrorCode());
-        assertEquals("running", instance.getState().getName());
-        assertFalse(resource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
-        verifyNoStoppedMutationOrStart();
-    }
-
-    @Test
-    void anAlreadyStoppingInstanceFinishesItsStopWithoutBeingRestarted() throws Exception {
-        Instance instance = reusable("i-1");
-        instance.setState(InstanceState.stopping());
-        AtomicInteger reads = new AtomicInteger();
-        when(ec2.describeInstances("us-east-1", List.of("i-1"), null)).thenAnswer(invocation -> {
-            if (reads.incrementAndGet() == 3) {
-                instance.setState(InstanceState.stopped());
-            }
-            return List.of(reservationOf(instance));
-        });
-        provisioner.stopPollMillis = 1;
-        provisioner.provision(resource("Server"),
-                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1"));
-        verify(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.small");
-        verify(ec2, never()).stopInstances(anyString(), anyList());
-        verify(ec2, never()).startInstances(anyString(), anyList());
-        assertEquals("stopped", instance.getState().getName());
-    }
-
-    @Test
-    void interruptedPollingPreservesStopAndDoesNotMutateOrRestart() throws Exception {
-        Instance instance = reusable("i-1");
-        doAnswer(invocation -> {
-            instance.setState(InstanceState.stopping());
-            return List.of();
-        }).when(ec2).stopInstances("us-east-1", List.of("i-1"));
-        when(ec2.describeInstances("us-east-1", List.of("i-1"), null)).thenAnswer(invocation -> {
-            if ("stopping".equals(instance.getState().getName())) {
-                Thread.currentThread().interrupt();
-            }
-            return List.of(reservationOf(instance));
-        });
-        try {
-            assertThrows(AwsException.class, () -> provisioner.provision(resource("Server"),
-                    props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
-            assertTrue(Thread.currentThread().isInterrupted());
-            assertEquals("stopping", instance.getState().getName());
-            verifyNoStoppedMutationOrStart();
-        } finally {
-            Thread.interrupted();
-        }
-    }
-
-    @Test
-    void aStartThatDoesNotLeaveStoppedCannotBeAwaitedAsALaunch() throws Exception {
-        Instance instance = reusable("i-1");
-        doAnswer(invocation -> List.of()).when(ec2).startInstances("us-east-1", List.of("i-1"));
-        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource("Server"),
-                props("{\"ImageId\":\"ami-1\",\"InstanceType\":\"t3.small\"}"), ctx("i-1")));
-        assertTrue(failure.getMessage().contains("did not enter pending or running"));
-        assertEquals("stopped", instance.getState().getName());
-        verify(ec2, never()).awaitContainerLaunch(any());
-    }
-
-    private void verifyNoStoppedMutationOrStart() {
-        verify(ec2, never()).modifyInstanceAttribute(anyString(), anyString(), anyString(), anyString());
-        verify(ec2, never()).modifyInstanceUserData(anyString(), anyString(), any());
-        verify(ec2, never()).startInstances(anyString(), anyList());
-        verify(ec2, never()).awaitContainerLaunch(any());
     }
 
     private ProvisionContext ctx() {

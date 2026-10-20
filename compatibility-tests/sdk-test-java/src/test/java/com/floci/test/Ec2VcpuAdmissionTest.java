@@ -25,8 +25,8 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 class Ec2VcpuAdmissionTest {
     @Test
-    void appliedQuotaLimitsBatchesAndStartsWhileSpotAndOtherAccountsRemainIndependent() {
-        assumeFalse(TestFixtures.isRealAws(), "Local admission holds and mock guest lifecycle only");
+    void quotaAdmissionFollowsOptInWhileSpotAndOtherAccountsRemainIndependent() {
+        assumeFalse(TestFixtures.isRealAws(), "Local opt-in admission and mock guest lifecycle only");
         Region region = TestFixtures.region();
         String owner = "765432101234";
         StaticCredentialsProvider credentials = StaticCredentialsProvider.create(AwsBasicCredentials.create(owner, "test"));
@@ -47,6 +47,26 @@ class Ec2VcpuAdmissionTest {
                     "FLOCI_TEST_EXPECTED_STANDARD_ON_DEMAND_VCPUS", "5"));
             assertThat(limit).as("applied quota retains the ordinary default or explicit fixture value")
                     .isEqualTo(expectedLimit);
+            if (!enforcementExpected()) {
+                try {
+                    ec2.runInstances(r -> r.imageId("ami-0abcdef1234567890").instanceType(InstanceType.T2_MICRO)
+                            .minCount(6).maxCount(6)).instances().forEach(i -> ids.add(i.instanceId()));
+                    ids.add(ec2.runInstances(r -> r.imageId("ami-0abcdef1234567890")
+                            .instanceType(InstanceType.M5_2_XLARGE).minCount(1).maxCount(1))
+                            .instances().get(0).instanceId());
+                    assertThat(ids).hasSize(7);
+                    ec2.stopInstances(r -> r.instanceIds(ids));
+                    ec2.startInstances(r -> r.instanceIds(ids));
+                    assertThat(ec2.describeInstances(r -> r.instanceIds(ids)).reservations())
+                            .flatExtracting(reservation -> reservation.instances())
+                            .allSatisfy(instance -> assertThat(instance.state().nameAsString()).isEqualTo("running"));
+                } finally {
+                    if (!ids.isEmpty()) {
+                        ec2.terminateInstances(r -> r.instanceIds(ids));
+                    }
+                }
+                return;
+            }
             assertThat(limit).as("compatibility fixture uses a small positive applied quota")
                     .isBetween(2, 32);
             int guests = limit / 2;
@@ -55,6 +75,7 @@ class Ec2VcpuAdmissionTest {
                         .instanceType(InstanceType.T3_MICRO).minCount(1).maxCount(guests + 2));
                 batch.instances().forEach(i -> ids.add(i.instanceId()));
                 assertThat(ids).hasSize(guests);
+                ec2.waiter().waitUntilInstanceRunning(r -> r.instanceIds(ids));
                 Ec2Exception full = assertThrows(Ec2Exception.class, () -> launch(ec2));
                 assertThat(full.statusCode()).isEqualTo(400);
                 assertThat(full.awsErrorDetails().errorCode()).isEqualTo("VcpuLimitExceeded");
@@ -108,6 +129,7 @@ class Ec2VcpuAdmissionTest {
                 ec2.stopInstances(r -> r.instanceIds(stopped));
                 String replacement = launch(ec2);
                 ids.add(replacement);
+                ec2.waiter().waitUntilInstanceRunning(r -> r.instanceIds(replacement));
                 assertThat(assertThrows(Ec2Exception.class, () -> ec2.startInstances(r -> r.instanceIds(stopped)))
                         .awsErrorDetails().errorCode()).isEqualTo("VcpuLimitExceeded");
                 assertThat(ec2.describeInstances(r -> r.instanceIds(stopped)).reservations().get(0)
@@ -118,9 +140,15 @@ class Ec2VcpuAdmissionTest {
                         .instances().get(0).state().nameAsString()).isEqualTo("running");
             } finally {
                 List<Executable> cleanup = new ArrayList<>();
-                if (!ids.isEmpty()) cleanup.add(() -> ec2.terminateInstances(r -> r.instanceIds(ids)));
-                if (!otherIds.isEmpty()) cleanup.add(() -> other.terminateInstances(r -> r.instanceIds(otherIds)));
-                if (!regionIds.isEmpty()) cleanup.add(() -> otherRegion.terminateInstances(r -> r.instanceIds(regionIds)));
+                if (!ids.isEmpty()) {
+                    cleanup.add(() -> ec2.terminateInstances(r -> r.instanceIds(ids)));
+                }
+                if (!otherIds.isEmpty()) {
+                    cleanup.add(() -> other.terminateInstances(r -> r.instanceIds(otherIds)));
+                }
+                if (!regionIds.isEmpty()) {
+                    cleanup.add(() -> otherRegion.terminateInstances(r -> r.instanceIds(regionIds)));
+                }
                 if (spotRequestId != null) {
                     String requestId = spotRequestId;
                     cleanup.add(() -> ec2.cancelSpotInstanceRequests(r -> r.spotInstanceRequestIds(requestId)));
@@ -135,15 +163,32 @@ class Ec2VcpuAdmissionTest {
     }
 
     @Test
-    void anUnsizedStandardTypeReturnsTheDocumentedLocalSupportError() {
+    void unknownTypesFollowTheEnforcementOptIn() {
         assumeFalse(TestFixtures.isRealAws(), "Local unsupported-type mapping is not an AWS response claim");
         try (Ec2Client ec2 = client(TestFixtures.region(), "765432101236")) {
+            if (!enforcementExpected()) {
+                String id = ec2.runInstances(r -> r.imageId("ami-0abcdef1234567890")
+                        .instanceType("m999.unmeasured").minCount(1).maxCount(1)).instances().get(0).instanceId();
+                try {
+                    ec2.stopInstances(r -> r.instanceIds(id));
+                    ec2.startInstances(r -> r.instanceIds(id));
+                    assertThat(ec2.describeInstances(r -> r.instanceIds(id)).reservations().get(0)
+                            .instances().get(0).state().nameAsString()).isEqualTo("running");
+                } finally {
+                    ec2.terminateInstances(r -> r.instanceIds(id));
+                }
+                return;
+            }
             Ec2Exception unsupported = assertThrows(Ec2Exception.class, () -> ec2.runInstances(r ->
                     r.imageId("ami-0abcdef1234567890").instanceType("m999.unmeasured").minCount(1).maxCount(1)));
             assertThat(unsupported.statusCode()).isEqualTo(400);
             assertThat(unsupported.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
             assertThat(ec2.describeInstances().reservations()).isEmpty();
         }
+    }
+
+    private static boolean enforcementExpected() {
+        return Boolean.parseBoolean(System.getenv().getOrDefault("FLOCI_TEST_EC2_ENFORCE_VCPU_QUOTAS", "false"));
     }
 
     private static String launch(Ec2Client ec2) {

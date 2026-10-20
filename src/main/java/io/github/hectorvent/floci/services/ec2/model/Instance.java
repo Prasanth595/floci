@@ -8,8 +8,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.ReentrantLock;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -18,23 +16,17 @@ public class Instance {
     private String instanceId;
     private String imageId;
     private volatile InstanceState state;
-    private transient long stateTransition;
-    private transient boolean initialSetup;
-    private transient long initialSetupTransition;
-    private final transient Object stateGuard = new Object();
-    private final transient ReentrantLock lifecycleLock = new ReentrantLock();
-    private boolean spot;
     private String stateTransitionReason;
     private String instanceType;
+    private boolean spot;
     private Placement placement;
     private String subnetId;
     private String vpcId;
     private String privateIpAddress;
     private String logicalPrivateIpAddress;
-    private volatile String publicIpAddress;
-    private transient long publicAddressRevision;
+    private String publicIpAddress;
     private String privateDnsName;
-    private volatile String publicDnsName;
+    private String publicDnsName;
     // Whether this instance's launch asked for an automatic public IP: the launch's
     // AssociatePublicIpAddress, else its subnet's MapPublicIpOnLaunch, and never for an
     // interface the caller created. AutomaticPublicAddress decides from it in every mode.
@@ -97,7 +89,6 @@ public class Instance {
      */
     private String imdsSourceIp;
     private String userData;
-    private Boolean userDataAttempted;
     private String encodedUserData;
     private int sshHostPort;
     private long terminatedAt;
@@ -115,104 +106,13 @@ public class Instance {
     public void setImageId(String imageId) { this.imageId = imageId; }
 
     public InstanceState getState() { return state; }
-    public void setState(InstanceState state) {
-        synchronized (stateGuard) {
-            stateTransition++;
-            this.state = state;
-            stateGuard.notifyAll();
-        }
-    }
-
-    /** Identifies an admitted operation without persisting executor state across a restart. */
-    public long stateTransition() { synchronized (stateGuard) { return stateTransition; } }
-
-    /** Bounded lifecycle publication; never held over Docker, forwarding or reachability probes. */
-    public Object stateGuard() { return stateGuard; }
-
-    public ReentrantLock lifecycleLock() { return lifecycleLock; }
-
-    /** Own initial setup before the new pending record becomes visible to StopInstances. */
-    public long beginInitialSetup() {
-        synchronized (stateGuard) {
-            if (!initialSetupPending() && state != null && "pending".equals(state.getName())) {
-                initialSetup = true;
-                initialSetupTransition = stateTransition;
-                if (userDataAttempted == null) {
-                    userDataAttempted = false;
-                }
-            }
-            return stateTransition;
-        }
-    }
-
-    public boolean initialSetupPending() {
-        synchronized (stateGuard) {
-            return initialSetup && initialSetupTransition == stateTransition;
-        }
-    }
-
-    /** Record Stop without abandoning the first guest's network, metadata and SSH setup. */
-    public boolean stopAfterInitialSetup() {
-        synchronized (stateGuard) {
-            if (!initialSetupPending()) {
-                return false;
-            }
-            state = InstanceState.stopping();
-            return true;
-        }
-    }
-
-    public boolean completeInitialSetup(long expected) {
-        synchronized (stateGuard) {
-            if (!initialSetup || initialSetupTransition != expected) {
-                return false;
-            }
-            // Stop either records its intent before this handoff, or sees completed setup and
-            // schedules its normal physical operation. No request can fall between the two.
-            initialSetup = false;
-            stateGuard.notifyAll();
-            return stateTransition == expected && state != null && "stopping".equals(state.getName());
-        }
-    }
-
-    public void awaitInitialSetup() throws InterruptedException {
-        synchronized (stateGuard) {
-            while (initialSetupPending()) {
-                stateGuard.wait();
-            }
-        }
-    }
-
-    /** Wait only for the caller's monotonic budget, retaining ownership on timeout. */
-    public boolean awaitInitialSetup(long deadlineNanos) throws InterruptedException {
-        synchronized (stateGuard) {
-            while (initialSetupPending()) {
-                long remaining = deadlineNanos - System.nanoTime();
-                if (remaining <= 0) {
-                    return false;
-                }
-                TimeUnit.NANOSECONDS.timedWait(stateGuard, remaining);
-            }
-            return true;
-        }
-    }
-
-    /** A late worker cannot complete a different start, stop or termination. */
-    public boolean completeStateTransition(long expected, InstanceState state) {
-        synchronized (stateGuard) {
-            if (stateTransition != expected) {
-                return false;
-            }
-            this.state = state;
-            return true;
-        }
-    }
-
-    public boolean isSpot() { return spot; }
-    public void setSpot(boolean spot) { this.spot = spot; }
+    public void setState(InstanceState state) { this.state = state; }
 
     public String getStateTransitionReason() { return stateTransitionReason; }
     public void setStateTransitionReason(String stateTransitionReason) { this.stateTransitionReason = stateTransitionReason; }
+
+    public boolean isSpot() { return spot; }
+    public void setSpot(boolean spot) { this.spot = spot; }
 
     public String getInstanceType() { return instanceType; }
     public void setInstanceType(String instanceType) { this.instanceType = instanceType; }
@@ -234,24 +134,13 @@ public class Instance {
     }
 
     public String getPublicIpAddress() { return publicIpAddress; }
-    public void setPublicIpAddress(String publicIpAddress) {
-        synchronized (stateGuard) {
-            this.publicIpAddress = publicIpAddress;
-            publicAddressRevision++;
-        }
-    }
-    public long publicAddressRevision() { synchronized (stateGuard) { return publicAddressRevision; } }
+    public void setPublicIpAddress(String publicIpAddress) { this.publicIpAddress = publicIpAddress; }
 
     public String getPrivateDnsName() { return privateDnsName; }
     public void setPrivateDnsName(String privateDnsName) { this.privateDnsName = privateDnsName; }
 
     public String getPublicDnsName() { return publicDnsName; }
-    public void setPublicDnsName(String publicDnsName) {
-        synchronized (stateGuard) {
-            this.publicDnsName = publicDnsName;
-            publicAddressRevision++;
-        }
-    }
+    public void setPublicDnsName(String publicDnsName) { this.publicDnsName = publicDnsName; }
     public boolean isAssociatePublicIp() { return associatePublicIp; }
     public void setAssociatePublicIp(boolean associatePublicIp) { this.associatePublicIp = associatePublicIp; }
 
@@ -327,20 +216,6 @@ public class Instance {
 
     public String getEncodedUserData() { return encodedUserData; }
     public void setEncodedUserData(String encodedUserData) { this.encodedUserData = encodedUserData; }
-    public Boolean getUserDataAttempted() { return userDataAttempted; }
-    public void setUserDataAttempted(Boolean attempted) { userDataAttempted = attempted; }
-
-    /** Legacy rows have no dispatch marker and must not replay a historical script. */
-    public boolean claimInitialUserData() {
-        synchronized (stateGuard) {
-            if (!Boolean.FALSE.equals(userDataAttempted)) {
-                return false;
-            }
-            userDataAttempted = true;
-            return true;
-        }
-    }
-
     public String getUserData() { return userData; }
     public void setUserData(String userData) { this.userData = userData; }
 

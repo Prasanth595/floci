@@ -308,6 +308,8 @@ floci:
       proxy-base-port: 9400
       proxy-max-port: 9499
     ec2:
+      # Opt-in Standard On-Demand vCPU admission. FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS
+      enforce-vcpu-quotas: false
       # Optional complete catalog override for locally built guest images.
       image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
       enabled: true
@@ -549,8 +551,7 @@ floci:
       enabled: true
     servicequotas:
       enabled: true
-      # Shared protocol fixtures retain guests across test classes. Quota tests use explicit small profiles.
-      standard-on-demand-vcpus: 1000
+      standard-on-demand-vcpus: 5
     verifiedpermissions:
       enabled: true
     ram:

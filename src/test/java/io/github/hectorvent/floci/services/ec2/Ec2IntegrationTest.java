@@ -1,8 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
@@ -44,17 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-@TestProfile(Ec2IntegrationTest.LargeEc2Fixture.class)
 class Ec2IntegrationTest {
-
-    /** This stateful protocol fixture retains many guests; quota behavior has dedicated tests. */
-    public static class LargeEc2Fixture implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.servicequotas.standard-on-demand-vcpus", "1000");
-        }
-    }
-
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";

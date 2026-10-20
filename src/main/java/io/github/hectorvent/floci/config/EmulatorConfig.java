@@ -3141,6 +3141,10 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        /** Enables RunInstances and StartInstances checks against current running vCPU usage. */
+        @WithDefault("false")
+        boolean enforceVcpuQuotas();
+
         /**
          * When true, DescribeInstances and IMDS report each instance's CFN- and
          * subnet-allocated private IP (AWS-faithful) instead of the Docker

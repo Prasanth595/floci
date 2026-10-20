@@ -19,9 +19,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 /**
  * CloudFormation provisioning for {@code AWS::EC2::Instance}. It delegates to {@link Ec2Service} so
@@ -46,8 +44,6 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     /** How long {@link #delete} waits for a terminated instance; package-visible so tests can shorten it. */
     long terminateTimeoutMillis = 90_000L;
     long terminatePollMillis = 250L;
-    long stopTimeoutMillis = 90_000L;
-    long stopPollMillis = 250L;
 
     @Inject
     public Ec2InstanceCfnProvisioner(Ec2Service ec2Service) {
@@ -116,39 +112,16 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
                 && !declaredCreateOnlyChanged(attributesBefore, privateIpAddress, availabilityZone)) {
             // A reused instance still has its mutable properties reconciled to the template rather
             // than left at their prior values; re-read it so the published attributes reflect them.
-            String originalState = prior.getState() == null ? null : prior.getState().getName();
-            String originalType = prior.getInstanceType();
-            String originalUserData = prior.getUserData();
-            try {
-                reconcileMutableProperties(region, prior, instanceType, securityGroupIds, userData,
-                        iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
-                Instance reconciled = findInstance(region, prior.getInstanceId());
-                Instance current = reconciled != null ? reconciled : prior;
-                r.setPhysicalId(current.getInstanceId());
-                publishInstanceAttributes(r, current);
-                storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
-                putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
-                Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), desiredTags);
-                ReplacementCleanup.record(r, ctx, attributesBefore);
-            } catch (RuntimeException failure) {
-                Instance current = null;
-                try {
-                    current = findInstance(region, prior.getInstanceId());
-                } catch (RuntimeException inspectionFailure) {
-                    failure.addSuppressed(inspectionFailure);
-                }
-                String currentState = current == null || current.getState() == null
-                        ? null : current.getState().getName();
-                if (current == null || !Objects.equals(originalState, currentState)
-                        || !Objects.equals(originalType, current.getInstanceType())
-                        || !Objects.equals(originalUserData, current.getUserData())) {
-                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
-                            "EC2 instance " + prior.getInstanceId()
-                                    + " could not complete its in-place update; physical state was not restored: "
-                                    + failure.getMessage());
-                }
-                throw failure;
-            }
+            reconcileMutableProperties(region, prior, instanceType, securityGroupIds, userData,
+                    iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
+            Instance reconciled = findInstance(region, prior.getInstanceId());
+            Instance current = reconciled != null ? reconciled : prior;
+            r.setPhysicalId(current.getInstanceId());
+            publishInstanceAttributes(r, current);
+            storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
+            putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
+            Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), desiredTags);
+            ReplacementCleanup.record(r, ctx, attributesBefore);
             return;
         }
 
@@ -237,10 +210,10 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Applies the mutable properties CloudFormation allows to change without replacing the instance,
-     * through the same Ec2Service calls the API actions use: changed InstanceType and UserData are
-     * applied in one stopped interval, restarting only an instance that was running or pending.
-     * An already stopped or stopping instance is left stopped. A changed SecurityGroupIds set is
-     * reattached, and a changed IamInstanceProfile is
+     * through the same Ec2Service calls the API actions use: a changed InstanceType is resized in
+     * place, a changed SecurityGroupIds set is reattached, a changed UserData is rewritten the way
+     * ModifyInstanceAttribute requires it (the instance stopped first and started again after, the
+     * "some interruptions" the property is documented with), and a changed IamInstanceProfile is
      * associated or replaced, or disassociated when the template declared one last time and drops it
      * now. Only a declared SecurityGroupIds or UserData is reconciled, so a template that omits them
      * does not strip what the instance already has (a launch template may have set it).
@@ -248,78 +221,35 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     private void reconcileMutableProperties(String region, Instance prior, String instanceType,
                                             List<String> securityGroupIds, String userData,
                                             String iamInstanceProfileArn, String priorDeclaredProfileArn) {
-        boolean changesType = instanceType != null && !instanceType.isBlank()
-                && !instanceType.equals(prior.getInstanceType());
-        boolean changesUserData = userData != null && !userData.equals(prior.getUserData());
-        if (changesType || changesUserData) {
-            reconcileStoppedProperties(region, prior, changesType ? instanceType : null,
-                    changesUserData, userData);
+        if (instanceType != null && !instanceType.isBlank()
+                && !instanceType.equals(prior.getInstanceType())) {
+            ec2Service.modifyInstanceAttribute(region, prior.getInstanceId(), "instanceType", instanceType);
         }
         if (!securityGroupIds.isEmpty() && !sameSecurityGroups(prior, securityGroupIds)) {
             ec2Service.modifyInstanceGroups(region, prior.getInstanceId(), securityGroupIds);
         }
+        if (userData != null && !userData.equals(prior.getUserData())) {
+            rewriteUserData(region, prior, userData);
+        }
         reconcileIamInstanceProfile(region, prior, iamInstanceProfileArn, priorDeclaredProfileArn);
     }
 
-    /** Changes type and user data in one stopped interval, preserving an already stopped instance. */
-    private void reconcileStoppedProperties(String region, Instance prior, String instanceType,
-                                             boolean changesUserData, String userData) {
+    /**
+     * User data can only be modified on a stopped instance, so a running one is stopped for the
+     * rewrite and started again after it, as CloudFormation's "some interruptions" update does; an
+     * instance that was already stopped is left stopped.
+     */
+    private void rewriteUserData(String region, Instance prior, String userData) {
         String instanceId = prior.getInstanceId();
-        String priorState = prior.getState() == null ? null : prior.getState().getName();
-        boolean restart = "running".equals(priorState) || "pending".equals(priorState);
-        if (restart) {
+        boolean wasStopped = prior.getState() != null && "stopped".equals(prior.getState().getName());
+        if (!wasStopped) {
             ec2Service.stopInstances(region, List.of(instanceId));
-        } else if (!"stopped".equals(priorState) && !"stopping".equals(priorState)) {
-            throw new AwsException("ValidationError", "Instance " + instanceId
-                    + " is not available for a stopped-property update", 400);
         }
-        awaitStopped(region, instanceId);
-        if (instanceType != null) {
-            ec2Service.modifyInstanceAttribute(region, instanceId, "instanceType", instanceType);
-        }
-        if (changesUserData) {
-            ec2Service.modifyInstanceUserData(region, instanceId, userData);
-        }
-        if (restart) {
+        ec2Service.modifyInstanceUserData(region, instanceId, userData);
+        if (!wasStopped) {
             ec2Service.startInstances(region, List.of(instanceId));
             Instance started = findInstance(region, instanceId);
-            String state = started == null || started.getState() == null ? null : started.getState().getName();
-            if (!"pending".equals(state) && !"running".equals(state)) {
-                throw new AwsException("ValidationError", "Instance " + instanceId
-                        + " did not enter pending or running after StartInstances", 400);
-            }
-            ec2Service.awaitContainerLaunch(started);
-        }
-    }
-
-    private void awaitStopped(String region, String instanceId) {
-        long began = System.nanoTime();
-        long timeout = TimeUnit.MILLISECONDS.toNanos(stopTimeoutMillis);
-        while (true) {
-            if (Thread.currentThread().isInterrupted()) {
-                throw new AwsException("ValidationError",
-                        "Interrupted while waiting for instance " + instanceId + " to stop", 400);
-            }
-            Instance current = findInstance(region, instanceId);
-            String state = current == null || current.getState() == null ? null : current.getState().getName();
-            if ("stopped".equals(state)) {
-                return;
-            }
-            if (current == null || state == null || "shutting-down".equals(state) || "terminated".equals(state)) {
-                throw new AwsException("ValidationError", "Instance " + instanceId
-                        + " became unavailable while waiting for stopped", 400);
-            }
-            if (System.nanoTime() - began >= timeout) {
-                throw new AwsException("ValidationError", "Instance " + instanceId
-                        + " did not reach stopped within " + (stopTimeoutMillis / 1000) + "s", 400);
-            }
-            try {
-                Thread.sleep(stopPollMillis);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new AwsException("ValidationError",
-                        "Interrupted while waiting for instance " + instanceId + " to stop", 400);
-            }
+            ec2Service.awaitContainerLaunch(started != null ? started : prior);
         }
     }
 

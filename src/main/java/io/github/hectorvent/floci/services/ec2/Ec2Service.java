@@ -884,6 +884,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         } catch (Exception e) {
             LOG.warnv("Could not restore EC2 firewall for {0}: {1}", instance.getInstanceId(), e.getMessage());
             containerManager.stopForShutdown(instance);
+            instance.setState(InstanceState.stopped());
             putForOwner(instances, entry, instance);
             return false;
         }
@@ -3583,7 +3584,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // subnet/VPC/security-groups and can only ever back a single instance.
         NetworkInterface suppliedEni = null;
         if (networkInterfaceId != null && !networkInterfaceId.isBlank()) {
-            if (Math.max(minCount, 1) > 1 || maxCount > 1) {
+            if (Math.max(minCount, 1) > 1) {
                 throw new AwsException("InvalidParameterCombination",
                         "Network interfaces may only be specified for a single instance.", 400);
             }
@@ -3690,8 +3691,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
             }
             synchronized (privateIpAllocationLock) {
-                int admitted = spot || "host".equals(tenancy) ? count
-                        : admittedInstanceCount(region, effectiveInstanceType, minCount, maxCount);
+                int admitted = !config.services().ec2().enforceVcpuQuotas() || spot || "host".equals(tenancy)
+                        ? count : admittedInstanceCount(region, effectiveInstanceType, minCount, maxCount);
                 synchronized (hostLock) {
                     if (hostId != null) {
                         // Re-checked under hostLock: a ReleaseHosts or ModifyHosts may have landed
@@ -3817,9 +3818,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         rootVol.getAttachments().add(att);
                         volumes.put(key(region, rootVolId), rootVol);
 
-                        if (!config.services().ec2().mock()) {
-                            inst.beginInitialSetup();
-                        }
                         instances.put(key(region, instanceId), inst);
                         launched.add(inst);
                         reservation.getInstances().add(inst);
@@ -3831,27 +3829,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // Outside the lock: the containers are what the lock protects a reference to, not part of
         // the registry, and a launch is slow.
         if (!config.services().ec2().mock()) {
-            Set<Instance> undispatched = new LinkedHashSet<>(launched);
-            try {
-                String publicKey = null;
-                if (keyName != null) {
-                    KeyPair kp = findKeyPair(region, keyName);
-                    if (kp != null) {
-                        publicKey = kp.getPublicKey();
-                    }
+            String publicKey = null;
+            if (keyName != null) {
+                KeyPair kp = findKeyPair(region, keyName);
+                if (kp != null) {
+                    publicKey = kp.getPublicKey();
                 }
-                for (Instance inst : launched) {
-                    List<SecurityGroup> policyGroups = inst.getSecurityGroups().stream()
-                            .map(group -> securityGroups.get(key(region, group.getGroupId()))
-                                    .orElseThrow(() -> new IllegalStateException("Missing security group " + group.getGroupId())))
-                            .toList();
-                    containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst),
-                            policyGroups, policyPrefixLists(region, policyGroups));
-                    undispatched.remove(inst);
-                }
-            } catch (RuntimeException failure) {
-                undispatched.forEach(containerManager::cancelLaunch);
-                throw failure;
+            }
+            for (Instance inst : launched) {
+                List<SecurityGroup> policyGroups = inst.getSecurityGroups().stream()
+                        .map(group -> securityGroups.get(key(region, group.getGroupId()))
+                                .orElseThrow(() -> new IllegalStateException("Missing security group " + group.getGroupId())))
+                        .toList();
+                containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst),
+                        policyGroups, policyPrefixLists(region, policyGroups));
             }
         }
 
@@ -4283,29 +4274,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * {@code mock-public-addresses} chooses, which by default is none.
      */
     private void assignAutomaticAddress(Instance instance, boolean replacement) {
-        long transition;
-        long revision;
-        String containerId;
-        String bridgeIp;
-        synchronized (instance.stateGuard()) {
-            if (instance.getPublicIpAddress() != null || !AutomaticPublicAddress.isDue(instance, replacement)) {
-                return;
-            }
-            transition = instance.stateTransition();
-            revision = instance.publicAddressRevision();
-            containerId = instance.getDockerContainerId();
-            bridgeIp = instance.getContainerBridgeIp();
+        if (instance.getPublicIpAddress() != null || !AutomaticPublicAddress.isDue(instance, replacement)) {
+            return;
         }
         String address = config.services().ec2().mock() ? mockPublicAddress()
                 : containerManager.reachablePublicAddress(instance);
-        synchronized (instance.stateGuard()) {
-            String state = instance.getState() == null ? null : instance.getState().getName();
-            if (address != null && !Set.of("stopped", "stopping", "shutting-down", "terminated").contains(state == null ? "" : state)
-                    && transition == instance.stateTransition() && revision == instance.publicAddressRevision()
-                    && Objects.equals(containerId, instance.getDockerContainerId())
-                    && Objects.equals(bridgeIp, instance.getContainerBridgeIp())) {
-                setPublicAddress(instance, address);
-            }
+        if (address != null) {
+            setPublicAddress(instance, address);
         }
     }
 
@@ -4316,10 +4291,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private static void setPublicAddress(Instance instance, String publicIp) {
-        synchronized (instance.stateGuard()) {
-            instance.setPublicIpAddress(publicIp);
-            instance.setPublicDnsName("127.0.0.1".equals(publicIp) ? "localhost" : publicIp);
-        }
+        instance.setPublicIpAddress(publicIp);
+        instance.setPublicDnsName("127.0.0.1".equals(publicIp) ? "localhost" : publicIp);
     }
 
     private static void clearPublicAddress(Instance instance) {
@@ -4541,35 +4514,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     @Override
     public void stopManagedContainers() {
-        stopManagedContainers(false);
-    }
-
-    @Override
-    public void stopManagedContainersForShutdown() {
-        stopManagedContainers(true);
-    }
-
-    private void stopManagedContainers(boolean shutdown) {
         if (config.services().ec2().mock()) {
             return;
         }
         for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
             Instance inst = entry.value();
-            if (inst == null || inst.getState() == null) {
-                continue;
-            }
-            String state = inst.getState().getName();
-            boolean needsPhysicalStop = inst.getDockerContainerId() != null
-                    && ("running".equals(state) || "pending".equals(state) || "stopping".equals(state));
-            if (!inst.initialSetupPending() && !needsPhysicalStop) {
+            if (inst == null || inst.getDockerContainerId() == null
+                    || inst.getState() == null || !"running".equals(inst.getState().getName())) {
                 continue;
             }
             try {
-                if (shutdown) {
-                    containerManager.stopForProcessShutdown(inst);
-                } else {
-                    containerManager.stopForShutdown(inst);
-                }
+                containerManager.stopForShutdown(inst);
+                inst.setState(InstanceState.stopped());
                 putForOwner(instances, entry, inst);
             } catch (Exception e) {
                 LOG.warnv("Failed to stop EC2 instance container {0} on shutdown: {1}",
@@ -4655,89 +4611,72 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public List<Map<String, String>> startInstances(String region, List<String> instanceIds) {
         ensureDefaultResources(region);
-        List<Instance> requested = instanceIds.stream().distinct()
-                .map(id -> getRequiredInstance(region, id)).toList();
-        Map<Instance, InstanceState> previous = new LinkedHashMap<>();
-        Map<Instance, Long> admitted = new LinkedHashMap<>();
-        synchronized (privateIpAllocationLock) {
-            long required = 0;
-            Set<String> legacySpot = spotInstanceIds(region);
-            for (Instance instance : requested) {
-                if (isExternalInstance(region, instance.getInstanceId())) {
-                    throw new AwsException("OperationNotPermitted", "The instance '" + instance.getInstanceId()
-                            + "' is a cluster node and cannot be started through EC2", 400);
-                }
-                InstanceState state = instance.getState();
-                requireStartable(instance, state);
-                previous.put(instance, state);
-                if ("stopped".equals(state.getName()) && !isSpot(instance, legacySpot) && !onDedicatedHost(instance)) {
-                    required += standardOnDemandVcpus(instance.getInstanceType());
-                }
-            }
-            enforceStandardOnDemandQuota(region, required);
-            for (Instance instance : requested) {
-                synchronized (instance.stateGuard()) {
-                    if (instance.getState() != previous.get(instance)) {
-                        admitted.forEach((changed, token) -> changed.completeStateTransition(token, previous.get(changed)));
-                        throw new AwsException("IncorrectInstanceState", "An instance changed state during StartInstances.", 400);
+        if (config.services().ec2().enforceVcpuQuotas()) {
+            synchronized (privateIpAllocationLock) {
+                long additional = 0;
+                Set<String> legacySpot = spotInstanceIds(region);
+                List<Instance> targets = new ArrayList<>();
+                for (String id : new LinkedHashSet<>(instanceIds)) {
+                    Instance instance = getRequiredInstance(region, id);
+                    if (isExternalInstance(region, id)) {
+                        throw new AwsException("OperationNotPermitted",
+                                "The instance '" + id + "' is a cluster node and cannot be started through EC2", 400);
                     }
-                    if ("stopped".equals(instance.getState().getName())) {
-                        instance.setState(InstanceState.pending());
-                        admitted.put(instance, instance.stateTransition());
+                    if ("terminated".equals(instance.getState().getName())) {
+                        throw new AwsException("IncorrectInstanceState",
+                                "The instance '" + id + "' is not in a state from which it can be started.", 400);
+                    }
+                    targets.add(instance);
+                }
+                for (Instance instance : targets) {
+                    String state = instance.getState().getName();
+                    if (("stopped".equals(state) || "stopping".equals(state))
+                            && !isSpot(instance, legacySpot) && !onDedicatedHost(instance)) {
+                        additional += standardOnDemandVcpus(instance.getInstanceType());
                     }
                 }
-            }
-        }
-        String owner = callerAccountId();
-        Set<Instance> dispatched = new HashSet<>();
-        for (Map.Entry<Instance, Long> entry : admitted.entrySet()) {
-            Instance instance = entry.getKey();
-            long transition = entry.getValue();
-            try {
-                if (config.services().ec2().mock()) {
-                    synchronized (privateIpAllocationLock) {
-                        synchronized (instance) {
-                            if (instance.stateTransition() == transition) {
-                                completeMockLaunch(region, instance, true);
-                            }
-                        }
-                    }
-                } else {
-                    synchronized (privateIpAllocationLock) {
-                        writePublicAddress(instance, () -> releaseAutomaticAddress(region, instance));
-                    }
-                    restoreInstanceFirewall(instance);
-                    containerManager.start(instance, () ->
-                            RequestScopes.runAs(owner, () -> restoreAttachedVolumesForInstance(region, instance)), transition);
-                }
-                // The worker has accepted ownership even if a subsequent storage write fails.
-                dispatched.add(instance);
-                instances.put(key(region, instance.getInstanceId()), instance);
-            } catch (RuntimeException failure) {
-                admitted.forEach((reserved, token) -> {
-                    if (!dispatched.contains(reserved)
-                            && reserved.completeStateTransition(token, InstanceState.stopped())) {
-                        instances.put(key(region, reserved.getInstanceId()), reserved);
-                    }
-                });
-                throw failure;
+                enforceStandardOnDemandQuota(region, additional);
             }
         }
         List<Map<String, String>> result = new ArrayList<>();
-        for (Instance instance : requested) {
-            InstanceState prev = previous.get(instance);
-            result.add(Map.of("instanceId", instance.getInstanceId(), "previousState", prev.getName(),
-                    "previousCode", String.valueOf(prev.getCode()), "currentState", "pending", "currentCode", "0"));
+        for (String id : instanceIds) {
+           Instance inst = getRequiredInstance(region, id);
+            if (isExternalInstance(region, id)) {
+                throw new AwsException("OperationNotPermitted",
+                        "The instance '" + id + "' is a cluster node and cannot be started through EC2", 400);
+            }
+
+            if ("terminated".equals(inst.getState().getName())) {
+                throw new AwsException("IncorrectInstanceState",
+                        "The instance '" + id + "' is not in a state from which it can be started.", 400);
+            }
+            InstanceState prev = inst.getState();
+            if (config.services().ec2().mock()) {
+                completeMockLaunch(region, inst, true);
+            } else {
+                if ("stopped".equals(prev.getName())) {
+                    // Whatever stopped it, StopInstances or Floci's own shutdown, an automatic
+                    // address does not outlive the stop: what is left for the container manager to
+                    // re-point is then only an Elastic IP's, and otherwise it assigns one when due.
+                    synchronized (privateIpAllocationLock) {
+                        writePublicAddress(inst, () -> releaseAutomaticAddress(region, inst));
+                    }
+                }
+                restoreInstanceFirewall(inst);
+                String accountId = callerAccountId();
+                containerManager.start(inst, () ->
+                        RequestScopes.runAs(accountId, () -> restoreAttachedVolumesForInstance(region, inst)));
+            }
+            instances.put(key(region, id), inst);
+            Map<String, String> entry = new LinkedHashMap<>();
+            entry.put("instanceId", id);
+            entry.put("previousState", prev.getName());
+            entry.put("previousCode", String.valueOf(prev.getCode()));
+            entry.put("currentState", "pending");
+            entry.put("currentCode", "0");
+            result.add(entry);
         }
         return result;
-    }
-
-    private static void requireStartable(Instance instance, InstanceState state) {
-        if (state == null || !("stopped".equals(state.getName()) || "pending".equals(state.getName())
-                || "running".equals(state.getName()))) {
-            throw new AwsException("IncorrectInstanceState", "The instance '" + instance.getInstanceId()
-                    + "' is not in a state from which it can be started.", 400);
-        }
     }
 
     private int appliedStandardOnDemandLimit() {
@@ -4751,7 +4690,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (vcpus == 0) {
             return requested;
         }
-        long available = Math.max(0L, (long) appliedStandardOnDemandLimit() - committedStandardOnDemandVcpus(region));
+        long available = Math.max(0L, (long) appliedStandardOnDemandLimit() - runningStandardOnDemandVcpus(region));
         int admitted = (int) Math.min(requested, available / vcpus);
         if (admitted < Math.max(minimum, 1)) {
             throw vcpuLimitExceeded();
@@ -4760,7 +4699,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private void enforceStandardOnDemandQuota(String region, long additional) {
-        if (additional > 0 && committedStandardOnDemandVcpus(region) + additional > appliedStandardOnDemandLimit()) {
+        if (additional > 0 && runningStandardOnDemandVcpus(region) + additional > appliedStandardOnDemandLimit()) {
             throw vcpuLimitExceeded();
         }
     }
@@ -4783,15 +4722,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return instance.getPlacement() != null && "host".equals(instance.getPlacement().getTenancy());
     }
 
-    /** Pending operations reserve admission capacity until they complete or fail. */
-    private long committedStandardOnDemandVcpus(String region) {
+    /** Current running usage only: pending operations do not reserve admission capacity. */
+    private long runningStandardOnDemandVcpus(String region) {
         Set<String> legacySpot = spotInstanceIds(region);
         return instances.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(i -> !isSpot(i, legacySpot) && !onDedicatedHost(i))
-                .filter(i -> i.getState() != null && switch (i.getState().getName()) {
-                    case "pending", "running", "stopping", "shutting-down" -> true;
-                    default -> false;
-                })
+                .filter(i -> i.getState() != null && "running".equals(i.getState().getName()))
                 .mapToLong(i -> standardOnDemandVcpus(i.getInstanceType())).sum();
     }
 
@@ -5105,14 +5041,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // basic attribute modifications
         switch (attribute) {
             case "instanceType" -> {
-                synchronized (privateIpAllocationLock) {
-                    synchronized (inst.stateGuard()) {
-                        if (inst.getState() == null || !"stopped".equals(inst.getState().getName())) {
-                            throw new AwsException("IncorrectInstanceState", "The instance must be stopped to change its type.", 400);
-                        }
-                        inst.setInstanceType(value);
-                    }
-                }
+                inst.setInstanceType(value);
                 // A resize onto a burstable type acquires that family's default. A resize away
                 // from one changes nothing, because AWS keeps reporting the unlimited option of
                 // an instance that was configured as a T2, T3 or T3a and then resized.
@@ -10868,31 +10797,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         // An address on a secondary private address leaves the instance's own public address alone.
         String secondary = secondaryPrivateIpOf(region, inst, addr.getPrivateIpAddress());
-        long transition;
-        long revision;
-        synchronized (inst.stateGuard()) {
-            transition = inst.stateTransition();
-            revision = inst.publicAddressRevision();
-        }
         String reachable = containerManager.reachablePublicAddress(inst);
         if (reachable != null) {
             addr.setPublicIp(reachable);
             // An EIP association gives the instance a public address even in a subnet that does
             // not map one on launch, exactly as on AWS. An unchanged address is not written again.
             String dnsName = "127.0.0.1".equals(reachable) ? "localhost" : reachable;
-            boolean changed = false;
-            synchronized (inst.stateGuard()) {
-                String state = inst.getState() == null ? null : inst.getState().getName();
-                boolean ended = "terminated".equals(state) || "shutting-down".equals(state);
-                if (secondary == null && !ended && transition == inst.stateTransition()
-                        && revision == inst.publicAddressRevision() && (!reachable.equals(inst.getPublicIpAddress())
-                        || !dnsName.equals(inst.getPublicDnsName()))) {
-                    inst.setPublicIpAddress(reachable);
-                    inst.setPublicDnsName(dnsName);
-                    changed = true;
-                }
-            }
-            if (changed) {
+            String state = inst.getState() == null ? null : inst.getState().getName();
+            boolean ended = "terminated".equals(state) || "shutting-down".equals(state);
+            if (secondary == null && !ended && (!reachable.equals(inst.getPublicIpAddress())
+                    || !dnsName.equals(inst.getPublicDnsName()))) {
+                inst.setPublicIpAddress(reachable);
+                inst.setPublicDnsName(dnsName);
                 instances.put(key(region, instanceId), inst);
             }
         } else if (config.services().ec2().mock() && secondary == null) {
@@ -11023,35 +10939,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * instance is left as it is.
      */
     private void releaseElasticAddress(String region, Instance inst) {
-        boolean restoreAutomatic;
-        if (config.services().ec2().mock()) {
-            synchronized (inst) {
-                restoreAutomatic = clearReleasedElasticAddress(region, inst);
-            }
-        } else {
-            restoreAutomatic = clearReleasedElasticAddress(region, inst);
-        }
-        // Reachability may block. It must not own lifecycle publication while it probes.
-        if (restoreAutomatic) {
-            assignAutomaticAddress(inst, true);
-        }
-        instances.put(key(region, inst.getInstanceId()), inst);
-    }
-
-    private boolean clearReleasedElasticAddress(String region, Instance inst) {
-        synchronized (inst.stateGuard()) {
+        writePublicAddress(inst, () -> {
             String state = inst.getState() == null ? null : inst.getState().getName();
             if ("terminated".equals(state) || "shutting-down".equals(state)) {
-                return false;
+                return;
             }
             Address remaining = primaryElasticAddress(region, inst);
             if (remaining != null) {
                 setPublicAddress(inst, remaining.getPublicIp());
-                return false;
+                return;
             }
             clearPublicAddress(inst);
-            return "running".equals(state);
-        }
+            if ("running".equals(state)) {
+                assignAutomaticAddress(inst, true);
+            }
+        });
+        instances.put(key(region, inst.getInstanceId()), inst);
     }
 
     /**

@@ -7,252 +7,186 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
-import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class Ec2VcpuQuotaTest {
     @Test
-    void separateLaunchesCannotExceedTheAppliedLimitAndCanRetryAfterTermination() {
-        Ec2Service service = service(4);
-        Instance first = launch(service, "us-east-1");
-        launch(service, "us-east-1");
-        AwsException failure = assertThrows(AwsException.class, () -> launch(service, "us-east-1"));
-        assertEquals("VcpuLimitExceeded", failure.getErrorCode());
-        assertEquals(400, failure.getHttpStatus());
-        assertEquals(2, service.describeInstances("us-east-1", List.of(), Map.of()).stream()
-                .mapToInt(r -> r.getInstances().size()).sum());
-        service.terminateInstances("us-east-1", List.of(first.getInstanceId()));
-        assertNotNull(launch(service, "us-east-1"));
+    void defaultOffPreservesLargeBatchesAndUnsizedTypes() {
+        Ec2Service service = service(5, false);
+        assertEquals(6, service.runInstances("us-east-1", "ami-test", "t2.micro", 6, 6, null,
+                List.of(), null, null, List.of(), null, null).getInstances().size());
+        assertNotNull(launch(service, "m5.2xlarge"));
+        assertNotNull(launch(service, "m999.unmeasured"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"pending", "running", "stopping", "stopped", "shutting-down", "terminated"})
+    void enabledAdmissionCountsOnlyRunningInstances(String state) {
+        Ec2Service service = service(2, true);
+        Instance existing = instance("i-existing", state);
+        service.putInstanceForTest(existing);
+        if ("running".equals(state)) {
+            AwsException failure = assertThrows(AwsException.class, () -> launch(service, "t3.micro"));
+            assertEquals("VcpuLimitExceeded", failure.getErrorCode());
+            assertEquals(400, failure.getHttpStatus());
+            existing.setState(InstanceState.stopping());
+            assertNotNull(launch(service, "t3.micro"));
+        } else {
+            assertNotNull(launch(service, "t3.micro"));
+        }
     }
 
     @Test
-    void refusedStartPreservesStoppedStateAndCanRetryAfterCapacityIsReleased() {
-        Ec2Service service = service(2);
-        Instance stopped = launch(service, "us-east-1");
-        service.stopInstances("us-east-1", List.of(stopped.getInstanceId()));
-        Instance occupied = launch(service, "us-east-1");
-        AwsException failure = assertThrows(AwsException.class,
-                () -> service.startInstances("us-east-1", List.of(stopped.getInstanceId())));
-        assertEquals("VcpuLimitExceeded", failure.getErrorCode());
+    void partialBatchesFitCurrentRunningUsageAndRefusedMinimumPublishesNothing() {
+        Ec2Service service = service(5, true);
+        Instance running = instance("i-running", "running");
+        running.setInstanceType("t3.large");
+        service.putInstanceForTest(running);
+        assertEquals(1, service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 4, null,
+                List.of(), null, null, List.of(), null, null).getInstances().size());
+        AwsException refused = assertThrows(AwsException.class, () -> service.runInstances("us-east-1", "ami-test",
+                "t3.micro", 2, 4, null, List.of(), null, null, List.of(), null, null));
+        assertEquals("VcpuLimitExceeded", refused.getErrorCode());
+        assertEquals(2, service.describeInstances("us-east-1", List.of(), Map.of()).stream()
+                .mapToInt(reservation -> reservation.getInstances().size()).sum());
+    }
+
+    @Test
+    void pendingLaunchesDoNotReserveFutureRunningCapacity() {
+        Ec2Service service = service(2, true);
+        Instance first = launch(service, "t3.micro");
+        assertEquals("pending", first.getState().getName());
+        Instance second = launch(service, "t3.micro");
+        assertEquals("pending", second.getState().getName());
+    }
+
+    @Test
+    void startsUseCurrentRunningUsageDeduplicateIdsAndRetryAfterStop() {
+        Ec2Service service = service(2, true);
+        Instance running = instance("i-running", "running");
+        Instance stopped = instance("i-stopped", "stopped");
+        service.putInstanceForTest(running);
+        service.putInstanceForTest(stopped);
+        AwsException refused = assertThrows(AwsException.class, () -> service.startInstances("us-east-1",
+                List.of(stopped.getInstanceId(), stopped.getInstanceId())));
+        assertEquals("VcpuLimitExceeded", refused.getErrorCode());
         assertEquals("stopped", stopped.getState().getName());
-        service.terminateInstances("us-east-1", List.of(occupied.getInstanceId()));
+        service.stopInstances("us-east-1", List.of(running.getInstanceId()));
+        service.startInstances("us-east-1", List.of(stopped.getInstanceId(), stopped.getInstanceId()));
+        assertEquals("running", stopped.getState().getName());
+    }
+
+    @Test
+    void startingAStoppingTargetChecksItsNewRunningCostAndCanRetry() {
+        Ec2Service service = service(2, true);
+        Instance running = instance("i-running", "running");
+        Instance stopping = instance("i-stopping", "stopping");
+        service.putInstanceForTest(running);
+        service.putInstanceForTest(stopping);
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.startInstances("us-east-1", List.of(stopping.getInstanceId())));
+        assertEquals("VcpuLimitExceeded", refused.getErrorCode());
+        assertEquals("stopping", stopping.getState().getName());
+        service.stopInstances("us-east-1", List.of(running.getInstanceId()));
+        service.startInstances("us-east-1", List.of(stopping.getInstanceId()));
+        assertEquals("running", stopping.getState().getName());
+    }
+
+    @Test
+    void terminatedTargetIsRejectedBeforeQuotaAndNoEarlierTargetStarts() {
+        Ec2Service service = service(2, true);
+        Instance running = instance("i-running", "running");
+        Instance stopped = instance("i-stopped", "stopped");
+        Instance terminated = instance("i-terminated", "terminated");
+        service.putInstanceForTest(running);
+        service.putInstanceForTest(stopped);
+        service.putInstanceForTest(terminated);
+        AwsException refused = assertThrows(AwsException.class, () -> service.startInstances("us-east-1",
+                List.of(stopped.getInstanceId(), terminated.getInstanceId())));
+        assertEquals("IncorrectInstanceState", refused.getErrorCode());
+        assertEquals("stopped", stopped.getState().getName());
+        assertEquals("terminated", terminated.getState().getName());
+        service.stopInstances("us-east-1", List.of(running.getInstanceId()));
         service.startInstances("us-east-1", List.of(stopped.getInstanceId()));
         assertEquals("running", stopped.getState().getName());
     }
 
     @Test
-    void aRejectedBatchDispatchReleasesEveryUndispatchedReservationAndCanRetry() {
-        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
-        Ec2Service service = service(4, false, manager);
-        Instance first = stopped("i-first");
-        Instance second = stopped("i-second");
-        service.putInstanceForTest(first);
-        service.putInstanceForTest(second);
-        doThrow(new RejectedExecutionException("controlled rejection"))
-                .when(manager).start(eq(first), any(), anyLong());
-        assertThrows(RejectedExecutionException.class,
-                () -> service.startInstances("us-east-1", List.of("i-first", "i-second")));
-        assertAll(() -> assertEquals("stopped", first.getState().getName()),
-                () -> assertEquals("stopped", second.getState().getName()));
-        doAnswer(call -> {
-            Instance instance = call.getArgument(0);
-            instance.completeStateTransition(call.getArgument(2), InstanceState.running());
-            return null;
-        }).when(manager).start(any(), any(), anyLong());
-        service.startInstances("us-east-1", List.of("i-first", "i-second"));
-        assertEquals("running", first.getState().getName());
-        assertEquals("running", second.getState().getName());
+    void defaultOffStartsLargeAndUnsizedStoppedTargets() {
+        Ec2Service service = service(0, false);
+        Instance large = instance("i-large", "stopped");
+        large.setInstanceType("m5.2xlarge");
+        Instance unsized = instance("i-unsized", "stopped");
+        unsized.setInstanceType("m999.unmeasured");
+        service.putInstanceForTest(large);
+        service.putInstanceForTest(unsized);
+        service.startInstances("us-east-1", List.of(large.getInstanceId(), unsized.getInstanceId()));
+        assertEquals("running", large.getState().getName());
+        assertEquals("running", unsized.getState().getName());
     }
 
     @Test
-    void aPrimaryInterfaceCannotBeSharedByAnAdmittedMaxCountBatch() {
-        Ec2Service service = service(4);
-        String vpc = service.createVpc("us-east-1", "10.90.0.0/16", false).getVpcId();
-        String subnet = service.createSubnet("us-east-1", vpc, "10.90.1.0/24", "us-east-1a").getSubnetId();
-        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnet, "single launch",
-                null, List.of(), List.of(), List.of());
-        AwsException error = assertThrows(AwsException.class, () -> service.runInstances("us-east-1", "ami-test",
-                "t3.micro", 1, 2, null, List.of(), subnet, null, List.of(), null, null,
-                null, eni.getNetworkInterfaceId(), 0));
-        assertEquals("InvalidParameterCombination", error.getErrorCode());
-        assertNull(eni.getAttachment());
-        assertTrue(service.describeInstances("us-east-1", List.of(), Map.of()).isEmpty());
-        assertEquals(1, service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1, null,
-                List.of(), subnet, null, List.of(), null, null, null, eni.getNetworkInterfaceId(), 0)
-                .getInstances().size());
-    }
-
-    @Test
-    void aCapturedTypeOutsideTheFullMetadataCatalogStillConsumesItsDefaultVcpus() {
-        Ec2Service service = service(2);
-        Instance first = launchType(service, "t3.large");
-        AwsException failure = assertThrows(AwsException.class, () -> launchType(service, "t3.large"));
-        assertEquals("VcpuLimitExceeded", failure.getErrorCode());
-        assertEquals(400, failure.getHttpStatus());
-        assertEquals(1, service.describeInstances("us-east-1", List.of(), Map.of()).stream()
-                .mapToInt(reservation -> reservation.getInstances().size()).sum());
-        service.terminateInstances("us-east-1", List.of(first.getInstanceId()));
-        assertNotNull(launchType(service, "t3.large"));
-    }
-
-    @Test
-    void anUnsizedStandardTypeIsRefusedBeforePublication() {
-        Ec2Service service = service(4);
-        AwsException failure = assertThrows(AwsException.class, () -> launchType(service, "m999.unmeasured"));
+    void enabledUnknownTypesAreRefusedBeforePublicationAndKnownTypesCanRetry() {
+        Ec2Service service = service(4, true);
+        AwsException failure = assertThrows(AwsException.class, () -> launch(service, "m999.unmeasured"));
         assertEquals("InvalidParameterValue", failure.getErrorCode());
-        assertEquals(400, failure.getHttpStatus());
         assertTrue(service.describeInstances("us-east-1", List.of(), Map.of()).isEmpty());
-        assertNotNull(launchType(service, "t3.micro"));
+        assertNotNull(launch(service, "t3.large"));
     }
 
     @Test
-    void anUnsizedLegacyGuestCannotBeCountedAsZeroButCanStillBeStoppedAndRemoved() {
-        Ec2Service service = service(4);
-        Instance legacy = stopped("i-unsized-legacy");
-        legacy.setInstanceType("m999.unmeasured");
-        legacy.setState(InstanceState.running());
-        service.putInstanceForTest(legacy);
-        AwsException failure = assertThrows(AwsException.class, () -> launchType(service, "t3.micro"));
-        assertEquals("InvalidParameterValue", failure.getErrorCode());
-        assertEquals("running", legacy.getState().getName());
-        service.stopInstances("us-east-1", List.of(legacy.getInstanceId()));
-        Instance valid = launchType(service, "t3.micro");
-        AwsException restart = assertThrows(AwsException.class,
-                () -> service.startInstances("us-east-1", List.of(legacy.getInstanceId())));
-        assertEquals("InvalidParameterValue", restart.getErrorCode());
-        assertEquals("stopped", legacy.getState().getName());
-        service.terminateInstances("us-east-1", List.of(legacy.getInstanceId(), valid.getInstanceId()));
-        assertNotNull(launchType(service, "t3.micro"));
+    void spotHostsAndOtherRegionsDoNotConsumeThisRegionalBucket() {
+        Ec2Service service = service(2, true);
+        Instance spot = instance("i-spot", "running");
+        spot.setSpot(true);
+        Instance host = instance("i-host", "running");
+        Placement placement = new Placement("us-east-1a");
+        placement.setTenancy("host");
+        host.setPlacement(placement);
+        Instance other = instance("i-other-region", "running");
+        other.setRegion("eu-west-1");
+        service.putInstanceForTest(spot);
+        service.putInstanceForTest(host);
+        service.putInstanceForTest(other);
+        assertNotNull(launch(service, "t3.micro"));
     }
 
-    @Test
-    void aPendingStartReservesCapacityBeforeItsWorkerRunsAndCompetingRunCanRetry() throws Exception {
-        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
-        Ec2Service service = service(2, false, manager);
-        Instance resumed = stopped("i-competing-start");
-        service.putInstanceForTest(resumed);
-        CountDownLatch accepted = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        doAnswer(call -> {
-            accepted.countDown();
-            assertTrue(release.await(3, TimeUnit.SECONDS));
-            resumed.completeStateTransition(call.getArgument(2), InstanceState.running());
-            return null;
-        }).when(manager).start(eq(resumed), any(), anyLong());
-        ExecutorService request = Executors.newSingleThreadExecutor();
-        try {
-            Future<?> start = request.submit(() -> service.startInstances("us-east-1", List.of(resumed.getInstanceId())));
-            assertTrue(accepted.await(2, TimeUnit.SECONDS));
-            assertEquals("pending", resumed.getState().getName());
-            AwsException competing = assertThrows(AwsException.class, () -> launch(service, "us-east-1"));
-            assertEquals("VcpuLimitExceeded", competing.getErrorCode());
-            assertEquals(1, service.describeInstances("us-east-1", List.of(), Map.of()).stream()
-                    .mapToInt(reservation -> reservation.getInstances().size()).sum());
-            release.countDown();
-            start.get(2, TimeUnit.SECONDS);
-            assertEquals("running", resumed.getState().getName());
-            doAnswer(call -> {
-                resumed.setState(InstanceState.terminated());
-                return null;
-            }).when(manager).terminate(eq(resumed), any());
-            service.terminateInstances("us-east-1", List.of(resumed.getInstanceId()));
-            assertNotNull(launch(service, "us-east-1"));
-        } finally {
-            release.countDown();
-            request.shutdownNow();
-            assertTrue(request.awaitTermination(3, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void competingLaunchesCannotPublishMoreThanTheAvailableCapacity() throws Exception {
-        Ec2Service service = service(34);
-        ExecutorService requests = Executors.newFixedThreadPool(24);
-        CountDownLatch ready = new CountDownLatch(24);
-        CountDownLatch start = new CountDownLatch(1);
-        List<Future<Boolean>> outcomes = new ArrayList<>();
-        try {
-            for (int i = 0; i < 24; i++) {
-                outcomes.add(requests.submit(() -> {
-                    ready.countDown();
-                    assertTrue(start.await(10, TimeUnit.SECONDS));
-                    try {
-                        launch(service, "us-east-1");
-                        return true;
-                    } catch (AwsException refusal) {
-                        assertEquals("VcpuLimitExceeded", refusal.getErrorCode());
-                        assertEquals(400, refusal.getHttpStatus());
-                        return false;
-                    }
-                }));
-            }
-            assertTrue(ready.await(10, TimeUnit.SECONDS));
-            start.countDown();
-            int accepted = 0;
-            for (Future<Boolean> outcome : outcomes) {
-                if (outcome.get(10, TimeUnit.SECONDS)) {
-                    accepted++;
-                }
-            }
-            assertEquals(17, accepted);
-            assertEquals(7, outcomes.size() - accepted);
-            assertEquals(17, service.describeInstances("us-east-1", List.of(), Map.of()).stream()
-                    .mapToInt(reservation -> reservation.getInstances().size()).sum());
-        } finally {
-            start.countDown();
-            requests.shutdownNow();
-            assertTrue(requests.awaitTermination(10, TimeUnit.SECONDS));
-        }
-    }
-
-    private static Instance launchType(Ec2Service service, String type) {
-        return service.runInstances("us-east-1", "ami-test", type, 1, 1, null,
-                List.of(), null, null, List.of(), null, null).getInstances().getFirst();
-    }
-
-    private static Instance stopped(String id) {
+    private static Instance instance(String id, String state) {
         Instance instance = new Instance();
         instance.setInstanceId(id);
         instance.setRegion("us-east-1");
         instance.setOwnerId("000000000000");
         instance.setInstanceType("t3.micro");
-        instance.setState(InstanceState.stopped());
+        instance.setState(new InstanceState(0, state));
         return instance;
     }
 
-    private static Instance launch(Ec2Service service, String region) {
-        return service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
+    private static Instance launch(Ec2Service service, String type) {
+        return service.runInstances("us-east-1", "ami-test", type, 1, 1, null,
                 List.of(), null, null, List.of(), null, null).getInstances().getFirst();
     }
 
-    private static Ec2Service service(int limit) {
-        return service(limit, true, mock(Ec2ContainerManager.class));
-    }
-
-    private static Ec2Service service(int limit, boolean mockMode, Ec2ContainerManager manager) {
+    private static Ec2Service service(int limit, boolean enabled) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultAccountId()).thenReturn("000000000000");
-        when(config.services().ec2().mock()).thenReturn(mockMode);
+        when(config.services().ec2().mock()).thenReturn(true);
+        when(config.services().ec2().enforceVcpuQuotas()).thenReturn(enabled);
         when(config.services().ec2().mockPublicAddresses())
                 .thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
         when(config.services().ec2().mockPublicAddress()).thenReturn(Optional.empty());
         when(config.services().servicequotas().standardOnDemandVcpus()).thenReturn(limit);
-        return new Ec2Service(config, manager, mock(Ec2PortForwardManager.class),
+        return new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new MemoryFactory());
     }

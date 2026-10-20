@@ -15,21 +15,9 @@ public final class ContainerTeardowns {
     }
 
     public static void stopAll(Instance<ContainerTeardown> teardowns, Logger log) {
-        stopAll(teardowns, log, false);
-    }
-
-    public static void stopAllForShutdown(Instance<ContainerTeardown> teardowns, Logger log) {
-        stopAll(teardowns, log, true);
-    }
-
-    private static void stopAll(Instance<ContainerTeardown> teardowns, Logger log, boolean shutdown) {
         for (ContainerTeardown teardown : teardowns) {
             try {
-                if (shutdown) {
-                    teardown.stopManagedContainersForShutdown();
-                } else {
-                    teardown.stopManagedContainers();
-                }
+                teardown.stopManagedContainers();
             } catch (Exception e) {
                 log.warnv("Container teardown failed for {0}: {1}",
                         teardown.getClass().getSimpleName(), e.getMessage());

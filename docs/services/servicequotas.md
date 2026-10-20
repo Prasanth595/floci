@@ -20,9 +20,8 @@ instances") reports a configurable applied value through `GetServiceQuota` and
 change that value for all local accounts and regions. Use a nonnegative integer;
 negative values prevent Floci from starting, even when Service Quotas is disabled.
 It defaults to 5. The AWS
-default read actions always return 5. EC2 uses this applied value to enforce
-Standard On-Demand launch/start admission independently for each account and
-region; see [EC2 admission](ec2.md#standard-on-demand-admission).
+default read actions always return 5. EC2 can use this applied value for opt-in
+Standard On-Demand launch/start admission for each account and region; see [EC2 admission](ec2.md#standard-on-demand-admission).
 
 All other applied quotas and AWS default quotas return the same catalog data.
 `RequestServiceQuotaIncrease` is accepted and validated, records the request, and lets you read
@@ -75,7 +74,7 @@ Limitations.
 | Environment variable | Default | Description |
 | --- | --- | --- |
 | `FLOCI_SERVICES_SERVICEQUOTAS_ENABLED` | `true` | Enables the service |
-| `FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` | `5` | Applied EC2 Standard On-Demand vCPU quota reported and enforced independently for each local account and region |
+| `FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` | `5` | Applied EC2 Standard On-Demand vCPU quota reported per local account and region; used by opt-in EC2 admission |
 
 ## Example
 

@@ -401,7 +401,7 @@ public class EmulatorLifecycle {
         // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,
         // EC2 instances, in-flight build/job containers). Runs before shutdownAll() so any
         // state written while stopping is captured by the final flush.
-        ContainerTeardowns.stopAllForShutdown(containerTeardowns, LOG);
+        ContainerTeardowns.stopAll(containerTeardowns, LOG);
         runCleanup("DynamoDB backend", dynamoDbRuntime::stop);
         runCleanup("storage shutdown", storageFactory::shutdownAll);
 
