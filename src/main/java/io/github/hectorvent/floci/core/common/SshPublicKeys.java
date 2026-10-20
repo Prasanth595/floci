@@ -14,7 +14,8 @@ import java.util.HexFormat;
 
 /**
  * The OpenSSH public key wire form, {@code "ssh-rsa AAAA..."}: decoding a line into its
- * length-prefixed fields, and reading or writing the RSA key they carry.
+ * length-prefixed fields, reading or writing the RSA key they carry, and telling whether a blob
+ * holds a whole key of the type it declares, RSA or otherwise.
  *
  * <p>Extracted from {@code Ec2KeyMaterial} rather than left there because it is key-format
  * handling rather than anything EC2 owns. The digest helper is here for the same reason, and

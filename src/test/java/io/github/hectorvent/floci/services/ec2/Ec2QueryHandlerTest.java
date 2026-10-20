@@ -265,8 +265,9 @@ class Ec2QueryHandlerTest {
     /**
      * The key-pair name becomes the comment only when it can be one. A key pair stored before
      * KeyName was required has no name, which would otherwise read {@code null}, and a name with a
-     * line break or another control character would split the key into lines an authorized_keys
-     * file reads as further keys (XML turns a carriage return into a line feed on the way).
+     * line break would split the key into lines an authorized_keys file reads as further keys (XML
+     * turns a carriage return into a line feed on the way), so a name holding any control
+     * character, a tab included, is left off.
      */
     @ParameterizedTest
     @NullAndEmptySource
