@@ -316,7 +316,8 @@ default region, and tags on an EKS node instance move to the node's region once 
 restored; any other tag whose resource no longer exists is dropped.
 
 `CreateTags` and `DeleteTags` require at least one resource id (`MissingParameter`) and reject an
-id that is not a known EC2 resource prefix followed by hex digits (`InvalidID`). `CreateTags` also
+id that is not a known EC2 resource prefix followed by 8 or more hex digits or, for fleets, a UUID
+(`InvalidID`). `CreateTags` also
 checks each resource exists in the request's region and answers with that type's own error
 (`InvalidVpcID.NotFound`, `InvalidInstanceID.NotFound`, ...); a well-formed id of a type Floci does
 not model is tagged as given. A resource takes at most 50 user tags (`TagLimitExceeded`; tags with

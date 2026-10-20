@@ -156,14 +156,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
-    // An EC2 id is a known resource prefix, a hyphen and 8 or 17 hex digits. Longer prefixes come
-    // first so that eni-attach- is read as one type, not as eni-.
+    // An EC2 id is a known resource prefix, a hyphen and either 8 or more hex digits (8, 17, or 33
+    // for an IPAM pool allocation) or a UUID (EC2 Fleet and Spot Fleet requests). Longer prefixes
+    // come first so that eni-attach- is read as one type, not as eni-.
     private static final String TAGGABLE_RESOURCE_TYPES = "(subnet-cidr-assoc|vpc-cidr-assoc"
+            + "|ipam-pool-alloc|ipam-scope|ipam-pool|ipam"
             + "|traf-mir-fil|traf-mir-tar|iip-assoc|eni-attach|tgw-attach|tgw-rtb|vpce-svc|aclassoc|eipassoc"
             + "|eipalloc|rtbassoc|subnet|fleet|cagw|dopt|eigw|snap|vpce|acl|ami|cgw|eni|igw|key|nat|pcx|rtb|scr"
             + "|sfr|sgr|sir|tgw|tms|vgw|vol|vpc|vpn|cr|fl|lt|pl|sg|h|i|r)-";
-    private static final Pattern TAGGABLE_RESOURCE_ID =
-            Pattern.compile(TAGGABLE_RESOURCE_TYPES + "(?:[0-9a-f]{8}|[0-9a-f]{17})");
+    private static final Pattern TAGGABLE_RESOURCE_ID = Pattern.compile(TAGGABLE_RESOURCE_TYPES
+            + "(?:[0-9a-f]{8,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})");
     private static final Pattern TAGGABLE_RESOURCE_PREFIX = Pattern.compile(TAGGABLE_RESOURCE_TYPES);
     private static final int MAX_USER_TAGS_PER_RESOURCE = 50;
     private static final int MAX_TAG_KEY_LENGTH = 128;
@@ -8626,10 +8628,41 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         for (String resourceId : resourceIds) {
             requireTaggableResource(region, resourceId);
         }
-        for (String resourceId : resourceIds) {
-            requireWithinTagLimit(region, resourceId, tagList);
+        // The limit is checked under the same locks as the write, so two requests cannot both pass
+        // it and then together exceed it, and a rejected request writes nothing.
+        withTagWriteLocks(region, resourceIds, () -> {
+            for (String resourceId : resourceIds) {
+                requireWithinTagLimit(region, resourceId, tagList);
+            }
+            createSystemTags(region, resourceIds, tagList);
+        });
+    }
+
+    /**
+     * Runs a tag write holding the lock of every resource it names, in the order the deletes and
+     * {@link #withTopologyLockIfNeeded} use: the topology lock first when a transit gateway
+     * resource is among them, then the stripes in ascending index order, the total order every
+     * multi-stripe caller agrees on.
+     */
+    private void withTagWriteLocks(String region, List<String> resourceIds, Runnable change) {
+        int[] stripes = resourceIds.stream().mapToInt(id -> stripeOf(key(region, id))).distinct().sorted().toArray();
+        if (resourceIds.stream().anyMatch(id -> id.startsWith("tgw-"))) {
+            synchronized (attachmentTopologyLock(region)) {
+                runHoldingStripes(stripes, 0, change);
+            }
+            return;
         }
-        createSystemTags(region, resourceIds, tagList);
+        runHoldingStripes(stripes, 0, change);
+    }
+
+    private void runHoldingStripes(int[] stripes, int next, Runnable change) {
+        if (next == stripes.length) {
+            change.run();
+            return;
+        }
+        synchronized (resourceLocks[stripes[next]]) {
+            runHoldingStripes(stripes, next + 1, change);
+        }
     }
 
     /**

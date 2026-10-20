@@ -905,7 +905,7 @@ class Ec2ServiceTest {
         assertEquals("MissingParameter", assertThrows(AwsException.class,
                 () -> service.deleteTags("us-east-1", List.of(), tag)).getErrorCode());
         for (String id : List.of("not-an-id", "vpc-xyz", "i-123", "foo-0123456789abcdef0", "vgw-12345678-not-an-id",
-                "vgw-0123456789abcdef", "vgw-0123456789abcdef01", "vpc-default-nowhere")) {
+                "vgw-0123456", "vgw-0123456789ABCDEF0", "fleet-73fbd2ce-aa30-494c-8788", "vpc-default-nowhere")) {
             assertEquals("InvalidID", assertThrows(AwsException.class,
                     () -> service.createTags("us-east-1", List.of(id), tag)).getErrorCode(), id);
             assertEquals("InvalidID", assertThrows(AwsException.class,
@@ -918,7 +918,11 @@ class Ec2ServiceTest {
         Ec2Service service = tagTestService(new InMemoryStorageFactory());
 
         List<String> ids = List.of("vgw-0123456789abcdef0", "vgw-01234567", "vpce-svc-0123456789abcdef0",
-                "eni-attach-0123456789abcdef0", "vpc-cidr-assoc-01234567", "subnet-cidr-assoc-0123456789abcdef0");
+                "eni-attach-0123456789abcdef0", "vpc-cidr-assoc-01234567", "subnet-cidr-assoc-0123456789abcdef0",
+                "fleet-73fbd2ce-aa30-494c-8788-1cee4a1b2c3d", "fleet-0123456789abcdef0123456789abcdef",
+                "sfr-306341ed-9739-402e-881b-ce47b0123456", "ipam-0123456789abcdef0",
+                "ipam-scope-0123456789abcdef0", "ipam-pool-0123456789abcdef0",
+                "ipam-pool-alloc-018ecc28043b54ba38e2cd99943cebfbd");
         service.createTags("us-east-1", ids, List.of(new Tag("Team", "x")));
 
         for (String id : ids) {
