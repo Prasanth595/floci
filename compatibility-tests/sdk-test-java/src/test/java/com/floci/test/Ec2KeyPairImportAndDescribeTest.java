@@ -41,8 +41,10 @@ class Ec2KeyPairImportAndDescribeTest {
 
                 assertThat(rsa.keyType()).isEqualTo(KeyType.RSA);
                 assertThat(ed25519.keyType()).isEqualTo(KeyType.ED25519);
-                assertThat(rsa.createTime()).isAfterOrEqualTo(before).isBeforeOrEqualTo(Instant.now());
-                assertThat(ed25519.createTime()).isAfterOrEqualTo(before).isBeforeOrEqualTo(Instant.now());
+                // A minute either side: Floci may run in a container whose clock is not this one's.
+                Instant after = Instant.now();
+                assertThat(rsa.createTime()).isBetween(before.minusSeconds(60), after.plusSeconds(60));
+                assertThat(ed25519.createTime()).isBetween(before.minusSeconds(60), after.plusSeconds(60));
             } finally {
                 ec2.deleteKeyPair(r -> r.keyPairId(created));
                 ec2.deleteKeyPair(r -> r.keyPairId(imported));

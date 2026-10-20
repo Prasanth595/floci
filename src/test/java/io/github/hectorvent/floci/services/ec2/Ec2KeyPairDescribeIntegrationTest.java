@@ -107,18 +107,23 @@ class Ec2KeyPairDescribeIntegrationTest {
     }
 
     /**
-     * The key pairs DescribeKeyPairs returns for a key-name filter of {@code prefix-*}, ANDed with a
-     * second filter when one is given: their names without the prefix, sorted. Without filtering,
-     * every key pair this application holds would come back.
+     * The key pairs DescribeKeyPairs returns for the given filter, a name and its values, ANDed with
+     * a key-name filter of {@code prefix-*}: their names without the prefix, sorted. Without that
+     * second filter every key pair this application holds would come back. A key-name filter under
+     * test is sent alone, with values that carry the prefix, since a request names a filter once.
      */
     private static List<String> described(String prefix, String... filter) {
         RequestSpecification request = given().header("Authorization", AUTH)
-                .formParam("Action", "DescribeKeyPairs")
-                .formParam("Filter.1.Name", "key-name").formParam("Filter.1.Value.1", prefix + "-*");
+                .formParam("Action", "DescribeKeyPairs");
+        int next = 1;
+        if (filter.length == 0 || !"key-name".equals(filter[0])) {
+            request.formParam("Filter.1.Name", "key-name").formParam("Filter.1.Value.1", prefix + "-*");
+            next = 2;
+        }
         if (filter.length > 0) {
-            request.formParam("Filter.2.Name", filter[0]);
+            request.formParam("Filter." + next + ".Name", filter[0]);
             for (int i = 1; i < filter.length; i++) {
-                request.formParam("Filter.2.Value." + i, filter[i]);
+                request.formParam("Filter." + next + ".Value." + i, filter[i]);
             }
         }
         List<String> names = new ArrayList<>();

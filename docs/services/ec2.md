@@ -312,13 +312,13 @@ private gateway lifecycles are not modelled.
 
 ### Key Pairs
 
-`ImportKeyPair` takes the key types and formats AWS documents: an RSA or ED25519 key as an
-OpenSSH public key line, and an RSA key also as an RFC 4716 file or as base64 DER, bare or in
-PEM armour. AWS lists 1024, 2048 and 4096 bits as the supported RSA lengths; Floci takes any
-length from 1024 to 16384 bits, the range OpenSSH reads, because AWS also imports others, such
-as ssh-keygen's default of 3072. A DSA, ECDSA, security-key or certificate key, a key line whose
-blob is incomplete, has bytes after its key or declares another type, and material holding more
-than one key line are refused with `InvalidKey.Format`. The key is stored as one OpenSSH line,
+`ImportKeyPair` takes the key types and formats AWS documents: an RSA or ED25519 key as an OpenSSH
+public key line, and an RSA key also as an RFC 4716 file or as base64 DER, bare or in PEM armour.
+AWS lists 1024, 2048 and 4096 bits as the supported RSA lengths but imports others too, such as
+8192 bits; Floci takes any length from 1024 to 16384 bits, the range OpenSSH reads, which also
+covers ssh-keygen's default of 3072. A DSA, ECDSA, security-key or certificate key, a key line
+whose blob is incomplete, has bytes after its key or declares another type, and material holding
+more than one key line are refused with `InvalidKey.Format`. The key is stored as one OpenSSH line,
 which is what `RunInstances` copies into `authorized_keys`. `CreateKeyPair` and `ImportKeyPair`
 take a `KeyName` of up to 255 ASCII characters with no leading or trailing space, and answer any
 other with `InvalidParameterValue`.
