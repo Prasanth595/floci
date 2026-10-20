@@ -211,9 +211,9 @@ public class StackSetService implements PassedRoleLookup {
         StackSet ss = getStackSetOrThrow(name);
         // Checked against the template and parameters the update leaves the stack set with, before
         // either is changed or an operation is recorded.
-        requireNoNullValues(templateBody != null && !templateBody.isBlank() ? templateBody : ss.getTemplateBody());
-        cfnService.requireParameterValues(
-                templateBody != null && !templateBody.isBlank() ? templateBody : ss.getTemplateBody(),
+        String keptTemplate = templateBody != null && !templateBody.isBlank() ? templateBody : ss.getTemplateBody();
+        requireNoNullValues(keptTemplate);
+        cfnService.requireParameterValues(keptTemplate,
                 parameters != null && !parameters.isEmpty() ? parameters : ss.getParameters());
         String operationId = reserveOperation(name, "UPDATE", requestedOperationId).getOperationId();
         if (templateBody != null && !templateBody.isBlank()) {
@@ -732,9 +732,8 @@ public class StackSetService implements PassedRoleLookup {
         try {
             cfnService.requireNoNullValues(templateBody);
         } catch (AwsException e) {
-            throw new AwsException(e.getErrorCode(), e.getMessage() + " (Service: AmazonCloudFormation; Status Code: "
-                    + e.getHttpStatus() + "; Error Code: " + e.getErrorCode() + "; Request ID: " + UUID.randomUUID()
-                    + "; Proxy: null)", e.getHttpStatus());
+            throw new AwsException(e.getErrorCode(), CloudFormationTemplateEngine.sdkErrorMessage(
+                    e.getMessage(), "AmazonCloudFormation", e.getHttpStatus(), e.getErrorCode()), e.getHttpStatus());
         }
     }
 
