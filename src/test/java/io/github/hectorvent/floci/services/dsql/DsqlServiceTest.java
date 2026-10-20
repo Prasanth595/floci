@@ -12,15 +12,21 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -35,14 +41,24 @@ class DsqlServiceTest {
     private static final String ROOT = "arn:aws:iam::" + ACCOUNT + ":root";
 
     private final DsqlPrincipals principals = mock(DsqlPrincipals.class);
+    private final DsqlDataPlane dataPlane = mock(DsqlDataPlane.class);
     private final ObjectMapper mapper = new ObjectMapper();
     private final DsqlService service = new DsqlService(
             new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT),
-            new RegionResolver(REGION, ACCOUNT), "localhost.floci.io", new DsqlDataPlane(), principals,
-            new IamPolicyEvaluator(mapper), mapper);
+            new RegionResolver(REGION, ACCOUNT), "localhost.floci.io", dataPlane, principals,
+            new IamPolicyEvaluator(mapper), mapper, true);
 
     @BeforeEach
     void caller() {
+        // A database that is ready at once and gone at once, as with floci.services.dsql.mock.
+        doAnswer(call -> {
+            call.<Consumer<Boolean>>getArgument(1).accept(true);
+            return null;
+        }).when(dataPlane).provision(any(), any());
+        doAnswer(call -> {
+            call.<Runnable>getArgument(1).run();
+            return null;
+        }).when(dataPlane).deprovision(any(), any());
         when(principals.caller()).thenReturn(CallerArns.accountRoot(ROOT, ACCOUNT));
         when(principals.exists(anyString())).thenAnswer(call -> call.getArgument(0, String.class).endsWith(":root"));
     }
@@ -161,6 +177,37 @@ class DsqlServiceTest {
                 service.getCluster("eu-west-3", second.getIdentifier()).getLinkedClusterArns());
     }
 
+    /**
+     * Peering makes a cluster ACTIVE only once its database answers: until then it is CREATING, and
+     * one whose database failed is FAILED, not left waiting.
+     */
+    @Test
+    void aPeerIsActiveOnlyOnceItsDatabaseAnswers() {
+        DsqlDataPlane slow = mock(DsqlDataPlane.class);
+        Map<String, Consumer<Boolean>> starting = new HashMap<>();
+        doAnswer(call -> {
+            starting.put(call.<DsqlCluster>getArgument(0).getIdentifier(), call.getArgument(1));
+            return null;
+        }).when(slow).provision(any(), any());
+        DsqlService peers = service(new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT), slow);
+        DsqlCluster first = peers.createCluster(REGION, false, null, null, null, "eu-west-2", null, null, false);
+        DsqlCluster second = peers.createCluster("eu-west-3", false, null, null, null, "eu-west-2", null, null, false);
+        DsqlCluster failing = peers.createCluster(REGION, false, null, null, null, "eu-west-2", null, null, false);
+
+        starting.get(first.getIdentifier()).accept(true);
+        starting.get(failing.getIdentifier()).accept(false);
+        assertEquals(DsqlService.PENDING_SETUP, peers.getCluster(REGION, first.getIdentifier()).getStatus());
+        assertEquals(DsqlService.FAILED, peers.getCluster(REGION, failing.getIdentifier()).getStatus());
+
+        peers.updateCluster(REGION, first.getIdentifier(), null, null, null, List.of(second.getArn()));
+        peers.updateCluster("eu-west-3", second.getIdentifier(), null, null, null, List.of(first.getArn()));
+        assertEquals(DsqlService.ACTIVE, peers.getCluster(REGION, first.getIdentifier()).getStatus());
+        assertEquals(DsqlService.CREATING, peers.getCluster("eu-west-3", second.getIdentifier()).getStatus());
+
+        starting.get(second.getIdentifier()).accept(true);
+        assertEquals(DsqlService.ACTIVE, peers.getCluster("eu-west-3", second.getIdentifier()).getStatus());
+    }
+
     @Test
     void anUpdateLeavesWhatItDoesNotNameAsItWas() {
         DsqlCluster cluster = service.createCluster(REGION, false, "arn:aws:kms:eu-west-1:" + ACCOUNT + ":key/k",
@@ -196,6 +243,39 @@ class DsqlServiceTest {
         assertEquals("1 validation error detected: Value at 'maxResults' failed to satisfy constraint: Member must"
                 + " have value less than or equal to 100", tooMany.getMessage());
         assertNull(tooMany.getExtendedData());
+    }
+
+    /**
+     * A restart over the same storage starts every cluster's database again, and finishes a
+     * deletion the stop interrupted.
+     */
+    @Test
+    void aRestartBringsEveryClusterBackAndFinishesAnInterruptedDeletion() {
+        AccountAwareStorageBackend<DsqlCluster> storage =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT);
+        DsqlDataPlane stopping = mock(DsqlDataPlane.class);
+        doAnswer(call -> {
+            call.<Consumer<Boolean>>getArgument(1).accept(true);
+            return null;
+        }).when(stopping).provision(any(), any());
+        DsqlService before = service(storage, stopping);
+        DsqlCluster kept = before.createCluster(REGION, false, null, null, null, null, null, null, false);
+        DsqlCluster deleting = before.createCluster(REGION, false, null, null, null, null, null, null, false);
+        // The stop comes before the database is gone, so the cluster stays DELETING.
+        before.deleteCluster(REGION, deleting.getIdentifier());
+
+        DsqlService after = service(storage, dataPlane);
+        after.onStart(null);
+
+        verify(dataPlane).provision(argThat(cluster -> kept.getIdentifier().equals(cluster.getIdentifier())), any());
+        verify(dataPlane).deprovision(argThat(cluster -> deleting.getIdentifier().equals(cluster.getIdentifier())), any());
+        assertEquals(DsqlService.ACTIVE, after.getCluster(REGION, kept.getIdentifier()).getStatus());
+        assertThrows(AwsException.class, () -> after.getCluster(REGION, deleting.getIdentifier()));
+    }
+
+    private DsqlService service(AccountAwareStorageBackend<DsqlCluster> storage, DsqlDataPlane plane) {
+        return new DsqlService(storage, new RegionResolver(REGION, ACCOUNT), "localhost.floci.io", plane, principals,
+                new IamPolicyEvaluator(mapper), mapper, true);
     }
 
     private DsqlCluster cluster() {
