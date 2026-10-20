@@ -29,6 +29,11 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1455,5 +1460,42 @@ class EcrServiceTest {
         assertThrows(AwsException.class, () -> first.getRegistryPolicy("us-west-2"));
         assertThrows(AwsException.class, () -> other.getRegistryPolicy(REGION));
         assertEquals("111111111111", other.registryId());
+    }
+
+    /**
+     * Terraform puts the policy, replication and scanning configuration in parallel. Each round
+     * starts the three puts together on a registry with no settings yet, and all three must stay.
+     */
+    @Test
+    void registrySettings_parallelPutsAllSurvive() throws Exception {
+        EcrService parallel = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), registryManager, Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, ACCOUNT));
+        List<RegistrySettings.ReplicationRule> rules = List.of(replicateTo("eu-west-1", ACCOUNT, null));
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            for (int round = 0; round < 300; round++) {
+                String region = "round-" + round;
+                CyclicBarrier start = new CyclicBarrier(3);
+                List<Runnable> puts = List.of(
+                        () -> parallel.putRegistryPolicy(REGISTRY_POLICY, region),
+                        () -> parallel.putReplicationConfiguration(rules, region),
+                        () -> parallel.putRegistryScanningConfiguration("ENHANCED", List.of(), region));
+                CompletableFuture.allOf(puts.stream().map(put -> CompletableFuture.runAsync(() -> {
+                    try {
+                        start.await(5, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                    put.run();
+                }, pool)).toArray(CompletableFuture[]::new)).get(10, TimeUnit.SECONDS);
+
+                assertEquals(REGISTRY_POLICY, parallel.getRegistryPolicy(region), region);
+                assertEquals(rules, parallel.replicationRules(region), region);
+                assertEquals("ENHANCED", parallel.registryScanningConfiguration(region).getScanType(), region);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }

@@ -89,6 +89,7 @@ public class EcrService implements ResourceProvider {
     private final StorageBackend<String, ImageMetadata> imageMetaStore;
     private final StorageBackend<String, PullThroughCacheRule> pullThroughCacheRuleStore;
     private final StorageBackend<String, RegistrySettings> registrySettingsStore;
+    private final Map<String, Object> registrySettingsLocks = new ConcurrentHashMap<>();
     private final EcrRegistryManager registryManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -1018,9 +1019,10 @@ public class EcrService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", "Invalid parameter at 'PolicyText' failed to satisfy "
                     + "constraint: 'Invalid registry policy provided'", 400);
         }
-        RegistrySettings settings = registrySettings(region);
-        settings.setPolicyText(policyText);
-        saveRegistrySettings(region, settings);
+        updateRegistrySettings(region, settings -> {
+            settings.setPolicyText(policyText);
+            return null;
+        });
         return policyText;
     }
 
@@ -1034,14 +1036,14 @@ public class EcrService implements ResourceProvider {
 
     /** Removes the registry policy and returns what it was. */
     public String deleteRegistryPolicy(String region) {
-        RegistrySettings settings = registrySettings(region);
-        String policy = settings.getPolicyText();
-        if (policy == null) {
-            throw registryPolicyNotFound();
-        }
-        settings.setPolicyText(null);
-        saveRegistrySettings(region, settings);
-        return policy;
+        return updateRegistrySettings(region, settings -> {
+            String policy = settings.getPolicyText();
+            if (policy == null) {
+                throw registryPolicyNotFound();
+            }
+            settings.setPolicyText(null);
+            return policy;
+        });
     }
 
     /** Stores the replication rules; an empty list clears them. Floci does not replicate images. */
@@ -1087,9 +1089,10 @@ public class EcrService implements ResourceProvider {
                 }
             }
         }
-        RegistrySettings settings = registrySettings(region);
-        settings.setReplicationRules(rules.isEmpty() ? null : List.copyOf(rules));
-        saveRegistrySettings(region, settings);
+        updateRegistrySettings(region, settings -> {
+            settings.setReplicationRules(rules.isEmpty() ? null : List.copyOf(rules));
+            return null;
+        });
         return replicationRules(region);
     }
 
@@ -1136,10 +1139,11 @@ public class EcrService implements ResourceProvider {
                 }
             }
         }
-        RegistrySettings settings = registrySettings(region);
-        settings.setScanType(type);
-        settings.setScanningRules(List.copyOf(given));
-        saveRegistrySettings(region, settings);
+        updateRegistrySettings(region, settings -> {
+            settings.setScanType(type);
+            settings.setScanningRules(List.copyOf(given));
+            return null;
+        });
         return registryScanningConfiguration(region);
     }
 
@@ -1161,8 +1165,20 @@ public class EcrService implements ResourceProvider {
         return registrySettingsStore.get(registrySettingsKey(region)).orElseGet(RegistrySettings::new);
     }
 
-    private void saveRegistrySettings(String region, RegistrySettings settings) {
-        registrySettingsStore.put(registrySettingsKey(region), settings);
+    /**
+     * Reads the registry's settings, changes them and writes them back under the registry's lock.
+     * The settings are one record, and Terraform puts the policy, replication and scanning
+     * configuration in parallel: unlocked, two writers could start from the same record and the
+     * later write would drop the other's field.
+     */
+    private <T> T updateRegistrySettings(String region, Function<RegistrySettings, T> change) {
+        String key = registrySettingsKey(region);
+        synchronized (registrySettingsLocks.computeIfAbsent(key, k -> new Object())) {
+            RegistrySettings settings = registrySettings(region);
+            T result = change.apply(settings);
+            registrySettingsStore.put(key, settings);
+            return result;
+        }
     }
 
     private String registrySettingsKey(String region) {
