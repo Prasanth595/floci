@@ -97,6 +97,7 @@ class RedshiftGetClusterCredentialsIamEnforcementIntegrationTest {
         userPolicy(user, allow("redshift:GetClusterCredentials", "*"));
 
         assertDenied(given()
+                .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
                 .queryParam("X-Amz-Credential", accessKeyId + "/20261020/us-east-1/redshift/aws4_request")
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "GetClusterCredentials")
