@@ -196,8 +196,8 @@ class ElbV2ServiceTest {
 
     /**
      * Only the SetSubnets action refuses an empty list. A CloudFormation rollback moves a kept
-     * balancer back onto the subnets it had before the update, and for a balancer an earlier version
-     * saved without subnets that is none.
+     * balancer back onto the subnets it had before the update, and for a balancer an earlier Floci
+     * version saved without subnets that is none.
      */
     @Test
     void aMoveBackOntoNoSubnetsIsStillTaken() {

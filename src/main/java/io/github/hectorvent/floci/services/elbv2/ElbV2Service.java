@@ -408,13 +408,14 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     }
 
     /**
-     * The SetSubnets action. A request with neither {@code Subnets} nor {@code SubnetMappings} is
-     * refused and the balancer stays on its subnets, with the error CreateLoadBalancer gives a balancer
-     * of its type with neither; AWS gives a Network Load Balancer that error for SetSubnets too. The
-     * balancer is looked up first, as the message depends on its type. A request that names subnets is
-     * checked by {@link #setSubnets}, as before.
+     * The SetSubnets action, for the Query handler. A request with neither {@code Subnets} nor
+     * {@code SubnetMappings} is refused and the balancer stays on its subnets, with the error
+     * CreateLoadBalancer gives a balancer of its type with neither; AWS gives a Network Load Balancer
+     * that error for SetSubnets too. The balancer is looked up first, as the message depends on its
+     * type. Only an empty list is refused here; a request that names subnets is checked by
+     * {@link #setSubnets}.
      */
-    public void setRequestedSubnets(String region, String arn, List<String> subnets) {
+    void setSubnetsFromRequest(String region, String arn, List<String> subnets) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
         if (subnets.isEmpty()) {
             requireSubnets(lb.getType(), subnets);
@@ -424,8 +425,8 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     /**
      * Under EC2's subnet lock for the same reason as {@link #createLoadBalancer}. Unlike the SetSubnets
-     * action, this takes an empty list: a CloudFormation rollback moves a balancer an earlier version
-     * saved without subnets back onto none.
+     * action, this takes an empty list: CloudFormation moves balancers through it, and its rollback
+     * moves a balancer an earlier Floci version saved without subnets back onto none.
      */
     public void setSubnets(String region, String arn, List<String> subnets) {
         ec2Service.runWithSubnetReferencesHeld(region, () -> {

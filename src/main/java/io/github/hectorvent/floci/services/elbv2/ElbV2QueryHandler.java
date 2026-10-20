@@ -256,7 +256,7 @@ public class ElbV2QueryHandler {
     private Response handleSetSubnets(MultivaluedMap<String, String> p, String region) {
         String arn = p.getFirst("LoadBalancerArn");
         List<String> subnets = ElbV2Service.requestedSubnets(memberList(p, "Subnets"), subnetMappingSubnetIds(p));
-        service.setRequestedSubnets(region, arn, subnets);
+        service.setSubnetsFromRequest(region, arn, subnets);
         return voidResponse("SetSubnetsResponse");
     }
 

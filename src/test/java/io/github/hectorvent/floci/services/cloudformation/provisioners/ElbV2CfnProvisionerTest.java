@@ -497,7 +497,8 @@ class ElbV2CfnProvisionerTest {
 
     /**
      * An update whose template names neither {@code Subnets} nor {@code SubnetMappings} leaves the kept
-     * load balancer on its subnets without a SetSubnets, which refuses a request with neither.
+     * load balancer on its subnets: it does not call ElbV2Service.setSubnets, which would move the
+     * balancer onto none.
      */
     @Test
     void anUpdateThatNamesNoSubnetsLeavesTheKeptLoadBalancerOnItsSubnets() {
@@ -516,9 +517,9 @@ class ElbV2CfnProvisionerTest {
     }
 
     /**
-     * A load balancer an earlier version saved without subnets is moved back onto none when an update
-     * that gave it subnets rolls back: the move back goes through ElbV2Service.setSubnets, which takes
-     * an empty list, where the SetSubnets action refuses one.
+     * A load balancer an earlier Floci version saved without subnets is moved back onto none when an
+     * update that gave it subnets rolls back: the move back goes through ElbV2Service.setSubnets, which
+     * takes an empty list, where the SetSubnets action refuses one.
      */
     @Test
     void aRollbackMovesALoadBalancerSavedWithoutSubnetsBackOntoNone() {
