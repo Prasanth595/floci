@@ -812,6 +812,30 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void resolveBackendEndpointUsesTheGlobalDockerNetworkFallback() {
+        EmulatorConfig config = config(tempDir.resolve("global-network-root"));
+        when(config.services().dockerNetwork()).thenReturn(Optional.of("global-network"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "container-a", Map.of(3306,
+                new ContainerLifecycleManager.EndpointInfo("old-address", 3306))));
+        ContainerLifecycleManager.EndpointInfo currentEndpoint =
+                new ContainerLifecycleManager.EndpointInfo("current-address", 3306);
+        when(lifecycleManager.resolveEndpoint("container-a", 3306, "global-network"))
+                .thenReturn(currentEndpoint);
+        RdsContainerManager manager = autoPauseManager(config, lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
+        manager.start(runtimeId, "db1", null,
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        ContainerLifecycleManager.EndpointInfo resolved =
+                manager.resolveBackendEndpoint(runtimeId, DatabaseEngine.MYSQL);
+
+        assertSame(currentEndpoint, resolved);
+        verify(lifecycleManager).resolveEndpoint("container-a", 3306, "global-network");
+    }
+
+    @Test
     void resolveBackendEndpointFailsWhenRuntimeIsInactive() {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);

@@ -469,9 +469,10 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         if (handle == null) {
             throw new IllegalStateException("RDS runtime " + runtimeId + " has no active container");
         }
+        String preferredNetwork = containerBuilder.resolveDockerNetwork(
+                config.services().rds().dockerNetwork()).orElse(null);
         return lifecycleManager.resolveEndpoint(
-                handle.getContainerId(), engine.defaultPort(),
-                config.services().rds().dockerNetwork().orElse(null));
+                handle.getContainerId(), engine.defaultPort(), preferredNetwork);
     }
 
     /** Returns the retained runtime handle used to persist cleanup identity after a failed start. */
