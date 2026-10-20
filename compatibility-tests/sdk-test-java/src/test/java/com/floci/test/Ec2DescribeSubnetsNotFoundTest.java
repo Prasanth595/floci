@@ -50,8 +50,8 @@ class Ec2DescribeSubnetsNotFoundTest {
     /**
      * describeSubnets is shared with the services that build on it, and each reports a missing
      * subnet in its own words. ELBv2 owes its callers SubnetNotFound, so the EC2 error must not
-     * reach through. An Application Load Balancer takes two subnets, and one alone is refused before
-     * it is looked up, so the missing subnet comes second.
+     * reach through. An Application Load Balancer takes at least two subnets, and one alone is refused
+     * before it is looked up, so the missing subnet is sent alongside an existing one.
      */
     @Test
     @DisplayName("ELBv2 still reports its own SubnetNotFound for a missing subnet")

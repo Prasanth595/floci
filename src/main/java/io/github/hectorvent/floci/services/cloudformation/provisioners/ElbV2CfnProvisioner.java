@@ -216,7 +216,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
      * as one an Fn::If drops, does not count. {@code SubnetId} is required in a mapping, so one without it
      * fails the resource before anything is created or moved, with the error the resource schema gives.
      * A blank one counts as a mapping and, with no {@code Subnets}, is passed on as given for ELBv2 to
-     * refuse as an unknown subnet; dropping it would create or move the balancer without it.
+     * refuse; dropping it would create or move the balancer without it.
      */
     private static List<String> templateSubnets(JsonNode props, ProvisionContext ctx) {
         List<String> subnets = ctx.resolveStringList(props, "Subnets");

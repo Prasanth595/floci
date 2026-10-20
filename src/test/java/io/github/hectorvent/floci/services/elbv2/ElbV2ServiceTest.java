@@ -133,6 +133,7 @@ class ElbV2ServiceTest {
     @ParameterizedTest
     @CsvSource(nullValues = "NONE", value = {"NONE", "application"})
     void anApplicationLoadBalancerOnOneSubnetIsRefusedBeforeTheSubnetIsLookedUp(String type) {
+        // Stubbed so that a lookup before the count would reach the zone check, not a SubnetNotFound from the mock.
         lenient().when(ec2Service.describeSubnets(REGION, List.of("subnet-a"), Map.of()))
                 .thenReturn(List.of(subnet("subnet-a", REGION + "a")));
         AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
