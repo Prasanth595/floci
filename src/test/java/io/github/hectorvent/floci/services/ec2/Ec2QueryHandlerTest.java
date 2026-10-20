@@ -33,7 +33,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -332,7 +331,7 @@ class Ec2QueryHandlerTest {
     /** DescribeKeyPairs with IncludePublicKey=true over a service that holds only this key pair. */
     private String describeKeyPairWithItsPublicKey(KeyPair keyPair) {
         Ec2Service service = mock(Ec2Service.class);
-        when(service.describeKeyPairs(eq("us-east-1"), anyList(), anyList(), anyMap())).thenReturn(List.of(keyPair));
+        when(service.describeKeyPairs(eq("us-east-1"), anyList(), anyList(), anyList())).thenReturn(List.of(keyPair));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("IncludePublicKey", "true");
 

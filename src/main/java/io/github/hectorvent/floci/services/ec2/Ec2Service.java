@@ -7278,10 +7278,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public List<KeyPair> describeKeyPairs(String region, List<String> keyNames, List<String> keyPairIds,
                                           Map<String, List<String>> filters) {
+        return describeKeyPairs(region, keyNames, keyPairIds, List.copyOf(filters.entrySet()));
+    }
+
+    /**
+     * Filter.N in request order, each a name and its values: AWS ANDs the filters, a repeated name
+     * included, and ORs the values within one.
+     */
+    public List<KeyPair> describeKeyPairs(String region, List<String> keyNames, List<String> keyPairIds,
+                                          List<Map.Entry<String, List<String>>> filters) {
         ensureDefaultResources(region);
-        // matchesFilters answers true for a name it does not know, so an unknown name would match
+        // matchesFilter answers true for a name it does not know, so an unknown name would match
         // every key pair rather than fail as it does in AWS.
-        requireSupportedFilters(filters.keySet(), KEY_PAIR_FILTERS);
+        requireSupportedFilters(filters.stream().map(Map.Entry::getKey).toList(), KEY_PAIR_FILTERS);
         List<KeyPair> regionKeyPairs = keyPairs.scan(k -> true).stream()
                 .filter(k -> k.getRegion().equals(region))
                 .collect(Collectors.toList());
@@ -7305,7 +7314,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return regionKeyPairs.stream()
                 .filter(k -> keyNames.isEmpty() || keyNames.contains(k.getKeyName()))
                 .filter(k -> keyPairIds.isEmpty() || keyPairIds.contains(k.getKeyPairId()))
-                .filter(k -> matchesFilters(k, filters, region))
+                .filter(k -> filters.stream().allMatch(f -> matchesFilter(k, f.getKey(), f.getValue(), region)))
                 .collect(Collectors.toList());
     }
 

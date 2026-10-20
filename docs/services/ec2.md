@@ -325,12 +325,13 @@ blank one is `MissingParameter`, and they answer any other with `InvalidParamete
 
 `DescribeKeyPairs` returns each key pair's `keyType` and `createTime`. It filters by `key-pair-id`,
 `key-name`, `fingerprint`, `tag-key` and `tag:<key>`, as AWS documents, and also by `key-type`,
-which AWS does not document; `*` and `?` are wildcards, and any other filter name is
-`InvalidParameterValue`. It omits the public key unless `IncludePublicKey=true`, read as `true` or
-`false` in any case and as `false` when empty or blank; any other value is `InvalidParameterValue`.
-When requested, it returns the OpenSSH public key with the key-pair name as its comment, whatever
-comment the key was imported with; a name holding a control character, such as a line break, is
-left off. It never returns private key material.
+which AWS does not document; `*` and `?` are wildcards, filters are ANDed, a repeated name
+included, and the values of one filter ORed, and any other filter name is `InvalidParameterValue`.
+It omits the public key unless `IncludePublicKey=true`, read as `true` or `false` in any case and
+as `false` when empty or blank; any other value is `InvalidParameterValue`. When requested, it
+returns the OpenSSH public key with the key-pair name as its comment, whatever comment the key was
+imported with; a name holding a control character, such as a line break, is left off. It never
+returns private key material.
 
 A key pair saved by an earlier version of Floci is described from what it stored. It has no
 `createTime`, and its `keyType` is read from the stored key: `rsa` for a created key pair,

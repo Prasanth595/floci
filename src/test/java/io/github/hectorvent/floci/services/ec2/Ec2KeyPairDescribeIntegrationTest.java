@@ -107,24 +107,45 @@ class Ec2KeyPairDescribeIntegrationTest {
     }
 
     /**
+     * AWS joins every Filter.N with AND, a repeated name included: two key-name filters narrow the
+     * answer to the key pairs matching both, rather than the second replacing the first.
+     */
+    @Test
+    void aRepeatedFilterNameIsAndedWithTheFirst() {
+        String prefix = "repeated-" + UUID.randomUUID();
+        String prodWeb = create(prefix + "-prod-web");
+        String devWeb = create(prefix + "-dev-web");
+        String prodDb = create(prefix + "-prod-db");
+        try {
+            List<String> ids = given().header("Authorization", AUTH).formParam("Action", "DescribeKeyPairs")
+                    .formParam("Filter.1.Name", "key-name").formParam("Filter.1.Value.1", prefix + "-prod-*")
+                    .formParam("Filter.2.Name", "key-name").formParam("Filter.2.Value.1", prefix + "-*-web")
+                    .post("/").then().statusCode(200).extract().xmlPath()
+                    .getList("DescribeKeyPairsResponse.keySet.item.keyPairId", String.class);
+
+            assertEquals(List.of(prodWeb), ids);
+            assertEquals(List.of("prod-db", "prod-web"), described(prefix, "key-name", prefix + "-prod-*"));
+        } finally {
+            delete(prodWeb);
+            delete(devWeb);
+            delete(prodDb);
+        }
+    }
+
+    /**
      * The key pairs DescribeKeyPairs returns for the given filter, a name and its values, ANDed with
      * a key-name filter of {@code prefix-*}: their names without the prefix, sorted. Without that
-     * second filter every key pair this application holds would come back. A key-name filter under
-     * test is sent alone, with values that carry the prefix: Floci reads one filter per name, so a
-     * second key-name filter would replace the first rather than narrow it.
+     * first filter every key pair this application holds would come back. A key-name filter under
+     * test is a second key-name filter, which has to narrow the first.
      */
     private static List<String> described(String prefix, String... filter) {
         RequestSpecification request = given().header("Authorization", AUTH)
-                .formParam("Action", "DescribeKeyPairs");
-        int next = 1;
-        if (filter.length == 0 || !"key-name".equals(filter[0])) {
-            request.formParam("Filter.1.Name", "key-name").formParam("Filter.1.Value.1", prefix + "-*");
-            next = 2;
-        }
+                .formParam("Action", "DescribeKeyPairs")
+                .formParam("Filter.1.Name", "key-name").formParam("Filter.1.Value.1", prefix + "-*");
         if (filter.length > 0) {
-            request.formParam("Filter." + next + ".Name", filter[0]);
+            request.formParam("Filter.2.Name", filter[0]);
             for (int i = 1; i < filter.length; i++) {
-                request.formParam("Filter." + next + ".Value." + i, filter[i]);
+                request.formParam("Filter.2.Value." + i, filter[i]);
             }
         }
         List<String> names = new ArrayList<>();

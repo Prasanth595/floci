@@ -3400,7 +3400,7 @@ public class Ec2QueryHandler {
         boolean includePublicKey = Boolean.TRUE.equals(parseOptionalBoolean(p.getFirst("IncludePublicKey"), "IncludePublicKey"));
         List<String> keyNames = getList(p, "KeyName");
         List<String> keyPairIds = getList(p, "KeyPairId");
-        List<KeyPair> kps = service.describeKeyPairs(region, keyNames, keyPairIds, getFilters(p));
+        List<KeyPair> kps = service.describeKeyPairs(region, keyNames, keyPairIds, getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeKeyPairsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
