@@ -4356,6 +4356,8 @@ class Ec2ServiceTest {
         padded[23] = 1;
         legacy.put("key-pad-bits", "-----BEGIN PUBLIC KEY-----\n" + Base64.getEncoder().encodeToString(padded)
                 + "\n-----END PUBLIC KEY-----\n");
+        // An rsaEncryption SubjectPublicKeyInfo whose key bit string is empty.
+        legacy.put("key-empty-bit-string", "-----BEGIN PUBLIC KEY-----\nMBIwDQYJKoZIhvcNAQEBBQADAQA=\n-----END PUBLIC KEY-----\n");
         for (Map.Entry<String, String> record : legacy.entrySet()) {
             KeyPair keyPair = new KeyPair();
             keyPair.setKeyPairId(record.getKey());
@@ -4387,6 +4389,7 @@ class Ec2ServiceTest {
         expected.put("key-ecdsa", null);
         expected.put("key-garbage", null);
         expected.put("key-pad-bits", null);
+        expected.put("key-empty-bit-string", null);
         assertEquals(expected, types);
         assertEquals(List.of("key-ed25519"), service.describeKeyPairs("us-east-1", List.of(), List.of(),
                 Map.of("key-type", List.of("ed25519"))).stream().map(KeyPair::getKeyPairId).toList());

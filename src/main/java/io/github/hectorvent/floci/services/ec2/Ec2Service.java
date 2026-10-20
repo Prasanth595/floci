@@ -7322,8 +7322,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (keyPair.getKeyMaterial() != null) {
             return "rsa";
         }
-        Ec2KeyMaterial.Imported imported = Ec2KeyMaterial.readImportedKey(keyPair.getPublicKey());
-        return imported != null ? imported.keyType() : null;
+        try {
+            Ec2KeyMaterial.Imported imported = Ec2KeyMaterial.readImportedKey(keyPair.getPublicKey());
+            return imported != null ? imported.keyType() : null;
+        } catch (RuntimeException e) {
+            // The record may hold any text an earlier ImportKeyPair stored. Text the reader cannot
+            // handle leaves the type out instead of failing every description in the region.
+            LOG.warnv(e, "Could not read the key type of stored key pair {0}", keyPair.getKeyPairId());
+            return null;
+        }
     }
 
     /**

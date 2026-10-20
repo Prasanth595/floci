@@ -54,7 +54,7 @@ class Ec2KeyPairImportIntegrationTest {
      */
     @ParameterizedTest
     @ValueSource(strings = {"dsa", "ecdsa", "rsa-768", "truncated-rsa", "two-lines", "rfc4716-ed25519",
-            "private-key", "double-base64", "der-pad-bits"})
+            "private-key", "double-base64", "der-pad-bits", "der-empty-bit-string"})
     void materialEc2DoesNotImportIsRefusedWithInvalidKeyFormat(String shape) {
         String name = "refused-" + UUID.randomUUID();
         String material = switch (shape) {
@@ -63,6 +63,8 @@ class Ec2KeyPairImportIntegrationTest {
             case "rsa-768" -> sshRsaLine(BigInteger.ONE.shiftLeft(767).setBit(0));
             // A SubjectPublicKeyInfo whose key bit string declares an unused bit: no whole key.
             case "der-pad-bits" -> base64(withPadBits(Ec2KeyMaterial.generateRsa().openSshPublicKey()));
+            // An rsaEncryption SubjectPublicKeyInfo whose key bit string is empty: no key at all.
+            case "der-empty-bit-string" -> "MBIwDQYJKoZIhvcNAQEBBQADAQA=";
             case "truncated-rsa" -> "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAQQDHnLTTbpnrFWkfVt test@test";
             case "two-lines" -> ED25519_KEY + " first\n" + Ec2KeyMaterial.generateRsa().openSshPublicKey() + " second\n";
             case "rfc4716-ed25519" -> "---- BEGIN SSH2 PUBLIC KEY ----\n" + ED25519_KEY.split(" ")[1]

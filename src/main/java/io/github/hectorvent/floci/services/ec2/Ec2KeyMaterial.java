@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PublicKeys;
 import io.github.hectorvent.floci.core.common.SshPublicKeyException;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
+import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.ASN1Primitive;
 import org.bouncycastle.asn1.ASN1Sequence;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
@@ -271,9 +272,18 @@ public final class Ec2KeyMaterial {
             }
             rsaKey = info.parsePublicKey();
         }
-        // Bouncy Castle's ASN.1 structure, named in full: RSAPublicKey here is the JDK key interface.
-        org.bouncycastle.asn1.pkcs.RSAPublicKey fields = org.bouncycastle.asn1.pkcs.RSAPublicKey.getInstance(rsaKey);
-        return PublicKeys.rsa(fields.getModulus(), fields.getPublicExponent());
+        // PKCS#1 RSAPublicKey: SEQUENCE { modulus INTEGER, publicExponent INTEGER }. An empty bit string
+        // parses to nothing at all. The integers are read signed, as an ssh-rsa blob's are, so a
+        // modulus missing its sign byte is refused rather than read as another, positive key.
+        if (!(rsaKey instanceof ASN1Sequence fields) || fields.size() != 2) {
+            throw new SshPublicKeyException("not an RSA public key");
+        }
+        BigInteger modulus = ASN1Integer.getInstance(fields.getObjectAt(0)).getValue();
+        BigInteger exponent = ASN1Integer.getInstance(fields.getObjectAt(1)).getValue();
+        if (modulus.signum() <= 0 || exponent.signum() <= 0) {
+            throw new SshPublicKeyException("not an RSA public key");
+        }
+        return PublicKeys.rsa(modulus, exponent);
     }
 
     private static String base64(byte[] bytes) {

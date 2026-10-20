@@ -541,6 +541,40 @@ class Ec2KeyMaterialTest {
         }
     }
 
+    /**
+     * An rsaEncryption SubjectPublicKeyInfo whose key bit string holds no bytes, primitive or
+     * constructed, has no key in it. Bouncy Castle reads such a bit string as no structure at all,
+     * which the reader once passed on to a null dereference.
+     */
+    @ParameterizedTest
+    @CsvSource({"MBIwDQYJKoZIhvcNAQEBBQADAQA=, der", "MBIwDQYJKoZIhvcNAQEBBQADAQA=, pem",
+            "MBEwDQYJKoZIhvcNAQEBBQAjAA==, der", "MBEwDQYJKoZIhvcNAQEBBQAjAA==, pem"})
+    void aDerKeyWhoseBitStringIsEmptyIsRefused(String der, String armour) {
+        String material = "der".equals(armour) ? der : "-----BEGIN PUBLIC KEY-----\n" + der + "\n-----END PUBLIC KEY-----\n";
+
+        assertNull(Ec2KeyMaterial.readImportedKey(material));
+    }
+
+    /**
+     * A PKCS#1 DER key whose modulus has the top bit set and no leading zero byte encodes a negative
+     * number, as the same bytes do in an ssh-rsa blob, and is refused the same way rather than read
+     * as some other, positive key.
+     */
+    @Test
+    void aDerKeyWithANegativeModulusIsRefused() {
+        byte[] pkcs1 = Base64.getDecoder().decode(RSA_DER_PKCS1);
+        // 30 82 01 0a, then 02 82 01 01 00 and the 256 modulus bytes: drop the sign byte and shorten
+        // both lengths by one, leaving a modulus whose top bit is set.
+        assertEquals(0, pkcs1[8]);
+        byte[] negative = new byte[pkcs1.length - 1];
+        System.arraycopy(pkcs1, 0, negative, 0, 8);
+        System.arraycopy(pkcs1, 9, negative, 8, pkcs1.length - 9);
+        negative[3] = (byte) (negative[3] - 1);
+        negative[7] = (byte) (negative[7] - 1);
+
+        assertNull(Ec2KeyMaterial.readImportedKey(base64(negative)));
+    }
+
     private static void assertDoesNotThrow(String material) {
         try {
             Ec2KeyMaterial.readImportedKey(material);
