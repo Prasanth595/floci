@@ -550,10 +550,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
 
-        // PutAccountPolicy also needs the action for the type of policy it creates, as its API
-        // reference says. An unknown type needs nothing more: the handler refuses it.
-        if ("logs:PutAccountPolicy".equals(action)) {
-            String typeAction = accountPolicyTypeAction(arnBuilder.readJsonBody(ctx));
+        // PutAccountPolicy also needs the action for the type of policy it creates, and
+        // DescribeAccountPolicies the one for the type it lists, as their API references say. An
+        // unknown type needs nothing more: the handler refuses it.
+        if ("logs:PutAccountPolicy".equals(action) || "logs:DescribeAccountPolicies".equals(action)) {
+            String typeAction = accountPolicyTypeAction(action, arnBuilder.readJsonBody(ctx));
             if (typeAction != null && abortIfDenied(ctx, caller, principal, typeAction, action, credentialScope,
                     resources, targetContexts, region, accountId, akid)) {
                 return;
@@ -638,11 +639,22 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private static final Set<String> GOVERNANCE_BYPASS_ACTIONS =
             Set.of("s3:PutObjectRetention", "s3:DeleteObject", "s3:DeleteObjectVersion");
 
-    private static String accountPolicyTypeAction(JsonNode body) {
+    private static String accountPolicyTypeAction(String action, JsonNode body) {
         if (body == null) {
             return null;
         }
-        return switch (body.path("policyType").asText()) {
+        String policyType = body.path("policyType").asText();
+        if ("logs:DescribeAccountPolicies".equals(action)) {
+            // The reference names no read action for metric extraction policies.
+            return switch (policyType) {
+                case "DATA_PROTECTION_POLICY" -> "logs:GetDataProtectionPolicy";
+                case "SUBSCRIPTION_FILTER_POLICY" -> "logs:DescribeSubscriptionFilters";
+                case "TRANSFORMER_POLICY" -> "logs:GetTransformer";
+                case "FIELD_INDEX_POLICY" -> "logs:DescribeIndexPolicies";
+                default -> null;
+            };
+        }
+        return switch (policyType) {
             case "DATA_PROTECTION_POLICY" -> "logs:PutDataProtectionPolicy";
             case "SUBSCRIPTION_FILTER_POLICY" -> "logs:PutSubscriptionFilter";
             case "TRANSFORMER_POLICY" -> "logs:PutTransformer";
