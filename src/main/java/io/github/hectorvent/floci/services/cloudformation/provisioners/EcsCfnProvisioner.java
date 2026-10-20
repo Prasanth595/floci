@@ -191,10 +191,10 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         // returned) has them applied below.
         EcsCluster cluster = ecsService.createCluster(clusterName, null, settings, ctx.region());
         if (!settings.isEmpty() && !settings.equals(cluster.getSettings())) {
-            boolean snapshotted = ctx.reusesPriorEntity(clusterName);
-            if (snapshotted) {
+            List<ClusterSetting> prior = cluster.getSettings() == null ? null : List.copyOf(cluster.getSettings());
+            if (ctx.reusesPriorEntity(clusterName)) {
                 ObjectNode snapshot = MAPPER.createObjectNode().put("region", ctx.region());
-                snapshot.set("settings", MAPPER.valueToTree(cluster.getSettings()));
+                snapshot.set("settings", MAPPER.valueToTree(prior));
                 r.getAttributes().put(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR, snapshot.toString());
             }
             // Before the id is set: a cluster the idempotent create returned for a resource this
@@ -203,9 +203,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             try {
                 ecsService.updateClusterSettings(clusterName, settings, ctx.region());
             } catch (RuntimeException failure) {
-                if (snapshotted) {
-                    unwindSettings(r, failure);
-                }
+                unwindSettings(r, clusterName, prior, ctx.region(), failure);
                 throw failure;
             }
         }
@@ -214,21 +212,27 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * A failed provision puts the resource the stack held before the attempt back in its place, and
-     * that object never carried the snapshot taken here, so the rollback walker skips
-     * {@link #rollbackUpdate}: the prior settings are put back here instead. A restore that fails
-     * too is recorded as a rollback failure, which ends the stack in UPDATE_ROLLBACK_FAILED, and is
-     * attached to the update's failure, which the stack still reports. The restore repeats the call
-     * that just failed, so it can come back with that very exception, which cannot be suppressed
-     * under itself.
+     * Puts back the settings an existing cluster had before a settings call that failed, which may
+     * have changed them before failing. For this resource's own cluster the engine restores the
+     * resource it held before the attempt, which never carried the snapshot, so the rollback walker
+     * would skip {@link #rollbackUpdate}; a cluster the stack found rather than created is not
+     * restored by anything else. A restore that fails too is recorded as a rollback failure, which
+     * ends an update in UPDATE_ROLLBACK_FAILED for the resource's own cluster, and is attached to
+     * the original failure. The restore repeats the call that just failed, so it can come back
+     * with that very exception, which cannot be suppressed under itself.
      */
-    private void unwindSettings(StackResource r, RuntimeException failure) {
+    private void unwindSettings(StackResource r, String clusterName, List<ClusterSetting> prior, String region,
+                                RuntimeException failure) {
         try {
-            restoreSettingsSnapshot(r);
+            ecsService.updateClusterSettings(clusterName, prior, region);
+            r.getAttributes().remove(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR);
         } catch (RuntimeException unwindFailure) {
-            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
-                    "Could not restore the settings of ECS cluster " + r.getPhysicalId() + ": "
-                            + unwindFailure.getMessage());
+            String reason = "Could not restore the settings of ECS cluster " + clusterName + ": "
+                    + unwindFailure.getMessage();
+            // ponytail: a cluster the stack found has no id here, so the engine drops the resource
+            // and nothing retries this; carrying it would need engine-side tracking for added resources.
+            LOG.warnv("{0}", reason);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
             if (unwindFailure != failure) {
                 failure.addSuppressed(unwindFailure);
             }

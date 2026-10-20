@@ -740,19 +740,28 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
-    void aClusterThatAlreadyExistedIsNotDeletedWhenItsSettingsFail() {
+    void aClusterThatAlreadyExistedGetsItsSettingsBackAndIsNotDeleted() {
         // The idempotent create hands back a cluster the stack did not create, without the settings.
-        when(ecs.createCluster(eq("web"), isNull(), anyList(), eq(REGION))).thenReturn(cluster("web"));
-        when(ecs.updateClusterSettings(eq("web"), any(), eq(REGION)))
-                .thenThrow(new AwsException("ServerException", "write failed", 500));
+        List<ClusterSetting> priorSettings = List.of(new ClusterSetting("containerInsights", "disabled"));
+        EcsCluster existing = cluster("web");
+        existing.setSettings(priorSettings);
+        when(ecs.createCluster(eq("web"), isNull(), anyList(), eq(REGION))).thenReturn(existing);
+        AwsException failure = new AwsException("ServerException", "write failed", 500);
+        when(ecs.updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enabled")), REGION))
+                .thenThrow(failure);
         StackResource r = resource("AWS::ECS::Cluster", "Cluster");
 
-        assertThrows(AwsException.class, () -> provisioner.provision(r, clusterWithInsights("enabled"), ctx()));
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(r, clusterWithInsights("enabled"), ctx()));
 
+        assertSame(failure, thrown);
+        // The failed call may have changed them, and nothing else puts back a cluster the stack found.
+        verify(ecs).updateClusterSettings("web", priorSettings, REGION);
         // Without an id, neither a create rollback nor an update that added this resource deletes it.
         assertNull(r.getPhysicalId());
         verify(ecs, never()).deleteCluster(anyString(), anyString());
         assertFalse(r.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR));
     }
 
     private EcsCluster created(InvocationOnMock inv) {
