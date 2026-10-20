@@ -804,7 +804,8 @@ public class RdsQueryHandler {
                 params.getFirst("EngineLifecycleSupport"),
                 includeEncryption ? cloudwatchLogsExports(params) : null,
                 includeEncryption ? null : cloudwatchLogsExportChanges(params),
-                optionalInt(params.getFirst("MaxAllocatedStorage")));
+                optionalInt(params.getFirst("MaxAllocatedStorage")),
+                params.getFirst("StorageType"));
     }
 
     /**
@@ -1167,7 +1168,7 @@ public class RdsQueryHandler {
                     parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                     optionalInt(params.getFirst("AllocatedStorage")),
                     params.getFirst("ReplicaMode"),
-                    parseTags(params));
+                    parseTags(params), params.getFirst("StorageType"));
             DbInstance replica = service.createDbInstanceReadReplica(request, region);
             return Response.ok(AwsQueryResponse.envelope(
                     "CreateDBInstanceReadReplica", AwsNamespaces.RDS, dbInstanceXml(replica))).build();
@@ -1982,7 +1983,7 @@ public class RdsQueryHandler {
             DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
                     dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
                     vpcSecurityGroupIds, tags, region, requestedPort,
-                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"));
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"), params.getFirst("StorageType"));
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -2683,7 +2684,7 @@ public class RdsQueryHandler {
                     parseIntegerParam(params, "BackupRetentionPeriod"),
                     params.getFirst("PreferredBackupWindow"),
                     parseOptionalBoolean(params, "DeletionProtection"),
-                    parseTags(params));
+                    parseTags(params), params.getFirst("StorageType"));
             DbInstance instance = service.restoreDbInstanceToPointInTime(request, region);
             return Response.ok(AwsQueryResponse.envelope(
                     "RestoreDBInstanceToPointInTime", AwsNamespaces.RDS, dbInstanceXml(instance))).build();
@@ -2767,6 +2768,7 @@ public class RdsQueryHandler {
                 .elem("Engine", engineStr)
                 .elem("EngineVersion", s.getEngineVersion())
                 .elem("AllocatedStorage", s.getAllocatedStorage())
+                .elem("StorageType", s.getStorageType())
                 .elem("Status", s.getStatus())
                 .elem("MasterUsername", s.getMasterUsername())
                 .elem("SnapshotType", s.getSnapshotType() != null
@@ -2878,7 +2880,7 @@ public class RdsQueryHandler {
         xml.elem("IAMDatabaseAuthenticationEnabled", i.isIamDatabaseAuthenticationEnabled())
            .elem("MultiAZ", i.isMultiAz())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
-           .elem("StorageType", DbInstance.DEFAULT_STORAGE_TYPE)
+           .elem("StorageType", i.getStorageType())
            .elem("PubliclyAccessible", i.isPubliclyAccessible())
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null

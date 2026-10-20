@@ -438,8 +438,24 @@ Two deviations are worth knowing:
   and reported on read, but the container started at create time keeps running the image it was
   started with. This is control-plane compatibility, like Aurora Serverless v2 scaling above.
 
-`StorageType`, `MultiAZ` and `Iops` are not read on a modify yet. Floci reports every instance as
-`gp2`.
+For standalone, non-Aurora instances with instance-owned storage, `CreateDBInstance` and
+`ModifyDBInstance` retain the general-purpose `StorageType` values `gp2`
+and `gp3`. A modify that omits the member leaves it unchanged; a request naming another type is
+refused with `StorageTypeNotSupported` before the instance is created or changed. Describe and
+modification responses report the stored value, and valid-modification discovery lists both supported
+general-purpose types. Aurora and cluster-member instance overrides remain ignored because their
+storage belongs to the cluster. Explicit type overrides also work on snapshot restores, point-in-time copies
+and read replicas. Snapshots and their copies retain the type; Floci carries it into snapshot
+restores, point-in-time copies and read replicas. It also survives persistent, hybrid and WAL storage
+reloads. Legacy records without the member retain the existing `gp2` fallback.
+
+Storage type changes apply immediately to control-plane metadata; the backing container volume's
+performance is unchanged. `Iops`, `StorageThroughput` and `MultiAZ` changes remain unimplemented.
+Omitted create requests retain Floci's existing `gp2` default, which differs from the current
+[AWS create default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html).
+Floci's snapshot and point-in-time copies inherit the source type when the request omits it, rather
+than applying the [AWS restore default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceFromDBSnapshot.html).
+Floci does not enforce every engine-specific storage allocation or IOPS restriction.
 
 ### Storage autoscaling threshold changes
 
