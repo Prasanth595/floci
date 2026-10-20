@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -775,10 +776,11 @@ public class EksClusterManager
      * Re-latches a persisted cluster onto its k3s container after a Floci restart. A surviving
      * container - running, or stopped by a Docker daemon reboot - is adopted (started if needed),
      * keeping its published API server port and data volume, so the cluster's workloads come back
-     * as they were. When the container is gone, the cluster is recreated via {@link #startCluster};
-     * the named k3s data volume is reused if it survived. Callers should put the cluster back into
-     * CREATING so the readiness poller re-verifies the API server and re-extracts the certificate
-     * authority before marking it ACTIVE again.
+     * as they were. A survivor whose node capacity changed, or that is not on the Docker network
+     * Floci now uses, is replaced on the same volume. When the container is gone, the cluster is
+     * recreated via {@link #startCluster}; the named k3s data volume is reused if it survived.
+     * Callers should put the cluster back into CREATING so the readiness poller re-verifies the API
+     * server and re-extracts the certificate authority before marking it ACTIVE again.
      */
     public void restoreCluster(Cluster cluster) {
         if (cluster.getDockerName() == null) {
@@ -816,9 +818,28 @@ public class EksClusterManager
             startCluster(cluster);
             return;
         }
-        if (capacityChanged) {
+        if (capacityChanged || onAnotherNetwork(existing.get())) {
             replaceClusterContainer(cluster, null);
         }
+    }
+
+    // Floci in a container reaches k3s over the Docker network; on the host it uses the published port.
+    private boolean onAnotherNetwork(Container survivor) {
+        if (!containerDetector.isRunningInContainer()) {
+            return false;
+        }
+        Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().eks().dockerNetwork());
+        if (network.isEmpty() || survivor.getNetworkSettings() == null
+                || survivor.getNetworkSettings().getNetworks() == null
+                || survivor.getNetworkSettings().getNetworks().isEmpty()) {
+            return false;
+        }
+        boolean moved = !survivor.getNetworkSettings().getNetworks().containsKey(network.get());
+        if (moved) {
+            LOG.infov("Surviving k3s container {0} is not on Docker network {1}; replacing it (its data volume is kept)",
+                    survivor.getId(), network.get());
+        }
+        return moved;
     }
 
     private boolean adoptSurvivingCluster(Cluster cluster, String containerId) {
@@ -885,9 +906,9 @@ public class EksClusterManager
             closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
             cluster.setContainerId(null);
             startCluster(cluster, oldPort);
-            LOG.infov("Replaced EKS cluster {0} to apply current node capacity limits", cluster.getName());
+            LOG.infov("Replaced the k3s container of EKS cluster {0}", cluster.getName());
         } catch (RuntimeException replacement) {
-            LOG.warnv("Could not replace EKS cluster {0} for node capacity: {1}; restoring surviving node",
+            LOG.warnv("Could not replace the k3s container of EKS cluster {0}: {1}; restoring surviving node",
                     cluster.getName(), replacement.getMessage());
             restorePreviousNodeType(cluster, previousType);
             if (!renamed) {
@@ -901,7 +922,7 @@ public class EksClusterManager
                 }
             } catch (RuntimeException rollback) {
                 throw new IllegalStateException("Could not restore EKS cluster " + cluster.getName()
-                        + " after node capacity replacement failed", rollback);
+                        + " after its k3s container replacement failed", rollback);
             }
             return false;
         }
