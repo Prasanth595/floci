@@ -20,6 +20,9 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Random;
 
+import static io.github.hectorvent.floci.core.common.SshKeyBlobs.concat;
+import static io.github.hectorvent.floci.core.common.SshKeyBlobs.line;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -43,9 +46,6 @@ class Ec2KeyMaterialTest {
             + "zM7MWlbKRAo8uuu2evnGrgnu+RmuXJQCRYz6lG+JESVzm6MnHXYxme+UD+7c/tTYwzoswfXh8VN8QVzX"
             + "mjfHi2Ve3PJ+YuF2X2gKpRMNMf7cLWMCTOhZI2AgXX+NLDlCG0dEUm/DXdSKRTDhm3mIJmF67eGYuff+"
             + "zHusBZ9cSBkW9i9";
-
-    private static final String ED25519_PUBLIC_KEY =
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
 
     /** RSA_PUBLIC_KEY's fingerprint: {@code openssl pkey -pubin -outform DER | openssl md5 -c}. */
     private static final String RSA_FINGERPRINT = "4d:1a:39:2e:6a:18:60:9a:c5:2a:cb:cc:6c:de:22:b5";
@@ -252,17 +252,17 @@ class Ec2KeyMaterialTest {
         // Derived independently with "ssh-keygen -l -f ed25519.pub", which prints
         //   SHA256:UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk
         // AWS reports the same digest without the prefix and with base64 padding kept.
-        String fingerprint = fingerprintOf(ED25519_PUBLIC_KEY);
+        String fingerprint = fingerprintOf(ED25519_KEY);
 
         assertEquals("UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=", fingerprint);
         assertEquals(fingerprint,
-                fingerprintOf(ED25519_PUBLIC_KEY + " someone@example.com"));
+                fingerprintOf(ED25519_KEY + " someone@example.com"));
     }
 
     @Test
     void ed25519MaterialThatIsNotA32ByteKeyYieldsNoFingerprint() {
         assertEquals(null, fingerprintOf(
-                "ssh-ed25519 " + Base64.getEncoder().encodeToString(blobOf("ssh-ed25519", new byte[31]))));
+                line("ssh-ed25519", new byte[31])));
     }
 
     @Test
@@ -327,12 +327,12 @@ class Ec2KeyMaterialTest {
 
     @Test
     void anEd25519KeyIsReadFromAnOpenSshLine() {
-        Ec2KeyMaterial.Imported key = Ec2KeyMaterial.readImportedKey(ED25519_PUBLIC_KEY + " someone@example.com\n");
+        Ec2KeyMaterial.Imported key = Ec2KeyMaterial.readImportedKey(ED25519_KEY + " someone@example.com\n");
 
         assertNotNull(key);
         assertEquals("ed25519", key.keyType());
         assertEquals("UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=", key.fingerprint());
-        assertEquals(ED25519_PUBLIC_KEY, key.openSshPublicKey());
+        assertEquals(ED25519_KEY, key.openSshPublicKey());
     }
 
     /**
@@ -396,7 +396,7 @@ class Ec2KeyMaterialTest {
             "rsa-empty-exponent"})
     void aKeyLineWhoseBlobIsNotExactlyTheKeyItNamesIsRefused(String shape) {
         byte[] rsaBlob = Base64.getDecoder().decode(RSA_PUBLIC_KEY.split(" ")[1]);
-        byte[] ed25519Blob = Base64.getDecoder().decode(ED25519_PUBLIC_KEY.split(" ")[1]);
+        byte[] ed25519Blob = Base64.getDecoder().decode(ED25519_KEY.split(" ")[1]);
         byte[] exponent = BigInteger.valueOf(65537).toByteArray();
         byte[] modulus = BigInteger.ONE.shiftLeft(2047).setBit(0).toByteArray();
         String material = switch (shape) {
@@ -419,7 +419,7 @@ class Ec2KeyMaterialTest {
     /** A key pair holds one key: an instance launched with it would trust every line of the material. */
     @Test
     void materialHoldingASecondKeyLineIsRefused() {
-        assertNull(Ec2KeyMaterial.readImportedKey(ED25519_PUBLIC_KEY + " first\n" + RSA_PUBLIC_KEY + " second\n"));
+        assertNull(Ec2KeyMaterial.readImportedKey(ED25519_KEY + " first\n" + RSA_PUBLIC_KEY + " second\n"));
         assertNull(Ec2KeyMaterial.readImportedKey(RSA_PUBLIC_KEY + "\n\n" + RSA_PUBLIC_KEY));
     }
 
@@ -432,7 +432,7 @@ class Ec2KeyMaterialTest {
         String ecDer = base64(KeyPairGenerator.getInstance("EC").generateKeyPair().getPublic().getEncoded());
         String material = switch (shape) {
             case "rfc4716-ed25519" -> "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"throwaway\"\n"
-                    + ED25519_PUBLIC_KEY.split(" ")[1] + "\n---- END SSH2 PUBLIC KEY ----\n";
+                    + ED25519_KEY.split(" ")[1] + "\n---- END SSH2 PUBLIC KEY ----\n";
             case "rfc4716-unterminated" -> RSA_RFC_4716.replace("---- END SSH2 PUBLIC KEY ----", "");
             case "rfc4716-empty" -> "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"throwaway\"\n---- END SSH2 PUBLIC KEY ----";
             case "pem-private-key" -> Ec2KeyMaterial.generateRsa().privateKeyPem();
@@ -471,7 +471,7 @@ class Ec2KeyMaterialTest {
     @Test
     void noMaterialMakesTheReaderThrow() {
         Random random = new Random(20261020L);
-        List<String> valid = List.of(RSA_PUBLIC_KEY + " c", ED25519_PUBLIC_KEY, RSA_RFC_4716, RSA_PEM_SPKI,
+        List<String> valid = List.of(RSA_PUBLIC_KEY + " c", ED25519_KEY, RSA_RFC_4716, RSA_PEM_SPKI,
                 RSA_PEM_PKCS1, RSA_DER_SPKI, RSA_DER_PKCS1, DSA_PUBLIC_KEY, ECDSA_P256_PUBLIC_KEY);
         for (String material : valid) {
             for (int end = 0; end <= material.length(); end++) {
@@ -520,7 +520,7 @@ class Ec2KeyMaterialTest {
     void noByteOfABinaryKeyMakesTheReaderThrow() {
         int[] values = {0, 1, 2, 3, 4, 7, 8, 0x0f, 0x10, 0x1f, 0x30, 0x7f, 0x80, 0x81, 0x82, 0x84, 0xfe, 0xff};
         List<byte[]> binaries = List.of(Base64.getDecoder().decode(RSA_DER_SPKI), Base64.getDecoder().decode(RSA_DER_PKCS1),
-                Base64.getDecoder().decode(RSA_PUBLIC_KEY.split(" ")[1]), Base64.getDecoder().decode(ED25519_PUBLIC_KEY.split(" ")[1]));
+                Base64.getDecoder().decode(RSA_PUBLIC_KEY.split(" ")[1]), Base64.getDecoder().decode(ED25519_KEY.split(" ")[1]));
         for (int form = 0; form < binaries.size(); form++) {
             byte[] original = binaries.get(form);
             for (int position = 0; position < original.length; position++) {
@@ -587,28 +587,6 @@ class Ec2KeyMaterialTest {
     private static String fingerprintOf(String material) {
         Ec2KeyMaterial.Imported key = Ec2KeyMaterial.readImportedKey(material);
         return key != null ? key.fingerprint() : null;
-    }
-
-    /** An OpenSSH line of the given type whose blob holds the type and then these fields. */
-    private static String line(String type, byte[]... fields) {
-        return type + " " + base64(blobOf(type, fields));
-    }
-
-    private static byte[] blobOf(String type, byte[]... fields) {
-        byte[] typeBytes = type.getBytes(StandardCharsets.UTF_8);
-        int length = Integer.BYTES + typeBytes.length;
-        for (byte[] field : fields) {
-            length += Integer.BYTES + field.length;
-        }
-        ByteBuffer blob = ByteBuffer.allocate(length).putInt(typeBytes.length).put(typeBytes);
-        for (byte[] field : fields) {
-            blob.putInt(field.length).put(field);
-        }
-        return blob.array();
-    }
-
-    private static byte[] concat(byte[] first, byte[] second) {
-        return ByteBuffer.allocate(first.length + second.length).put(first).put(second).array();
     }
 
     private static String base64(byte[] bytes) {

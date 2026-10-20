@@ -8,6 +8,8 @@ import java.security.KeyPairGenerator;
 import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPublicKey;
 
+import static io.github.hectorvent.floci.core.common.SshKeyBlobs.blob;
+import static io.github.hectorvent.floci.core.common.SshKeyBlobs.concat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -237,16 +239,12 @@ class SshPublicKeysTest {
     @Test
     void aBlobWithAnythingAfterItsKeyCarriesNoKey() {
         assertFalse(SshPublicKeys.carriesAKey(blobWithTrailingJunk()));
-        assertFalse(SshPublicKeys.carriesAKey(withTrailing(SshPublicKeys.openSshBlob(KEY), new byte[4])));
+        assertFalse(SshPublicKeys.carriesAKey(concat(SshPublicKeys.openSshBlob(KEY), new byte[4])));
         assertFalse(SshPublicKeys.carriesAKey(blob("ssh-ed25519", new byte[32], ascii("extra"))));
-        assertFalse(SshPublicKeys.carriesAKey(withTrailing(blob("ssh-ed25519", new byte[32]), new byte[] {1, 2, 3})));
+        assertFalse(SshPublicKeys.carriesAKey(concat(blob("ssh-ed25519", new byte[32]), new byte[] {1, 2, 3})));
         assertFalse(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp256", ascii("nistp256"), point(32), new byte[0])));
         assertFalse(SshPublicKeys.carriesAKey(
                 blob("sk-ssh-ed25519@openssh.com", new byte[32], ascii("ssh:"), ascii("extra"))));
-    }
-
-    private static byte[] withTrailing(byte[] blob, byte[] trailing) {
-        return ByteBuffer.allocate(blob.length + trailing.length).put(blob).put(trailing).array();
     }
 
     /** An uncompressed EC point, {@code 0x04} and then both coordinates of the given size. */
@@ -258,19 +256,5 @@ class SshPublicKeysTest {
 
     private static byte[] ascii(String value) {
         return value.getBytes(StandardCharsets.US_ASCII);
-    }
-
-    /** An OpenSSH blob of the given type followed by the given fields, each length-prefixed. */
-    private static byte[] blob(String type, byte[]... fields) {
-        byte[] typeBytes = type.getBytes(StandardCharsets.US_ASCII);
-        int length = Integer.BYTES + typeBytes.length;
-        for (byte[] field : fields) {
-            length += Integer.BYTES + field.length;
-        }
-        ByteBuffer buffer = ByteBuffer.allocate(length).putInt(typeBytes.length).put(typeBytes);
-        for (byte[] field : fields) {
-            buffer.putInt(field.length).put(field);
-        }
-        return buffer.array();
     }
 }

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
@@ -7,17 +8,19 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigInteger;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.interfaces.RSAPublicKey;
-import java.security.spec.RSAPublicKeySpec;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.core.common.SshKeyBlobs.line;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.createKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.deleteKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ec2;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.importKeyPair;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -29,12 +32,6 @@ import static org.hamcrest.Matchers.equalTo;
  */
 @QuarkusTest
 class Ec2KeyPairImportIntegrationTest {
-
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261020/us-east-1/ec2/aws4_request";
-
-    private static final String ED25519_KEY =
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
 
     /** Throwaway keys from ssh-keygen, of types EC2 does not import. */
     private static final String DSA_KEY = "ssh-dss AAAAB3NzaC1kc3MAAACBAOFToDsRbL7Z8AqAZOKXROc1Cy5SA1ZgM5odRC57MSEruUj"
@@ -60,7 +57,8 @@ class Ec2KeyPairImportIntegrationTest {
         String material = switch (shape) {
             case "dsa" -> DSA_KEY;
             case "ecdsa" -> ECDSA_KEY;
-            case "rsa-768" -> sshRsaLine(BigInteger.ONE.shiftLeft(767).setBit(0));
+            case "rsa-768" -> line("ssh-rsa", BigInteger.valueOf(65537).toByteArray(),
+                    BigInteger.ONE.shiftLeft(767).setBit(0).toByteArray());
             // A SubjectPublicKeyInfo whose key bit string declares an unused bit: no whole key.
             case "der-pad-bits" -> base64(withPadBits(Ec2KeyMaterial.generateRsa().openSshPublicKey()));
             // An rsaEncryption SubjectPublicKeyInfo whose key bit string is empty: no key at all.
@@ -70,15 +68,15 @@ class Ec2KeyPairImportIntegrationTest {
             case "rfc4716-ed25519" -> "---- BEGIN SSH2 PUBLIC KEY ----\n" + ED25519_KEY.split(" ")[1]
                     + "\n---- END SSH2 PUBLIC KEY ----\n";
             case "private-key" -> Ec2KeyMaterial.generateRsa().privateKeyPem();
-            case "double-base64" -> base64(utf8(Ec2KeyMaterial.generateRsa().openSshPublicKey()));
+            case "double-base64" -> base64(Ec2KeyMaterial.generateRsa().openSshPublicKey()
+                    .getBytes(StandardCharsets.UTF_8));
             default -> throw new IllegalArgumentException(shape);
         };
 
         importKeyPair(name, material).statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidKey.Format"))
                 .body("Response.Errors.Error.Message", equalTo("Key is not in valid OpenSSH public key format"));
-        given().header("Authorization", AUTH)
-                .formParam("Action", "DescribeKeyPairs").formParam("KeyName.1", name)
+        ec2("DescribeKeyPairs").formParam("KeyName.1", name)
                 .post("/").then().statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.NotFound"));
     }
@@ -92,7 +90,7 @@ class Ec2KeyPairImportIntegrationTest {
     void anRsaKeyIsImportedFromEachFormatAwsDocuments(String format) throws Exception {
         String openSsh = Ec2KeyMaterial.generateRsa().openSshPublicKey();
         String blob = openSsh.split(" ")[1];
-        RSAPublicKey key = rsaKeyOf(Base64.getDecoder().decode(blob));
+        RSAPublicKey key = SshPublicKeys.rsaKeyOf(Base64.getDecoder().decode(blob));
         String der = base64(key.getEncoded());
         String material = switch (format) {
             case "openssh" -> openSsh + " someone@example.com\n";
@@ -112,8 +110,7 @@ class Ec2KeyPairImportIntegrationTest {
                 .body("ImportKeyPairResponse.keyFingerprint", equalTo(expected))
                 .extract().path("ImportKeyPairResponse.keyPairId");
         try {
-            given().header("Authorization", AUTH)
-                    .formParam("Action", "DescribeKeyPairs").formParam("KeyPairId.1", id)
+            ec2("DescribeKeyPairs").formParam("KeyPairId.1", id)
                     .post("/").then().statusCode(200)
                     .body("DescribeKeyPairsResponse.keySet.item.keyFingerprint", equalTo(expected))
                     .body("DescribeKeyPairsResponse.keySet.item.keyType", equalTo("rsa"));
@@ -153,33 +150,7 @@ class Ec2KeyPairImportIntegrationTest {
     private static ValidatableResponse createOrImport(boolean imported, String name) {
         return imported
                 ? importKeyPair(name, Ec2KeyMaterial.generateRsa().openSshPublicKey())
-                : given().header("Authorization", AUTH)
-                        .formParam("Action", "CreateKeyPair").formParam("KeyName", name)
-                        .post("/").then();
-    }
-
-    private static ValidatableResponse importKeyPair(String name, String material) {
-        return given().header("Authorization", AUTH)
-                .formParam("Action", "ImportKeyPair").formParam("KeyName", name)
-                .formParam("PublicKeyMaterial", base64(utf8(material)))
-                .post("/").then();
-    }
-
-    private static void deleteKeyPair(String id) {
-        given().header("Authorization", AUTH).formParam("Action", "DeleteKeyPair")
-                .formParam("KeyPairId", id).post("/").then().statusCode(200);
-    }
-
-    /** An ssh-rsa line for a key with this modulus and the usual exponent, 65537. */
-    private static String sshRsaLine(BigInteger modulus) {
-        byte[] type = utf8("ssh-rsa");
-        byte[] exponent = BigInteger.valueOf(65537).toByteArray();
-        byte[] n = modulus.toByteArray();
-        ByteBuffer blob = ByteBuffer.allocate(12 + type.length + exponent.length + n.length);
-        for (byte[] field : new byte[][] {type, exponent, n}) {
-            blob.putInt(field.length).put(field);
-        }
-        return "ssh-rsa " + base64(blob.array());
+                : createKeyPair(name);
     }
 
     /**
@@ -187,32 +158,12 @@ class Ec2KeyPairImportIntegrationTest {
      * byte after the BIT STRING header, set to one.
      */
     private static byte[] withPadBits(String openSshRsaKey) {
-        try {
-            byte[] der = rsaKeyOf(Base64.getDecoder().decode(openSshRsaKey.split(" ")[1])).getEncoded();
-            der[23] = 1;
-            return der;
-        } catch (Exception e) {
-            throw new IllegalStateException("could not encode the test key", e);
-        }
-    }
-
-    /** The RSA key of an ssh-rsa blob: its type, then the exponent, then the modulus. */
-    private static RSAPublicKey rsaKeyOf(byte[] blob) throws Exception {
-        ByteBuffer fields = ByteBuffer.wrap(blob);
-        fields.position(fields.getInt() + Integer.BYTES);
-        byte[] exponent = new byte[fields.getInt()];
-        fields.get(exponent);
-        byte[] modulus = new byte[fields.getInt()];
-        fields.get(modulus);
-        return (RSAPublicKey) KeyFactory.getInstance("RSA")
-                .generatePublic(new RSAPublicKeySpec(new BigInteger(modulus), new BigInteger(exponent)));
+        byte[] der = SshPublicKeys.rsaKeyOf(SshPublicKeys.decodeBlob(openSshRsaKey)).getEncoded();
+        der[23] = 1;
+        return der;
     }
 
     private static String base64(byte[] bytes) {
         return Base64.getEncoder().encodeToString(bytes);
-    }
-
-    private static byte[] utf8(String text) {
-        return text.getBytes(StandardCharsets.UTF_8);
     }
 }

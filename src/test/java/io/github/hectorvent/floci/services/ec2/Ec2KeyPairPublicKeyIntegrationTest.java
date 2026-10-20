@@ -15,22 +15,20 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.io.StringReader;
-import java.nio.charset.StandardCharsets;
 import java.security.interfaces.RSAPublicKey;
-import java.util.Base64;
 import java.util.UUID;
 import java.util.function.Consumer;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_BLOB;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.createKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.deleteKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ec2;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.importKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.importedKeyPairId;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 class Ec2KeyPairPublicKeyIntegrationTest {
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261009/us-east-1/ec2/aws4_request";
-
-    /** The blob of a throwaway ed25519 public key. */
-    private static final String ED25519_BLOB = "AAAAC3NzaC1lZDI1NTE5AAAAIIj7azlDjVHAsSxgcpCRZ3oWnTm0nAFM64y9jd22ioI/";
 
     /**
      * The described key is the public half of the key the caller holds, with the key-pair name as
@@ -42,15 +40,9 @@ class Ec2KeyPairPublicKeyIntegrationTest {
     void publicKeyIsReturnedOnlyWhenRequested(boolean imported) throws IOException {
         String name = "public-key-" + UUID.randomUUID();
         String importedKey = imported ? Ec2KeyMaterial.generateRsa().openSshPublicKey() : null;
-        RequestSpecification create = given().header("Authorization", AUTH)
-                .formParam("Action", imported ? "ImportKeyPair" : "CreateKeyPair")
-                .formParam("KeyName", name);
-        if (imported) {
-            create.formParam("PublicKeyMaterial", Base64.getEncoder().encodeToString(
-                    utf8(importedKey + " supplied-comment")));
-        }
         String responseName = imported ? "ImportKeyPairResponse" : "CreateKeyPairResponse";
-        XmlPath created = create.post("/").then().statusCode(200).extract().xmlPath();
+        XmlPath created = (imported ? importKeyPair(name, importedKey + " supplied-comment") : createKeyPair(name))
+                .statusCode(200).extract().xmlPath();
         String id = created.getString(responseName + ".keyPairId");
         try {
             String expected = (imported ? importedKey : publicHalfOf(created.getString(responseName + ".keyMaterial")))
@@ -58,8 +50,7 @@ class Ec2KeyPairPublicKeyIntegrationTest {
             for (String selection : new String[]{"KeyName.1", "KeyPairId.1"}) {
                 String value = selection.startsWith("KeyName") ? name : id;
                 for (String include : new String[]{null, "false", "true"}) {
-                    RequestSpecification describe = given().header("Authorization", AUTH)
-                            .formParam("Action", "DescribeKeyPairs").formParam(selection, value);
+                    RequestSpecification describe = ec2("DescribeKeyPairs").formParam(selection, value);
                     if (include != null) {
                         describe.formParam("IncludePublicKey", include);
                     }
@@ -87,7 +78,7 @@ class Ec2KeyPairPublicKeyIntegrationTest {
     @Test
     void anOpenSshLineWithoutACommentIsDescribedWithTheKeyPairName() {
         String name = "public-key-" + UUID.randomUUID();
-        describeImported(name, utf8("ssh-ed25519\t" + ED25519_BLOB + "\r\n"), response -> response
+        describeImported(name, "ssh-ed25519\t" + ED25519_BLOB + "\r\n", response -> response
                 .body("DescribeKeyPairsResponse.keySet.item.publicKey",
                         equalTo("ssh-ed25519 " + ED25519_BLOB + " " + name)));
     }
@@ -99,7 +90,7 @@ class Ec2KeyPairPublicKeyIntegrationTest {
     @Test
     void aNameWithALineBreakIsNotUsedAsTheComment() {
         String name = "public-key-" + UUID.randomUUID() + "\nssh-ed25519 " + ED25519_BLOB + " another";
-        describeImported(name, utf8("ssh-ed25519 " + ED25519_BLOB), response -> response
+        describeImported(name, "ssh-ed25519 " + ED25519_BLOB, response -> response
                 .body("DescribeKeyPairsResponse.keySet.item.publicKey", equalTo("ssh-ed25519 " + ED25519_BLOB)));
     }
 
@@ -113,8 +104,8 @@ class Ec2KeyPairPublicKeyIntegrationTest {
     void anRfc4716KeyIsDescribedAsItsOpenSshLine() {
         String name = "public-key-" + UUID.randomUUID();
         String openSsh = Ec2KeyMaterial.generateRsa().openSshPublicKey();
-        byte[] material = utf8("---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"" + name + "\"\n" + openSsh.split(" ")[1]
-                + "\n---- END SSH2 PUBLIC KEY ----\n");
+        String material = "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"" + name + "\"\n" + openSsh.split(" ")[1]
+                + "\n---- END SSH2 PUBLIC KEY ----\n";
         describeImported(name, material, response -> response
                 .body("DescribeKeyPairsResponse.keySet.item.keyName", equalTo(name))
                 .body("DescribeKeyPairsResponse.keySet.item.publicKey", equalTo(openSsh + " " + name)));
@@ -143,10 +134,10 @@ class Ec2KeyPairPublicKeyIntegrationTest {
      * Imports the material under the given name, describes the key pair with IncludePublicKey=true
      * and hands the response to the check, then deletes the key pair whatever the check found.
      */
-    private static void describeImported(String name, byte[] material, Consumer<ValidatableResponse> check) {
-        String id = importKey(name, material);
+    private static void describeImported(String name, String material, Consumer<ValidatableResponse> check) {
+        String id = importedKeyPairId(name, material);
         try {
-            check.accept(given().header("Authorization", AUTH).formParam("Action", "DescribeKeyPairs")
+            check.accept(ec2("DescribeKeyPairs")
                     .formParam("KeyPairId.1", id).formParam("IncludePublicKey", "true")
                     .post("/").then().statusCode(200)
                     .body("DescribeKeyPairsResponse.keySet.item.keyPairId", equalTo(id)));
@@ -160,26 +151,14 @@ class Ec2KeyPairPublicKeyIntegrationTest {
      * answer, and hands the response to the check, then deletes the key pair.
      */
     private static void describeWithIncludePublicKey(String includePublicKey, Consumer<ValidatableResponse> check) {
-        String id = importKey("public-key-" + UUID.randomUUID(), utf8("ssh-ed25519 " + ED25519_BLOB));
+        String id = importedKeyPairId("public-key-" + UUID.randomUUID(), "ssh-ed25519 " + ED25519_BLOB);
         try {
-            check.accept(given().header("Authorization", AUTH).formParam("Action", "DescribeKeyPairs")
+            check.accept(ec2("DescribeKeyPairs")
                     .formParam("KeyPairId.1", id).formParam("IncludePublicKey", includePublicKey)
                     .post("/").then());
         } finally {
             deleteKeyPair(id);
         }
-    }
-
-    private static String importKey(String name, byte[] material) {
-        return given().header("Authorization", AUTH)
-                .formParam("Action", "ImportKeyPair").formParam("KeyName", name)
-                .formParam("PublicKeyMaterial", Base64.getEncoder().encodeToString(material))
-                .post("/").then().statusCode(200).extract().path("ImportKeyPairResponse.keyPairId");
-    }
-
-    private static void deleteKeyPair(String id) {
-        given().header("Authorization", AUTH).formParam("Action", "DeleteKeyPair")
-                .formParam("KeyPairId", id).post("/").then().statusCode(200);
     }
 
     /** The OpenSSH line, without a comment, of the public half of a PEM private key. */
@@ -188,9 +167,5 @@ class Ec2KeyPairPublicKeyIntegrationTest {
             PEMKeyPair pair = (PEMKeyPair) parser.readObject();
             return SshPublicKeys.toOpenSsh((RSAPublicKey) new JcaPEMKeyConverter().getKeyPair(pair).getPublic());
         }
-    }
-
-    private static byte[] utf8(String text) {
-        return text.getBytes(StandardCharsets.UTF_8);
     }
 }

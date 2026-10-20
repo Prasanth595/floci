@@ -105,6 +105,7 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -4425,13 +4426,11 @@ class Ec2ServiceTest {
                 + "vnGrgnu+RmuXJQCRYz6lG+JESVzm6MnHXYxme+UD+7c/tTYwzoswfXh8VN8QVzXmjfHi2Ve3PJ+Y"
                 + "uF2X2gKpRMNMf7cLWMCTOhZI2AgXX+NLDlCG0dEUm/DXdSKRTDhm3mIJmF67eGYuff+zHusBZ9cS"
                 + "BkW9i9";
-        String ed25519Key =
-                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
 
         assertEquals("4d:1a:39:2e:6a:18:60:9a:c5:2a:cb:cc:6c:de:22:b5",
                 service.importKeyPair("us-east-1", "pinned-rsa", rsaKey).getKeyFingerprint());
         assertEquals("UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=",
-                service.importKeyPair("us-east-1", "pinned-ed25519", ed25519Key).getKeyFingerprint());
+                service.importKeyPair("us-east-1", "pinned-ed25519", ED25519_KEY).getKeyFingerprint());
     }
 
     @Test
@@ -4653,12 +4652,11 @@ class Ec2ServiceTest {
         String rsaLine = Ec2KeyMaterial.generateRsa().openSshPublicKey();
         String rfc4716 = "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"throwaway\"\n" + rsaLine.split(" ")[1]
                 + "\n---- END SSH2 PUBLIC KEY ----\n";
-        String ed25519 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
         Instant before = Instant.now();
 
         KeyPair created = service.createKeyPair("us-east-1", "created");
         KeyPair importedRsa = service.importKeyPair("us-east-1", "imported-rsa", rfc4716);
-        KeyPair importedEd25519 = service.importKeyPair("us-east-1", "imported-ed25519", ed25519 + " someone@host\n");
+        KeyPair importedEd25519 = service.importKeyPair("us-east-1", "imported-ed25519", ED25519_KEY + " someone@host\n");
 
         Instant after = Instant.now();
         assertEquals("rsa", created.getKeyType());
@@ -4669,7 +4667,7 @@ class Ec2ServiceTest {
             assertFalse(keyPair.getCreateTime().isAfter(after), keyPair.getKeyName());
         }
         assertEquals(rsaLine, importedRsa.getPublicKey());
-        assertEquals(ed25519, importedEd25519.getPublicKey());
+        assertEquals(ED25519_KEY, importedEd25519.getPublicKey());
     }
 
     /**
@@ -4685,8 +4683,7 @@ class Ec2ServiceTest {
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
         KeyPair alpha = service.createKeyPair("us-east-1", "alpha-rsa");
-        KeyPair beta = service.importKeyPair("us-east-1", "beta-ed25519",
-                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj");
+        KeyPair beta = service.importKeyPair("us-east-1", "beta-ed25519", ED25519_KEY);
         KeyPair gamma = service.importKeyPair("us-east-1", "gamma-rsa", Ec2KeyMaterial.generateRsa().openSshPublicKey());
         service.createKeyPair("us-west-2", "alpha-rsa");
         service.createTags("us-east-1", List.of(beta.getKeyPairId()), List.of(new Tag("Team", "blue")));
@@ -4742,7 +4739,7 @@ class Ec2ServiceTest {
         AccountAwareStorageBackend<KeyPair> keyPairStore = AccountAwareStorageBackend.inMemory("000000000000");
         Map<String, String> legacy = new LinkedHashMap<>();
         legacy.put("key-created", null);
-        legacy.put("key-ed25519", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj me\n");
+        legacy.put("key-ed25519", ED25519_KEY + " me\n");
         legacy.put("key-ecdsa", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFaxjAHsoCE0"
                 + "FmjbKLGzgVRKfOKFmYj1/JpnSjsuLjy23mHIUPkLJ5thgE47igHp+KufC1V2KqJE4OP5w4EK9SU= throwaway");
         legacy.put("key-garbage", "c3NoLXJzYSBBQUFB");
@@ -4807,7 +4804,7 @@ class Ec2ServiceTest {
         stored.setKeyPairId("key-unreadable");
         stored.setKeyName("key-unreadable");
         stored.setRegion("us-east-1");
-        stored.setPublicKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj");
+        stored.setPublicKey(ED25519_KEY);
         keyPairStore.put("us-east-1::key-unreadable", stored);
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -4846,8 +4843,7 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
-        String ed25519 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
-        KeyPair recorded = service.importKeyPair("us-east-1", "recorded", ed25519);
+        KeyPair recorded = service.importKeyPair("us-east-1", "recorded", ED25519_KEY);
 
         try (MockedStatic<Ec2KeyMaterial> reader = mockStatic(Ec2KeyMaterial.class,
                 withSettings().mockMaker(MockMakers.INLINE).defaultAnswer(CALLS_REAL_METHODS))) {
@@ -4855,7 +4851,7 @@ class Ec2ServiceTest {
                     .thenThrow(new IllegalStateException("a reader that fails"));
 
             IllegalStateException failure = assertThrows(IllegalStateException.class,
-                    () -> service.importKeyPair("us-east-1", "another", ed25519));
+                    () -> service.importKeyPair("us-east-1", "another", ED25519_KEY));
             assertEquals("a reader that fails", failure.getMessage());
             assertEquals("ed25519", Ec2Service.keyTypeOf(service.describeKeyPairs("us-east-1",
                     List.of("recorded"), List.of()).getFirst()));

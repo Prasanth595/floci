@@ -24,6 +24,9 @@ import java.util.Base64;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.core.common.SshKeyBlobs.concat;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_BLOB;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -43,7 +46,6 @@ import static org.mockito.Mockito.when;
 class Ec2QueryHandlerTest {
 
     /** The blob of a throwaway ed25519 public key. */
-    private static final String ED25519_BLOB = "AAAAC3NzaC1lZDI1NTE5AAAAIIj7azlDjVHAsSxgcpCRZ3oWnTm0nAFM64y9jd22ioI/";
 
     @ParameterizedTest
     @CsvSource({
@@ -281,7 +283,7 @@ class Ec2QueryHandlerTest {
     @NullAndEmptySource
     @ValueSource(strings = {"two\nlines", "carriage\rreturn", "a\ttab"})
     void describeKeyPairsGivesTheKeyNoCommentWhenTheNameCannotBeOne(String name) {
-        String line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIj7azlDjVHAsSxgcpCRZ3oWnTm0nAFM64y9jd22ioI/";
+        String line = ED25519_KEY;
         KeyPair keyPair = new KeyPair();
         keyPair.setKeyPairId("key-0123456789abcdef0");
         keyPair.setKeyName(name);
@@ -339,10 +341,6 @@ class Ec2QueryHandlerTest {
 
         assertEquals(200, response.getStatus());
         return (String) response.getEntity();
-    }
-
-    private static byte[] concat(byte[] first, byte[] second) {
-        return ByteBuffer.allocate(first.length + second.length).put(first).put(second).array();
     }
 
     private String describeRegions(RegionResolver regionResolver, String region) {

@@ -43,6 +43,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -565,8 +566,7 @@ class Ec2ServicePersistenceTest {
     void keyPairTypeAndCreateTimeSurviveRestart(@TempDir Path dir) {
         Ec2Service first = newService(dir);
         KeyPair created = first.createKeyPair(REGION, "restart-created");
-        KeyPair imported = first.importKeyPair(REGION, "restart-imported",
-                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj");
+        KeyPair imported = first.importKeyPair(REGION, "restart-imported", ED25519_KEY);
 
         Ec2Service restarted = newService(dir);
         Map<String, KeyPair> described = new HashMap<>();
@@ -589,7 +589,7 @@ class Ec2ServicePersistenceTest {
     @Test
     void keyPairsSavedBeforeTypeAndCreateTimeWereRecordedStillLoad(@TempDir Path dir) throws IOException {
         Ec2KeyMaterial.Generated generated = Ec2KeyMaterial.generateRsa();
-        String importedKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj me@host\n";
+        String importedKey = ED25519_KEY + " me@host\n";
         String legacyJson = """
                 {
                   "us-east-1::key-0aaaaaaaaaaaaaaaa": {

@@ -5,15 +5,17 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.createdKeyPairId;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.deleteKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ec2;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.importedKeyPairId;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -27,24 +29,17 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 @QuarkusTest
 class Ec2KeyPairDescribeIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261020/us-east-1/ec2/aws4_request";
-
-    private static final String ED25519_KEY =
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj";
-
     @Test
     void createdAndImportedKeyPairsAreDescribedWithTheirTypeAndCreateTime() {
         String prefix = "described-" + UUID.randomUUID();
         Instant before = Instant.now().truncatedTo(ChronoUnit.MILLIS);
-        String created = create(prefix + "-created");
-        String importedRsa = importKey(prefix + "-rsa", Ec2KeyMaterial.generateRsa().openSshPublicKey());
-        String importedEd25519 = importKey(prefix + "-ed25519", ED25519_KEY + " someone@example.com");
+        String created = createdKeyPairId(prefix + "-created");
+        String importedRsa = importedKeyPairId(prefix + "-rsa", Ec2KeyMaterial.generateRsa().openSshPublicKey());
+        String importedEd25519 = importedKeyPairId(prefix + "-ed25519", ED25519_KEY + " someone@example.com");
         Instant after = Instant.now();
         try {
             for (String[] expected : new String[][] {{created, "rsa"}, {importedRsa, "rsa"}, {importedEd25519, "ed25519"}}) {
-                XmlPath item = given().header("Authorization", AUTH)
-                        .formParam("Action", "DescribeKeyPairs").formParam("KeyPairId.1", expected[0])
+                XmlPath item = ec2("DescribeKeyPairs").formParam("KeyPairId.1", expected[0])
                         .post("/").then().statusCode(200)
                         .body("DescribeKeyPairsResponse.keySet.item.keyType", equalTo(expected[1]))
                         .extract().xmlPath();
@@ -53,9 +48,9 @@ class Ec2KeyPairDescribeIntegrationTest {
                 assertFalse(createTime.isAfter(after), createTime + " is after " + after);
             }
         } finally {
-            delete(created);
-            delete(importedRsa);
-            delete(importedEd25519);
+            deleteKeyPair(created);
+            deleteKeyPair(importedRsa);
+            deleteKeyPair(importedEd25519);
         }
     }
 
@@ -67,15 +62,14 @@ class Ec2KeyPairDescribeIntegrationTest {
     @Test
     void filtersNarrowTheKeyPairsDescribed() {
         String prefix = "filtered-" + UUID.randomUUID();
-        String alpha = create(prefix + "-alpha");
-        String beta = importKey(prefix + "-beta", ED25519_KEY);
-        String gamma = importKey(prefix + "-gamma", Ec2KeyMaterial.generateRsa().openSshPublicKey());
+        String alpha = createdKeyPairId(prefix + "-alpha");
+        String beta = importedKeyPairId(prefix + "-beta", ED25519_KEY);
+        String gamma = importedKeyPairId(prefix + "-gamma", Ec2KeyMaterial.generateRsa().openSshPublicKey());
         try {
-            given().header("Authorization", AUTH).formParam("Action", "CreateTags")
+            ec2("CreateTags")
                     .formParam("ResourceId.1", beta).formParam("Tag.1.Key", "Team").formParam("Tag.1.Value", "blue")
                     .post("/").then().statusCode(200);
-            String gammaFingerprint = given().header("Authorization", AUTH)
-                    .formParam("Action", "DescribeKeyPairs").formParam("KeyPairId.1", gamma)
+            String gammaFingerprint = ec2("DescribeKeyPairs").formParam("KeyPairId.1", gamma)
                     .post("/").then().statusCode(200)
                     .extract().path("DescribeKeyPairsResponse.keySet.item.keyFingerprint");
 
@@ -90,16 +84,16 @@ class Ec2KeyPairDescribeIntegrationTest {
             assertEquals(List.of("beta"), described(prefix, "tag:Team", "blue"));
             assertEquals(List.of(), described(prefix, "tag:Team", "red"));
         } finally {
-            delete(alpha);
-            delete(beta);
-            delete(gamma);
+            deleteKeyPair(alpha);
+            deleteKeyPair(beta);
+            deleteKeyPair(gamma);
         }
     }
 
     /** A filter name DescribeKeyPairs does not know is an error, not a filter that matches everything. */
     @Test
     void anUnknownFilterIsRefused() {
-        given().header("Authorization", AUTH).formParam("Action", "DescribeKeyPairs")
+        ec2("DescribeKeyPairs")
                 .formParam("Filter.1.Name", "owner-id").formParam("Filter.1.Value.1", "000000000000")
                 .post("/").then().statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
@@ -113,11 +107,11 @@ class Ec2KeyPairDescribeIntegrationTest {
     @Test
     void aRepeatedFilterNameIsAndedWithTheFirst() {
         String prefix = "repeated-" + UUID.randomUUID();
-        String prodWeb = create(prefix + "-prod-web");
-        String devWeb = create(prefix + "-dev-web");
-        String prodDb = create(prefix + "-prod-db");
+        String prodWeb = createdKeyPairId(prefix + "-prod-web");
+        String devWeb = createdKeyPairId(prefix + "-dev-web");
+        String prodDb = createdKeyPairId(prefix + "-prod-db");
         try {
-            List<String> ids = given().header("Authorization", AUTH).formParam("Action", "DescribeKeyPairs")
+            List<String> ids = ec2("DescribeKeyPairs")
                     .formParam("Filter.1.Name", "key-name").formParam("Filter.1.Value.1", prefix + "-prod-*")
                     .formParam("Filter.2.Name", "key-name").formParam("Filter.2.Value.1", prefix + "-*-web")
                     .post("/").then().statusCode(200).extract().xmlPath()
@@ -126,9 +120,9 @@ class Ec2KeyPairDescribeIntegrationTest {
             assertEquals(List.of(prodWeb), ids);
             assertEquals(List.of("prod-db", "prod-web"), described(prefix, "key-name", prefix + "-prod-*"));
         } finally {
-            delete(prodWeb);
-            delete(devWeb);
-            delete(prodDb);
+            deleteKeyPair(prodWeb);
+            deleteKeyPair(devWeb);
+            deleteKeyPair(prodDb);
         }
     }
 
@@ -139,8 +133,7 @@ class Ec2KeyPairDescribeIntegrationTest {
      * test is a second key-name filter, which has to narrow the first.
      */
     private static List<String> described(String prefix, String... filter) {
-        RequestSpecification request = given().header("Authorization", AUTH)
-                .formParam("Action", "DescribeKeyPairs")
+        RequestSpecification request = ec2("DescribeKeyPairs")
                 .formParam("Filter.1.Name", "key-name").formParam("Filter.1.Value.1", prefix + "-*");
         if (filter.length > 0) {
             request.formParam("Filter.2.Name", filter[0]);
@@ -155,22 +148,5 @@ class Ec2KeyPairDescribeIntegrationTest {
         }
         names.sort(null);
         return names;
-    }
-
-    private static String create(String name) {
-        return given().header("Authorization", AUTH).formParam("Action", "CreateKeyPair").formParam("KeyName", name)
-                .post("/").then().statusCode(200).extract().path("CreateKeyPairResponse.keyPairId");
-    }
-
-    private static String importKey(String name, String publicKey) {
-        return given().header("Authorization", AUTH).formParam("Action", "ImportKeyPair").formParam("KeyName", name)
-                .formParam("PublicKeyMaterial",
-                        Base64.getEncoder().encodeToString(publicKey.getBytes(StandardCharsets.UTF_8)))
-                .post("/").then().statusCode(200).extract().path("ImportKeyPairResponse.keyPairId");
-    }
-
-    private static void delete(String id) {
-        given().header("Authorization", AUTH).formParam("Action", "DeleteKeyPair").formParam("KeyPairId", id)
-                .post("/").then().statusCode(200);
     }
 }
