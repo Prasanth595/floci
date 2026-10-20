@@ -524,6 +524,135 @@ class DynamoDbBackupIntegrationTest {
     }
 
     @Test
+    void restoreOnDemandOverridesMergeWithTheSourceAndFollowTheBillingMode() {
+        String table = "BackupIT-ondemand";
+        ddb("CreateTable", """
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexes": [%s],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "OnDemandThroughput": {"MaxReadRequestUnits": 7, "MaxWriteRequestUnits": 8}
+                }
+                """.formatted(table, gsi1(", \"OnDemandThroughput\": {\"MaxReadRequestUnits\": 5, "
+                        + "\"MaxWriteRequestUnits\": 6}"))).statusCode(200);
+        String backupArn = createBackup(table, "ondemand");
+        String gsiThroughput = ", \"ProvisionedThroughput\": {\"ReadCapacityUnits\": 1, \"WriteCapacityUnits\": 1}";
+        String provisioned = """
+                "BillingModeOverride": "PROVISIONED",
+                "ProvisionedThroughputOverride": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 3},
+                """;
+
+        restore(backupArn, "BackupIT-ondemand-x", provisioned + "\"GlobalSecondaryIndexOverride\": [" + gsi1(
+                gsiThroughput + ", \"OnDemandThroughput\": {\"MaxWriteRequestUnits\": 5}") + "]")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: Cannot override MaxWriteRequestUnits for "
+                        + "OnDemandThroughput when BillingMode is PROVISIONED for index gsi1"));
+        restore(backupArn, "BackupIT-ondemand-x", "\"GlobalSecondaryIndexOverride\": [" + gsi1(
+                gsiThroughput + ", \"OnDemandThroughput\": {\"MaxReadRequestUnits\": 5}") + "]")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: Cannot override MaxReadRequestUnits for "
+                        + "OnDemandThroughput when ProvisionedThroughputOverride is present for index gsi1"));
+        restore(backupArn, "BackupIT-ondemand-x", """
+                "ProvisionedThroughputOverride": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 3},
+                "OnDemandThroughputOverride": {"MaxReadRequestUnits": 10}
+                """)
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: Cannot override MaxReadRequestUnits for "
+                        + "OnDemandThroughput when ProvisionedThroughputOverride is present"));
+        restore(backupArn, "BackupIT-ondemand-x", """
+                "BillingModeOverride": "PAY_PER_REQUEST",
+                "ProvisionedThroughputOverride": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 3}
+                """)
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: Cannot override ProvisionedThroughput if BillingMode "
+                        + "is overridden to PAY_PER_REQUEST"));
+        restore(backupArn, "BackupIT-ondemand-x", "\"BillingModeOverride\": \"PAY_PER_REQUEST\", "
+                + "\"GlobalSecondaryIndexOverride\": [" + gsi1(gsiThroughput) + "]")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: Cannot override ProvisionedThroughput if BillingMode "
+                        + "is overridden to PAY_PER_REQUEST for index gsi1"));
+
+        restore(backupArn, "BackupIT-ondemand-provisioned",
+                provisioned + "\"GlobalSecondaryIndexOverride\": [" + gsi1(gsiThroughput) + "]")
+                .statusCode(200)
+                .body("TableDescription", not(hasKey("OnDemandThroughput")))
+                .body("TableDescription.GlobalSecondaryIndexes[0]", not(hasKey("OnDemandThroughput")));
+        restore(backupArn, "BackupIT-ondemand-merged", """
+                "OnDemandThroughputOverride": {"MaxReadRequestUnits": 10},
+                "GlobalSecondaryIndexOverride": [%s]
+                """.formatted(gsi1(", \"OnDemandThroughput\": {\"MaxWriteRequestUnits\": 9}")))
+                .statusCode(200)
+                .body("TableDescription.OnDemandThroughput.MaxReadRequestUnits", equalTo(10))
+                .body("TableDescription.OnDemandThroughput.MaxWriteRequestUnits", equalTo(8))
+                .body("TableDescription.GlobalSecondaryIndexes[0].OnDemandThroughput.MaxReadRequestUnits", equalTo(5))
+                .body("TableDescription.GlobalSecondaryIndexes[0].OnDemandThroughput.MaxWriteRequestUnits",
+                        equalTo(9));
+        restore(backupArn, "BackupIT-ondemand-empty", """
+                "OnDemandThroughputOverride": {},
+                "GlobalSecondaryIndexOverride": [%s]
+                """.formatted(gsi1(", \"OnDemandThroughput\": {}")))
+                .statusCode(200)
+                .body("TableDescription.OnDemandThroughput.MaxReadRequestUnits", equalTo(7))
+                .body("TableDescription.GlobalSecondaryIndexes[0].OnDemandThroughput.MaxWriteRequestUnits",
+                        equalTo(6));
+    }
+
+    @Test
+    void restoreOfAProvisionedTableNeedsThroughputForEveryIndexOverride() {
+        String table = "BackupIT-provisioned";
+        String gsiThroughput = ", \"ProvisionedThroughput\": {\"ReadCapacityUnits\": 1, \"WriteCapacityUnits\": 1}";
+        ddb("CreateTable", """
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexes": [%s],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 1, "WriteCapacityUnits": 1}
+                }
+                """.formatted(table, gsi1(gsiThroughput))).statusCode(200);
+        String backupArn = createBackup(table, "provisioned");
+
+        restore(backupArn, "BackupIT-provisioned-x", "\"GlobalSecondaryIndexOverride\": [" + gsi1("") + "]")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: Must specify provisioned throughput for index gsi1"));
+        restore(backupArn, "BackupIT-provisioned-x", "\"GlobalSecondaryIndexOverride\": [" + gsi1(
+                ", \"OnDemandThroughput\": {\"MaxReadRequestUnits\": 5}") + "]")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: Cannot override MaxReadRequestUnits for "
+                        + "OnDemandThroughput unless BillingModeOverride is PAY_PER_REQUEST for index gsi1"));
+        restore(backupArn, "BackupIT-provisioned-x", "\"OnDemandThroughputOverride\": {\"MaxReadRequestUnits\": 10}")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: Cannot override MaxReadRequestUnits for "
+                        + "OnDemandThroughput unless BillingModeOverride is PAY_PER_REQUEST"));
+
+        restore(backupArn, "BackupIT-provisioned-kept", """
+                "ProvisionedThroughputOverride": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 3},
+                "OnDemandThroughputOverride": {},
+                "GlobalSecondaryIndexOverride": [%s]
+                """.formatted(gsi1(gsiThroughput + ", \"OnDemandThroughput\": {}")))
+                .statusCode(200)
+                .body("TableDescription.ProvisionedThroughput.ReadCapacityUnits", equalTo(2))
+                .body("TableDescription.GlobalSecondaryIndexes[0].ProvisionedThroughput.ReadCapacityUnits",
+                        equalTo(1))
+                .body("TableDescription.GlobalSecondaryIndexes[0]", not(hasKey("OnDemandThroughput")));
+        restore(backupArn, "BackupIT-provisioned-ondemand", """
+                "BillingModeOverride": "PAY_PER_REQUEST",
+                "GlobalSecondaryIndexOverride": [%s]
+                """.formatted(gsi1(", \"OnDemandThroughput\": {\"MaxReadRequestUnits\": 5}")))
+                .statusCode(200)
+                .body("TableDescription.BillingModeSummary.BillingMode", equalTo("PAY_PER_REQUEST"))
+                .body("TableDescription.GlobalSecondaryIndexes[0].ProvisionedThroughput.ReadCapacityUnits",
+                        equalTo(0))
+                .body("TableDescription.GlobalSecondaryIndexes[0].OnDemandThroughput.MaxReadRequestUnits", equalTo(5))
+                .body("TableDescription.GlobalSecondaryIndexes[0].OnDemandThroughput",
+                        not(hasKey("MaxWriteRequestUnits")));
+    }
+
+    @Test
     void restoreIndexOverridesMustMatchTheSourceIndexes() {
         String table = "BackupIT-indexes";
         createIndexedTable(table);

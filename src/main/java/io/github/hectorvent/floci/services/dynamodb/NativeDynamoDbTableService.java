@@ -192,18 +192,8 @@ public class NativeDynamoDbTableService {
                 ? overrides.billingMode()
                 : "PAY_PER_REQUEST".equals(source.getBillingMode()) ? "PAY_PER_REQUEST" : "PROVISIONED";
         boolean provisioned = "PROVISIONED".equals(billingMode);
-        boolean overriddenToProvisioned = "PROVISIONED".equals(overrides.billingMode());
-        if (overriddenToProvisioned && overrides.provisionedThroughput() == null) {
-            throw invalidRestore("Must override ProvisionedThroughput if BillingMode is overridden to PROVISIONED");
-        }
-        if (!provisioned && overrides.provisionedThroughput() != null) {
-            throw invalidRestore("Cannot override ProvisionedThroughput unless BillingMode is PROVISIONED");
-        }
-        OnDemandThroughput onDemand = overrides.onDemandThroughput();
-        if (provisioned && onDemand != null) {
-            String member = onDemand.maxReadRequestUnits() != null ? "MaxReadRequestUnits" : "MaxWriteRequestUnits";
-            throw invalidRestore("Cannot override " + member + " for OnDemandThroughput when BillingMode is PROVISIONED");
-        }
+        checkThroughputOverrides(overrides.billingMode(), provisioned, overrides.provisionedThroughput(),
+                overrides.onDemandThroughput(), "");
         Throughput throughput = null;
         if (provisioned) {
             throughput = overrides.provisionedThroughput() != null
@@ -212,8 +202,7 @@ public class NativeDynamoDbTableService {
                             source.getProvisionedThroughput().getWriteCapacityUnits());
         }
 
-        List<GlobalSecondaryIndex> gsis = restoredGlobalSecondaryIndexes(source, overrides, provisioned,
-                overriddenToProvisioned);
+        List<GlobalSecondaryIndex> gsis = restoredGlobalSecondaryIndexes(source, overrides, provisioned);
         List<LocalSecondaryIndex> lsis = restoredLocalSecondaryIndexes(source, overrides);
         List<DynamoDbService.VectorIndexCreate> vectorIndexes = restoredVectorIndexes(source, overrides);
 
@@ -229,11 +218,8 @@ public class NativeDynamoDbTableService {
         Boolean sseEnabled = overrides.sseEnabled() != null ? overrides.sseEnabled() : source.isSseEnabled();
         String sseType = overrides.sseEnabled() != null ? overrides.sseType() : source.getSseType();
         String kmsMasterKeyId = overrides.sseEnabled() != null ? overrides.kmsMasterKeyId() : source.getKmsMasterKeyArn();
-        if (onDemand == null && !provisioned && (source.getOnDemandMaxReadRequestUnits() != null
-                || source.getOnDemandMaxWriteRequestUnits() != null)) {
-            onDemand = new OnDemandThroughput(source.getOnDemandMaxReadRequestUnits(),
-                    source.getOnDemandMaxWriteRequestUnits());
-        }
+        OnDemandThroughput onDemand = provisioned ? null : mergedOnDemand(overrides.onDemandThroughput(),
+                source.getOnDemandMaxReadRequestUnits(), source.getOnDemandMaxWriteRequestUnits());
         TableSettings settings = new TableSettings(billingMode, false, null, onDemand, null, null,
                 sseEnabled, sseType, kmsMasterKeyId);
         dynamoDbService.requireRestoreTarget(targetTableName, region);
@@ -243,18 +229,15 @@ public class NativeDynamoDbTableService {
     }
 
     private static List<GlobalSecondaryIndex> restoredGlobalSecondaryIndexes(TableDefinition source,
-            RestoreOverrides overrides, boolean provisioned, boolean overriddenToProvisioned) {
+            RestoreOverrides overrides, boolean provisioned) {
         List<GlobalSecondaryIndex> restored = new ArrayList<>();
         if (overrides.globalSecondaryIndexes() == null) {
             for (GlobalSecondaryIndex gsi : source.getGlobalSecondaryIndexes()) {
-                if (overriddenToProvisioned) {
+                if ("PROVISIONED".equals(overrides.billingMode())) {
                     throw invalidRestore("Must override ProvisionedThroughput if BillingMode is overridden to "
                             + "PROVISIONED for index " + gsi.getIndexName());
                 }
-                restored.add(restoredGsi(gsi.getIndexName(), gsi, provisioned,
-                        gsi.getProvisionedThroughput().getReadCapacityUnits(),
-                        gsi.getProvisionedThroughput().getWriteCapacityUnits(),
-                        gsi.getOnDemandMaxReadRequestUnits(), gsi.getOnDemandMaxWriteRequestUnits()));
+                restored.add(restoredGsi(gsi.getIndexName(), gsi, provisioned, null, null));
             }
             return restored;
         }
@@ -264,38 +247,78 @@ public class NativeDynamoDbTableService {
                             gsi.getNonKeyAttributes()))
                     .findFirst()
                     .orElseThrow(() -> indexMismatch(override.indexName()));
-            Throughput throughput = override.provisionedThroughput();
-            if (overriddenToProvisioned && throughput == null) {
-                throw invalidRestore("Must override ProvisionedThroughput if BillingMode is overridden to "
-                        + "PROVISIONED for index " + override.indexName());
+            String forIndex = " for index " + override.indexName();
+            checkThroughputOverrides(overrides.billingMode(), provisioned, override.provisionedThroughput(),
+                    override.onDemandThroughput(), forIndex);
+            if (provisioned && override.provisionedThroughput() == null) {
+                throw invalidRestore("Must specify provisioned throughput" + forIndex);
             }
-            if (!provisioned && throughput != null) {
-                throw invalidRestore("Cannot override ProvisionedThroughput unless BillingMode is PROVISIONED "
-                        + "for index " + override.indexName());
-            }
-            OnDemandThroughput onDemand = override.onDemandThroughput();
-            restored.add(restoredGsi(override.indexName(), match, provisioned,
-                    throughput != null ? throughput.readCapacityUnits()
-                            : match.getProvisionedThroughput().getReadCapacityUnits(),
-                    throughput != null ? throughput.writeCapacityUnits()
-                            : match.getProvisionedThroughput().getWriteCapacityUnits(),
-                    onDemand != null ? onDemand.maxReadRequestUnits() : match.getOnDemandMaxReadRequestUnits(),
-                    onDemand != null ? onDemand.maxWriteRequestUnits() : match.getOnDemandMaxWriteRequestUnits()));
+            restored.add(restoredGsi(override.indexName(), match, provisioned, override.provisionedThroughput(),
+                    override.onDemandThroughput()));
         }
         return restored;
     }
 
+    /**
+     * The table and each index override go through the same checks in this order. An empty
+     * OnDemandThroughput is ignored, and the message names the first member the override sets.
+     */
+    private static void checkThroughputOverrides(String billingModeOverride, boolean provisioned,
+                                                 Throughput throughput, OnDemandThroughput onDemand, String suffix) {
+        if ("PAY_PER_REQUEST".equals(billingModeOverride) && throughput != null) {
+            throw invalidRestore("Cannot override ProvisionedThroughput if BillingMode is overridden to "
+                    + "PAY_PER_REQUEST" + suffix);
+        }
+        if ("PROVISIONED".equals(billingModeOverride) && throughput == null) {
+            throw invalidRestore("Must override ProvisionedThroughput if BillingMode is overridden to PROVISIONED"
+                    + suffix);
+        }
+        if (onDemand != null && (onDemand.maxReadRequestUnits() != null || onDemand.maxWriteRequestUnits() != null)) {
+            String cannot = "Cannot override "
+                    + (onDemand.maxReadRequestUnits() != null ? "MaxReadRequestUnits" : "MaxWriteRequestUnits")
+                    + " for OnDemandThroughput ";
+            if ("PROVISIONED".equals(billingModeOverride)) {
+                throw invalidRestore(cannot + "when BillingMode is PROVISIONED" + suffix);
+            }
+            if (throughput != null) {
+                throw invalidRestore(cannot + "when ProvisionedThroughputOverride is present" + suffix);
+            }
+            if (provisioned) {
+                throw invalidRestore(cannot + "unless BillingModeOverride is PAY_PER_REQUEST" + suffix);
+            }
+        }
+        if (!provisioned && throughput != null) {
+            throw invalidRestore("Cannot override ProvisionedThroughput unless BillingMode is PROVISIONED" + suffix);
+        }
+    }
+
+    /** An on-demand override replaces only the members it sets. */
+    private static OnDemandThroughput mergedOnDemand(OnDemandThroughput override, Integer maxReadRequestUnits,
+                                                     Integer maxWriteRequestUnits) {
+        Integer maxRead = override != null && override.maxReadRequestUnits() != null
+                ? override.maxReadRequestUnits() : maxReadRequestUnits;
+        Integer maxWrite = override != null && override.maxWriteRequestUnits() != null
+                ? override.maxWriteRequestUnits() : maxWriteRequestUnits;
+        return maxRead == null && maxWrite == null ? null : new OnDemandThroughput(maxRead, maxWrite);
+    }
+
     private static GlobalSecondaryIndex restoredGsi(String indexName, GlobalSecondaryIndex source, boolean provisioned,
-                                                    long readCapacityUnits, long writeCapacityUnits,
-                                                    Integer maxReadRequestUnits, Integer maxWriteRequestUnits) {
+                                                    Throughput throughput, OnDemandThroughput onDemandOverride) {
         GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, new ArrayList<>(source.getKeySchema()), null,
                 source.getProjectionType(), new ArrayList<>(source.getNonKeyAttributes()));
         if (provisioned) {
-            gsi.getProvisionedThroughput().setReadCapacityUnits(readCapacityUnits);
-            gsi.getProvisionedThroughput().setWriteCapacityUnits(writeCapacityUnits);
+            gsi.getProvisionedThroughput().setReadCapacityUnits(throughput != null ? throughput.readCapacityUnits()
+                    : source.getProvisionedThroughput().getReadCapacityUnits());
+            gsi.getProvisionedThroughput().setWriteCapacityUnits(throughput != null ? throughput.writeCapacityUnits()
+                    : source.getProvisionedThroughput().getWriteCapacityUnits());
+            return gsi;
         }
-        gsi.setOnDemandMaxReadRequestUnits(maxReadRequestUnits);
-        gsi.setOnDemandMaxWriteRequestUnits(maxWriteRequestUnits);
+        OnDemandThroughput onDemand = mergedOnDemand(onDemandOverride, source.getOnDemandMaxReadRequestUnits(),
+                source.getOnDemandMaxWriteRequestUnits());
+        if (onDemand != null) {
+            gsi.setOnDemandMaxReadRequestUnits(onDemand.maxReadRequestUnits());
+            gsi.setOnDemandMaxWriteRequestUnits(onDemand.maxWriteRequestUnits());
+        }
         return gsi;
     }
 
