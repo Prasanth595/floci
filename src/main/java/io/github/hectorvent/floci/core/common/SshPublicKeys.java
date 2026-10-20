@@ -15,7 +15,7 @@ import java.util.HexFormat;
 /**
  * The OpenSSH public key wire form, {@code "ssh-rsa AAAA..."}: decoding a line into its
  * length-prefixed fields, reading or writing the RSA key they carry, and telling whether a blob
- * holds a whole key of the type it declares, RSA or otherwise.
+ * holds a whole RSA, ed25519, ECDSA or security-key public key of the type it declares.
  *
  * <p>Extracted from {@code Ec2KeyMaterial} rather than left there because it is key-format
  * handling rather than anything EC2 owns. The digest helper is here for the same reason, and
@@ -161,12 +161,13 @@ public final class SshPublicKeys {
     /**
      * Whether a blob carries a whole public key of the type it declares: an {@code ssh-rsa}
      * exponent and modulus that make a usable key, a 32-byte ed25519 key, or an uncompressed point
-     * of the size of the curve an ECDSA type names, each with the application field a security-key
-     * type adds. A type field alone, or a field of the wrong size, is not a key, and neither is a
-     * type other than these, such as {@code ssh-dss} or a certificate. Unlike {@link #rsaKeyOf},
-     * which reads only the fields it needs, nothing may follow the key, as OpenSSH requires. The
-     * check is of the format alone: it does not ask whether an RSA modulus is long enough for
-     * OpenSSH or whether an EC point lies on its curve.
+     * of the size of the curve an ECDSA type names, followed by an application field for the two
+     * security-key types, {@code sk-ssh-ed25519@openssh.com} and
+     * {@code sk-ecdsa-sha2-nistp256@openssh.com}. A type field alone, or a field of the wrong size,
+     * is not a key, and neither is a type other than these, such as {@code ssh-dss} or a
+     * certificate. Unlike {@link #rsaKeyOf}, which reads only the fields it needs, nothing may
+     * follow the key, as OpenSSH requires. The check is of the format alone: it does not ask
+     * whether an RSA modulus is long enough for OpenSSH or whether an EC point lies on its curve.
      */
     public static boolean carriesAKey(byte[] blob) {
         if (blob == null) {

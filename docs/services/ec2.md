@@ -279,8 +279,8 @@ stores the material as it was given, and a key pair whose material is not exactl
 OpenSSH public key is described without one: PEM, DER or RFC 4716 text, material of more than
 one line, a line whose blob lacks a field its type requires (such as an `ssh-rsa` blob with no
 modulus), has bytes after its key or declares a different type than the line names, and a
-key of a type other than RSA, ED25519, ECDSA on P-256, P-384 or P-521, and the security-key
-forms of ED25519 and ECDSA P-256.
+key of any type but `ssh-rsa`, `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`,
+`ecdsa-sha2-nistp521`, `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`.
 
 | Action | Description |
 |--------|-------------|

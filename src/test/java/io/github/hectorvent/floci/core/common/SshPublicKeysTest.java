@@ -193,8 +193,8 @@ class SshPublicKeysTest {
     /**
      * A blob carries a key only when it has every field its type requires: a type field alone, an
      * RSA exponent and modulus that make no usable key, or an ed25519 key or ECDSA point of the
-     * wrong size or form, is not a public key, and neither is a type other than RSA, ed25519, ECDSA
-     * and their security-key forms.
+     * wrong size or form, is not a public key, and neither is a type outside RSA, ed25519, the three
+     * ECDSA curves and the two security-key types.
      */
     @Test
     void aBlobCarriesAKeyOnlyWithEveryFieldItsTypeRequires() {
