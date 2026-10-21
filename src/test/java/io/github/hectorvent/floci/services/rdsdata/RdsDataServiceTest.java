@@ -1270,8 +1270,8 @@ class RdsDataServiceTest {
         private boolean resuming;
 
         @Override
-        public Lease enter(String host, int port) {
-            throw new AssertionError("RDS Data API must enter backends by runtime identity");
+        public Lease enterRuntime(String runtimeId) {
+            return enterRuntime(runtimeId, true);
         }
 
         @Override

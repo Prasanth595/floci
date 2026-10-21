@@ -521,26 +521,11 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
     @Override
     public Lease enterRuntime(String runtimeId, boolean waitForResume) throws InterruptedException {
-        AutoPauseController controller = runtimeId != null ? autoPauses.get(runtimeId) : null;
+        if (runtimeId == null || runtimeId.isBlank()) {
+            throw new IllegalArgumentException("RDS runtime ID is required to enter its backend");
+        }
+        AutoPauseController controller = autoPauses.get(runtimeId);
         return controller != null ? controller.acquire(waitForResume) : Lease.NONE;
-    }
-
-    @Override
-    public Lease enter(String host, int port) throws InterruptedException {
-        return enter(host, port, true);
-    }
-
-    @Override
-    public Lease enter(String host, int port, boolean waitForResume) throws InterruptedException {
-        if (host == null) {
-            return Lease.NONE;
-        }
-        for (AutoPauseController controller : autoPauses.values()) {
-            if (controller.serves(host, port)) {
-                return controller.acquire(waitForResume);
-            }
-        }
-        return Lease.NONE;
     }
 
     /**
@@ -576,8 +561,8 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         AutoPauseController controller = new AutoPauseController(
                 handle.getContainerId(), handle.getHost(), handle.getPort(), dockerFreezer,
                 this::scheduleAutoPauseTask, autoPauseEvents, Clock.systemUTC(), resumeDelay);
-        // Clients find a container by its address, so the new container owns it from now on,
-        // even if Docker removed the previous owner without Floci stopping it.
+        // Drop any controller still tied to this endpoint: Docker may have removed its container
+        // without Floci observing the stop before assigning the endpoint to this runtime.
         for (Map.Entry<String, AutoPauseController> entry : List.copyOf(autoPauses.entrySet())) {
             if (entry.getValue().serves(handle.getHost(), handle.getPort())
                     && autoPauses.remove(entry.getKey(), entry.getValue())) {

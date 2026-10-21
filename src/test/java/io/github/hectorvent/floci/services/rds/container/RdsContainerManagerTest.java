@@ -1331,7 +1331,7 @@ class RdsContainerManagerTest {
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
         manager.configureAutoPause(runtimeId, 300, alwaysMayPause());
 
-        try (RdsBackendGate.Lease client = manager.enter("db1", 3306)) {
+        try (RdsBackendGate.Lease client = manager.enterRuntime(runtimeId)) {
             assertFalse(manager.pauseIfIdle(runtimeId), "a client is connected");
         }
         assertTrue(manager.pauseIfIdle(runtimeId));
@@ -1347,7 +1347,6 @@ class RdsContainerManagerTest {
         InOrder order = inOrder(unpause, lifecycleManager);
         order.verify(unpause, times(2)).exec();
         order.verify(lifecycleManager).stopAndRemoveStrict(eq("cluster-container"), any());
-        assertSame(RdsBackendGate.Lease.NONE, manager.enter("db1", 3306));
         assertSame(RdsBackendGate.Lease.NONE, manager.enterRuntime(runtimeId));
     }
 
@@ -1372,7 +1371,7 @@ class RdsContainerManagerTest {
         manager.clear();
 
         verify(unpause).exec();
-        assertSame(RdsBackendGate.Lease.NONE, manager.enter("db1", 3306));
+        assertSame(RdsBackendGate.Lease.NONE, manager.enterRuntime(runtimeId));
         assertFalse(manager.pauseIfIdle(runtimeId));
     }
 
@@ -1396,9 +1395,10 @@ class RdsContainerManagerTest {
         manager.configureAutoPause(removedRuntime, 300, alwaysMayPause());
         assertTrue(manager.pauseIfIdle(removedRuntime));
 
-        manager.start("arn:aws:rds:us-east-1:000000000000:cluster:new", "new", null,
+        String newRuntime = "arn:aws:rds:us-east-1:000000000000:cluster:new";
+        manager.start(newRuntime, "new", null,
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
-        manager.enter("db1", 3306).close();
+        manager.enterRuntime(newRuntime).close();
 
         verify(dockerClient, never()).unpauseContainerCmd("new-container");
         assertFalse(manager.pauseIfIdle(removedRuntime), "the removed container's auto-pause is gone");

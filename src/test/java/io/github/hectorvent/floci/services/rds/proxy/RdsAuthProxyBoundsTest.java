@@ -109,12 +109,12 @@ class RdsAuthProxyBoundsTest {
         fakeBackend.setSoTimeout(300);
         CountDownLatch admit = new CountDownLatch(1);
         CountDownLatch released = new CountDownLatch(1);
-        RdsBackendGate gate = (host, port) -> {
+        RdsBackendGate gate = runtimeId -> {
             admit.await();
             return released::countDown;
         };
         int proxyPort = FreePorts.anyInterfacePort();
-        proxy = new RdsAuthProxy("db-1", "localhost", fakeBackend.getLocalPort(),
+        proxy = new RdsAuthProxy("db-1", "localhost", fakeBackend.getLocalPort(), "runtime:db-1",
                 DatabaseEngine.SQLSERVER, false, "sa", "Secret123", null,
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
                 5000, 5000, 100, null, gate);
@@ -136,7 +136,7 @@ class RdsAuthProxyBoundsTest {
 
     private RdsAuthProxy newProxy(int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
                                   int maxConnections) {
-        return new RdsAuthProxy("db-1", "localhost", fakeBackend.getLocalPort(),
+        return new RdsAuthProxy("db-1", "localhost", fakeBackend.getLocalPort(), "runtime:db-1",
                 DatabaseEngine.POSTGRES, false,
                 "admin", "Secret123", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,

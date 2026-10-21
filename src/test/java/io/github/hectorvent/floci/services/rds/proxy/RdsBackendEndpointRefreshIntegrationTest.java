@@ -194,7 +194,8 @@ class RdsBackendEndpointRefreshIntegrationTest {
             return new RdsAuthProxy.BackendEndpoint(endpoint.host(), endpoint.port());
         };
         RdsAuthProxy proxy = new RdsAuthProxy(
-                id, initialAddress, POSTGRES_PORT, resolver, DatabaseEngine.POSTGRES, false,
+                id, initialAddress, POSTGRES_PORT, resolver, containerId,
+                DatabaseEngine.POSTGRES, false,
                 USER, PASSWORD, DATABASE, mock(RdsSigV4Validator.class),
                 mock(RdsProxyTlsCertificates.class), (user, password) -> true,
                 5000, 5000, 100, null, username -> false,
