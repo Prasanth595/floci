@@ -125,7 +125,8 @@ public class DsqlDatabases {
         }
     }
 
-    private static Connection superuser(Backend backend) throws SQLException {
+    /** A superuser connection to the cluster's database, for what the endpoint checks itself. */
+    public static Connection superuser(Backend backend) throws SQLException {
         return DriverManager.getConnection(backend.jdbcUrl(), "dbowner", "");
     }
 

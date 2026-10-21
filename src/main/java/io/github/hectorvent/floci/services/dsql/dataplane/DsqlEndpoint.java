@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.dsql.dataplane;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
@@ -23,6 +25,10 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -38,8 +44,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * sends picks the cluster. A connection is admitted as Aurora DSQL admits it (measured on AWS,
  * eu-west-1, 2026-10-16): the password is a SigV4 token for the endpoint's host, {@code admin}
  * signs {@code DbConnectAdmin} and every other role {@code DbConnect}, a token is taken up to 5
- * seconds past its expiry, and a role other than {@code admin} logs in only for an IAM role mapped
- * to it, which Floci does not map yet. Every refusal is the same {@code access denied}, with a hint
+ * seconds past its expiry, and a role other than {@code admin} logs in only for an IAM role that
+ * {@code AWS IAM GRANT} mapped to it. Every refusal is the same {@code access denied}, with a hint
  * only where DSQL gives one. DSQL lets clients in while a cluster is still CREATING; Floci's
  * clusters are CREATING only while their database starts, and serve once it answers.
  */
@@ -70,18 +76,17 @@ public class DsqlEndpoint {
     }
 
     /**
-     * Whether a connection may go on, and to which cluster; when it may not, the SQLSTATE DSQL
-     * answers ({@code 08006} for the token, {@code 28000} for the role it would log in as) and its
-     * hint.
+     * Whether a connection may go on, and as whom; when it may not, the SQLSTATE DSQL answers
+     * ({@code 08006} for the token, {@code 28000} for the role it would log in as) and its hint.
      */
-    record Admission(boolean allowed, String state, String hint, Route route) {
+    record Admission(boolean allowed, String state, String hint, Route route, String principalArn) {
 
         static Admission refused(String hint) {
-            return new Admission(false, "08006", hint, null);
+            return new Admission(false, "08006", hint, null, null);
         }
 
         static Admission unauthorized() {
-            return new Admission(false, "28000", null, null);
+            return new Admission(false, "28000", null, null, null);
         }
     }
 
@@ -177,8 +182,7 @@ public class DsqlEndpoint {
      * Whether {@code token} lets {@code user} in, checked in the order DSQL reports: the cluster
      * the client asked for by name (or, without a name, the one the token is for), the action
      * the user needs, the token's expiry, then its signature and, for a role other than
-     * {@code admin}, the IAM role mapped to it: DSQL refuses a role no IAM role is mapped to, and
-     * Floci maps none yet, so only {@code admin} signs in.
+     * {@code admin}, the IAM role mapped to it.
      */
     Admission admit(String token, String user, String serverName) {
         URI uri;
@@ -231,16 +235,22 @@ public class DsqlEndpoint {
         if (!route.accountId().equals(iamService.resolveAccountId(accessKeyId).orElse(route.accountId()))) {
             return Admission.refused(null);
         }
-        // The endpoint runs outside any request: the caller's policies are read in the cluster's
-        // account, as the enforcement filter reads them in the request's.
-        if (enforcement && !RequestScopes.callAs(route.accountId(), route.region(),
-                () -> allowedByIam(accessKeyId, "dsql:" + needed, route))) {
+        // The endpoint runs outside any request: the caller's identity and policies are read in the
+        // cluster's account, as the enforcement filter reads them in the request's.
+        String principal = RequestScopes.callAs(route.accountId(), route.region(), () -> {
+            if (enforcement && !allowedByIam(accessKeyId, "dsql:" + needed, route)) {
+                return null;
+            }
+            return iamService.resolvePrincipalArn(accessKeyId).orElseGet(() -> AwsArnUtils.Arn.global(
+                    AwsRegions.partitionFor(route.region()), "iam", route.accountId(), "root").toString());
+        });
+        if (principal == null) {
             return Admission.refused(null);
         }
-        if (!ADMIN.equals(user)) {
+        if (!ADMIN.equals(user) && !mapped(route.backend(), principal, user)) {
             return Admission.unauthorized();
         }
-        return new Admission(true, null, null, route);
+        return new Admission(true, null, null, route, principal);
     }
 
     /**
@@ -287,6 +297,26 @@ public class DsqlEndpoint {
         }
         return policyEvaluator.simulatePrincipalPolicy(caller, action, route.arn(), Map.of())
                 == IamPolicyEvaluator.SimulationDecision.ALLOWED;
+    }
+
+    /**
+     * Whether {@code AWS IAM GRANT} mapped the IAM role {@code principal} to {@code role}. A
+     * superuser is never one, as DSQL never lets {@code dbowner} in.
+     */
+    private static boolean mapped(DsqlDatabases.Backend backend, String principal, String role) {
+        try (Connection connection = DsqlDatabases.superuser(backend);
+             PreparedStatement query = connection.prepareStatement("SELECT 1 FROM sys.iam_pg_role_mappings m"
+                     + " JOIN pg_roles r ON r.oid = m.pg_role_oid WHERE m.arn = ? AND m.pg_role_name = ?"
+                     + " AND NOT r.rolsuper")) {
+            query.setString(1, principal);
+            query.setString(2, role);
+            try (ResultSet rows = query.executeQuery()) {
+                return rows.next();
+            }
+        } catch (SQLException e) {
+            LOG.warnv("Could not read the IAM role mappings of a DSQL cluster: {0}", e.getMessage());
+            return false;
+        }
     }
 
     private static String[] credentialScope(String rawQuery) {

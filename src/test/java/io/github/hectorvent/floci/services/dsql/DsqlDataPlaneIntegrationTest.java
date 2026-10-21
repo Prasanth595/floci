@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dsql;
 
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.services.dsql.dataplane.DsqlEndpoint;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
@@ -48,6 +49,7 @@ class DsqlDataPlaneIntegrationTest {
 
     private static final String ACCOUNT = "111122223333";
     private static final String REGION = "eu-west-1";
+    private static final String ROLE_ARN = "arn:aws:iam::" + ACCOUNT + ":role/service/app-role";
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=" + ACCOUNT
             + "/20261016/" + REGION + "/dsql/aws4_request, SignedHeaders=host, Signature=abc";
 
@@ -56,6 +58,9 @@ class DsqlDataPlaneIntegrationTest {
 
     @Inject
     DsqlEndpoint endpoint;
+
+    @Inject
+    IamService iamService;
 
     @ConfigProperty(name = "quarkus.http.test-port", defaultValue = "0")
     int httpPort;
@@ -94,11 +99,14 @@ class DsqlDataPlaneIntegrationTest {
         try (Connection connection = connect("admin", adminToken());
              Statement statement = connection.createStatement();
              ResultSet row = statement.executeQuery("SELECT current_user, current_setting('transaction_isolation'),"
-                     + " (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'public')")) {
+                     + " (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'public'),"
+                     + " sys.iam_session_user(), length(sys.current_session_id())")) {
             assertTrue(row.next());
             assertEquals("admin", row.getString(1));
             assertEquals("repeatable read", row.getString(2));
             assertEquals("admin", row.getString(3));
+            assertEquals("arn:aws:iam::" + ACCOUNT + ":root", row.getString(4));
+            assertEquals(26, row.getInt(5));
         }
     }
 
@@ -141,24 +149,80 @@ class DsqlDataPlaneIntegrationTest {
         assertEquals("55000", otherDatabase.getSQLState());
     }
 
-    /** A role other than {@code admin} signs in only for an IAM role mapped to it, and none is. */
     @Test
-    void aRoleOtherThanAdminIsRefusedAsAnUnmappedRole() throws Exception {
+    void aRoleLogsInOnlyForTheIamRoleMappedToIt() throws Exception {
+        String accessKeyId = "ASIA" + Long.toString(System.nanoTime(), 36).toUpperCase();
+        String secret = "app+session/secret=key";
+        String sessionToken = "IQoJb3JpZ2luX2VjEJr+app/role+session==";
+        iamService.registerLambdaExecutionRoleSession(ACCOUNT, accessKeyId, secret, sessionToken, ROLE_ARN);
         try (Connection admin = connect("admin", adminToken()); Statement statement = admin.createStatement()) {
             statement.execute("CREATE ROLE app_role WITH LOGIN");
+
+            PSQLException unmapped = assertThrows(PSQLException.class, () -> connect("app_role",
+                    token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
+            assertEquals("unable to accept connection, access denied", unmapped.getServerErrorMessage().getMessage());
+            assertEquals("28000", unmapped.getSQLState());
+
+            statement.execute("AWS IAM GRANT app_role TO '" + ROLE_ARN + "'");
+            try (Connection app = connect("app_role", token("DbConnect", accessKeyId, secret, Instant.now(), 900,
+                         sessionToken));
+                 Statement query = app.createStatement()) {
+                try (ResultSet row = query.executeQuery("SELECT current_user, sys.iam_session_user()")) {
+                    assertTrue(row.next());
+                    assertEquals("app_role", row.getString(1));
+                    assertEquals(ROLE_ARN, row.getString(2));
+                }
+            }
+
+            PSQLException adminAction = assertThrows(PSQLException.class, () -> connect("app_role",
+                    token("DbConnectAdmin", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
+            assertEquals("Wrong user to action mapping. user: app_role, action: DbConnectAdmin",
+                    adminAction.getServerErrorMessage().getHint());
+
+            PSQLException superuser = assertThrows(PSQLException.class, () ->
+                    statement.execute("AWS IAM GRANT dbowner TO '" + ROLE_ARN + "'"));
+            assertEquals("0LP01", superuser.getSQLState());
+            assertEquals("cannot establish trust with role \"dbowner\"", superuser.getServerErrorMessage().getMessage());
+            PSQLException itself = assertThrows(PSQLException.class, () ->
+                    statement.execute("AWS IAM GRANT admin TO '" + ROLE_ARN + "'"));
+            assertEquals("42501", itself.getSQLState());
+            assertEquals("Only roles with the ADMIN option on role \"admin\" may grant IAM trust to this role.",
+                    itself.getServerErrorMessage().getDetail());
+            assertThrows(PSQLException.class, () -> connect("dbowner",
+                    token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
+
+            statement.execute("AWS IAM REVOKE app_role FROM '" + ROLE_ARN + "'");
+            assertThrows(PSQLException.class, () -> connect("app_role",
+                    token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
+        } finally {
+            iamService.unregisterSession(ACCOUNT, accessKeyId);
         }
+    }
 
-        PSQLException unmapped = assertThrows(PSQLException.class, () ->
-                connect("app_role", token("DbConnect", "test", "test", Instant.now(), 900, null)).close());
-        assertEquals("28000", unmapped.getSQLState());
-        assertEquals("unable to accept connection, access denied", unmapped.getServerErrorMessage().getMessage());
-        assertTrue(unmapped.getServerErrorMessage().getDetail().startsWith("Session Id: "));
+    @Test
+    void dsqlsParametersAreReservedAsDsqlReservesThem() throws Exception {
+        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+            for (String sql : List.of("SET dsql.x = 1", "RESET dsql.x", "SELECT set_config('dsql.x', '1', false)",
+                    "ALTER ROLE admin SET dsql.x = 1",
+                    "CREATE FUNCTION reserved() RETURNS int LANGUAGE sql SET dsql.x = 1 AS 'SELECT 1'")) {
+                PSQLException reserved = assertThrows(PSQLException.class, () -> statement.execute(sql), sql);
+                assertEquals("42602", reserved.getSQLState(), sql);
+                assertEquals("invalid configuration parameter name \"dsql.x\"",
+                        reserved.getServerErrorMessage().getMessage(), sql);
+                assertEquals("\"dsql\" is a reserved prefix.", reserved.getServerErrorMessage().getDetail(), sql);
+            }
+            PSQLException shown = assertThrows(PSQLException.class, () -> statement.execute("SHOW dsql.session_id"));
+            assertEquals("42704", shown.getSQLState());
+            assertEquals("unrecognized configuration parameter \"dsql.session_id\"",
+                    shown.getServerErrorMessage().getMessage());
 
-        PSQLException adminAction = assertThrows(PSQLException.class, () ->
-                connect("app_role", token("DbConnectAdmin", "test", "test", Instant.now(), 900, null)).close());
-        assertEquals("08006", adminAction.getSQLState());
-        assertEquals("Wrong user to action mapping. user: app_role, action: DbConnectAdmin",
-                adminAction.getServerErrorMessage().getHint());
+            PSQLException custom = assertThrows(PSQLException.class, () ->
+                    statement.execute("SELECT set_config('myapp.foo', 'x', false)"));
+            assertEquals("0A000", custom.getSQLState());
+            assertEquals("setting configuration parameter \"myapp.foo\" not supported",
+                    custom.getServerErrorMessage().getMessage());
+            statement.execute("SET myapp.foo = 'x'");
+        }
     }
 
     @Test
@@ -185,12 +249,14 @@ class DsqlDataPlaneIntegrationTest {
         assertEquals(null, fromTheDatabase.getServerErrorMessage().getFile());
 
         Properties ignored = properties("admin", adminToken());
-        ignored.setProperty("options", "--search_path=elsewhere -c search_path=first -c search_path=second");
+        ignored.setProperty("options", "--dsql.iam_session_user=spoofed --search_path=elsewhere"
+                + " -c search_path=first -c search_path=second");
         try (Connection connection = DriverManager.getConnection(url(), ignored);
              Statement statement = connection.createStatement();
-             ResultSet row = statement.executeQuery("SELECT current_setting('search_path')")) {
+             ResultSet row = statement.executeQuery("SELECT current_setting('search_path'), sys.iam_session_user()")) {
             assertTrue(row.next());
             assertEquals("first", row.getString(1));
+            assertEquals("arn:aws:iam::" + ACCOUNT + ":root", row.getString(2));
         }
     }
 

@@ -67,8 +67,10 @@ When Floci runs in Docker, publish `5432` alongside `4566`.
   wrong action is refused with the hint `Wrong user to action mapping. user: <user>, action: <action>`.
 - A token is accepted up to 5 seconds past its expiry, as DSQL accepts it; after that the hint is
   `Signature expired: ...`.
-- Only `admin` signs in. DSQL lets another role in only for an IAM role that `AWS IAM GRANT` mapped
-  to it, which Floci does not support yet, so every other role is refused as an unmapped one is.
+- A role other than `admin` signs in only for the IAM role that `AWS IAM GRANT` mapped to it. The
+  token's principal is the role behind its credentials (a Lambda function's execution role, an ECS
+  task's role with `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED`, an `AssumeRole` session),
+  its ARN with its path.
 - The signature is verified like any other Floci IAM token: the `test` key, or a key or session
   Floci issued. With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`, the principal also needs
   `dsql:DbConnectAdmin` or `dsql:DbConnect` on the cluster ARN.
@@ -84,11 +86,28 @@ The database is PostgreSQL 16 at `REPEATABLE READ`, as DSQL's is, with the role 
 the `public` schema and can create roles and databases. A connection closes after an hour, as DSQL
 closes it.
 
+- `AWS IAM GRANT <role> TO '<role arn>'` and `AWS IAM REVOKE <role> FROM '<role arn>'`, with
+  `sys.iam_pg_role_mappings`. A superuser role cannot be mapped, and only a role holding the
+  `ADMIN` option on a role can map it: `admin` maps the roles it created.
+- `sys.iam_session_user()` answers the connection's IAM principal and `sys.current_session_id()`
+  its session id, as on DSQL.
+- `dsql` is a reserved prefix, as on DSQL: `SET`, `RESET`, `set_config`, `ALTER ROLE ... SET` and a
+  function's `SET` clause of a `dsql.` parameter fail with `42602` and `"dsql" is a reserved
+  prefix.`, and `SHOW` of one with `42704`. `set_config` of another dotted parameter is `0A000`, though
+  `SET` of one works.
+- Errors carry no source location, as DSQL's carry none, and no line of Floci's `sys` functions in
+  their context; notices keep their location.
+
 ### Differences from AWS
 
-- DSQL's SQL dialect is not applied: what DSQL adds to PostgreSQL (`CREATE INDEX ASYNC`, `AWS IAM
-  GRANT`, the `sys` functions) is refused as PostgreSQL refuses it, what DSQL refuses works, and
-  DSQL's transaction limits (one DDL statement, 3,000 rows, 300 seconds) do not apply.
+- The rest of DSQL's SQL dialect is not applied yet: `CREATE INDEX ASYNC` and its jobs are refused
+  as PostgreSQL refuses them, what DSQL refuses works, and DSQL's transaction limits (one DDL
+  statement, 3,000 rows, 300 seconds) do not apply.
+- `sys` also holds the tables behind Floci's IAM mappings.
+- A `dsql.` parameter whose name a statement builds at run time, as in `set_config(chr(100) ||
+  'sql.x', ...)`, is set where DSQL refuses it, since only a PostgreSQL extension written in C can
+  reserve a prefix; it changes at most what `sys.iam_session_user()` and `sys.current_session_id()`
+  report to that session.
 - DSQL is optimistic: conflicting transactions both run and the second to commit fails with
   `40001`. Floci's database is PostgreSQL, so a write that conflicts waits for the other
   transaction, then fails with PostgreSQL's `40001`.

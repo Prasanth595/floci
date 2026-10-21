@@ -17,19 +17,25 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 /**
  * One client connection to a DSQL endpoint, as Aurora DSQL serves it (measured on AWS, eu-west-1,
  * 2026-10-16): TLS is mandatory, the password is an IAM token for the endpoint, the startup is read
- * as DSQL reads it, and a connection lives an hour.
+ * as DSQL reads it, DSQL's own statements become the {@code sys} calls that implement them, their
+ * errors come back without the source locations and {@code sys} lines DSQL never shows, and a
+ * connection lives an hour.
  */
 final class DsqlSession {
 
@@ -42,6 +48,9 @@ final class DsqlSession {
     private final Socket socket;
     private final DsqlEndpoint endpoint;
     private final String sessionId = DsqlIdentifiers.newId();
+    private final Deque<String> commandTags = new ArrayDeque<>();
+    private final Map<String, String> statementTags = new ConcurrentHashMap<>();
+    private final Map<String, String> portalStatements = new ConcurrentHashMap<>();
     private volatile long cancelKey;
 
     DsqlSession(Socket socket, DsqlEndpoint endpoint) {
@@ -142,6 +151,8 @@ final class DsqlSession {
                 backendStartup.put("options", backendOptions(optionSettings));
             }
             backendStartup.put("database", "postgres");
+            backendStartup.put("dsql.iam_session_user", admission.principalArn());
+            backendStartup.put("dsql.session_id", sessionId);
             backendOut.write(PostgresWire.startupMessage(backendStartup));
             backendOut.flush();
 
@@ -171,18 +182,62 @@ final class DsqlSession {
         }
     }
 
-    private static void relayToBackend(InputStream in, OutputStream backendOut) throws IOException {
+    private void relayToBackend(InputStream in, OutputStream backendOut) throws IOException {
         while (true) {
             PostgresWire.Message message = PostgresWire.read(in, MAX_MESSAGE, "message");
-            PostgresWire.write(backendOut, message);
-            if (message.type() == 'X') {
-                backendOut.flush();
-                return;
+            switch (message.type()) {
+                case 'Q' -> {
+                    String query = PostgresWire.cString(message.body(), 0).value();
+                    PostgresWire.write(backendOut, 'Q', PostgresWire.cStringBytes(rewriteSimpleQuery(query)));
+                }
+                case 'P' -> {
+                    PostgresWire.CString name = PostgresWire.cString(message.body(), 0);
+                    PostgresWire.CString query = PostgresWire.cString(message.body(), name.next());
+                    DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(query.value());
+                    if (rewritten.overridesTags() && rewritten.commandTags().size() == 1) {
+                        statementTags.put(name.value(), rewritten.commandTags().get(0));
+                    } else {
+                        statementTags.remove(name.value());
+                    }
+                    PostgresWire.write(backendOut, 'P', PostgresWire.cStringBytes(name.value()),
+                            PostgresWire.cStringBytes(rewritten.sql()),
+                            Arrays.copyOfRange(message.body(), query.next(), message.body().length));
+                }
+                case 'B' -> {
+                    PostgresWire.CString portal = PostgresWire.cString(message.body(), 0);
+                    PostgresWire.CString statement = PostgresWire.cString(message.body(), portal.next());
+                    portalStatements.put(portal.value(), statement.value());
+                    PostgresWire.write(backendOut, message);
+                }
+                case 'E' -> {
+                    String statement = portalStatements.getOrDefault(PostgresWire.cString(message.body(), 0).value(), "");
+                    synchronized (commandTags) {
+                        commandTags.addLast(statementTags.getOrDefault(statement, ""));
+                    }
+                    PostgresWire.write(backendOut, message);
+                }
+                case 'X' -> {
+                    PostgresWire.write(backendOut, message);
+                    backendOut.flush();
+                    return;
+                }
+                default -> PostgresWire.write(backendOut, message);
             }
             if (in.available() == 0) {
                 backendOut.flush();
             }
         }
+    }
+
+    /** A simple query as the database runs it, its statements' command tags queued for the client. */
+    private String rewriteSimpleQuery(String query) {
+        DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(query);
+        if (rewritten.overridesTags()) {
+            synchronized (commandTags) {
+                rewritten.commandTags().forEach(tag -> commandTags.addLast(tag == null ? "" : tag));
+            }
+        }
+        return rewritten.sql();
     }
 
     /**
@@ -244,8 +299,31 @@ final class DsqlSession {
                     authenticated = null;
                     started = message.type() == 'Z';
                 }
-                if (message.type() == 'K') {
-                    cancelKey = endpoint.registerCancelKey(message.body(), backend);
+                switch (message.type()) {
+                    case 'C' -> {
+                        String override;
+                        synchronized (commandTags) {
+                            override = commandTags.pollFirst();
+                        }
+                        if (override != null && !override.isEmpty()) {
+                            message = new PostgresWire.Message((byte) 'C', PostgresWire.cStringBytes(override));
+                        }
+                    }
+                    case 'I', 's' -> {
+                        synchronized (commandTags) {
+                            commandTags.pollFirst();
+                        }
+                    }
+                    case 'E', 'N' -> message = new PostgresWire.Message(message.type(),
+                            inDsqlWords(message.type(), message.body()));
+                    case 'K' -> cancelKey = endpoint.registerCancelKey(message.body(), backend);
+                    case 'Z' -> {
+                        synchronized (commandTags) {
+                            commandTags.clear();
+                        }
+                    }
+                    default -> {
+                    }
                 }
                 PostgresWire.write(out, message);
                 if (backendIn.available() == 0) {
@@ -259,14 +337,37 @@ final class DsqlSession {
     }
 
     /**
-     * A refusal of the database's as DSQL words every one: the session's id as its detail, and no
-     * source location.
+     * An error or notice as DSQL words it (measured on AWS). An error carries no source location,
+     * PostgreSQL's own included, while a notice keeps its location. The context keeps what the
+     * client's SQL ran and drops the lines of Floci's {@code sys} functions, as DSQL's context never
+     * shows its own.
      */
+    static byte[] inDsqlWords(byte type, byte[] body) {
+        Map<Character, String> fields = PostgresWire.parseFields(body, 0);
+        boolean changed = false;
+        String where = fields.get('W');
+        if (where != null) {
+            String kept = String.join("\n", where.lines().filter(line -> !line.contains("function sys.")).toList());
+            if (!kept.equals(where)) {
+                changed = true;
+                if (kept.isEmpty()) {
+                    fields.remove('W');
+                } else {
+                    fields.put('W', kept);
+                }
+            }
+        }
+        if (type == 'E') {
+            changed |= fields.remove('F') != null;
+            changed |= fields.remove('L') != null;
+            changed |= fields.remove('R') != null;
+        }
+        return changed ? PostgresWire.fields(fields) : body;
+    }
+
+    /** A refusal of the database's as DSQL words every one: the session's id as its detail. */
     private byte[] withSessionId(byte[] body) {
         Map<Character, String> fields = PostgresWire.parseFields(body, 0);
-        fields.remove('F');
-        fields.remove('L');
-        fields.remove('R');
         fields.putIfAbsent('D', "Session Id: " + sessionId);
         return PostgresWire.fields(fields);
     }
