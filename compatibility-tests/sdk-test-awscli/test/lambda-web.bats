@@ -10,7 +10,10 @@ setup() {
     BUCKET="cli-lambda-web-code-$$"
     ROLE_ARN="arn:aws:iam::000000000000:role/lambda-web"
     aws_cmd s3api create-bucket --bucket "$BUCKET" >/dev/null 2>&1 || true
-    printf 'zip' > "$BATS_TEST_TMPDIR/app.zip"
+    # A revision whose code is not a zip fails. python3 ships in the CLI image.
+    python3 -c 'import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    z.writestr("index.js", "")' "$BATS_TEST_TMPDIR/app.zip"
     aws_cmd s3api put-object --bucket "$BUCKET" --key app.zip --body "$BATS_TEST_TMPDIR/app.zip" >/dev/null
 }
 
