@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -264,7 +265,7 @@ class FirehoseRedshiftServiceTest {
         shutdownService.createDeliveryStream("us-east-1", "fh-timeout", null, destination, List.of(), null, null);
         shutdownService.putRecord("fh-timeout", new Record("{\"id\":1}".getBytes(StandardCharsets.UTF_8)));
 
-        when(mockExecutor.awaitTermination(org.mockito.ArgumentMatchers.anyLong(), any())).thenReturn(false);
+        when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(false);
         when(mockExecutor.shutdownNow()).thenReturn(List.of(() -> {}));
 
         shutdownService.onPreShutdown(null);

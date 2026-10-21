@@ -279,18 +279,19 @@ public class FirehoseService implements ResourceProvider {
             es.shutdown();
             try {
                 if (!es.awaitTermination(5, TimeUnit.SECONDS)) {
-                    List<Runnable> dropped = es.shutdownNow();
-                    if (!dropped.isEmpty()) {
-                        LOG.warnv("Dropping {0} queued Redshift COPY task(s) on Firehose shutdown", dropped.size());
-                    }
+                    dropAndLogQueuedTasks(es);
                 }
             } catch (InterruptedException e) {
-                List<Runnable> dropped = es.shutdownNow();
-                if (!dropped.isEmpty()) {
-                    LOG.warnv("Dropping {0} queued Redshift COPY task(s) on Firehose shutdown", dropped.size());
-                }
+                dropAndLogQueuedTasks(es);
                 Thread.currentThread().interrupt();
             }
+        }
+    }
+
+    private static void dropAndLogQueuedTasks(ExecutorService es) {
+        List<Runnable> dropped = es.shutdownNow();
+        if (!dropped.isEmpty()) {
+            LOG.warnv("Dropping {0} queued Redshift COPY task(s) on Firehose shutdown", dropped.size());
         }
     }
 
