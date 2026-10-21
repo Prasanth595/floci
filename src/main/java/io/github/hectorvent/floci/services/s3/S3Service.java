@@ -680,6 +680,12 @@ public class S3Service implements Resettable, ResourceProvider {
         return createObject(bucketName, key, data, contentType, metadata, options, "ObjectCreated:Put");
     }
 
+    /** Like {@link #putObject(String, String, byte[], String, Map)}, with the body read from a stream. */
+    public S3Object putObjectFromStream(String bucketName, String key, InputStream body,
+                                        String contentType, Map<String, String> metadata) {
+        return putObject(bucketName, key, body, UploadChecksums.NONE, contentType, metadata, new PutObjectOptions());
+    }
+
     /**
      * Stores an object streamed from {@code body}, checked against {@code checksums}, without holding
      * it in memory in the disk-backed modes. Everything the request alone decides is checked before

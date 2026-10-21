@@ -11,7 +11,6 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
-import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -37,9 +36,9 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
 import io.github.hectorvent.floci.services.lambda.model.ScalingConfig;
 import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
+import io.github.hectorvent.floci.services.lambda.zip.DeploymentPackage;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.s3.model.S3ObjectUpdatedEvent;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import jakarta.annotation.PostConstruct;
@@ -3434,25 +3433,25 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("RequestEntityTooLargeException",
                     "Request must be smaller than 52428800 bytes.", 413);
         }
-        extractZipCodeBytes(fn, zipBytes, region);
+        extractZipCodePackage(fn, DeploymentPackage.of(zipBytes), region);
     }
 
-    private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes, String region) {
+    private void extractZipCodePackage(LambdaFunction fn, DeploymentPackage zip, String region) {
         Path codePath = codeStore.getCodePath(ownerAccount(fn), region, fn.getFunctionName());
         try {
-            zipExtractor.extractTo(zipBytes, codePath, configuredZipMaxEntries(),
-                    () -> storeDeploymentPackage(fn, zipBytes, region));
+            zip.extractTo(zipExtractor, codePath, configuredZipMaxEntries(),
+                    () -> storeDeploymentPackage(fn, zip, region));
             // Publish the new code identity under the same per-function lock publishVersion holds.
             // PublishVersion's CodeSha256 precondition is a check-then-act: it compares the hash and
             // then snapshots the code. Mutating these fields without the lock lets an overlapping
             // deploy move $LATEST between those two steps, so a version would carry code whose hash
             // the caller never authorised even though the check passed. UpdateFunctionCode and reactive
             // sync hold this monitor across extraction; a new function is saved after extraction.
-            String newSha256 = Base64.getEncoder().encodeToString(Digests.sha256(zipBytes));
+            String newSha256 = zip.sha256();
             synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
                 fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
                 fn.setHotReloadHostPath(null);
-                fn.setCodeSizeBytes(zipBytes.length);
+                fn.setCodeSizeBytes(zip.size());
                 if (newSha256 != null) {
                     fn.setCodeSha256(newSha256);
                 }
@@ -3487,8 +3486,8 @@ public class LambdaService implements ResourceProvider {
         return configured;
     }
 
-    private void storeDeploymentPackage(LambdaFunction fn, byte[] zipBytes, String region) {
-        boolean stored = putTasksObjectQuietly(s3Service, region, codeObjectKey(fn), zipBytes,
+    private void storeDeploymentPackage(LambdaFunction fn, DeploymentPackage zip, String region) {
+        boolean stored = putTasksObjectQuietly(s3Service, region, codeObjectKey(fn), zip,
                 "deployment package for " + fn.getFunctionName());
         if (!stored && requiresStoredTasksObject(config)) {
             throw new AwsException("ServiceException",
@@ -3504,7 +3503,7 @@ public class LambdaService implements ResourceProvider {
      * executor depends on it can fail loudly instead of silently succeeding.
      */
     static boolean putTasksObjectQuietly(S3Service s3Service, String region, String key,
-                                         byte[] zipBytes, String what) {
+                                         DeploymentPackage zip, String what) {
         if (s3Service == null) {
             return false;
         }
@@ -3518,7 +3517,7 @@ public class LambdaService implements ResourceProvider {
                     throw e;
                 }
             }
-            s3Service.putObject(bucket, key, zipBytes, "application/zip", java.util.Map.of());
+            zip.putObject(s3Service, bucket, key, "application/zip");
             return true;
         } catch (Exception e) {
             LOG.warnv("Could not store {0}: {1}", what, e.getMessage());
@@ -3541,16 +3540,25 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("ServiceUnavailableException", "S3 service not available", 503);
         }
 
-        S3Object obj;
+        DeploymentPackage zip;
         try {
-            obj = s3Service.getObject(s3Bucket, s3Key);
+            zip = readS3Package(fn, s3Bucket, s3Key, region);
         } catch (Exception e) {
             throw new AwsException("InvalidParameterValueException",
                     "Unable to fetch code from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
         }
-        extractZipCodeBytes(fn, obj.getData(), region);
+        try (zip) {
+            extractZipCodePackage(fn, zip, region);
+        }
         fn.setS3Bucket(s3Bucket);
         fn.setS3Key(s3Key);
+    }
+
+    /** Staged beside the function's code directory, where the extractor stages too. */
+    private DeploymentPackage readS3Package(LambdaFunction fn, String s3Bucket, String s3Key, String region)
+            throws IOException {
+        return DeploymentPackage.read(s3Service.openObject(s3Bucket, s3Key, null),
+                codeStore.getCodePath(ownerAccount(fn), region, fn.getFunctionName()).getParent());
     }
 
     private void applyHotReload(LambdaFunction fn, String hostPath) {
@@ -4151,8 +4159,9 @@ public class LambdaService implements ResourceProvider {
                     LOG.infov("Reactive S3 Sync: updating function {0} from s3://{1}/{2}",
                             fn.getFunctionName(), event.bucketName(), event.key());
                     try {
-                        S3Object obj = s3Service.getObject(event.bucketName(), event.key());
-                        extractZipCodeBytes(fn, obj.getData(), region);
+                        try (DeploymentPackage zip = readS3Package(fn, event.bucketName(), event.key(), region)) {
+                            extractZipCodePackage(fn, zip, region);
+                        }
                         fn.setLastModified(Instant.now().toEpochMilli());
                         fn.setRevisionId(UUID.randomUUID().toString());
                         functionStore.saveForAccount(ownerAccount(fn), region, fn);

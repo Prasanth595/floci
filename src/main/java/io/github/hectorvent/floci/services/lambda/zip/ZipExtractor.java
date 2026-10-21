@@ -66,10 +66,14 @@ public class ZipExtractor {
 
     /** For an archive already on disk, which is opened in place instead of read into the heap and staged. */
     public void extractTo(Path zipFile, Path targetDir, int maxEntries) throws IOException {
+        extractTo(zipFile, targetDir, maxEntries, null);
+    }
+
+    public void extractTo(Path zipFile, Path targetDir, int maxEntries, Runnable beforeInstall) throws IOException {
         checkLimits(maxEntries, Files.size(zipFile));
         Path absTarget = targetDir.toAbsolutePath().normalize();
         Files.createDirectories(absTarget.getParent());
-        extract(zipFile, absTarget, maxEntries, null);
+        extract(zipFile, absTarget, maxEntries, beforeInstall);
     }
 
     private static void checkLimits(int maxEntries, long compressedBytes) throws IOException {

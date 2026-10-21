@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -2289,6 +2290,13 @@ class LambdaServiceTest {
         }
     }
 
+    /** What S3 in memory mode returns: the body is already in the heap. */
+    private static S3Service.ObjectRead heldObject(String zipBase64) {
+        byte[] data = Base64.getDecoder().decode(zipBase64);
+        return new S3Service.ObjectRead(new S3Object("code-bucket", "function.zip", data, "application/zip"),
+                new ByteArrayInputStream(data));
+    }
+
     @Test
     void reactiveSyncHoldsThePublicationLockThroughExtraction() throws Exception {
         S3Service s3 = mock(S3Service.class);
@@ -2305,11 +2313,9 @@ class LambdaServiceTest {
                 new LambdaTargetResolver(functionStore, aliasStore), s3, null, null, null, null,
                 storageFactory, null, null, null, null, new ObjectMapper());
         String name = "reactive-snapshot-" + UUID.randomUUID();
-        when(s3.getObject("code-bucket", "function.zip"))
-                .thenReturn(new S3Object("code-bucket", "function.zip",
-                        Base64.getDecoder().decode(zipWithBody("v1")), "application/zip"))
-                .thenReturn(new S3Object("code-bucket", "function.zip",
-                        Base64.getDecoder().decode(zipWithBody("v2")), "application/zip"));
+        when(s3.openObject("code-bucket", "function.zip", null))
+                .thenReturn(heldObject(zipWithBody("v1")))
+                .thenReturn(heldObject(zipWithBody("v2")));
         Map<String, Object> request = baseRequest(name);
         request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
         LambdaFunction latest = syncingService.createFunction(REGION, request);
