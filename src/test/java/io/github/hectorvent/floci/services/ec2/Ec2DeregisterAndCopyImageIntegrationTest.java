@@ -212,7 +212,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 "x86_64", "/dev/xvda", List.of(mapping("/dev/xvda", "snap-" + hex())));
         String keptSnapshot = snapshotIdOf(kept);
         service.deregisterImage(EAST, kept.getImageId(), false);
-        assertEquals(1, service.describeSnapshots(EAST, List.of(keptSnapshot), null, null).size());
+        assertEquals(1, service.describeSnapshots(EAST, List.of(keptSnapshot), null, Map.of()).size());
 
         Image deleted = service.registerImage(EAST, uniqueName("floci-delete-snapshots"), null,
                 "x86_64", "/dev/xvda", List.of(mapping("/dev/xvda", "snap-" + hex())));
@@ -221,7 +221,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 service.deregisterImage(EAST, deleted.getImageId(), true);
         assertEquals(List.of(new Ec2Service.SnapshotDeletion(deletedSnapshot, "success")), results);
         assertThrows(AwsException.class,
-                () -> service.describeSnapshots(EAST, List.of(deletedSnapshot), null, null));
+                () -> service.describeSnapshots(EAST, List.of(deletedSnapshot), null, Map.of()));
     }
 
     @Test
@@ -250,7 +250,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 service.deregisterImage(EAST, first.getImageId(), true);
 
         assertEquals(List.of(new Ec2Service.SnapshotDeletion(snapshotId, "skipped")), results);
-        assertEquals(1, service.describeSnapshots(EAST, List.of(snapshotId), null, null).size());
+        assertEquals(1, service.describeSnapshots(EAST, List.of(snapshotId), null, Map.of()).size());
         assertTrue(service.describeImages(EAST, List.of(first.getImageId()), null).isEmpty(),
                 "the AMI is still deregistered even when its snapshot is kept");
     }
@@ -317,8 +317,8 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 uniqueName("floci-copy-snap-dst"), null);
 
         assertNotEquals(snapshotIdOf(source), snapshotIdOf(copy));
-        assertEquals(1, service.describeSnapshots(WEST, List.of(snapshotIdOf(copy)), null, null).size());
-        assertEquals(1, service.describeSnapshots(EAST, List.of(snapshotIdOf(source)), null, null).size());
+        assertEquals(1, service.describeSnapshots(WEST, List.of(snapshotIdOf(copy)), null, Map.of()).size());
+        assertEquals(1, service.describeSnapshots(EAST, List.of(snapshotIdOf(source)), null, Map.of()).size());
     }
 
     @Test

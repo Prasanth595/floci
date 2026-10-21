@@ -247,6 +247,12 @@ Floci seeds the following resources on first use in each region so Terraform, th
 
 ## Supported Actions
 
+Where a Describe action reads `Filter.N`, every filter is joined with an AND and the values of one
+filter with an OR, as the [Filter](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_Filter.html)
+reference describes. A name given twice is two filters, so `tag-key` with `Env` and `tag-key` with
+`Team` find only the resources that carry both tag keys, and two `vpc-id` filters naming different
+VPCs find nothing.
+
 ### Instances
 
 | Action | Description |

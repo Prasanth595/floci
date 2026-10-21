@@ -5184,7 +5184,7 @@ class Ec2ServiceTest {
 
         // The mapping's snapshot is registered, so DescribeSnapshots can resolve it.
         List<Snapshot> snapshots = service.describeSnapshots("us-east-1",
-                List.of(root.getEbs().getSnapshotId()), null, null);
+                List.of(root.getEbs().getSnapshotId()), null, Map.of());
         assertEquals(1, snapshots.size());
     }
 
