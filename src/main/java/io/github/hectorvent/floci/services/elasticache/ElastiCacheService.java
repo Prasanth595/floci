@@ -221,6 +221,10 @@ public class ElastiCacheService implements ResourceProvider {
         ReplicationGroupSettings settings = request.settings() != null
                 ? request.settings() : ReplicationGroupSettings.defaults();
         settings.validate();
+        if (settings.transitEncryptionMode() != null && request.authMode() == AuthMode.NO_AUTH) {
+            throw new AwsException("InvalidParameterCombination",
+                    "TransitEncryptionMode requires transit encryption to be enabled.", 400);
+        }
         // resolved with the other validations, before a port is taken or a container started
         ReplicationGroupSettings resolvedSettings =
                 settings.withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), request.region()));
@@ -1752,6 +1756,10 @@ public class ElastiCacheService implements ResourceProvider {
         settings.validate();
         synchronized (lockFor("rg:" + groupId)) {
             ReplicationGroup group = getReplicationGroup(groupId);
+            if (settings.transitEncryptionMode() != null && !group.isEncryptedInTransit()) {
+                throw new AwsException("InvalidParameterCombination",
+                        "TransitEncryptionMode requires transit encryption to be enabled.", 400);
+            }
             // every check before any change: the store hands out its own object, so a mutation
             // made before a later refusal would stay visible
             synchronized (userGroupLock) {

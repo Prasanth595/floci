@@ -28,6 +28,7 @@ public class ReplicationGroup {
      * access control but is still encrypted in transit. Null otherwise, see {@link #isEncryptedInTransit}.
      */
     private Boolean transitEncryptionEnabled;
+    private String transitEncryptionMode;
     /** Users associated directly by user id, which Floci accepted before it modelled user groups. */
     private Set<String> associatedUserIds = new HashSet<>();
     private Set<String> userGroupIds = new LinkedHashSet<>();
@@ -94,6 +95,9 @@ public class ReplicationGroup {
 
     public String getAuthToken() { return authToken; }
     public void setAuthToken(String authToken) { this.authToken = authToken; }
+
+    public String getTransitEncryptionMode() { return transitEncryptionMode; }
+    public void setTransitEncryptionMode(String transitEncryptionMode) { this.transitEncryptionMode = transitEncryptionMode; }
 
     public Boolean getTransitEncryptionEnabled() { return transitEncryptionEnabled; }
     public void setTransitEncryptionEnabled(Boolean transitEncryptionEnabled) {

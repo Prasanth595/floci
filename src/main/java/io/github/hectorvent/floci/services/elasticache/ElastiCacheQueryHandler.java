@@ -160,7 +160,7 @@ public class ElastiCacheQueryHandler {
                 atRest == null ? null : !"false".equalsIgnoreCase(atRest.trim()),
                 params.getFirst("KmsKeyId"),
                 optionalInt(params.getFirst("SnapshotRetentionLimit")),
-                params.getFirst("SnapshotWindow"));
+                params.getFirst("SnapshotWindow"), params.getFirst("TransitEncryptionMode"));
     }
 
     private static Integer optionalInt(String value) {
@@ -238,7 +238,8 @@ public class ElastiCacheQueryHandler {
         try {
             // AtRestEncryptionEnabled and KmsKeyId are fixed at create and not in the modify shape
             ReplicationGroupSettings settings = new ReplicationGroupSettings(null, null,
-                    optionalInt(params.getFirst("SnapshotRetentionLimit")), params.getFirst("SnapshotWindow"));
+                    optionalInt(params.getFirst("SnapshotRetentionLimit")), params.getFirst("SnapshotWindow"),
+                    params.getFirst("TransitEncryptionMode"));
             // AuthToken with ROTATE or SET is not modelled yet; DELETE moves the cache to user groups
             ReplicationGroup group = service.modifyReplicationGroup(groupId,
                     userGroupIdsToAdd.isEmpty() ? null : userGroupIdsToAdd,
@@ -508,6 +509,9 @@ public class ElastiCacheQueryHandler {
                   .elem("AuthTokenEnabled", authTokenEnabled)
                   .elem("TransitEncryptionEnabled", transitEncryptionEnabled(g))
                   .elem("AtRestEncryptionEnabled", g.isAtRestEncryptionEnabled());
+        if (g.getTransitEncryptionMode() != null) {
+            xml.elem("TransitEncryptionMode", g.getTransitEncryptionMode());
+        }
         if (g.getEngine() != null) {
             xml.elem("Engine", g.getEngine());
         }
@@ -1056,6 +1060,9 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("MultiAZ", g.isMultiAzEnabled() ? "enabled" : "disabled")
                   .elem("AutomaticFailover", g.isAutomaticFailoverEnabled() ? "enabled" : "disabled")
                   .elem("SnapshotRetentionLimit", (long) g.getSnapshotRetentionLimit());
+        if (g.getTransitEncryptionMode() != null) {
+            xml.elem("TransitEncryptionMode", g.getTransitEncryptionMode());
+        }
         xml.elem("SnapshotWindow", g.getSnapshotWindow() != null
                 ? g.getSnapshotWindow() : ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);
         if (g.getKmsKeyId() != null) {

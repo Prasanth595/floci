@@ -330,3 +330,11 @@ aws elasticache create-user \
   --no-no-password-required \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+### Transit encryption mode metadata
+
+An explicit `TransitEncryptionMode` (`preferred` or `required`) on a replication group is
+persisted and returned by create, modify and describe responses, including the member entries
+in `DescribeCacheClusters`. An unrelated modification preserves it. This is control-plane
+metadata; it does not establish data-plane TLS or plaintext rejection. Legacy records and
+requests that omit the mode do not acquire an invented value.

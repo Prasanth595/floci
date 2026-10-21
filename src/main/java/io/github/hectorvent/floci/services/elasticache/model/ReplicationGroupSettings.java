@@ -14,7 +14,13 @@ import java.util.regex.Pattern;
 public record ReplicationGroupSettings(Boolean atRestEncryptionEnabled,
                                        String kmsKeyId,
                                        Integer snapshotRetentionLimit,
-                                       String snapshotWindow) {
+                                       String snapshotWindow,
+                                       String transitEncryptionMode) {
+
+    public ReplicationGroupSettings(Boolean atRestEncryptionEnabled, String kmsKeyId,
+                                    Integer snapshotRetentionLimit, String snapshotWindow) {
+        this(atRestEncryptionEnabled, kmsKeyId, snapshotRetentionLimit, snapshotWindow, null);
+    }
 
     private static final Pattern TIME = Pattern.compile("^([01]\\d|2[0-3]):([0-5]\\d)$");
     private static final int MINUTES_PER_DAY = 24 * 60;
@@ -33,6 +39,10 @@ public record ReplicationGroupSettings(Boolean atRestEncryptionEnabled,
 
     /** The checks a live account applies to these parameters, with its wording. */
     public void validate() {
+        if (transitEncryptionMode != null && !"preferred".equals(transitEncryptionMode)
+                && !"required".equals(transitEncryptionMode)) {
+            throw new AwsException("InvalidParameterValue", "TransitEncryptionMode must be preferred or required.", 400);
+        }
         // an omitted AtRestEncryptionEnabled is false on a live account, and refused the same way
         if (kmsKeyId != null && !kmsKeyId.isBlank() && !Boolean.TRUE.equals(atRestEncryptionEnabled)) {
             throw new AwsException("InvalidParameterCombination",
@@ -80,10 +90,13 @@ public record ReplicationGroupSettings(Boolean atRestEncryptionEnabled,
 
     public ReplicationGroupSettings withKmsKeyId(String resolvedKmsKeyId) {
         return new ReplicationGroupSettings(atRestEncryptionEnabled, resolvedKmsKeyId,
-                snapshotRetentionLimit, snapshotWindow);
+                snapshotRetentionLimit, snapshotWindow, transitEncryptionMode);
     }
 
     public void applyTo(ReplicationGroup group) {
+        if (transitEncryptionMode != null) {
+            group.setTransitEncryptionMode(transitEncryptionMode);
+        }
         if (atRestEncryptionEnabled != null) {
             group.setAtRestEncryptionEnabled(atRestEncryptionEnabled);
         }
