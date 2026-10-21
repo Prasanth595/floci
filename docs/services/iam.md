@@ -1379,10 +1379,27 @@ role each passes:
   `ContinueUpdateRollback` pass `RoleARN` to `cloudformation.amazonaws.com` when the request names
   one. `CreateStackSet` and `UpdateStackSet` pass `AdministrationRoleARN`, or, for a self-managed
   StackSet, the default `AWSCloudFormationStackSetAdministrationRole`.
+- **EC2 Auto Scaling:** `CreateLaunchConfiguration` passes the roles of its `IamInstanceProfile`,
+  given by name or ARN, or else of the profile of the instance it is made from (`InstanceId`), to
+  `ec2.amazonaws.com`. `CreateAutoScalingGroup`, `UpdateAutoScalingGroup` and `StartInstanceRefresh`
+  (its desired configuration) pass the roles of the instance profile in each launch template they
+  name, at the version the group launches from, there too: the group's own, its mixed instances
+  policy's and each override's. A refresh's desired configuration counts as the group will have it
+  applied: one naming only a version passes that version of the group's template, and one naming a
+  template without a version passes the group's version of it. A `ServiceLinkedRoleARN` other than
+  the default `AWSServiceRoleForAutoScaling` (`CreateAutoScalingGroup`, `UpdateAutoScalingGroup`)
+  and a lifecycle hook's `RoleARN` (`PutLifecycleHook`, and the hooks `CreateAutoScalingGroup`
+  names) go to `autoscaling.amazonaws.com`.
+- **Application Auto Scaling:** `RegisterScalableTarget` passes `RoleARN` to
+  `application-autoscaling.amazonaws.com` when the request names one.
 
-Launching from a launch template does not check the template's role, as on AWS: the EC2 user guide
-warns that a user who can create launch template versions "can potentially update a launch template
-to pass an IAM role to an instance even if they don't have the iam:PassRole permission". A
+Launching an instance from a launch template does not check the template's role, as on AWS: the EC2
+user guide warns that a user who can create launch template versions "can potentially update a launch
+template to pass an IAM role to an instance even if they don't have the iam:PassRole permission". An
+Auto Scaling group does check it: the EC2 Auto Scaling user guide has the permission "needed on the
+IAM identity (user or role) that creates or updates an Auto Scaling group using a launch template
+that specifies an instance profile", while a group using a launch configuration passes nothing, its
+role having been checked when the configuration was created. A
 CloudFormation operation that names no role uses the stack's own without checking it, as the
 CloudFormation API reference says the service does "even if the users don't have permission to pass
 it". The CloudFormation user guide has the default StackSet administration role checked "Even when

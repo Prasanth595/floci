@@ -16,9 +16,11 @@ import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -31,8 +33,9 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class AutoScalingService {
+public class AutoScalingService implements PassedRoleLookup {
 
+    private static final Logger LOG = Logger.getLogger(AutoScalingService.class);
     private static final String FULLY_FORMED_LAUNCH_TEMPLATE = "You must use a valid fully-formed launch template. ";
     static final String MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE =
             FULLY_FORMED_LAUNCH_TEMPLATE + "The request must contain the parameter ImageId";
@@ -195,12 +198,9 @@ public class AutoScalingService {
             throw new AwsException("ValidationError", INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE, 400);
         }
         if (notBlank(instanceId) && ec2Service != null) {
-            List<Instance> sourceInstances = ec2Service.describeInstances(region, List.of(instanceId), Map.of())
-                    .stream()
-                    .flatMap(reservation -> reservation.getInstances().stream())
-                    .collect(Collectors.toList());
-            if (!sourceInstances.isEmpty()) {
-                Instance source = sourceInstances.getFirst();
+            Optional<Instance> sourceInstance = sourceInstance(region, instanceId);
+            if (sourceInstance.isPresent()) {
+                Instance source = sourceInstance.get();
                 if (isBlank(imageId)) {
                     imageId = source.getImageId();
                 }
@@ -282,6 +282,29 @@ public class AutoScalingService {
         if (value != null && !List.of(allowed).contains(value)) {
             violations.add("Value '" + value + "' at 'metadataOptions." + member + "' failed to satisfy constraint:"
                     + " Member must satisfy enum value set: [" + String.join(", ", allowed) + "]");
+        }
+    }
+
+    /** The EC2 instance a launch configuration is made from, which it derives what the request leaves out from. */
+    private Optional<Instance> sourceInstance(String region, String instanceId) {
+        return ec2Service.describeInstances(region, List.of(instanceId), Map.of()).stream()
+                .flatMap(reservation -> reservation.getInstances().stream())
+                .findFirst();
+    }
+
+    /** The instance profile a launch configuration made from the instance takes, for the {@code iam:PassRole} check. */
+    @Override
+    public Optional<String> launchConfigurationInstanceProfile(String instanceId, String region) {
+        if (ec2Service == null || isBlank(instanceId)) {
+            return Optional.empty();
+        }
+        try {
+            return sourceInstance(region, instanceId).map(Instance::getIamInstanceProfileArn)
+                    .filter(profile -> !isBlank(profile));
+        } catch (AwsException e) {
+            // An instance that does not exist is the operation's to refuse, and passes no role.
+            LOG.debugv("Instance {0} passes no role: {1}", instanceId, e.getMessage());
+            return Optional.empty();
         }
     }
 
@@ -1730,6 +1753,37 @@ public class AutoScalingService {
         }
     }
 
+    /**
+     * The instance profile a group's instances get from the launch template version, resolved as the
+     * group's own validation resolves it, for the {@code iam:PassRole} check of the operations naming it.
+     */
+    @Override
+    public Optional<String> launchTemplateInstanceProfile(String templateId, String templateName, String version,
+                                                          String region) {
+        if (ec2Service == null || (isBlank(templateId) && isBlank(templateName))) {
+            return Optional.empty();
+        }
+        List<LaunchTemplate> versions;
+        try {
+            versions = ec2Service.describeLaunchTemplateVersions(region, templateId, templateName,
+                    isBlank(version) ? List.of() : List.of(version));
+        } catch (AwsException e) {
+            // A version that does not exist is the operation's to refuse, and passes no role.
+            LOG.debugv("Launch template {0} has no version {1}, so it passes no role: {2}",
+                    isBlank(templateId) ? templateName : templateId, version, e.getMessage());
+            return Optional.empty();
+        }
+        LaunchTemplateData.IamInstanceProfile profile =
+                versions.isEmpty() ? null : versions.getFirst().getData().getIamInstanceProfile();
+        if (profile == null) {
+            return Optional.empty();
+        }
+        if (!isBlank(profile.getArn())) {
+            return Optional.of(profile.getArn());
+        }
+        return isBlank(profile.getName()) ? Optional.empty() : Optional.of(profile.getName());
+    }
+
     private static MixedInstancesPolicy.LaunchTemplateSpecification mixedInstancesLaunchTemplateSpecification(
             MixedInstancesPolicy policy) {
         if (policy == null || policy.getLaunchTemplate() == null) {
@@ -1857,14 +1911,47 @@ public class AutoScalingService {
         if (!refresh.hasDesiredConfiguration()) {
             return;
         }
-        if (refresh.getDesiredLaunchTemplateId() != null || refresh.getDesiredLaunchTemplateName() != null) {
-            asg.setLaunchTemplateId(refresh.getDesiredLaunchTemplateId());
-            asg.setLaunchTemplateName(refresh.getDesiredLaunchTemplateName());
+        DesiredLaunchTemplate desired = desiredLaunchTemplate(asg, refresh.getDesiredLaunchTemplateId(),
+                refresh.getDesiredLaunchTemplateName(), refresh.getDesiredLaunchTemplateVersion());
+        if (desired.replacesTemplate()) {
             asg.setLaunchConfigurationName(null);
         }
-        if (refresh.getDesiredLaunchTemplateVersion() != null) {
-            asg.setLaunchTemplateVersion(refresh.getDesiredLaunchTemplateVersion());
+        asg.setLaunchTemplateId(desired.id());
+        asg.setLaunchTemplateName(desired.name());
+        asg.setLaunchTemplateVersion(desired.version());
+    }
+
+    /** The launch template a group launches from once a refresh's desired configuration is applied to it. */
+    private record DesiredLaunchTemplate(String id, String name, String version, boolean replacesTemplate) {
+    }
+
+    /**
+     * A desired configuration naming a template replaces the group's, and one naming a version replaces
+     * its version, so a template named without a version keeps the group's version number.
+     */
+    private static DesiredLaunchTemplate desiredLaunchTemplate(AutoScalingGroup asg, String templateId,
+                                                               String templateName, String version) {
+        boolean replacesTemplate = templateId != null || templateName != null;
+        return new DesiredLaunchTemplate(
+                replacesTemplate ? templateId : asg.getLaunchTemplateId(),
+                replacesTemplate ? templateName : asg.getLaunchTemplateName(),
+                version != null ? version : asg.getLaunchTemplateVersion(),
+                replacesTemplate);
+    }
+
+    /**
+     * The instance profile the group launches with once the refresh applies its desired configuration,
+     * merged with the group as {@link #applyDesiredConfiguration} merges it, for the {@code iam:PassRole} check.
+     */
+    @Override
+    public Optional<String> instanceRefreshInstanceProfile(String groupName, String templateId, String templateName,
+                                                           String version, String region) {
+        AutoScalingGroup asg = isBlank(groupName) ? null : groups.get(asgKey(region, groupName));
+        if (asg == null || (templateId == null && templateName == null && version == null)) {
+            return Optional.empty();
         }
+        DesiredLaunchTemplate desired = desiredLaunchTemplate(asg, templateId, templateName, version);
+        return launchTemplateInstanceProfile(desired.id(), desired.name(), desired.version(), region);
     }
 
     private static List<String> markInstancesForRefresh(AutoScalingGroup asg, InstanceRefresh refresh) {

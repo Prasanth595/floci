@@ -48,6 +48,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -919,9 +920,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * A request that passes a role to a service also needs {@code iam:PassRole} on that role (see
      * {@link PassedRoles}), checked as the caller with {@code iam:PassedToService} naming the
      * service and the keys that say who is calling, which {@code callerArns} writes when it is known.
-     * What a request names that holds roles, an instance profile or a task definition, is looked up
-     * in the request's account, as the service resolves it; one that does not exist passes nothing,
-     * and the operation reports it. Returns true when the request was aborted.
+     * What a request names that holds roles, an instance profile, a launch template or a task
+     * definition, is looked up in the request's account, as the service resolves it; one that does not
+     * exist passes nothing, and the operation reports it. Returns true when the request was aborted.
      */
     private boolean abortIfRolePassDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
                                           CallerArns callerArns, String action, String credentialScope,
@@ -959,13 +960,26 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
             @Override
             public Optional<String> stackSetPermissionModel(String stackSetName) {
-                for (PassedRoleLookup lookup : roleLookups()) {
-                    Optional<String> model = lookup.stackSetPermissionModel(stackSetName);
-                    if (model.isPresent()) {
-                        return model;
-                    }
-                }
-                return Optional.empty();
+                return firstFound(lookup -> lookup.stackSetPermissionModel(stackSetName));
+            }
+
+            @Override
+            public Optional<String> launchTemplateInstanceProfile(String templateId, String templateName,
+                                                                  String version) {
+                return firstFound(lookup -> lookup.launchTemplateInstanceProfile(templateId, templateName, version,
+                        region));
+            }
+
+            @Override
+            public Optional<String> launchConfigurationInstanceProfile(String instanceId) {
+                return firstFound(lookup -> lookup.launchConfigurationInstanceProfile(instanceId, region));
+            }
+
+            @Override
+            public Optional<String> instanceRefreshInstanceProfile(String groupName, String templateId,
+                                                                   String templateName, String version) {
+                return firstFound(lookup -> lookup.instanceRefreshInstanceProfile(groupName, templateId, templateName,
+                        version, region));
             }
 
             @Override
@@ -977,6 +991,17 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     private Iterable<PassedRoleLookup> roleLookups() {
         return passedRoleLookups == null || passedRoleLookups.isUnsatisfied() ? List.of() : passedRoleLookups;
+    }
+
+    /** The first answer a {@link PassedRoleLookup} gives, each answering only for what its service owns. */
+    private Optional<String> firstFound(Function<PassedRoleLookup, Optional<String>> question) {
+        for (PassedRoleLookup lookup : roleLookups()) {
+            Optional<String> answer = question.apply(lookup);
+            if (answer.isPresent()) {
+                return answer;
+            }
+        }
+        return Optional.empty();
     }
 
     /** The ARNs of the roles the instance profile, named by {@code name} or {@code arn}, holds. */

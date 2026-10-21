@@ -28,6 +28,18 @@ import java.util.regex.Pattern;
  * role to an instance even if they don't have the iam:PassRole permission", so the role is checked
  * where the template is created.
  *
+ * <p>An Auto Scaling group is different: the EC2 Auto Scaling user guide has the permission "needed on
+ * the IAM identity (user or role) that creates or updates an Auto Scaling group using a launch template
+ * that specifies an instance profile", and an instance refresh to a desired configuration needs it
+ * the same way. A group request passes the roles of the instance profile in each launch template it
+ * names, at the version the group launches from, to {@code ec2.amazonaws.com}; a refresh's desired
+ * configuration is read merged with the group, as Auto Scaling applies it. A launch configuration
+ * passes its profile's roles where it is created, the one it names or else the one of the instance it
+ * is made from. A service-linked role the request names and a lifecycle hook's role go
+ * to {@code autoscaling.amazonaws.com}, except the default service-linked role: the permission is
+ * "Needed when a nondefault service-linked role, an IAM role for a lifecycle hook, or a launch
+ * template that specifies an instance profile ... is provided".
+ *
  * <p>An ECS request that starts tasks from a task definition passes the definition's task role and
  * task execution role: the ECS developer guide has the role EventBridge runs scheduled tasks with
  * hold {@code iam:PassRole} "for each task execution role, task role, or task role override". A role
@@ -63,9 +75,14 @@ final class PassedRoles {
     private static final String SCHEDULER = ServicePrincipals.of("scheduler");
     private static final String PIPES = ServicePrincipals.of("pipes");
     private static final String CLOUDFORMATION = ServicePrincipals.of("cloudformation");
+    private static final String AUTOSCALING = ServicePrincipals.of("autoscaling");
+    private static final String APPLICATION_AUTOSCALING = ServicePrincipals.of("application-autoscaling");
 
     private static final String STACK_SET_ADMINISTRATION_ROLE = "AWSCloudFormationStackSetAdministrationRole";
     private static final String SERVICE_MANAGED = "SERVICE_MANAGED";
+    /** The end of the default Auto Scaling service-linked role's ARN; passing that role needs no permission. */
+    private static final String DEFAULT_AUTOSCALING_ROLE =
+            ":role/aws-service-role/" + AUTOSCALING + "/AWSServiceRoleForAutoScaling";
 
     /** A role a request passes, and the service principal it is passed to. */
     record PassedRole(String roleArn, String passedToService) {
@@ -82,6 +99,22 @@ final class PassedRoles {
 
         /** The permission model of the StackSet named {@code stackSetName}; empty when there is none. */
         Optional<String> stackSetPermissionModel(String stackSetName);
+
+        /**
+         * The instance profile, by its ARN or else its name, of the launch template version an Auto Scaling
+         * group launches from when it names this template and version; empty when there is none.
+         */
+        Optional<String> launchTemplateInstanceProfile(String templateId, String templateName, String version);
+
+        /** The instance profile, by its ARN, a launch configuration made from this EC2 instance takes from it. */
+        Optional<String> launchConfigurationInstanceProfile(String instanceId);
+
+        /**
+         * The instance profile of the launch template version the group launches from once an instance
+         * refresh applies this desired configuration, each part as the request gives it or null.
+         */
+        Optional<String> instanceRefreshInstanceProfile(String groupName, String templateId, String templateName,
+                                                        String version);
 
         /** The ARN of the role {@code roleName}, a name with any path, names in the request's account. */
         String roleArn(String roleName);
@@ -120,6 +153,12 @@ final class PassedRoles {
                     fromForm(ctx, CLOUDFORMATION, "RoleARN");
             case "cloudformation:CreateStackSet", "cloudformation:UpdateStackSet" ->
                     stackSetAdministrationRole(ctx, lookups, "cloudformation:UpdateStackSet".equals(action));
+            case "autoscaling:CreateLaunchConfiguration" -> launchConfiguration(ctx, lookups);
+            case "autoscaling:CreateAutoScalingGroup", "autoscaling:UpdateAutoScalingGroup" ->
+                    autoScalingGroup(ctx, lookups);
+            case "autoscaling:StartInstanceRefresh" -> instanceRefresh(ctx, lookups);
+            case "autoscaling:PutLifecycleHook" -> fromForm(ctx, AUTOSCALING, "RoleARN");
+            case "application-autoscaling:RegisterScalableTarget" -> fromJson(ctx, APPLICATION_AUTOSCALING, "RoleARN");
             default -> List.of();
         };
     }
@@ -204,6 +243,95 @@ final class PassedRoles {
                 ? List.of() : passed(List.of(lookups.roleArn(STACK_SET_ADMINISTRATION_ROLE)), CLOUDFORMATION);
     }
 
+    /** The roles of the profile a launch configuration names, or else takes from the instance it is made from. */
+    private static List<PassedRole> launchConfiguration(ContainerRequestContext ctx, Lookups lookups) {
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        String profile = blankToNull(form.get("IamInstanceProfile"));
+        String instanceId = blankToNull(form.get("InstanceId"));
+        if (profile == null && instanceId != null) {
+            profile = lookups.launchConfigurationInstanceProfile(instanceId).orElse(null);
+        }
+        return fromInstanceProfile(lookups, profile);
+    }
+
+    /**
+     * StartInstanceRefresh: the roles of the launch template the group launches from once the desired
+     * configuration is applied to it, which may name only a version of the group's template or keep the
+     * group's version for a template it names, and those of its mixed instances policy's templates.
+     */
+    private static List<PassedRole> instanceRefresh(ContainerRequestContext ctx, Lookups lookups) {
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        String desired = "DesiredConfiguration.LaunchTemplate.";
+        List<PassedRole> passed = new ArrayList<>();
+        String group = blankToNull(form.get("AutoScalingGroupName"));
+        if (group != null) {
+            lookups.instanceRefreshInstanceProfile(group, form.get(desired + "LaunchTemplateId"),
+                            form.get(desired + "LaunchTemplateName"), form.get(desired + "Version"))
+                    .ifPresent(profile -> passed.addAll(fromInstanceProfile(lookups, profile)));
+        }
+        passed.addAll(mixedInstancesPolicyRoles(form, "DesiredConfiguration.", lookups));
+        return passed;
+    }
+
+    /**
+     * CreateAutoScalingGroup and UpdateAutoScalingGroup: the roles of the launch templates' instance
+     * profiles, and a service-linked role and the lifecycle hooks' roles.
+     */
+    private static List<PassedRole> autoScalingGroup(ContainerRequestContext ctx, Lookups lookups) {
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        List<String> roles = new ArrayList<>();
+        String serviceLinkedRole = blankToNull(form.get("ServiceLinkedRoleARN"));
+        if (serviceLinkedRole != null && !serviceLinkedRole.endsWith(DEFAULT_AUTOSCALING_ROLE)) {
+            roles.add(serviceLinkedRole);
+        }
+        for (String hook : members(form, "LifecycleHookSpecificationList")) {
+            roles.add(form.get(hook + "RoleARN"));
+        }
+        List<PassedRole> passed = new ArrayList<>(launchTemplateRoles(form, "LaunchTemplate.", lookups));
+        passed.addAll(mixedInstancesPolicyRoles(form, "", lookups));
+        passed.addAll(passed(roles, AUTOSCALING));
+        return passed;
+    }
+
+    /** The roles of the mixed instances policy's launch template under {@code prefix}, and of each override's. */
+    private static List<PassedRole> mixedInstancesPolicyRoles(Map<String, String> form, String prefix,
+                                                              Lookups lookups) {
+        String mixed = prefix + "MixedInstancesPolicy.LaunchTemplate.";
+        List<PassedRole> passed = new ArrayList<>(launchTemplateRoles(form, mixed + "LaunchTemplateSpecification.",
+                lookups));
+        for (String override : members(form, mixed + "Overrides")) {
+            passed.addAll(launchTemplateRoles(form, override + "LaunchTemplateSpecification.", lookups));
+        }
+        return passed;
+    }
+
+    /** The roles of the instance profile in the launch template a request names under {@code template}. */
+    private static List<PassedRole> launchTemplateRoles(Map<String, String> form, String template, Lookups lookups) {
+        String id = blankToNull(form.get(template + "LaunchTemplateId"));
+        String name = blankToNull(form.get(template + "LaunchTemplateName"));
+        if (id == null && name == null) {
+            return List.of();
+        }
+        return lookups.launchTemplateInstanceProfile(id, name, blankToNull(form.get(template + "Version")))
+                .map(profile -> fromInstanceProfile(lookups, profile))
+                .orElse(List.of());
+    }
+
+    /**
+     * The prefix of each {@code list}.member.N, from 1 up to the first N the form holds nothing under,
+     * as the handlers read numbered members.
+     */
+    private static List<String> members(Map<String, String> form, String list) {
+        List<String> members = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String member = list + ".member." + i + ".";
+            if (form.keySet().stream().noneMatch(key -> key.startsWith(member))) {
+                return members;
+            }
+            members.add(member);
+        }
+    }
+
     private static List<PassedRole> fromJson(ContainerRequestContext ctx, String service, String... path) {
         return passed(values(jsonBody(ctx), path), service);
     }
@@ -250,6 +378,15 @@ final class PassedRoles {
             return List.of();
         }
         return passed(lookups.instanceProfileRoleArns(name, arn), EC2);
+    }
+
+    /** The roles of the instance profile {@code profile}, given by its name or its ARN. */
+    private static List<PassedRole> fromInstanceProfile(Lookups lookups, String profile) {
+        if (profile == null || profile.isBlank()) {
+            return List.of();
+        }
+        boolean arn = AwsArnUtils.isArn(profile);
+        return passed(lookups.instanceProfileRoleArns(arn ? null : profile, arn ? profile : null), EC2);
     }
 
     /** The roles that are IAM role ARNs; anything else is left for the operation to refuse. */

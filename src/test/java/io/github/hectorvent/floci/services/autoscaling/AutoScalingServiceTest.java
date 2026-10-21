@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +33,7 @@ import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 import java.util.zip.GZIPOutputStream;
@@ -40,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class AutoScalingServiceTest {
@@ -130,6 +133,43 @@ class AutoScalingServiceTest {
         assertEquals("lt-updated", group.getLaunchTemplateId());
         assertEquals("2", group.getLaunchTemplateVersion());
         assertNull(group.getLaunchConfigurationName());
+    }
+
+    @Test
+    void anInstanceRefreshResolvesTheProfileOfTheTemplateItsGroupLaunchesFromOnceItApplies() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        service.ec2Service = ec2Service;
+        when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-original", null, List.of("1")))
+                .thenReturn(List.of(withProfile("version-one")));
+        when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-original", null, List.of("2")))
+                .thenReturn(List.of(withProfile("version-two")));
+        when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-other", null, List.of("1")))
+                .thenReturn(List.of(withProfile("other-at-one")));
+
+        // The group launches from lt-original version 1: a version alone moves it, a template alone keeps it.
+        assertEquals(Optional.of("version-two"),
+                service.instanceRefreshInstanceProfile("test-asg", null, null, "2", REGION));
+        assertEquals(Optional.of("other-at-one"),
+                service.instanceRefreshInstanceProfile("test-asg", "lt-other", null, null, REGION));
+        // Without a desired configuration the group keeps the template it was checked for when it named it.
+        assertEquals(Optional.empty(), service.instanceRefreshInstanceProfile("test-asg", null, null, null, REGION));
+        assertEquals(Optional.empty(),
+                service.instanceRefreshInstanceProfile("no-such-group", null, null, "2", REGION));
+    }
+
+    @Test
+    void aLaunchTemplateLookupNamingNoTemplateFindsNoProfileRatherThanAnyTemplatesProfile() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        service.ec2Service = ec2Service;
+
+        assertEquals(Optional.empty(), service.launchTemplateInstanceProfile(null, " ", "2", REGION));
+        verifyNoInteractions(ec2Service);
+    }
+
+    private static LaunchTemplate withProfile(String profileName) {
+        LaunchTemplate version = new LaunchTemplate();
+        version.getData().setIamInstanceProfile(new LaunchTemplateData.IamInstanceProfile(null, profileName));
+        return version;
     }
 
     @Test

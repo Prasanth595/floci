@@ -49,6 +49,9 @@ class IamPassRoleEnforcementIntegrationTest {
     private static final String QUEUE_ARN = "arn:aws:sqs:us-east-1:" + ACCOUNT + ":passrole-queue";
     private static final String SCHEDULER = "scheduler.amazonaws.com";
     private static final String PIPES = "pipes.amazonaws.com";
+    private static final String AUTOSCALING = "autoscaling.amazonaws.com";
+    private static final String SERVICE_LINKED_ROLES =
+            "arn:aws:iam::" + ACCOUNT + ":role/aws-service-role/autoscaling.amazonaws.com/";
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
 
     @TestHTTPResource("/")
@@ -498,6 +501,215 @@ class IamPassRoleEnforcementIntegrationTest {
     }
 
     /** Requests a Spot Instance, removes it afterwards, and returns the profile ARN it was launched with. */
+    @Test
+    void aLaunchConfigurationNeedsPassRoleOnItsInstanceProfilesRoleForEc2() {
+        String role = role("asg-config");
+        String profile = instanceProfile(roleName(role));
+        String profileArn = "arn:aws:iam::" + ACCOUNT + ":instance-profile/" + profile;
+        User user = user("passrole-launch-config");
+        String name = "passrole-config-" + suffix();
+
+        // The role goes to the instances, so a grant to pass it to Auto Scaling does not cover it.
+        user.policy(allow("autoscaling:CreateLaunchConfiguration", "*") + "," + passRole(role, AUTOSCALING));
+        denied(launchConfiguration(user, name, profile).then());
+        denied(launchConfiguration(user, name, profileArn).then());
+
+        user.policy(allow("autoscaling:CreateLaunchConfiguration", "*") + "," + passRole(role, "ec2.amazonaws.com"));
+        launchConfiguration(user, name, profileArn).then().statusCode(200);
+        cleanup.register(() -> admin("autoscaling").formParam("Action", "DeleteLaunchConfiguration")
+                .formParam("LaunchConfigurationName", name).post("/"));
+    }
+
+    @Test
+    void aLaunchConfigurationMadeFromAnInstanceNeedsPassRoleOnTheRoleOfTheProfileItTakes() {
+        String role = role("asg-from-instance");
+        String profile = instanceProfile(roleName(role));
+        String instanceId = admin("ec2").formParam("Action", "RunInstances").formParam("ImageId", IMAGE)
+                .formParam("InstanceType", "t3.micro").formParam("MinCount", "1").formParam("MaxCount", "1")
+                .formParam("IamInstanceProfile.Name", profile).post("/").then().statusCode(200)
+                .extract().xmlPath().getString("RunInstancesResponse.instancesSet.item.instanceId");
+        terminateLater(instanceId);
+        User user = user("passrole-config-instance");
+        String name = "passrole-instance-config-" + suffix();
+
+        user.policy(allow("autoscaling:CreateLaunchConfiguration", "*"));
+        denied(user.autoscaling("CreateLaunchConfiguration").formParam("LaunchConfigurationName", name)
+                .formParam("InstanceId", instanceId).post("/").then());
+
+        user.policy(allow("autoscaling:CreateLaunchConfiguration", "*") + "," + passRole(role, "ec2.amazonaws.com"));
+        user.autoscaling("CreateLaunchConfiguration").formParam("LaunchConfigurationName", name)
+                .formParam("InstanceId", instanceId).post("/").then().statusCode(200);
+        cleanup.register(() -> admin("autoscaling").formParam("Action", "DeleteLaunchConfiguration")
+                .formParam("LaunchConfigurationName", name).post("/"));
+    }
+
+    @Test
+    void aGroupNeedsPassRoleOnTheRoleOfItsLaunchTemplatesInstanceProfileAtTheVersionItLaunches() {
+        String role = role("asg-template");
+        String templateId = launchTemplate(null, instanceProfile(roleName(role)));
+        User user = user("passrole-asg");
+        String group = "passrole-asg-" + suffix();
+        String actions = allow("autoscaling:CreateAutoScalingGroup", "*") + ","
+                + allow("autoscaling:UpdateAutoScalingGroup", "*") + ","
+                + allow("autoscaling:StartInstanceRefresh", "*");
+
+        user.policy(actions);
+        denied(group(user, "CreateAutoScalingGroup", group).formParam("LaunchTemplate.LaunchTemplateId", templateId)
+                .formParam("LaunchTemplate.Version", "$Latest").post("/").then());
+        String mixed = "MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.";
+        denied(group(user, "CreateAutoScalingGroup", group).formParam(mixed + "LaunchTemplateId", templateId)
+                .formParam(mixed + "Version", "2").post("/").then());
+        // Version 1 names no instance profile, so a group launching from it passes no role.
+        group(user, "CreateAutoScalingGroup", group).formParam("LaunchTemplate.LaunchTemplateId", templateId)
+                .formParam("LaunchTemplate.Version", "1").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("autoscaling").formParam("Action", "DeleteAutoScalingGroup")
+                .formParam("AutoScalingGroupName", group).formParam("ForceDelete", "true").post("/"));
+
+        denied(group(user, "UpdateAutoScalingGroup", group).formParam("LaunchTemplate.LaunchTemplateId", templateId)
+                .formParam("LaunchTemplate.Version", "2").post("/").then());
+        denied(user.autoscaling("StartInstanceRefresh").formParam("AutoScalingGroupName", group)
+                .formParam("DesiredConfiguration.LaunchTemplate.LaunchTemplateId", templateId)
+                .formParam("DesiredConfiguration.LaunchTemplate.Version", "2").post("/").then());
+
+        user.policy(actions + "," + passRole(role, "ec2.amazonaws.com"));
+        group(user, "UpdateAutoScalingGroup", group).formParam("LaunchTemplate.LaunchTemplateId", templateId)
+                .formParam("LaunchTemplate.Version", "2").post("/").then().statusCode(200);
+    }
+
+    @Test
+    void anInstanceRefreshNeedsPassRoleOnTheTemplateVersionItsGroupLaunchesFromOnceItApplies() {
+        String role = role("asg-refresh");
+        String profile = instanceProfile(roleName(role));
+        String plain = launchTemplate(null, null);
+        // Version 2 names the profile; the latest, version 3, names none.
+        String privileged = launchTemplate(null, profile, null);
+        String group = "passrole-refresh-" + suffix();
+        admin("autoscaling").formParam("Action", "CreateAutoScalingGroup").formParam("AutoScalingGroupName", group)
+                .formParam("LaunchTemplate.LaunchTemplateId", plain).formParam("LaunchTemplate.Version", "2")
+                .formParam("MinSize", "0").formParam("MaxSize", "0").formParam("DesiredCapacity", "0")
+                .formParam("AvailabilityZones.member.1", "us-east-1a").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("autoscaling").formParam("Action", "DeleteAutoScalingGroup")
+                .formParam("AutoScalingGroupName", group).formParam("ForceDelete", "true").post("/"));
+        User user = user("passrole-refresh");
+
+        // A template named without a version keeps the group's version 2, not the template's latest.
+        user.policy(allow("autoscaling:StartInstanceRefresh", "*"));
+        denied(user.autoscaling("StartInstanceRefresh").formParam("AutoScalingGroupName", group)
+                .formParam("DesiredConfiguration.LaunchTemplate.LaunchTemplateId", privileged).post("/").then());
+
+        // A version named alone moves the group's own template to it.
+        admin("autoscaling").formParam("Action", "UpdateAutoScalingGroup").formParam("AutoScalingGroupName", group)
+                .formParam("LaunchTemplate.LaunchTemplateId", privileged).formParam("LaunchTemplate.Version", "1")
+                .post("/").then().statusCode(200);
+        denied(user.autoscaling("StartInstanceRefresh").formParam("AutoScalingGroupName", group)
+                .formParam("DesiredConfiguration.LaunchTemplate.Version", "2").post("/").then());
+
+        user.policy(allow("autoscaling:StartInstanceRefresh", "*") + "," + passRole(role, "ec2.amazonaws.com"));
+        user.autoscaling("StartInstanceRefresh").formParam("AutoScalingGroupName", group)
+                .formParam("DesiredConfiguration.LaunchTemplate.Version", "2").post("/").then().statusCode(200);
+    }
+
+    @Test
+    void aServiceLinkedRoleOtherThanTheDefaultAndALifecycleHooksRoleNeedPassRoleForAutoScaling() {
+        String hookRole = role("asg-hook");
+        String configuration = "passrole-plain-config-" + suffix();
+        admin("autoscaling").formParam("Action", "CreateLaunchConfiguration")
+                .formParam("LaunchConfigurationName", configuration).formParam("ImageId", IMAGE)
+                .formParam("InstanceType", "t3.micro").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("autoscaling").formParam("Action", "DeleteLaunchConfiguration")
+                .formParam("LaunchConfigurationName", configuration).post("/"));
+        User user = user("passrole-asg-roles");
+        String group = "passrole-asg-roles-" + suffix();
+        String hooks = "LifecycleHookSpecificationList.member.1.";
+
+        user.policy(allow("autoscaling:CreateAutoScalingGroup", "*") + ","
+                + allow("autoscaling:PutLifecycleHook", "*"));
+        denied(group(user, "CreateAutoScalingGroup", group).formParam("LaunchConfigurationName", configuration)
+                .formParam("ServiceLinkedRoleARN", SERVICE_LINKED_ROLES + "AWSServiceRoleForAutoScaling_passrole")
+                .post("/").then());
+        denied(group(user, "CreateAutoScalingGroup", group).formParam("LaunchConfigurationName", configuration)
+                .formParam(hooks + "LifecycleHookName", "launch")
+                .formParam(hooks + "LifecycleTransition", "autoscaling:EC2_INSTANCE_LAUNCHING")
+                .formParam(hooks + "NotificationTargetARN", QUEUE_ARN).formParam(hooks + "RoleARN", hookRole)
+                .post("/").then());
+        // The default service-linked role needs no permission to pass, nor does a launch configuration's group.
+        group(user, "CreateAutoScalingGroup", group).formParam("LaunchConfigurationName", configuration)
+                .formParam("ServiceLinkedRoleARN", SERVICE_LINKED_ROLES + "AWSServiceRoleForAutoScaling")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> admin("autoscaling").formParam("Action", "DeleteAutoScalingGroup")
+                .formParam("AutoScalingGroupName", group).formParam("ForceDelete", "true").post("/"));
+
+        denied(lifecycleHook(user, group, hookRole).then());
+        user.policy(allow("autoscaling:PutLifecycleHook", "*") + "," + passRole(hookRole, AUTOSCALING));
+        lifecycleHook(user, group, hookRole).then().statusCode(200);
+    }
+
+    @Test
+    void aScalableTargetNeedsPassRoleOnTheRoleItNamesForApplicationAutoScaling() {
+        String role = role("scalable-target");
+        String table = "table/passrole-" + suffix();
+        String target = "AnyScaleFrontendService.RegisterScalableTarget";
+        String body = """
+                {"ServiceNamespace":"dynamodb","ResourceId":"%s","ScalableDimension":"dynamodb:table:ReadCapacityUnits",
+                 "MinCapacity":1,"MaxCapacity":5,"RoleARN":"%s"}""".formatted(table, role);
+        User user = user("passrole-scaling");
+
+        user.policy(allow("application-autoscaling:RegisterScalableTarget", "*") + "," + passRole(role, AUTOSCALING));
+        deniedJson(user.json("application-autoscaling", target).body(body).post("/").then());
+
+        user.policy(allow("application-autoscaling:RegisterScalableTarget", "*") + ","
+                + passRole(role, "application-autoscaling.amazonaws.com"));
+        user.json("application-autoscaling", target).body(body).post("/").then().statusCode(200);
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "application-autoscaling"))
+                .header("X-Amz-Target", "AnyScaleFrontendService.DeregisterScalableTarget")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"ServiceNamespace\":\"dynamodb\",\"ResourceId\":\"" + table
+                        + "\",\"ScalableDimension\":\"dynamodb:table:ReadCapacityUnits\"}").post("/"));
+    }
+
+    private static Response launchConfiguration(User user, String name, String profile) {
+        return user.autoscaling("CreateLaunchConfiguration").formParam("LaunchConfigurationName", name)
+                .formParam("ImageId", IMAGE).formParam("InstanceType", "t3.micro")
+                .formParam("IamInstanceProfile", profile).post("/");
+    }
+
+    /**
+     * A launch template, removed afterwards, with a version for each of {@code profiles} in order, each
+     * naming that instance profile or, for null, none; returns its ID.
+     */
+    private String launchTemplate(String... profiles) {
+        String name = "passrole-asg-template-" + suffix();
+        String templateId = withProfile(admin("ec2").formParam("Action", "CreateLaunchTemplate")
+                .formParam("LaunchTemplateName", name), profiles[0]).post("/").then().statusCode(200)
+                .extract().xmlPath().getString("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+        cleanup.register(() -> admin("ec2").formParam("Action", "DeleteLaunchTemplate")
+                .formParam("LaunchTemplateId", templateId).post("/"));
+        for (int i = 1; i < profiles.length; i++) {
+            withProfile(admin("ec2").formParam("Action", "CreateLaunchTemplateVersion")
+                    .formParam("LaunchTemplateId", templateId), profiles[i]).post("/").then().statusCode(200);
+        }
+        return templateId;
+    }
+
+    private static RequestSpecification withProfile(RequestSpecification request, String profile) {
+        request.formParam("LaunchTemplateData.ImageId", IMAGE);
+        return profile == null ? request : request.formParam("LaunchTemplateData.IamInstanceProfile.Name", profile);
+    }
+
+    /** An empty group's request, which launches nothing. */
+    private static RequestSpecification group(User user, String action, String name) {
+        return user.autoscaling(action).formParam("AutoScalingGroupName", name).formParam("MinSize", "0")
+                .formParam("MaxSize", "0").formParam("DesiredCapacity", "0")
+                .formParam("AvailabilityZones.member.1", "us-east-1a");
+    }
+
+    private static Response lifecycleHook(User user, String group, String role) {
+        return user.autoscaling("PutLifecycleHook").formParam("AutoScalingGroupName", group)
+                .formParam("LifecycleHookName", "launch")
+                .formParam("LifecycleTransition", "autoscaling:EC2_INSTANCE_LAUNCHING")
+                .formParam("NotificationTargetARN", QUEUE_ARN).formParam("RoleARN", role).post("/");
+    }
+
     private String spotProfileArn(User user, String selector, String profile) {
         String item = "RequestSpotInstancesResponse.spotInstanceRequestSet.item.";
         XmlPath request = spotRequest(user, selector, profile).then().statusCode(200).extract().xmlPath();
@@ -685,6 +897,10 @@ class IamPassRoleEnforcementIntegrationTest {
 
         RequestSpecification ec2(String action) {
             return given().header("Authorization", auth(accessKeyId, "ec2")).formParam("Action", action);
+        }
+
+        RequestSpecification autoscaling(String action) {
+            return given().header("Authorization", auth(accessKeyId, "autoscaling")).formParam("Action", action);
         }
 
         RequestSpecification ecs(String action) {

@@ -30,12 +30,51 @@ class PassedRolesTest {
     private static final String ECS_TASKS = "ecs-tasks.amazonaws.com";
     private static final String CLOUDFORMATION = "cloudformation.amazonaws.com";
     private static final String DEFAULT_ADMINISTRATION = ROLES + "AWSCloudFormationStackSetAdministrationRole";
+    private static final String EC2 = "ec2.amazonaws.com";
+    private static final String AUTOSCALING = "autoscaling.amazonaws.com";
+    private static final String PROFILE_ARN = "arn:aws:iam::111122223333:instance-profile/arn-profile";
 
-    /** A task definition {@code web:3} holding a task role by ARN and an execution role by name, and two StackSets. */
+    /**
+     * A task definition {@code web:3} holding a task role by ARN and an execution role by name, two
+     * StackSets, two instance profiles, and the launch templates {@code lt-web}, whose every version
+     * names one profile by name, and {@code arn-template}, whose version 2 names the other by ARN. The
+     * instance {@code i-arn} runs with that other profile, and the group {@code g} launches from
+     * {@code lt-web} once a refresh names only a version, or from {@code arn-template} at the group's
+     * version 2 once a refresh names that template alone.
+     */
     private static final PassedRoles.Lookups LOOKUPS = new PassedRoles.Lookups() {
         @Override
         public List<String> instanceProfileRoleArns(String profileName, String profileArn) {
-            return List.of();
+            if ("web-profile".equals(profileName)) {
+                return List.of(ROLES + "web-instance");
+            }
+            return PROFILE_ARN.equals(profileArn) ? List.of(ROLES + "arn-instance") : List.of();
+        }
+
+        @Override
+        public Optional<String> launchTemplateInstanceProfile(String templateId, String templateName, String version) {
+            if ("lt-web".equals(templateId)) {
+                return Optional.of("web-profile");
+            }
+            return "arn-template".equals(templateName) && "2".equals(version)
+                    ? Optional.of(PROFILE_ARN) : Optional.empty();
+        }
+
+        @Override
+        public Optional<String> launchConfigurationInstanceProfile(String instanceId) {
+            return "i-arn".equals(instanceId) ? Optional.of(PROFILE_ARN) : Optional.empty();
+        }
+
+        @Override
+        public Optional<String> instanceRefreshInstanceProfile(String groupName, String templateId,
+                                                               String templateName, String version) {
+            if (!"g".equals(groupName)) {
+                return Optional.empty();
+            }
+            if (templateId == null && templateName == null && "2".equals(version)) {
+                return Optional.of("web-profile");
+            }
+            return "arn-template".equals(templateName) && version == null ? Optional.of(PROFILE_ARN) : Optional.empty();
         }
 
         @Override
@@ -182,6 +221,99 @@ class PassedRolesTest {
         assertEquals(List.of(), PassedRoles.of("cloudformation:UpdateStackSet", form("StackSetName=missing"), LOOKUPS));
         assertEquals(List.of(passed("admin", CLOUDFORMATION)), PassedRoles.of("cloudformation:UpdateStackSet",
                 form("StackSetName=org-set&AdministrationRoleARN=" + ROLES + "admin"), LOOKUPS));
+    }
+
+    @Test
+    void aLaunchConfigurationPassesItsInstanceProfilesRolesToEc2ByNameOrArn() {
+        assertEquals(List.of(passed("web-instance", EC2)), PassedRoles.of("autoscaling:CreateLaunchConfiguration",
+                form("LaunchConfigurationName=c&IamInstanceProfile=web-profile"), LOOKUPS));
+        assertEquals(List.of(passed("arn-instance", EC2)), PassedRoles.of("autoscaling:CreateLaunchConfiguration",
+                form("LaunchConfigurationName=c&IamInstanceProfile=" + PROFILE_ARN), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("autoscaling:CreateLaunchConfiguration",
+                form("LaunchConfigurationName=c&IamInstanceProfile=missing"), LOOKUPS));
+    }
+
+    @Test
+    void aLaunchConfigurationMadeFromAnInstancePassesTheInstancesProfileUnlessItNamesOne() {
+        assertEquals(List.of(passed("arn-instance", EC2)), PassedRoles.of("autoscaling:CreateLaunchConfiguration",
+                form("LaunchConfigurationName=c&InstanceId=i-arn"), LOOKUPS));
+        assertEquals(List.of(passed("web-instance", EC2)), PassedRoles.of("autoscaling:CreateLaunchConfiguration",
+                form("LaunchConfigurationName=c&InstanceId=i-arn&IamInstanceProfile=web-profile"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("autoscaling:CreateLaunchConfiguration",
+                form("LaunchConfigurationName=c&InstanceId=i-none"), LOOKUPS));
+    }
+
+    @Test
+    void aGroupPassesTheRolesOfEachLaunchTemplatesInstanceProfileToEc2AtTheVersionItNames() {
+        for (String action : List.of("CreateAutoScalingGroup", "UpdateAutoScalingGroup")) {
+            assertEquals(List.of(passed("web-instance", EC2)), PassedRoles.of("autoscaling:" + action,
+                    form("LaunchTemplate.LaunchTemplateId=lt-web"), LOOKUPS), action);
+            assertEquals(List.of(passed("arn-instance", EC2)), PassedRoles.of("autoscaling:" + action,
+                    form("LaunchTemplate.LaunchTemplateName=arn-template&LaunchTemplate.Version=2"), LOOKUPS), action);
+            // A version whose data names no profile passes nothing, nor does a launch configuration.
+            assertEquals(List.of(), PassedRoles.of("autoscaling:" + action,
+                    form("LaunchTemplate.LaunchTemplateName=arn-template&LaunchTemplate.Version=1"), LOOKUPS), action);
+            assertEquals(List.of(), PassedRoles.of("autoscaling:" + action,
+                    form("LaunchConfigurationName=c"), LOOKUPS), action);
+
+            // A mixed instances policy names its template, and each override may name another.
+            String mixed = "MixedInstancesPolicy.LaunchTemplate.";
+            String policy = mixed + "LaunchTemplateSpecification.LaunchTemplateName=arn-template&"
+                    + mixed + "LaunchTemplateSpecification.Version=2&"
+                    + mixed + "Overrides.member.1.InstanceType=t3.micro&"
+                    + mixed + "Overrides.member.2.LaunchTemplateSpecification.LaunchTemplateId=lt-web";
+            assertEquals(List.of(passed("arn-instance", EC2), passed("web-instance", EC2)),
+                    PassedRoles.of("autoscaling:" + action, form(policy), LOOKUPS), action);
+        }
+    }
+
+    @Test
+    void aGroupPassesAServiceLinkedRoleOtherThanTheDefaultAndItsHooksRolesToAutoScaling() {
+        String serviceLinked = "aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling";
+        assertEquals(List.of(passed(serviceLinked + "_custom", AUTOSCALING)),
+                PassedRoles.of("autoscaling:UpdateAutoScalingGroup",
+                        form("ServiceLinkedRoleARN=" + ROLES + serviceLinked + "_custom"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("autoscaling:UpdateAutoScalingGroup",
+                form("ServiceLinkedRoleARN=" + ROLES + serviceLinked), LOOKUPS));
+
+        String hooks = "LifecycleHookSpecificationList.member.";
+        assertEquals(List.of(passed("web-instance", EC2), passed(serviceLinked + "_custom", AUTOSCALING),
+                        passed("hook", AUTOSCALING), passed("other-hook", AUTOSCALING)),
+                PassedRoles.of("autoscaling:CreateAutoScalingGroup", form("LaunchTemplate.LaunchTemplateId=lt-web"
+                        + "&ServiceLinkedRoleARN=" + ROLES + serviceLinked + "_custom"
+                        + "&" + hooks + "1.RoleARN=" + ROLES + "hook&" + hooks + "2.LifecycleHookName=no-role"
+                        + "&" + hooks + "3.RoleARN=" + ROLES + "other-hook"
+                        + "&" + hooks + "5.RoleARN=" + ROLES + "after-a-gap"), LOOKUPS));
+    }
+
+    @Test
+    void anInstanceRefreshPassesTheRolesOfTheTemplateItsGroupLaunchesFromOnceTheDesiredConfigurationApplies() {
+        // The desired configuration goes to the group's own lookup as given, a version alone or a template alone.
+        assertEquals(List.of(passed("web-instance", EC2)), PassedRoles.of("autoscaling:StartInstanceRefresh",
+                form("AutoScalingGroupName=g&DesiredConfiguration.LaunchTemplate.Version=2"), LOOKUPS));
+        assertEquals(List.of(passed("arn-instance", EC2)), PassedRoles.of("autoscaling:StartInstanceRefresh",
+                form("AutoScalingGroupName=g&DesiredConfiguration.LaunchTemplate.LaunchTemplateName=arn-template"),
+                LOOKUPS));
+        String desired = "DesiredConfiguration.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.";
+        assertEquals(List.of(passed("arn-instance", EC2)), PassedRoles.of("autoscaling:StartInstanceRefresh",
+                form("AutoScalingGroupName=g&" + desired + "LaunchTemplateName=arn-template&" + desired + "Version=2"),
+                LOOKUPS));
+        // Without a desired configuration the refresh uses the group's own template, checked when the group named it.
+        assertEquals(List.of(), PassedRoles.of("autoscaling:StartInstanceRefresh",
+                form("AutoScalingGroupName=g"), LOOKUPS));
+    }
+
+    @Test
+    void aLifecycleHookAndAScalableTargetPassTheRoleTheyName() {
+        assertEquals(List.of(passed("hook", AUTOSCALING)), PassedRoles.of("autoscaling:PutLifecycleHook",
+                form("AutoScalingGroupName=g&LifecycleHookName=h&RoleARN=" + ROLES + "hook"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("autoscaling:PutLifecycleHook",
+                form("AutoScalingGroupName=g&LifecycleHookName=h"), LOOKUPS));
+        assertEquals(List.of(passed("scaling", "application-autoscaling.amazonaws.com")),
+                PassedRoles.of("application-autoscaling:RegisterScalableTarget",
+                        json("{\"ServiceNamespace\":\"ecs\",\"RoleARN\":\"" + ROLES + "scaling\"}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("application-autoscaling:RegisterScalableTarget",
+                json("{\"ServiceNamespace\":\"ecs\"}"), LOOKUPS));
     }
 
     private static PassedRole passed(String roleName, String service) {
