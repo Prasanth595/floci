@@ -374,6 +374,10 @@ class Ec2RepeatedFilterNamesTest {
 
         assertEquals(Set.of(), names(describe("DescribeImages",
                 filter("name", "repeated-first-*"), filter("name", "repeated-second-*"))));
+        // Patterns that overlap but whose first wildcards each build a name the other rejects: no
+        // image is made up, as AWS returns only images that exist.
+        assertEquals(Set.of(), names(describe("DescribeImages",
+                filter("name", "foo-*"), filter("name", "*-bar-*"))));
     }
 
     @Test
