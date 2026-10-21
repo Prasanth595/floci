@@ -1617,8 +1617,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<List<String>> filterIds = filterValues(filters, "prefix-list-id");
         return awsManagedPrefixLists(region).stream()
                 .filter(pl -> ids.isEmpty() || ids.contains(pl.getPrefixListId()))
-                .filter(pl -> filterIds.stream().allMatch(v -> v.isEmpty() || v.contains(pl.getPrefixListId())))
-                .filter(pl -> names.stream().allMatch(v -> v.isEmpty() || v.contains(pl.getPrefixListName())))
+                .filter(pl -> everyFilterContains(filterIds, pl.getPrefixListId()))
+                .filter(pl -> everyFilterContains(names, pl.getPrefixListName()))
                 .map(pl -> new PrefixList(pl.getPrefixListId(), pl.getPrefixListName(),
                         pl.currentEntries().stream()
                                 .map(PrefixListEntry::getCidr)
@@ -11683,12 +11683,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<Map<String, String>> offerings = new ArrayList<>();
         for (Map<String, Object> type : describeInstanceTypes(effectiveTypeNames)) {
             String instanceType = (String) type.get("instanceType");
-            if (!instanceTypeNames.contains(instanceType)
-                    && laterTypeFilters.stream().anyMatch(values -> !values.contains(instanceType))) {
+            if (!instanceTypeNames.contains(instanceType) && !everyFilterContains(laterTypeFilters, instanceType)) {
                 continue;
             }
             for (String location : locations) {
-                if (locationFilters.stream().anyMatch(values -> !matchesValue(location, values))) {
+                if (!everyFilterMatches(locationFilters, location)) {
                     continue;
                 }
                 Map<String, String> offering = new LinkedHashMap<>();
@@ -11734,6 +11733,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     static boolean everyFilterAdmits(List<List<String>> filters, String value) {
         return filters.stream().allMatch(values -> matchesFilterValue(values, value));
+    }
+
+    /** Whether every one of {@code filters} names {@code value} exactly. A filter without values admits anything. */
+    static boolean everyFilterContains(List<List<String>> filters, String value) {
+        return filters.stream().allMatch(values -> values.isEmpty() || values.contains(value));
+    }
+
+    /**
+     * Whether {@code value} matches a value of every one of {@code filters}, wildcards included, as
+     * {@link #matchesValue(String, List)} tests one. A filter without values matches nothing.
+     */
+    private boolean everyFilterMatches(List<List<String>> filters, String value) {
+        return filters.stream().allMatch(values -> matchesValue(value, values));
     }
 
     private boolean matchesValue(String resourceValue, List<String> filterValues) {
@@ -13557,8 +13569,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<List<String>> priceFilters = filterValues(filters, "spot-price");
         String formattedTimestamp = ISO_FMT.format(effectiveTimestamp);
 
-        if (filterValues(filters, "timestamp").stream()
-                .anyMatch(timestampFilter -> !matchesValue(formattedTimestamp, timestampFilter))) {
+        if (!everyFilterMatches(filterValues(filters, "timestamp"), formattedTimestamp)) {
             return new SpotPriceHistoryResult(List.of(), null);
         }
 
@@ -13572,7 +13583,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 double priceVal = ((type.vcpu * 0.0016) + ((type.memoryMib / 1024.0) * 0.0012)) * multiplier;
                 String formattedPrice = String.format(Locale.ROOT, "%.6f", priceVal);
 
-                if (priceFilters.stream().anyMatch(priceFilter -> !matchesValue(formattedPrice, priceFilter))) {
+                if (!everyFilterMatches(priceFilters, formattedPrice)) {
                     continue;
                 }
 

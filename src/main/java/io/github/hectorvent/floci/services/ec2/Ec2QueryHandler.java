@@ -3354,10 +3354,8 @@ public class Ec2QueryHandler {
         List<SecurityGroupRule> named = service.describeSecurityGroupRules(
                 region, List.of(), getList(p, "SecurityGroupRuleId"));
         List<SecurityGroupRule> rules = named.stream()
-                .filter(rule -> ruleIdFilters.stream()
-                        .allMatch(ids -> ids.isEmpty() || ids.contains(rule.getSecurityGroupRuleId())))
-                .filter(rule -> groupIdFilters.stream()
-                        .allMatch(ids -> ids.isEmpty() || ids.contains(rule.getGroupId())))
+                .filter(rule -> Ec2Service.everyFilterContains(ruleIdFilters, rule.getSecurityGroupRuleId()))
+                .filter(rule -> Ec2Service.everyFilterContains(groupIdFilters, rule.getGroupId()))
                 .toList();
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeSecurityGroupRulesResponse", AwsNamespaces.EC2)
