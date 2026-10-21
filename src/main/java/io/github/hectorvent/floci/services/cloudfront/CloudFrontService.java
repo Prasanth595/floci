@@ -199,6 +199,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
         ensureAliasesAvailable(dist.getConfig(), null);
+        validateOriginSettings(dist.getConfig());
         validateOriginCustomHeaders(dist.getConfig());
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
@@ -233,6 +234,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
         ensureAliasesAvailable(updated.getConfig(), id);
+        validateOriginSettings(updated.getConfig());
         validateOriginCustomHeaders(updated.getConfig());
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
@@ -297,6 +299,58 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             return action.get();
         }
         return iamService.supplyWithServerCertificatesHeld(action);
+    }
+
+    private static void validateOriginSettings(DistributionConfig config) {
+        if (config == null || config.getOrigins() == null) {
+            return;
+        }
+        for (Origin origin : config.getOrigins()) {
+            requireRange("InvalidArgument", "ConnectionAttempts",
+                    origin.getConnectionAttempts(),
+                    CloudFrontOriginTimeouts.MIN_CONNECTION_ATTEMPTS,
+                    CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS, "");
+            requireRange("InvalidArgument", "ConnectionTimeout",
+                    origin.getConnectionTimeout(),
+                    CloudFrontOriginTimeouts.MIN_CONNECTION_TIMEOUT_SECONDS,
+                    CloudFrontOriginTimeouts.MAX_CONNECTION_TIMEOUT_SECONDS, " seconds");
+            Map<String, Object> customOriginConfig = origin.getCustomOriginConfig();
+            if (customOriginConfig == null) {
+                continue;
+            }
+            requireRange("InvalidOriginReadTimeout", "OriginReadTimeout",
+                    asIntOrNull(customOriginConfig.get("OriginReadTimeout")),
+                    CloudFrontOriginTimeouts.MIN_ORIGIN_READ_TIMEOUT_SECONDS,
+                    CloudFrontOriginTimeouts.MAX_ORIGIN_READ_TIMEOUT_SECONDS, " seconds");
+            requireRange("InvalidOriginKeepaliveTimeout", "OriginKeepaliveTimeout",
+                    asIntOrNull(customOriginConfig.get("OriginKeepaliveTimeout")),
+                    CloudFrontOriginTimeouts.MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS,
+                    CloudFrontOriginTimeouts.MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS, " seconds");
+        }
+    }
+
+    private static void requireRange(String errorCode, String field, Integer value,
+            int min, int max, String unit) {
+        if (value != null && (value < min || value > max)) {
+            throw new AwsException(
+                    errorCode,
+                    "The parameter " + field + " must be between " + min + " and " + max + unit + ".",
+                    400);
+        }
+    }
+
+    private static Integer asIntOrNull(Object value) {
+        if (value instanceof Integer intValue) {
+            return intValue;
+        }
+        if (value instanceof String text) {
+            try {
+                return Integer.valueOf(text);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static void validateOriginCustomHeaders(DistributionConfig config) {

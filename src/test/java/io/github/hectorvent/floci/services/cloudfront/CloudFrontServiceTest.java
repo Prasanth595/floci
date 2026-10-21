@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -708,6 +709,111 @@ class CloudFrontServiceTest {
                 existing.getEtag(), distributionWithOrigin("example.com", "E0000000000000", null)));
         assertNull(service.getDistribution(existing.getId()).getConfig().getOrigins().getFirst()
                 .getOriginAccessControlId());
+    }
+
+    @Test
+    void createDistributionRejectsConnectionAttemptsOutsideTheAwsRange() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        AwsException above = assertAws("InvalidArgument",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+                    origin.setConnectionAttempts(4);
+                }), Map.of()));
+        assertEquals("The parameter ConnectionAttempts must be between 1 and 3.", above.getMessage());
+        assertEquals(400, above.getHttpStatus());
+
+        assertAws("InvalidArgument",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+                    origin.setConnectionAttempts(0);
+                }), Map.of()));
+    }
+
+    @Test
+    void createDistributionRejectsConnectionTimeoutOutsideTheAwsRange() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        AwsException above = assertAws("InvalidArgument",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+                    origin.setConnectionTimeout(11);
+                }), Map.of()));
+        assertEquals("The parameter ConnectionTimeout must be between 1 and 10 seconds.", above.getMessage());
+        assertEquals(400, above.getHttpStatus());
+
+        AwsException below = assertAws("InvalidArgument",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+                    origin.setConnectionTimeout(0);
+                }), Map.of()));
+        assertEquals("The parameter ConnectionTimeout must be between 1 and 10 seconds.", below.getMessage());
+    }
+
+    @Test
+    void createDistributionRejectsOriginReadTimeoutOutsideTheAwsRange() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        AwsException error = assertAws("InvalidOriginReadTimeout",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+                    origin.getCustomOriginConfig().put("OriginReadTimeout", 121);
+                }), Map.of()));
+        assertEquals("The parameter OriginReadTimeout must be between 1 and 120 seconds.", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+
+        assertAws("InvalidOriginReadTimeout",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+                    origin.getCustomOriginConfig().put("OriginReadTimeout", 0);
+                }), Map.of()));
+    }
+
+    @Test
+    void createDistributionRejectsOriginKeepaliveTimeoutOutsideTheAwsRange() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        AwsException below = assertAws("InvalidOriginKeepaliveTimeout",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+                    origin.getCustomOriginConfig().put("OriginKeepaliveTimeout", 0);
+                }), Map.of()));
+        assertEquals("The parameter OriginKeepaliveTimeout must be between 1 and 300 seconds.", below.getMessage());
+        assertEquals(400, below.getHttpStatus());
+
+        assertAws("InvalidOriginKeepaliveTimeout",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+                    origin.getCustomOriginConfig().put("OriginKeepaliveTimeout", 301);
+                }), Map.of()));
+    }
+
+    @Test
+    void updateDistributionRejectsOriginSettingsOutsideTheAwsRange() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        Distribution existing = service.createDistribution(
+                distributionWithCustomOrigin(origin -> { }), Map.of());
+
+        AwsException error = assertAws("InvalidArgument", () -> service.updateDistribution(
+                existing.getId(), existing.getEtag(),
+                distributionWithCustomOrigin(origin -> origin.setConnectionAttempts(4))));
+        assertEquals("The parameter ConnectionAttempts must be between 1 and 3.", error.getMessage());
+
+        assertAws("InvalidOriginReadTimeout", () -> service.updateDistribution(
+                existing.getId(), existing.getEtag(),
+                distributionWithCustomOrigin(origin ->
+                        origin.getCustomOriginConfig().put("OriginReadTimeout", 121))));
+    }
+
+    @Test
+    void createDistributionAcceptsOriginSettingsWithinTheAwsRange() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        Distribution created = assertDoesNotThrow(() -> service.createDistribution(
+                distributionWithCustomOrigin(origin -> {
+                    origin.setConnectionAttempts(2);
+                    origin.setConnectionTimeout(5);
+                    origin.getCustomOriginConfig().put("OriginReadTimeout", 45);
+                    origin.getCustomOriginConfig().put("OriginKeepaliveTimeout", 300);
+                }), Map.of()));
+
+        Origin origin = created.getConfig().getOrigins().getFirst();
+        assertEquals(2, origin.getConnectionAttempts());
+        assertEquals(5, origin.getConnectionTimeout());
+        assertEquals(45, origin.getCustomOriginConfig().get("OriginReadTimeout"));
+        assertEquals(300, origin.getCustomOriginConfig().get("OriginKeepaliveTimeout"));
     }
 
     @Test
@@ -1489,6 +1595,25 @@ class CloudFrontServiceTest {
             behavior.setLambdaFunctionAssociations(List.of(Map.<String, Object>of("LambdaFunctionARN",
                     "arn:aws:lambda:us-east-1:000000000000:function:edge:1", "EventType", edgeEventType)));
         }
+        Distribution distribution = distribution(false, List.of());
+        distribution.getConfig().setOrigins(List.of(origin));
+        distribution.getConfig().setDefaultCacheBehavior(behavior);
+        return distribution;
+    }
+
+    /** A distribution with one custom (HTTP/HTTPS) origin, customized through {@code originCustomizer}. */
+    private static Distribution distributionWithCustomOrigin(Consumer<Origin> originCustomizer) {
+        Origin origin = new Origin();
+        origin.setId("o");
+        origin.setDomainName("example.com");
+        Map<String, Object> customOriginConfig = new LinkedHashMap<>();
+        customOriginConfig.put("HTTPPort", "80");
+        customOriginConfig.put("HTTPSPort", "443");
+        customOriginConfig.put("OriginProtocolPolicy", "https-only");
+        origin.setCustomOriginConfig(customOriginConfig);
+        originCustomizer.accept(origin);
+        DefaultCacheBehavior behavior = new DefaultCacheBehavior();
+        behavior.setTargetOriginId("o");
         Distribution distribution = distribution(false, List.of());
         distribution.getConfig().setOrigins(List.of(origin));
         distribution.getConfig().setDefaultCacheBehavior(behavior);

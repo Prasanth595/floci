@@ -445,38 +445,6 @@ class CloudFrontControllerTest {
     }
 
     @Test
-    void originReadTimeoutAboveTheAwsMaximumIsRejected() {
-        CloudFrontService service = mock(CloudFrontService.class);
-        CloudFrontController controller = new CloudFrontController(service);
-
-        String body = distributionConfigBody("").replace(
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
-                        + "<OriginReadTimeout>121</OriginReadTimeout></CustomOriginConfig>");
-
-        try (Response created = controller.createDistribution(null, body)) {
-            assertEquals(400, created.getStatus());
-            assertTrue(((String) created.getEntity()).contains("InvalidOriginReadTimeout"));
-        }
-    }
-
-    @Test
-    void originKeepaliveTimeoutOfZeroIsRejected() {
-        CloudFrontService service = mock(CloudFrontService.class);
-        CloudFrontController controller = new CloudFrontController(service);
-
-        String body = distributionConfigBody("").replace(
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
-                        + "<OriginKeepaliveTimeout>0</OriginKeepaliveTimeout></CustomOriginConfig>");
-
-        try (Response created = controller.createDistribution(null, body)) {
-            assertEquals(400, created.getStatus());
-            assertTrue(((String) created.getEntity()).contains("InvalidOriginKeepaliveTimeout"));
-        }
-    }
-
-    @Test
     void nonNumericOriginReadTimeoutIsRejected() {
         CloudFrontService service = mock(CloudFrontService.class);
         CloudFrontController controller = new CloudFrontController(service);
@@ -489,57 +457,6 @@ class CloudFrontControllerTest {
         try (Response created = controller.createDistribution(null, body)) {
             assertEquals(400, created.getStatus());
             assertTrue(((String) created.getEntity()).contains("InvalidOriginReadTimeout"));
-        }
-    }
-
-    @Test
-    void connectionTimeoutAboveTheAwsMaximumIsRejected() {
-        CloudFrontService service = mock(CloudFrontService.class);
-        CloudFrontController controller = new CloudFrontController(service);
-
-        String body = distributionConfigBody("").replace(
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
-                        + "<ConnectionTimeout>11</ConnectionTimeout>");
-
-        try (Response created = controller.createDistribution(null, body)) {
-            assertEquals(400, created.getStatus());
-            assertTrue(((String) created.getEntity()).contains("InvalidArgument"));
-            assertTrue(((String) created.getEntity())
-                    .contains("The parameter ConnectionTimeout must be between 1 and 10 seconds."));
-        }
-    }
-
-    @Test
-    void connectionTimeoutOfZeroIsRejected() {
-        CloudFrontService service = mock(CloudFrontService.class);
-        CloudFrontController controller = new CloudFrontController(service);
-
-        String body = distributionConfigBody("").replace(
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
-                        + "<ConnectionTimeout>0</ConnectionTimeout>");
-
-        try (Response created = controller.createDistribution(null, body)) {
-            assertEquals(400, created.getStatus());
-            assertTrue(((String) created.getEntity()).contains("InvalidArgument"));
-        }
-    }
-
-    @Test
-    void connectionAttemptsAboveTheAwsMaximumIsRejected() {
-        CloudFrontService service = mock(CloudFrontService.class);
-        CloudFrontController controller = new CloudFrontController(service);
-
-        String body = distributionConfigBody("").replace(
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
-                        + "<ConnectionAttempts>4</ConnectionAttempts>");
-
-        try (Response created = controller.createDistribution(null, body)) {
-            assertEquals(400, created.getStatus());
-            assertTrue(((String) created.getEntity())
-                    .contains("The parameter ConnectionAttempts must be between 1 and 3."));
         }
     }
 
