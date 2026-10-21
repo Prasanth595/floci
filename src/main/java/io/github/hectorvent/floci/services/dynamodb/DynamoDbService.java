@@ -1012,6 +1012,9 @@ public class DynamoDbService {
             }
             requireItemNestingWithinLimit(normalizedItem);
 
+            if (stagedItems == null) {
+                pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, existing);
+            }
             tableItems.put(itemKey, normalizedItem);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -1025,7 +1028,6 @@ public class DynamoDbService {
             // which is the ambient-account bug this commit exists to remove.
             String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
-                pointInTimeRecovery.recordItem(ownerAccountId, storageKey, table, itemKey, existing);
                 if (streamService != null) {
                     streamService.captureEvent(eventName, existing, item, table, region);
                 }
@@ -1111,6 +1113,10 @@ public class DynamoDbService {
                 evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
             }
 
+            JsonNode current = items.get(itemKey);
+            if (stagedItems == null && current != null) {
+                pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, current);
+            }
             JsonNode removed = items.remove(itemKey);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -1124,7 +1130,6 @@ public class DynamoDbService {
                 // which is the ambient-account bug this commit exists to remove.
                 String ownerAccountId = regionResolver.getAccountId();
                 Runnable streamEvent = () -> {
-                    pointInTimeRecovery.recordItem(ownerAccountId, storageKey, table, itemKey, removed);
                     if (streamService != null) {
                         streamService.captureEvent("REMOVE", removed, null, table, region);
                     }
@@ -1325,6 +1330,9 @@ public class DynamoDbService {
                 requireUpdatedItemWithinSizeLimit(item);
             }
 
+            if (stagedItems == null) {
+                pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, existing);
+            }
             items.put(itemKey, item);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -1337,7 +1345,6 @@ public class DynamoDbService {
             // which is the ambient-account bug this commit exists to remove.
             String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
-                pointInTimeRecovery.recordItem(ownerAccountId, storageKey, table, itemKey, existing);
                 if (streamService != null) {
                     streamService.captureEvent("MODIFY", existing, item, table, region);
                 }
@@ -1916,6 +1923,12 @@ public class DynamoDbService {
                         scopedItemsKey(participant.storageKey()), ignored -> new ConcurrentSkipListMap<>());
                 ConcurrentSkipListMap<String, JsonNode> stagedTable = staged.get(participant.storageKey());
                 JsonNode value = stagedTable.get(participant.itemKey());
+                JsonNode before = live.get(participant.itemKey());
+                if (value != before) {
+                    tableStore.get(participant.storageKey()).ifPresent(participantTable -> pointInTimeRecovery.recordItem(
+                            regionResolver.getAccountId(), participant.storageKey(), participantTable,
+                            participant.itemKey(), before));
+                }
                 if (value == null) {
                     live.remove(participant.itemKey());
                 } else {
@@ -2916,13 +2929,13 @@ public class DynamoDbService {
                     if (current == null || !isExpired(current, scan.table())) {
                         return null;
                     }
+                    pointInTimeRecovery.recordItem(scan.accountId(), scan.storageKey(), scan.table(), itemKey, current);
                     return items.remove(itemKey);
                 });
                 if (removed == null) {
                     continue;
                 }
                 deletedForTable++;
-                pointInTimeRecovery.recordItem(scan.accountId(), scan.storageKey(), scan.table(), itemKey, removed);
                 if (streamService != null) {
                     streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region(), true);
                 }

@@ -85,7 +85,10 @@ final class DynamoDbPointInTimeRecovery {
         return new RestoreWindow(earliest, later(earliest, now.minus(latestLag)));
     }
 
-    /** An item changed after {@code time} takes the value that its first change after it replaced. */
+    /**
+     * An item changed after {@code time} takes the value that its first change after it replaced.
+     * Writers record a change before they write the item, so the live items are copied first.
+     */
     List<JsonNode> itemsAt(String accountId, String storageKey, Map<String, JsonNode> liveItems, Instant time) {
         Map<String, JsonNode> items = new HashMap<>(liveItems);
         Set<String> undone = new HashSet<>();
