@@ -64,7 +64,7 @@ final class Ec2PuttyKeys {
                 byte[] privateBlob = strings(key.getPrivateExponent().toByteArray(), key.getPrimeP().toByteArray(),
                         key.getPrimeQ().toByteArray(), key.getCrtCoefficient().toByteArray());
                 yield new Ec2KeyMaterial.Generated(file(algorithm, comment, publicBlob, privateBlob),
-                        pem.openSshPublicKey(), HexFormat.of().withDelimiter(":").formatHex(Digests.sha1(key.getEncoded())));
+                        pem.openSshPublicKey(), Ec2KeyMaterial.colonHex(Digests.sha1(key.getEncoded())));
             }
             // PuTTY's ssh-ed25519 private field: the 32-byte private key, without OpenSSH's copy of the public key.
             case "ssh-ed25519" -> new Ec2KeyMaterial.Generated(

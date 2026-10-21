@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
@@ -8,6 +9,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
 import java.io.StringReader;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
@@ -27,12 +29,18 @@ import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ECDSA_P
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_BLOB;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_FINGERPRINT;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.PUTTY_TEST_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.PUTTY_TEST_PUBLIC_KEY;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_FINGERPRINT;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_KEY;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.openSshEd25519Key;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.sshEd25519Blob;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -590,5 +598,48 @@ class Ec2KeyMaterialTest {
         byte[] field = new byte[blob.getInt()];
         blob.get(field);
         return field;
+    }
+
+    @Test
+    void theFingerprintIsSshKeygensSha256WithThePaddingAwsKeeps() {
+        // Derived outside this code: "ssh-keygen -l -f" on the public key prints
+        //   256 SHA256:Mv99xcHfjQuHbqmIs0Qx5I9kr7lX7Yw97eh4jZtoS70 no comment (ED25519)
+        Ec2KeyMaterial.Generated key = Ec2KeyMaterial.ed25519(new Ed25519PrivateKeyParameters(PUTTY_TEST_KEY, 0));
+
+        assertEquals("Mv99xcHfjQuHbqmIs0Qx5I9kr7lX7Yw97eh4jZtoS70=", key.fingerprint());
+        assertEquals(PUTTY_TEST_PUBLIC_KEY, key.openSshPublicKey());
+    }
+
+    @Test
+    void thePrivateKeyIsAnOpenSshKeyFileOfTheSameKey() throws IOException {
+        Ec2KeyMaterial.Generated key = Ec2KeyMaterial.ed25519(new Ed25519PrivateKeyParameters(PUTTY_TEST_KEY, 0));
+
+        List<String> lines = key.privateKeyPem().lines().toList();
+        assertEquals("-----BEGIN OPENSSH PRIVATE KEY-----", lines.getFirst());
+        assertEquals("-----END OPENSSH PRIVATE KEY-----", lines.getLast());
+        assertTrue(key.privateKeyPem().endsWith("\n"));
+        // ssh-keygen's line length, though OpenSSH reads any
+        lines.subList(1, lines.size() - 2).forEach(line -> assertEquals(70, line.length(), line));
+        assertArrayEquals(PUTTY_TEST_KEY, openSshEd25519Key(key.privateKeyPem()).getEncoded());
+    }
+
+    @Test
+    void everyGeneratedKeyIsNewAndMatchesItsPublicHalf() throws IOException {
+        Ec2KeyMaterial.Generated first = Ec2KeyMaterial.generate("ed25519", "pem", "first");
+        Ec2KeyMaterial.Generated second = Ec2KeyMaterial.generate("ed25519", "pem", "second");
+
+        assertNotEquals(first.openSshPublicKey(), second.openSshPublicKey());
+        assertNotEquals(first.fingerprint(), second.fingerprint());
+        for (Ec2KeyMaterial.Generated key : List.of(first, second)) {
+            byte[] blob = sshEd25519Blob(openSshEd25519Key(key.privateKeyPem()));
+            assertEquals("ssh-ed25519 " + Base64.getEncoder().encodeToString(blob), key.openSshPublicKey());
+        }
+    }
+
+    @Test
+    void aTypeOrFormatAwsDoesNotOfferIsNotGenerated() {
+        // The request is refused before this point; reaching it with another value is a bug, not a default.
+        assertThrows(IllegalArgumentException.class, () -> Ec2KeyMaterial.generate("ecdsa", "pem", "name"));
+        assertThrows(IllegalArgumentException.class, () -> Ec2KeyMaterial.generate("rsa", "der", "name"));
     }
 }

@@ -12,6 +12,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.util.HexFormat;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.PUTTY_TEST_KEY;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -20,7 +21,7 @@ class Ec2PuttyKeysTest {
 
     /**
      * The unencrypted version 2 file PuTTY's own test suite (test/cryptsuite.py, testPPKLoadSave)
-     * checks its writer against, byte for byte, for {@link Ec2Ed25519KeysTest#PUTTY_TEST_KEY}.
+     * checks its writer against, byte for byte, for {@link Ec2KeyPairFixtures#PUTTY_TEST_KEY}.
      */
     private static final String PUTTY_TEST_FILE = """
             PuTTY-User-Key-File-2: ssh-ed25519
@@ -36,8 +37,7 @@ class Ec2PuttyKeysTest {
 
     @Test
     void anEd25519KeyIsWrittenExactlyAsPuttyWritesIt() {
-        Ec2KeyMaterial.Generated pem = Ec2Ed25519Keys.of(
-                new Ed25519PrivateKeyParameters(Ec2Ed25519KeysTest.PUTTY_TEST_KEY, 0));
+        Ec2KeyMaterial.Generated pem = Ec2KeyMaterial.ed25519(new Ed25519PrivateKeyParameters(PUTTY_TEST_KEY, 0));
 
         Ec2KeyMaterial.Generated ppk = Ec2PuttyKeys.of(pem, "ed25519-key-20200105");
 

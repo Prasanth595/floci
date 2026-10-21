@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.HexFormat;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -49,6 +50,15 @@ final class Ec2KeyPairFixtures {
      * {@code ssh-keygen -l} prints it as {@code SHA256:UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk}.
      */
     static final String ED25519_FINGERPRINT = "UOyzahv0Ty520U89wfCvKdTlp2TbtpmnlpJHPW3MbMk=";
+
+    /**
+     * The throwaway ED25519 key of the version 2 key file in PuTTY's test suite (test/cryptsuite.py,
+     * testPPKLoadSave): its 32-byte private key, and its public key line.
+     */
+    static final byte[] PUTTY_TEST_KEY =
+            HexFormat.of().parseHex("6bef22997c8f2aa7f17b9f930eafdc59c41ad5c5dca5b0e7900fdff006101a58");
+    static final String PUTTY_TEST_PUBLIC_KEY =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHJCszOHaI9X/yGLtjn22f0hO6VPMQDVtctkym6FJH1W";
 
     /** A throwaway DSA key from {@code ssh-keygen -t dsa}. */
     static final String DSA_KEY = "ssh-dss AAAAB3NzaC1kc3MAAACBAOFToDsRbL7Z8AqAZOKXROc1Cy5SA1ZgM5odRC57"
