@@ -2293,16 +2293,7 @@ class LambdaServiceTest {
     @Test
     void anS3PackageOverTheCompressedLimitGetsTheExtractionError() {
         S3Service s3 = mock(S3Service.class);
-        StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        LambdaFunctionStore functionStore = new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>());
-        LambdaAliasStore aliasStore = new LambdaAliasStore(storageFactory);
-        LambdaService s3Backed = new LambdaService(functionStore, null, new LambdaConcurrencyLimiter(),
-                mock(WarmPool.class), new CodeStore(Path.of("target/test-data/lambda-code")), new ZipExtractor(), null,
-                new RegionResolver(REGION, "000000000000"), null, aliasStore,
-                new LambdaTargetResolver(functionStore, aliasStore), s3, null, null, null, null,
-                storageFactory, null, null, null, null, new ObjectMapper());
+        LambdaService s3Backed = s3BackedService(s3, mock(WarmPool.class), new ZipExtractor());
         long size = 250L * 1024 * 1024 + 1;
         when(s3.openObject("code-bucket", "function.zip", null)).thenReturn(new S3Service.ObjectRead(
                 new S3Object("code-bucket", "function.zip", size, "application/zip", "\"etag\""),
@@ -2317,6 +2308,19 @@ class LambdaServiceTest {
                 + size, e.getMessage());
     }
 
+    private static LambdaService s3BackedService(S3Service s3, WarmPool warmPool, ZipExtractor extractor) {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        LambdaFunctionStore functionStore = new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>());
+        LambdaAliasStore aliasStore = new LambdaAliasStore(storageFactory);
+        return new LambdaService(functionStore, null, new LambdaConcurrencyLimiter(),
+                warmPool, new CodeStore(Path.of("target/test-data/lambda-code")), extractor, null,
+                new RegionResolver(REGION, "000000000000"), null, aliasStore,
+                new LambdaTargetResolver(functionStore, aliasStore), s3, null, null, null, null,
+                storageFactory, null, null, null, null, new ObjectMapper());
+    }
+
     /** What S3 in memory mode returns: the body is already in the heap. */
     private static S3Service.ObjectRead heldObject(String zipBase64) {
         byte[] data = Base64.getDecoder().decode(zipBase64);
@@ -2329,16 +2333,7 @@ class LambdaServiceTest {
         S3Service s3 = mock(S3Service.class);
         WarmPool warmPool = mock(WarmPool.class);
         ZipExtractor extractor = spy(new ZipExtractor());
-        StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        LambdaFunctionStore functionStore = new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>());
-        LambdaAliasStore aliasStore = new LambdaAliasStore(storageFactory);
-        LambdaService syncingService = new LambdaService(functionStore, null, new LambdaConcurrencyLimiter(),
-                warmPool, new CodeStore(Path.of("target/test-data/lambda-code")), extractor, null,
-                new RegionResolver(REGION, "000000000000"), null, aliasStore,
-                new LambdaTargetResolver(functionStore, aliasStore), s3, null, null, null, null,
-                storageFactory, null, null, null, null, new ObjectMapper());
+        LambdaService syncingService = s3BackedService(s3, warmPool, extractor);
         String name = "reactive-snapshot-" + UUID.randomUUID();
         when(s3.openObject("code-bucket", "function.zip", null))
                 .thenReturn(heldObject(zipWithBody("v1")))

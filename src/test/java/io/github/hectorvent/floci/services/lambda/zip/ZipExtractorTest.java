@@ -36,7 +36,7 @@ class ZipExtractorTest {
     }
 
     /** Build a ZIP whose entry names use the given separator, as PowerShell does. */
-    private static byte[] zipWith(String entryName, String content) throws IOException {
+    static byte[] zipWith(String entryName, String content) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (ZipOutputStream zos = new ZipOutputStream(baos)) {
             zos.putNextEntry(new ZipEntry(entryName));
