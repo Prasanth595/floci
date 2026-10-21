@@ -16,9 +16,12 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
@@ -30,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -54,10 +58,14 @@ class LambdaWebServiceTest {
     }
 
     private LambdaWebService service(StorageFactory storage, String baseUrl) {
+        return service(storage, baseUrl, null);
+    }
+
+    private LambdaWebService service(StorageFactory storage, String baseUrl, S3Service s3Service) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
-        LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config, null,
-                mapper, null);
+        LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config,
+                s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null);
         service.initializeStorage();
         return service;
     }
@@ -585,6 +593,51 @@ class LambdaWebServiceTest {
         assertTrue(service.endpointDomain("nope.001.lambda-web.us-east-1.floci.example").isEmpty());
         service.deleteEndpoint(REGION, "app", "dev");
         assertTrue(service.endpointDomain(host).isEmpty(), "a deleted endpoint's domain is gone");
+    }
+
+    @Test
+    void eachRevisionKeepsTheCodeTheObjectHadWhenItWasCreated() {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
+        when(s3.getObject("code", "app.zip", null)).thenReturn(object("first"));
+        String first = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
+        when(s3.getObject("code", "app.zip", null)).thenReturn(object("second"));
+        String second = service.createRevision(REGION, "app", revisionConfig(30)).revisionId;
+
+        assertEquals("first", new String(code.read(ACCOUNT_ID, REGION, "app", first), StandardCharsets.UTF_8));
+        assertEquals("second", new String(code.read(ACCOUNT_ID, REGION, "app", second), StandardCharsets.UTF_8));
+        service.deleteRevision(REGION, "app", first);
+        assertNull(code.read(ACCOUNT_ID, REGION, "app", first));
+        service.deleteFunction(REGION, "app");
+        assertNull(code.read(ACCOUNT_ID, REGION, "app", second));
+    }
+
+    @Test
+    void aVersionThatCannotBeReadIsNamedInTheError() {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        ObjectNode pinned = createRequest("app");
+        ((ObjectNode) pinned.path("revisionConfig").path("buildConfig").path("codeConfig").path("s3Object"))
+                .put("versionId", "v1");
+        when(s3.getObject("code", "app.zip", "v1"))
+                .thenThrow(new AwsException("NoSuchVersion", "The specified version does not exist.", 404));
+        assertEquals("The specified S3 object does not exist: s3://code/app.zip (versionId=v1). Verify the object exists"
+                + " and the versionId is correct.", message(() -> service.createFunction(REGION, pinned)));
+
+        doThrow(new AwsException("InvalidArgument", "Invalid version id specified", 400))
+                .when(s3).getObject("code", "app.zip", "v1");
+        assertEquals("The S3 object s3://code/app.zip (versionId=v1) is inaccessible. Verify the request parameters and"
+                + " permissions are correct.", message(() -> service.createFunction(REGION, pinned)));
+
+        when(s3.getObject("code", "app.zip", null))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+        assertEquals("The specified S3 object does not exist: s3://code/app.zip. Verify the object exists in the bucket.",
+                message(() -> service.createFunction(REGION, createRequest("app"))));
+    }
+
+    private static S3Object object(String data) {
+        return new S3Object("code", "app.zip", data.getBytes(StandardCharsets.UTF_8), "application/zip");
     }
 
     private static final class MemoryStorageFactory extends StorageFactory {

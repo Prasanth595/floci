@@ -262,6 +262,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private final ImageResolver imageResolver;
     private final EcrRegistryManager ecrRegistryManager;
     private final S3Service s3Service;
+    private final LambdaWebCode code;
     private final ZipExtractor zipExtractor;
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
@@ -281,7 +282,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                                        ContainerLifecycleManager lifecycleManager,
                                        @StreamingDocker DockerClient streamingDocker, ImageResolver imageResolver,
                                        EcrRegistryManager ecrRegistryManager, S3Service s3Service,
-                                       ZipExtractor zipExtractor, LaunchedContainerAwsEnv awsEnv,
+                                       LambdaWebCode code, ZipExtractor zipExtractor, LaunchedContainerAwsEnv awsEnv,
                                        LambdaExecutionRoleCredentials executionRoleCredentials, LambdaWebLogs logs,
                                        LambdaWebMetrics metrics) {
         this.config = config;
@@ -291,6 +292,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         this.imageResolver = imageResolver;
         this.ecrRegistryManager = ecrRegistryManager;
         this.s3Service = s3Service;
+        this.code = code;
         this.zipExtractor = zipExtractor;
         this.awsEnv = awsEnv;
         this.executionRoleCredentials = executionRoleCredentials;
@@ -684,8 +686,11 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private void copyCode(String containerId, String accountId, String region, WebFunction fn,
                           WebFunctionRevision revision) {
         WebFunctionRevision.BuildConfig build = revision.buildConfig;
-        byte[] zip = RequestScopes.callAs(accountId, region,
-                () -> s3Service.getObject(build.bucket, build.key, build.versionId)).getData();
+        byte[] zip = code.read(accountId, region, fn.functionName, revision.revisionId);
+        if (zip == null) {
+            zip = RequestScopes.callAs(accountId, region,
+                    () -> s3Service.getObject(build.bucket, build.key, build.versionId)).getData();
+        }
         Path dir;
         try {
             dir = Files.createTempDirectory("floci-lambda-web-");
