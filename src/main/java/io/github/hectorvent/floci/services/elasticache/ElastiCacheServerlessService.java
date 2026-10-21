@@ -308,6 +308,22 @@ public class ElastiCacheServerlessService implements Resettable {
         }
     }
 
+    public Map<String, String> getTags(String name) {
+        synchronized (lockFor(name)) {
+            return requireCache(name).getTags();
+        }
+    }
+
+    public Map<String, String> updateTags(String name, Map<String, String> additions, List<String> removals) {
+        synchronized (lockFor(name)) {
+            ServerlessCache cache = requireCache(name);
+            Map<String, String> tags = ElastiCacheService.mergedTags(cache.getTags(), additions, removals);
+            cache.setTags(tags);
+            caches.put(key(name), cache);
+            return tags;
+        }
+    }
+
     private ServerlessCache requireCache(String name) {
         return caches.get(key(name)).orElseThrow(() -> new AwsException("ServerlessCacheNotFoundFault",
                 "Serverless cache " + name + " not found.", 404));

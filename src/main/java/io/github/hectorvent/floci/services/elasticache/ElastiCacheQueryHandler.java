@@ -93,7 +93,7 @@ public class ElastiCacheQueryHandler {
             case "ModifyCacheParameterGroup" -> handleModifyCacheParameterGroup(params);
             case "DescribeCacheParameters" -> handleDescribeCacheParameters(params);
             case "DeleteCacheParameterGroup" -> handleDeleteCacheParameterGroup(params);
-            case "ListTagsForResource" -> handleListTagsForResource(params);
+            case "ListTagsForResource", "AddTagsToResource", "RemoveTagsFromResource" -> handleTags(action, params);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.EC, 400);
         };
@@ -273,7 +273,7 @@ public class ElastiCacheQueryHandler {
             UserAuthentication auth = resolveUserAuthentication(params);
             AuthMode authMode = auth != null ? auth.mode() : AuthMode.NO_AUTH;
             List<String> passwords = auth != null ? auth.passwords() : List.of();
-            ElastiCacheUser user = service.createUser(userId, userName, authMode, passwords, accessString, engine);
+            ElastiCacheUser user = service.createUser(userId, userName, authMode, passwords, accessString, engine, parseTags(params));
             return Response.ok(AwsQueryResponse.envelope("CreateUser", AwsNamespaces.EC, userXml(user))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
@@ -339,7 +339,7 @@ public class ElastiCacheQueryHandler {
     private Response handleCreateUserGroup(MultivaluedMap<String, String> params, String region) {
         try {
             ElastiCacheUserGroup userGroup = service.createUserGroup(params.getFirst("UserGroupId"),
-                    params.getFirst("Engine"), extractMemberList(params, "UserIds.member."), region);
+                    params.getFirst("Engine"), extractMemberList(params, "UserIds.member."), region, parseTags(params));
             return Response.ok(AwsQueryResponse.envelope("CreateUserGroup", AwsNamespaces.EC,
                     userGroupXml(userGroup))).build();
         } catch (AwsException e) {
@@ -739,11 +739,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         }
     }
 
-    /**
-     * Tags for a resource ARN. Only parameter groups carry tags in floci, so any other ARN reports
-     * none — which is what floci knows, rather than a guess at what AWS would hold.
-     */
-    private Response handleListTagsForResource(MultivaluedMap<String, String> params) {
+    private Response handleTags(String action, MultivaluedMap<String, String> params) {
         try {
             String resourceName = params.getFirst("ResourceName");
             String[] arn = resourceName == null ? new String[0] : resourceName.split(":", -1);
@@ -793,7 +789,10 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                                 "Cache cluster " + arn[6] + " not found.", 404);
                     }
                     tags = cluster.getTags();
-                } else if (service.listMemberCacheClusters(arn[6]).isEmpty()) {
+                } else if (!service.listMemberCacheClusters(arn[6]).isEmpty()) {
+                    ReplicationGroup group = service.listMemberCacheClusters(arn[6]).getFirst().group();
+                    tags = service.memberTags(group, arn[6]);
+                } else {
                     CacheCluster mcCluster = memcachedService.getCacheCluster(arn[6]);
                     if (mcCluster.getArn() != null && !mcCluster.getArn().equalsIgnoreCase(resourceName)) {
                         throw new AwsException("CacheClusterNotFound",
@@ -811,13 +810,38 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                                 arn[6] + " is not present", 404))
                         .getTags();
             }
+            if ("user".equals(arn[5])) {
+                tags = service.getUser(arn[6]).getTags();
+            } else if ("usergroup".equals(arn[5])) {
+                tags = service.getUserGroup(arn[6]).getTags();
+            }
+            if (!List.of("user", "usergroup", "replicationgroup", "cluster", "subnetgroup",
+                    "parametergroup", "serverlesscache").contains(arn[5])) {
+                throw new AwsException("InvalidARN", "Unsupported ElastiCache resource type.", 400);
+            }
+            if (!"ListTagsForResource".equals(action)) {
+                Map<String, String> additions = "AddTagsToResource".equals(action) ? parseTags(params) : Map.of();
+                List<String> removals = "RemoveTagsFromResource".equals(action)
+                        ? extractMemberList(params, "TagKeys.member.") : List.of();
+                if (removals.isEmpty() && "RemoveTagsFromResource".equals(action)) {
+                    removals = extractMemberList(params, "TagKeys.TagKey.");
+                }
+                if (additions.isEmpty() && removals.isEmpty()) {
+                    throw new AwsException("InvalidParameterValue", "Tags or TagKeys must not be empty.", 400);
+                }
+                if ("serverlesscache".equals(arn[5])) {
+                    tags = serverlessHandler.updateTags(arn[6], additions, removals);
+                } else {
+                    tags = service.updateTags(arn[5], arn[6], additions, removals);
+                }
+            }
             XmlBuilder xml = new XmlBuilder().start("TagList");
             tags.forEach((key, value) -> xml.start("Tag")
                     .elem("Key", key)
                     .elem("Value", value)
                     .end("Tag"));
             xml.end("TagList");
-            return Response.ok(AwsQueryResponse.envelope("ListTagsForResource", AwsNamespaces.EC, xml.build())).build();
+            return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.EC, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }

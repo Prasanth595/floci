@@ -6,6 +6,17 @@
 
 Floci manages real Valkey/Redis Docker containers and proxies TCP connections to them. This means any Redis client works — including IAM authentication.
 
+## Resource tags
+
+`ListTagsForResource`, `AddTagsToResource` and `RemoveTagsFromResource` support
+users, user groups, replication groups, their member cache clusters, standalone
+Redis/Valkey and Memcached clusters, serverless caches, parameter groups and subnet groups.
+User and user-group creation tags are persisted. Tag keys are case-sensitive; adding
+an existing key replaces its value. Mutations return the resulting `TagList`.
+Replication-group changes propagate to its member clusters, which can also carry
+individual tags. Removing an absent key returns `TagNotFound`; a rejected mutation
+does not partially update that resource. Resources can have at most 50 tags.
+
 ## Supported Management Actions
 
 <!-- floci:actions:start -->
@@ -41,6 +52,8 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `DescribeCacheParameters` | List the parameters set on a group |
 | `DeleteCacheParameterGroup` | Delete a cache parameter group |
 | `ListTagsForResource` | Read stored tags for supported ElastiCache resource ARNs |
+| `AddTagsToResource` | - |
+| `RemoveTagsFromResource` | - |
 <!-- floci:actions:end -->
 
 ### Serverless caches and user groups

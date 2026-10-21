@@ -38,6 +38,7 @@ public class ReplicationGroup {
     private int snapshotRetentionLimit;
     private String snapshotWindow;
     private Map<String, String> tags = new LinkedHashMap<>();
+    private Map<String, Map<String, String>> memberTags = new LinkedHashMap<>();
     private boolean clusterEnabled;
     private int numNodeGroups = 1;
     private int replicasPerNodeGroup;
@@ -136,6 +137,11 @@ public class ReplicationGroup {
 
     public String getSnapshotWindow() { return snapshotWindow; }
     public void setSnapshotWindow(String snapshotWindow) { this.snapshotWindow = snapshotWindow; }
+
+    public Map<String, Map<String, String>> getMemberTags() { return memberTags; }
+    public void setMemberTags(Map<String, Map<String, String>> memberTags) {
+        this.memberTags = memberTags == null ? new LinkedHashMap<>() : memberTags;
+    }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags == null ? new LinkedHashMap<>() : tags; }

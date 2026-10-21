@@ -58,6 +58,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
@@ -1848,6 +1850,12 @@ public class ElastiCacheService implements ResourceProvider {
 
     public ElastiCacheUser createUser(String userId, String userName, AuthMode authMode,
                                       List<String> passwords, String accessString, String engine) {
+        return createUser(userId, userName, authMode, passwords, accessString, engine, Map.of());
+    }
+
+    public ElastiCacheUser createUser(String userId, String userName, AuthMode authMode,
+                                      List<String> passwords, String accessString, String engine,
+                                      Map<String, String> tags) {
         if (users.get(userId).isPresent()) {
             throw new AwsException("UserAlreadyExists",
                     "User " + userId + " already exists.", 400);
@@ -1863,9 +1871,85 @@ public class ElastiCacheService implements ResourceProvider {
                 normalizedEngine, "active", Instant.now());
         user.setArn(regionResolver.buildArn("elasticache", regionResolver.getRegion(), "user:" + userId));
 
+        user.setTags(tags);
         users.put(userId, user);
         LOG.infov("ElastiCache user {0} created with authMode={1}", userId, authMode);
         return user;
+    }
+
+    public Map<String, String> updateTags(String type, String id, Map<String, String> additions,
+                                          List<String> removals) {
+        return switch (type) {
+            case "user" -> updateTags(users, id, "UserNotFound", ElastiCacheUser::getTags,
+                    ElastiCacheUser::setTags, additions, removals);
+            case "usergroup" -> updateTags(userGroups, normalizeUserGroupId(id), "UserGroupNotFound",
+                    ElastiCacheUserGroup::getTags, ElastiCacheUserGroup::setTags, additions, removals);
+            case "replicationgroup" -> {
+                ReplicationGroup group = getReplicationGroup(id);
+                synchronized (group) {
+                    Map<String, String> tags = mergedTags(group.getTags(), additions, removals);
+                    Map<String, Map<String, String>> members = new LinkedHashMap<>();
+                    group.getMemberTags().forEach((member, current) -> members.put(member,
+                            mergedTags(current, additions, removals.stream().filter(current::containsKey).toList())));
+                    group.setTags(tags);
+                    group.setMemberTags(members);
+                    groups.put(id, group);
+                    yield tags;
+                }
+            }
+            case "cluster" -> {
+                List<MemberCacheCluster> members = listMemberCacheClusters(id);
+                if (!members.isEmpty()) {
+                    ReplicationGroup group = members.getFirst().group();
+                    synchronized (group) {
+                        Map<String, String> tags = mergedTags(memberTags(group, id), additions, removals);
+                        group.getMemberTags().put(id, tags);
+                        groups.put(group.getReplicationGroupId(), group);
+                        yield tags;
+                    }
+                }
+                yield updateTags(cacheClusters.get(id).isPresent() ? cacheClusters : memcachedClusters,
+                        id, "CacheClusterNotFound", CacheCluster::getTags, CacheCluster::setTags, additions, removals);
+            }
+            case "subnetgroup" -> updateTags(subnetGroups, id, "CacheSubnetGroupNotFoundFault",
+                    CacheSubnetGroup::getTags, CacheSubnetGroup::setTags, additions, removals);
+            case "parametergroup" -> updateTags(parameterGroups, id, "CacheParameterGroupNotFound",
+                    CacheParameterGroup::getTags, CacheParameterGroup::setTags, additions, removals);
+            default -> throw new AwsException("InvalidARN", "Unsupported ElastiCache resource type.", 400);
+        };
+    }
+
+    private static <T> Map<String, String> updateTags(StorageBackend<String, T> store, String id,
+                                                     String notFound, Function<T, Map<String, String>> read,
+                                                     BiConsumer<T, Map<String, String>> write,
+                                                     Map<String, String> additions, List<String> removals) {
+        T resource = store.get(id).orElseThrow(() -> new AwsException(notFound, id + " not found.", 404));
+        synchronized (resource) {
+            Map<String, String> tags = mergedTags(read.apply(resource), additions, removals);
+            write.accept(resource, tags);
+            store.put(id, resource);
+            return tags;
+        }
+    }
+
+    static Map<String, String> mergedTags(Map<String, String> current, Map<String, String> additions,
+                                          List<String> removals) {
+        Map<String, String> tags = new LinkedHashMap<>(current);
+        tags.putAll(additions);
+        for (String key : removals) {
+            if (!tags.containsKey(key)) {
+                throw new AwsException("TagNotFound", "Tag " + key + " not found.", 404);
+            }
+        }
+        removals.forEach(tags::remove);
+        if (tags.size() > 50) {
+            throw new AwsException("TagQuotaPerResourceExceeded", "A resource may have at most 50 tags.", 400);
+        }
+        return tags;
+    }
+
+    public Map<String, String> memberTags(ReplicationGroup group, String clusterId) {
+        return group.getMemberTags().getOrDefault(clusterId, group.getTags());
     }
 
     public ElastiCacheUser getUser(String userId) {
@@ -1958,6 +2042,11 @@ public class ElastiCacheService implements ResourceProvider {
 
     public ElastiCacheUserGroup createUserGroup(String userGroupId, String engine, List<String> userIds,
                                                 String region) {
+        return createUserGroup(userGroupId, engine, userIds, region, Map.of());
+    }
+
+    public ElastiCacheUserGroup createUserGroup(String userGroupId, String engine, List<String> userIds,
+                                                String region, Map<String, String> tags) {
         String id = normalizeUserGroupId(userGroupId);
         // Engine is required on AWS; a missing value defaults to redis as CreateUser does.
         String normalizedEngine = (engine == null || engine.isBlank()) ? "redis" : normalizeEngine(engine);
@@ -1971,6 +2060,7 @@ public class ElastiCacheService implements ResourceProvider {
             ElastiCacheUserGroup userGroup = new ElastiCacheUserGroup(
                     id, normalizedEngine, members, "active", Instant.now());
             userGroup.setArn(regionResolver.buildArn("elasticache", region, "usergroup:" + id));
+            userGroup.setTags(tags);
             userGroups.put(id, userGroup);
             LOG.infov("ElastiCache user group {0} created with {1} users", id, members.size());
             return userGroup;
