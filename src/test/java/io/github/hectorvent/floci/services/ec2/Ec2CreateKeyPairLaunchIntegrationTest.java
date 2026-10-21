@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.path.xml.XmlPath;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -16,6 +17,7 @@ import java.util.UUID;
 
 import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.REGION;
 import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.createKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.deleteKeyPair;
 import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.openSshEd25519Key;
 import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.sshEd25519Blob;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -55,17 +57,26 @@ class Ec2CreateKeyPairLaunchIntegrationTest {
     @ValueSource(strings = {"pem", "ppk"})
     void anEd25519KeyPairIsLaunchedWithThePublicHalfOfTheKeyItReturned(String keyFormat) throws Exception {
         String name = "launch-key-" + UUID.randomUUID();
-        String material = createKeyPair(name, "ed25519", keyFormat)
-                .statusCode(200).extract().path("CreateKeyPairResponse.keyMaterial");
-        byte[] blob = "pem".equals(keyFormat)
-                ? sshEd25519Blob(openSshEd25519Key(material))
-                : PuttyKeyFile.parse(material).publicBlob();
+        XmlPath created = createKeyPair(name, "ed25519", keyFormat).statusCode(200).extract().xmlPath();
+        Instance instance = null;
+        try {
+            String material = created.getString("CreateKeyPairResponse.keyMaterial");
+            byte[] blob = "pem".equals(keyFormat)
+                    ? sshEd25519Blob(openSshEd25519Key(material))
+                    : PuttyKeyFile.parse(material).publicBlob();
 
-        Instance instance = service.runInstances(REGION, "ami-amazonlinux2023", "t3.micro", 1, 1, name,
-                List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+            instance = service.runInstances(REGION, "ami-amazonlinux2023", "t3.micro", 1, 1, name,
+                    List.of(), null, null, List.of(), null, null).getInstances().getFirst();
 
-        ArgumentCaptor<String> injected = ArgumentCaptor.forClass(String.class);
-        verify(containerManager).launch(eq(instance), any(), injected.capture(), anyString(), any(), any(), any());
-        assertEquals("ssh-ed25519 " + Base64.getEncoder().encodeToString(blob), injected.getValue());
+            ArgumentCaptor<String> injected = ArgumentCaptor.forClass(String.class);
+            verify(containerManager).launch(eq(instance), any(), injected.capture(), anyString(), any(), any(), any());
+            assertEquals("ssh-ed25519 " + Base64.getEncoder().encodeToString(blob), injected.getValue());
+        } finally {
+            // The application is shared with another class, so what this one made goes again.
+            if (instance != null) {
+                service.terminateInstances(REGION, List.of(instance.getInstanceId()));
+            }
+            deleteKeyPair(created.getString("CreateKeyPairResponse.keyPairId"));
+        }
     }
 }

@@ -3418,7 +3418,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleCreateKeyPair(MultivaluedMap<String, String> p, String region) {
-        // AWS answers DryRun before it checks the name, the key type or the key format.
+        // AWS answers DryRun before it checks the name or the key type.
         checkDryRun(p);
         String keyName = requireKeyName(p);
         KeyPair kp = service.createKeyPair(region, keyName, p.getFirst("KeyType"), p.getFirst("KeyFormat"));

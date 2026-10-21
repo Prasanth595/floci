@@ -68,20 +68,24 @@ class Ec2CreateKeyPairIntegrationTest {
         // AWS fingerprints an ED25519 key the same way whether it created the key or was given it.
         String name = uniqueName();
         XmlPath created = createKeyPair(name, "ed25519", null).statusCode(200).extract().xmlPath();
-        String id = created.getString("CreateKeyPairResponse.keyPairId");
-        String publicKey = "ssh-ed25519 " + Base64.getEncoder().encodeToString(
-                sshEd25519Blob(openSshEd25519Key(created.getString("CreateKeyPairResponse.keyMaterial"))));
-        XmlPath imported = ec2("ImportKeyPair", ACCOUNT_ID, REGION)
-                .formParam("KeyName", name + "-imported")
-                .formParam("PublicKeyMaterial",
-                        Base64.getEncoder().encodeToString(publicKey.getBytes(StandardCharsets.UTF_8)))
-                .post("/").then().statusCode(200).extract().xmlPath();
+        String importedId = null;
         try {
+            String publicKey = "ssh-ed25519 " + Base64.getEncoder().encodeToString(
+                    sshEd25519Blob(openSshEd25519Key(created.getString("CreateKeyPairResponse.keyMaterial"))));
+            XmlPath imported = ec2("ImportKeyPair", ACCOUNT_ID, REGION)
+                    .formParam("KeyName", name + "-imported")
+                    .formParam("PublicKeyMaterial",
+                            Base64.getEncoder().encodeToString(publicKey.getBytes(StandardCharsets.UTF_8)))
+                    .post("/").then().statusCode(200).extract().xmlPath();
+            importedId = imported.getString("ImportKeyPairResponse.keyPairId");
+
             assertEquals(created.getString("CreateKeyPairResponse.keyFingerprint"),
                     imported.getString("ImportKeyPairResponse.keyFingerprint"));
         } finally {
-            deleteKeyPair(id);
-            deleteKeyPair(imported.getString("ImportKeyPairResponse.keyPairId"));
+            deleteKeyPair(created.getString("CreateKeyPairResponse.keyPairId"));
+            if (importedId != null) {
+                deleteKeyPair(importedId);
+            }
         }
     }
 
@@ -165,7 +169,7 @@ class Ec2CreateKeyPairIntegrationTest {
         assertNotCreated(name);
     }
 
-    /** Floci checks the values before it looks for the name, as request validation precedes the operation. */
+    /** Floci checks the values before it looks for a key pair with that name. */
     @Test
     void anUnknownKeyTypeIsRefusedBeforeTheNameIsFoundTaken() {
         String name = uniqueName();
