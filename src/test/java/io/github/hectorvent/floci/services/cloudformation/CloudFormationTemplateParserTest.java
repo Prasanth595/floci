@@ -29,6 +29,7 @@ class CloudFormationTemplateParserTest {
         "{\"Resources\": {\"A\": {\"Type\": \"AWS::SNS::Topic\"}}|JSON not well-formed. (line 1, column 49)",
         "{\"a\": 1}}|JSON not well-formed. (line 1, column 9)",
         "{\"a\": [1}|JSON not well-formed. (line 1, column 9)",
+        "[{\"a\": 1}|YAML not well-formed. (line 1, column 10)",
     })
     void aBodyThatIsNeitherJsonNorYamlIsRefusedWhereCloudFormationStops(String body, String message) {
         CloudFormationTemplateParser.TemplateFormatException refused = assertThrows(

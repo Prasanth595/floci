@@ -47,7 +47,7 @@ final class CloudFormationTemplateParser {
             // The CF-aware parser turns !Sub, !Ref, !GetAtt and the other short forms into their maps.
             return new CloudFormationYamlParser(objectMapper).parse(body);
         } catch (YAMLException yamlError) {
-            if (jsonError != null && trimmed.endsWith("}")) {
+            if (jsonError != null && trimmed.startsWith("{") && trimmed.endsWith("}")) {
                 JsonLocation at = jsonError.getLocation();
                 throw new TemplateFormatException("JSON not well-formed. (line " + at.getLineNr()
                         + ", column " + at.getColumnNr() + ")", jsonError);

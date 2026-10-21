@@ -151,7 +151,8 @@ class CloudFormationNullValuesIntegrationTest {
 
     /**
      * Measured: CreateStackSet and UpdateStackSet refuse the template before the stack set keeps it,
-     * passing CloudFormation's message on with the service exception's details.
+     * passing CloudFormation's message on with the service exception's details, for a null value
+     * (2026-10-20) and for a body that is no template (2026-10-21).
      */
     @Test
     void aStackSetRefusesATemplateWithANullValueBeforeKeepingIt() {
@@ -168,6 +169,15 @@ class CloudFormationNullValuesIntegrationTest {
         Response update = stackSet("UpdateStackSet", name, queue("{\"QueueName\": null}"));
         update.then().statusCode(400);
         assertThat(update.xmlPath().getString("ErrorResponse.Error.Message"), startsWith(prefix));
+        String details = " (Service: AmazonCloudFormation; Status Code: 400; Error Code: ValidationError; Request ID: ";
+        Response notATemplate = stackSet("CreateStackSet", name + "-list", "[1, 2]");
+        notATemplate.then().statusCode(400);
+        assertThat(notATemplate.xmlPath().getString("ErrorResponse.Error.Message"),
+                startsWith("Template format error: unsupported structure." + details));
+        Response unparsable = stackSet("UpdateStackSet", name, "{\"Resources\": {\"A\": {\"Type\": \"AWS::SNS::Topic\"}}");
+        unparsable.then().statusCode(400);
+        assertThat(unparsable.xmlPath().getString("ErrorResponse.Error.Message"),
+                startsWith("Template format error: JSON not well-formed. (line 1, column 49)" + details));
 
         given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
                 .formParam("Action", "DescribeStackSet").formParam("StackSetName", name)

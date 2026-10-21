@@ -3939,7 +3939,8 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * {@code templateBody} parsed, refused as CloudFormation refuses a body that is no template
-     * (measured, eu-west-1, 2026-10-21, for ValidateTemplate, CreateStack and GetTemplateSummary):
+     * (measured, eu-west-1, 2026-10-21, for ValidateTemplate, CreateStack, UpdateStack,
+     * CreateChangeSet, GetTemplateSummary, CreateStackSet and UpdateStackSet):
      * one that reads as neither JSON nor YAML, with the parser's position, and one that reads as a
      * scalar or a list. A null template passes, for the checks that answer it.
      */
@@ -4510,28 +4511,12 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The checks ValidateTemplate, CreateStack, UpdateStack and CreateChangeSet make of a template
-     * before anything is created: a body that is no template ({@link #readTemplate}), then its null
-     * values ({@link #requireNoNullValues}).
+     * The checks ValidateTemplate, CreateStack, UpdateStack, CreateChangeSet, CreateStackSet and
+     * UpdateStackSet make of a template before anything is created or kept: a body that is no
+     * template ({@link #readTemplate}), then its null values ({@link #requireNoNullValues}).
      */
-    private void requireValidTemplate(String templateBody) {
+    void requireValidTemplate(String templateBody) {
         requireNoNullValues(readTemplate(templateBody));
-    }
-
-    /**
-     * {@link #requireNoNullValues(JsonNode)} for a stack set's template, as CreateStackSet and
-     * UpdateStackSet refuse it. They were not measured with a body that does not parse, so such a
-     * body fails where the template is processed, with the parser's error.
-     */
-    void requireNoNullValues(String templateBody) {
-        JsonNode parsed;
-        try {
-            parsed = parseTemplate(templateBody);
-        } catch (CloudFormationTemplateParser.TemplateFormatException e) {
-            LOG.debugv("Skipping null value validation; template did not parse: {0}", e.getMessage());
-            return;
-        }
-        requireNoNullValues(parsed);
     }
 
     /**
