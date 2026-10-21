@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -36,13 +37,15 @@ final class DynamoDbPointInTimeRecovery {
 
     private final StorageBackend<String, PointInTimeChange> store;
     private final Duration latestLag;
+    private final Clock clock;
     // Keyed like DynamoDbService.itemsByTable: "<account>/<region>::<table>".
     private final ConcurrentHashMap<String, Changes> changesByTable = new ConcurrentHashMap<>();
 
     DynamoDbPointInTimeRecovery(StorageBackend<String, PointInTimeChange> store, String defaultAccountId,
-                                Duration latestLag) {
+                                Duration latestLag, Clock clock) {
         this.store = store;
         this.latestLag = latestLag;
+        this.clock = clock;
         Map<String, PointInTimeChange> stored = new HashMap<>();
         if (store instanceof AccountAwareStorageBackend<PointInTimeChange> aware) {
             stored.putAll(aware.scanAllAccountsRaw());
@@ -88,7 +91,7 @@ final class DynamoDbPointInTimeRecovery {
             if (changes.dropped || !table.isPointInTimeRecoveryEnabled()) {
                 return;
             }
-            Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+            Instant now = clock.instant().truncatedTo(ChronoUnit.MILLIS);
             PointInTimeChange change = new PointInTimeChange(changes.nextSequence++, now, itemKey,
                     oldItem != null ? oldItem.deepCopy() : null);
             changes.list.add(change);
@@ -105,7 +108,7 @@ final class DynamoDbPointInTimeRecovery {
 
     /** AWS words an InvalidRestoreTimeException with the latest time to the nanosecond. */
     RestoreWindow window(TableDefinition table) {
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         Instant earliest = later(table.getPointInTimeRecoveryStartDateTime(), now.minus(recoveryPeriod(table)));
         return new RestoreWindow(earliest, later(earliest, now.minus(latestLag)));
     }

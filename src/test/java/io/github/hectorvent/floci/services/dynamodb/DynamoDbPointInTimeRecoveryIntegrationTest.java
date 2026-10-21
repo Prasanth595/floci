@@ -109,7 +109,7 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
     }
 
     @Test
-    void restoreTableToPointInTimeRestoresTheItemsOfThatTime() throws Exception {
+    void restoreTableToPointInTimeRestoresTheItemsOfThatTime() {
         String table = "PitrIT-items";
         createTable(table);
         updateContinuousBackups(table, "true").statusCode(200);
@@ -164,7 +164,7 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
         BigDecimal t1 = pause();
 
         ValidatableResponse restored = restoreToTime(table, "PitrIT-summary-t1", t1).statusCode(200);
-        assertEquals(t1, decimalAt(restored, "/TableDescription/RestoreSummary/RestoreDateTime"));
+        assertEquals(0, t1.compareTo(decimalAt(restored, "/TableDescription/RestoreSummary/RestoreDateTime")));
     }
 
     @Test
@@ -375,11 +375,12 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
     }
 
     /** Returns a time between the writes before and after the call, in epoch seconds with milliseconds. */
-    private static BigDecimal pause() throws InterruptedException {
-        Thread.sleep(5);
-        BigDecimal now = BigDecimal.valueOf(System.currentTimeMillis(), 3);
-        Thread.sleep(5);
-        return now;
+    private static BigDecimal pause() {
+        long now = System.currentTimeMillis();
+        while (System.currentTimeMillis() <= now) {
+            Thread.onSpinWait();
+        }
+        return BigDecimal.valueOf(now, 3);
     }
 
     private void createTable(String table) {
