@@ -4747,6 +4747,7 @@ public class DynamoDbService {
         String storageKey = regionKey(tableRegion, tableName);
 
         TableDefinition table = tableStore.get(storageKey)
+                .filter(t -> !"CREATING".equals(t.getTableStatus()))
                 .orElseThrow(() -> new AwsException("TableNotFoundException", "Table not found: " + tableArn, 400));
         Instant startTime = clock.instant().truncatedTo(ChronoUnit.MILLIS);
         // Seconds, as CreationDateTime is shown, so an EarliestRestorableDateTime in the creation second passes.

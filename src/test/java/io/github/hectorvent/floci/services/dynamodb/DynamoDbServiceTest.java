@@ -4494,6 +4494,19 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void exportTable_whileCreating_returnsTableNotFoundException() {
+        createUsersTableInCreating(service);
+        String tableArn = "arn:aws:dynamodb:us-east-1:000000000000:table/Users";
+        Map<String, Object> request = Map.of("TableArn", tableArn, "S3Bucket", "bucket");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.exportTable(request, Instant.EPOCH, "us-east-1"));
+
+        assertEquals("TableNotFoundException", e.getErrorCode());
+        assertEquals("Table not found: " + tableArn, e.getMessage());
+    }
+
+    @Test
     void validateImportRequest_rejectsUnsupportedFormatWithoutUnsupportedOperationWording() {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.validateImportRequest(importRequest("Users", "CSV")));
