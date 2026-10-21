@@ -80,6 +80,9 @@ import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
+import static io.github.hectorvent.floci.services.dynamodb.DynamoDbTimestamps.epochSeconds;
+import static io.github.hectorvent.floci.services.dynamodb.DynamoDbTimestamps.instantOf;
+
 @ApplicationScoped
 public class DynamoDbService {
 
@@ -4926,14 +4929,6 @@ public class DynamoDbService {
         } catch (JsonProcessingException e) {
             return "{}";
         }
-    }
-
-    private static BigDecimal epochSeconds(Instant instant) {
-        return BigDecimal.valueOf(instant.toEpochMilli(), 3);
-    }
-
-    private static Instant instantOf(BigDecimal epochSeconds) {
-        return Instant.ofEpochMilli(epochSeconds.movePointRight(3).longValue());
     }
 
     public ExportDescription describeExport(String exportArn) {

@@ -33,7 +33,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -47,6 +46,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
+
+import static io.github.hectorvent.floci.services.dynamodb.DynamoDbTimestamps.epochSeconds;
+import static io.github.hectorvent.floci.services.dynamodb.DynamoDbTimestamps.instantOf;
 
 /**
  * DynamoDB JSON protocol handler of the native engine, reached through the native backend
@@ -2213,11 +2215,7 @@ public class NativeDynamoDbJsonHandler {
 
     private static Instant timestampOrNull(JsonNode request, String member) {
         JsonNode node = request.path(member);
-        return node.isNumber() ? Instant.ofEpochMilli(node.decimalValue().movePointRight(3).longValue()) : null;
-    }
-
-    private static BigDecimal epochSeconds(Instant instant) {
-        return BigDecimal.valueOf(instant.toEpochMilli(), 3);
+        return node.isNumber() ? instantOf(node.decimalValue()) : null;
     }
 
     private ObjectNode backupDetailsNode(TableBackup backup, String status) {
