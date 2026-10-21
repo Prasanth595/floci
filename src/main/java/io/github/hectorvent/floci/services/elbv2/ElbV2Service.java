@@ -290,11 +290,11 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
      * counts before it looks a subnet up, so one subnet that does not exist gets this error too, not
      * SubnetNotFound. On create this runs after the duplicate-name check, because a CloudFormation stack
      * update finds the balancer it keeps through DuplicateLoadBalancerName, whatever subnets its
-     * template names. SetSubnets also requires an Application Load Balancer's subnets to span two
-     * Availability Zones, so {@link #setSubnets} runs this on a list that names subnets, once it has the
-     * balancer's type, and {@link #setSubnetsFromRequest} on a SetSubnets that names none. No public
-     * report shows what AWS answers a SetSubnets with one subnet, so it gets the create message and
-     * order.
+     * template names. SetSubnets takes the same subnets, so {@link #setSubnetsFromRequest} runs this on
+     * a SetSubnets that names none, and {@link #setSubnets} on a list that names some, once it has the
+     * balancer's type; whether the subnets span two Availability Zones is checked after they are looked
+     * up. No public report shows what AWS answers a SetSubnets with one subnet, so it gets the create
+     * message and order.
      */
     private static void requireSubnets(String lbType, List<String> subnets) {
         int count = subnets == null ? 0 : subnets.size();
