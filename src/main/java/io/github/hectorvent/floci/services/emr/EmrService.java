@@ -201,6 +201,10 @@ public class EmrService {
 
     public synchronized List<String> addJobFlowSteps(String clusterId, List<EmrStep> steps) {
         EmrCluster cluster = requireCluster(clusterId);
+        if ("TERMINATED".equals(cluster.getState())) {
+            throw new AwsException("ValidationException",
+                    "A job flow that is shutting down, terminated, or finished may not be modified.", 400);
+        }
         List<String> ids = new ArrayList<>();
         for (EmrStep step : steps) {
             initStep(step);

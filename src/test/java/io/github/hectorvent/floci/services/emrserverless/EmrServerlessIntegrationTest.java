@@ -253,11 +253,37 @@ public class EmrServerlessIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Verify it's gone
         givenReq()
         .when()
             .get("/applications/" + applicationId)
         .then()
-            .statusCode(404);
+            .statusCode(200)
+            .body("application.state", equalTo("TERMINATED"));
+
+        givenReq()
+        .when()
+            .get("/applications")
+        .then()
+            .statusCode(200)
+            .body("applications.find { it.id == '" + applicationId + "' }", nullValue());
+
+        givenReq()
+        .when()
+            .post("/applications/" + applicationId + "/start")
+        .then()
+            .statusCode(400);
+
+        givenReq()
+        .when()
+            .post("/applications/" + applicationId + "/stop")
+        .then()
+            .statusCode(400);
+
+        givenReq()
+        .when()
+            .get("/applications/" + applicationId)
+        .then()
+            .statusCode(200)
+            .body("application.state", equalTo("TERMINATED"));
     }
 }

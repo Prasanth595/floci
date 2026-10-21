@@ -119,6 +119,8 @@ public class EmrServerlessService {
                 .filter(app -> inRegion(app, region)).collect(Collectors.toList());
         if (request.getStates() != null && !request.getStates().isEmpty()) {
             all = all.stream().filter(app -> request.getStates().contains(app.getState())).collect(Collectors.toList());
+        } else {
+            all = all.stream().filter(app -> !"TERMINATED".equals(app.getState())).collect(Collectors.toList());
         }
         
         PaginatedResult<Application> page = Pagination.paginate(all, Application::getApplicationId, request.getMaxResults(), request.getNextToken(), 50, "ValidationException");
@@ -197,7 +199,9 @@ public class EmrServerlessService {
         if (!"CREATED".equals(state) && !"STOPPED".equals(state)) {
             throw new AwsException("ValidationException", "Application must be in a stopped or created state in order to be deleted.", 400);
         }
-        storage.delete(applicationId);
+        app.setState("TERMINATED");
+        app.setUpdatedAt(System.currentTimeMillis());
+        storage.put(applicationId, app);
     }
 
     public synchronized void startApplication(String applicationId) {
@@ -205,6 +209,9 @@ public class EmrServerlessService {
         String state = app.getState();
         if ("STARTED".equals(state) || "STARTING".equals(state)) {
             return;
+        }
+        if ("TERMINATED".equals(state)) {
+            throw new AwsException("ValidationException", "Application is terminated.", 400);
         }
         app.setState("STARTED");
         app.setUpdatedAt(System.currentTimeMillis());
@@ -216,6 +223,9 @@ public class EmrServerlessService {
         String state = app.getState();
         if ("STOPPED".equals(state) || "STOPPING".equals(state)) {
             return;
+        }
+        if ("TERMINATED".equals(state)) {
+            throw new AwsException("ValidationException", "Application is terminated.", 400);
         }
         app.setState("STOPPED");
         app.setUpdatedAt(System.currentTimeMillis());
@@ -288,6 +298,7 @@ public class EmrServerlessService {
         }
         return storage.get(matcher.group(1))
                 .filter(app -> arn.equals(app.getArn()))
+                .filter(app -> !"TERMINATED".equals(app.getState()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Resource " + arn + " not found", 404));
     }
 

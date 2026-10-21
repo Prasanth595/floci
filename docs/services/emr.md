@@ -61,6 +61,8 @@ steps added later complete, reporting `ALL_STEPS_COMPLETED`. A cluster with no s
 `WAITING` until steps are added. Set `KeepJobFlowAliveWhenNoSteps` to `true` to keep the cluster
 `WAITING` after its steps complete. Automatic step-completion termination also applies when
 termination protection is enabled.
+`AddJobFlowSteps` rejects a terminated cluster without adding steps or changing its
+termination status.
 After automatic or manual termination, instance groups and fleets report `TERMINATED` with zero
 running or provisioned capacity; their requested and target capacities remain recorded.
 `ListInstances` retains each group's instances with their original synthetic IDs and `TERMINATED`
