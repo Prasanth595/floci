@@ -30,6 +30,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.*;
@@ -39,6 +40,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -112,6 +115,8 @@ public class FirehoseService implements ResourceProvider {
     private final Map<String, Map<String, String>> pendingSourceIterators = new ConcurrentHashMap<>();
     private final FirehoseParquetConverter parquetConverter;
     private final FirehoseLambdaTransformer lambdaTransformer;
+    private final FirehoseRedshiftDelivery redshiftDelivery;
+    private final Executor redshiftDeliveryExecutor;
     // Serialises the read, version check, merge and write of a Redshift UpdateDestination per stream.
     private final Map<String, Object> redshiftUpdateLocks = new ConcurrentHashMap<>();
     private final Clock clock;
@@ -196,11 +201,39 @@ public class FirehoseService implements ResourceProvider {
         sourceIteratorStore.deleteForAccount(accountFromScopedKey(key), logicalKeyFromScopedKey(key));
     }
 
-    @Inject
+    /** Kept so callers that never deliver to Redshift need no delivery collaborator; null means unavailable. */
     public FirehoseService(StorageFactory storageFactory, S3Service s3Service, KinesisService kinesisService,
                            RegionResolver regionResolver, Clock clock, EmulatorConfig config,
                            FirehoseParquetConverter parquetConverter,
                            FirehoseLambdaTransformer lambdaTransformer) {
+        this(storageFactory, s3Service, kinesisService, regionResolver, clock, config, parquetConverter,
+                lambdaTransformer, null);
+    }
+
+    @Inject
+    public FirehoseService(StorageFactory storageFactory, S3Service s3Service, KinesisService kinesisService,
+                           RegionResolver regionResolver, Clock clock, EmulatorConfig config,
+                           FirehoseParquetConverter parquetConverter,
+                           FirehoseLambdaTransformer lambdaTransformer,
+                           FirehoseRedshiftDelivery redshiftDelivery) {
+        this(storageFactory, s3Service, kinesisService, regionResolver, clock, config, parquetConverter,
+                lambdaTransformer, redshiftDelivery, null);
+    }
+
+    public FirehoseService(StorageFactory storageFactory, S3Service s3Service, KinesisService kinesisService,
+                           RegionResolver regionResolver, Clock clock, EmulatorConfig config,
+                           FirehoseParquetConverter parquetConverter,
+                           FirehoseLambdaTransformer lambdaTransformer,
+                           FirehoseRedshiftDelivery redshiftDelivery,
+                           Executor redshiftDeliveryExecutor) {
+        this.redshiftDelivery = redshiftDelivery;
+        this.redshiftDeliveryExecutor = redshiftDeliveryExecutor != null
+                ? redshiftDeliveryExecutor
+                : Executors.newSingleThreadExecutor(r -> {
+                    Thread t = new Thread(r, "firehose-redshift-delivery");
+                    t.setDaemon(true);
+                    return t;
+                });
         this.streamStore = storageFactory.create("firehose", "streams.json",
                 new TypeReference<Map<String, DeliveryStreamDescription>>() {});
         this.sourceIteratorStore = storageFactory.create("firehose", "source-iterators.json",
@@ -238,6 +271,9 @@ public class FirehoseService implements ResourceProvider {
     // checkpoint out with everything else.
     void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {
         flushExecutor.shutdownNow();
+        if (redshiftDeliveryExecutor instanceof ExecutorService es) {
+            es.shutdownNow();
+        }
         buffers.keySet().forEach(this::flushByKey);
     }
 
@@ -1070,11 +1106,16 @@ public class FirehoseService implements ResourceProvider {
                 }
             }
 
-            byte[] body = compression.compress(payload.toByteArray());
+            byte[] rawPayload = payload.toByteArray();
+            byte[] body = compression.compress(rawPayload);
             s3Service.putObject(bucket, key, body, "application/octet-stream", Map.of(),
                     new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
             LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3} ({4})",
                     records.size(), streamName, bucket, key, compression.wireValue());
+            if (isRedshiftStream(stream)) {
+                deliverRedshiftBatch(streamName, stream, bucket, key, rawPayload, checkpoint);
+                return;
+            }
             // Only now: the records these iterators were read past are durable.
             commitSourceIterators(streamName, checkpoint);
         } catch (Exception e) {
@@ -1082,6 +1123,73 @@ public class FirehoseService implements ResourceProvider {
                     streamName, toFlush.size(), e.getMessage());
             restoreFailedFlush(streamName, toFlush, since, checkpoint);
         }
+    }
+
+    /**
+     * Everything after a Redshift batch is staged in S3. The batch is durable in S3, so no failure here may hand its
+     * records back to the buffer: that would stage and load them a second time. Backups and source checkpoints are
+     * completed first, then COPY is submitted to run on its own thread so that a slow or hanging query never holds
+     * the buffer flusher thread or PutRecord.
+     */
+    private void deliverRedshiftBatch(String streamName, DeliveryStreamDescription stream,
+                                     String bucket, String key, byte[] rawPayload,
+                                     Map<String, String> checkpoint) {
+        RedshiftDestination redshift = stream.getDestinations().get(0).getRedshiftDestinationDescription();
+        try {
+            writeRedshiftBackup(stream, redshift, rawPayload);
+        } catch (IOException | RuntimeException e) {
+            LOG.errorv(e, "Backup write for stream {0} failed; the batch is staged in S3 and loads normally but "
+                    + "has no backup copy: {1}", streamName, describe(e));
+        }
+        try {
+            commitSourceIterators(streamName, checkpoint);
+        } catch (RuntimeException e) {
+            LOG.errorv(e, "Could not persist the source checkpoint of stream {0} after its batch was staged; the "
+                    + "source records may be read again: {1}", streamName, describe(e));
+        }
+        if (redshiftDelivery == null) {
+            LOG.warnv("Stream {0} has a Redshift destination but Redshift delivery is unavailable; "
+                    + "the batch stays in s3://{1}/{2}", streamName, bucket, key);
+            return;
+        }
+        redshiftDeliveryExecutor.execute(() -> {
+            RequestScopes.runAs(stream.getAccountId(), () -> {
+                try {
+                    String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
+                            regionResolver.getDefaultRegion());
+                    redshiftDelivery.copy(stream.getAccountId(), region, redshift, bucket, key);
+                } catch (Exception e) {
+                    LOG.errorv("Redshift delivery of s3://{0}/{1} into table {2} failed for stream {3}; "
+                            + "the batch stays in s3://{0}/{1}: {4}", bucket, key,
+                            redshift.getCopyCommand().getDataTableName(), streamName, describe(e));
+                }
+            });
+        });
+    }
+
+    private static String describe(Exception e) {
+        return e.getMessage() != null ? e.getMessage() : e.toString();
+    }
+
+    /** Writes the raw batch to the backup location under that location's own prefix, compression and bucket. */
+    private void writeRedshiftBackup(DeliveryStreamDescription stream, RedshiftDestination redshift,
+                                     byte[] rawPayload) throws IOException {
+        S3Destination backup = redshift.getS3Backup();
+        if (!"Enabled".equals(redshift.getS3BackupMode()) || backup == null || backup.bucketName() == null) {
+            return;
+        }
+        FirehoseCompression compression = FirehoseCompression.forDelivery(backup.getCompressionFormat());
+        String backupKey = S3ObjectKeyResolver.resolveKey(backup, stream.getDeliveryStreamName(),
+                stream.getVersionId(), clock.instant(), compression);
+        ensureBucket(backup.bucketName(), stream);
+        s3Service.putObject(backup.bucketName(), backupKey, compression.compress(rawPayload),
+                "application/octet-stream", Map.of(),
+                new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
+    }
+
+    private static boolean isRedshiftStream(DeliveryStreamDescription stream) {
+        return stream.getDestinations() != null && !stream.getDestinations().isEmpty()
+                && stream.getDestinations().get(0).getRedshiftDestinationDescription() != null;
     }
 
     private void restoreFailedFlush(String streamName, List<byte[]> toFlush, Instant since,

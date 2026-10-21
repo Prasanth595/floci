@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Pattern;
 
 /**
@@ -10,14 +12,51 @@ import java.util.regex.Pattern;
  * outside a quoted literal, which is what keeps the text from carrying a second statement. The separator scan follows PostgreSQL's own
  * quoting rules rather than a simplified one, because the statement is later run in simple query mode, where
  * PostgreSQL executes every {@code ;}-separated statement it receives.
+ *
+ * <p>{@link #build} adds no {@code IAM_ROLE} or credentials. AWS hands the cluster temporary credentials of the
+ * stream's role; the wire proxy reads a staged object straight from Floci's S3 when the statement names no role,
+ * whereas an {@code IAM_ROLE} would have to exist in IAM and be associated with the cluster.
  */
 final class RedshiftCopySql {
 
     private static final String NAME = "(?:[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\")";
     private static final Pattern QUALIFIED_NAME = Pattern.compile(NAME + "(?:\\." + NAME + ")?");
     private static final Pattern SIMPLE_NAME = Pattern.compile(NAME);
+    private static final Pattern BUCKET = Pattern.compile("[^/'\"\\s]+");
+    private static final Pattern OBJECT_KEY = Pattern.compile("[^'\"\\s]*");
 
     private RedshiftCopySql() {}
+
+    static String build(String table, String columns, String bucket, String key, String copyOptions) {
+        if (!isValidTableName(table)) {
+            throw new IllegalArgumentException("DataTableName is not a table identifier: " + table);
+        }
+        if (!isValidColumnList(columns)) {
+            throw new IllegalArgumentException("DataTableColumns is not a list of column identifiers: " + columns);
+        }
+        if (!BUCKET.matcher(bucket).matches() || !OBJECT_KEY.matcher(key).matches()) {
+            throw new IllegalArgumentException("The staged object s3://" + bucket + "/" + key
+                    + " has a name the COPY emulation cannot read: keys must not contain whitespace or quotes.");
+        }
+        if (copyOptions != null && hasStatementSeparator(copyOptions)) {
+            throw new IllegalArgumentException("CopyOptions must not contain a statement separator.");
+        }
+        StringBuilder sql = new StringBuilder("COPY ").append(table);
+        if (columns != null && !columns.isBlank()) {
+            List<String> trimmed = new ArrayList<>();
+            for (String column : columns.split(",")) {
+                trimmed.add(column.trim());
+            }
+            sql.append(" (").append(String.join(", ", trimmed)).append(')');
+        }
+        sql.append(" FROM 's3://").append(bucket).append('/').append(key).append('\'');
+        // The closing terminator is dropped: the statement is sent on its own, and a second one cannot follow it.
+        String options = copyOptions == null ? "" : withoutTrailingTerminator(copyOptions).trim();
+        if (!options.isEmpty()) {
+            sql.append(' ').append(options);
+        }
+        return sql.toString();
+    }
 
     static boolean isValidTableName(String table) {
         return table != null && QUALIFIED_NAME.matcher(table).matches();
