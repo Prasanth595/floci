@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
+import io.github.hectorvent.floci.services.rds.model.DbProxyEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
@@ -169,6 +170,10 @@ public class RdsQueryHandler {
                 case "CreateDBProxy" -> handleCreateDbProxy(params, region);
                 case "ModifyDBProxy" -> handleModifyDbProxy(params, region);
                 case "DeleteDBProxy" -> handleDeleteDbProxy(params, region);
+                case "CreateDBProxyEndpoint" -> handleCreateDbProxyEndpoint(params, region);
+                case "DescribeDBProxyEndpoints" -> handleDescribeDbProxyEndpoints(params, region);
+                case "ModifyDBProxyEndpoint" -> handleModifyDbProxyEndpoint(params, region);
+                case "DeleteDBProxyEndpoint" -> handleDeleteDbProxyEndpoint(params, region);
                 case "RegisterDBProxyTargets" -> handleRegisterDbProxyTargets(params, region);
                 case "DeregisterDBProxyTargets" -> handleDeregisterDbProxyTargets(params, region);
                 case "DescribeDBProxyTargetGroups" -> handleDescribeDbProxyTargetGroups(params, region);
@@ -2203,6 +2208,84 @@ public class RdsQueryHandler {
         String result = new XmlBuilder().start("DBProxy").raw(dbProxyInnerXml(proxy)).end("DBProxy").build();
         service.deleteDbProxy(name, region);
         return Response.ok(AwsQueryResponse.envelope("DeleteDBProxy", AwsNamespaces.RDS, result)).build();
+    }
+
+    private Response handleCreateDbProxyEndpoint(MultivaluedMap<String, String> params, String region) {
+        DbProxyEndpoint endpoint = service.createDbProxyEndpoint(region,
+                params.getFirst("DBProxyName"),
+                params.getFirst("DBProxyEndpointName"),
+                memberList(params, "VpcSubnetIds"),
+                memberList(params, "VpcSecurityGroupIds"),
+                params.getFirst("TargetRole"),
+                params.getFirst("EndpointNetworkType"),
+                parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("CreateDBProxyEndpoint", AwsNamespaces.RDS,
+                dbProxyEndpointXml(endpoint))).build();
+    }
+
+    private Response handleDescribeDbProxyEndpoints(MultivaluedMap<String, String> params, String region) {
+        RdsService.ProxyEndpointPage page = service.describeDbProxyEndpoints(region,
+                params.getFirst("DBProxyName"),
+                params.getFirst("DBProxyEndpointName"),
+                optionalInt(params.getFirst("MaxRecords")),
+                params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder().start("DBProxyEndpoints");
+        for (DbProxyEndpoint endpoint : page.endpoints()) {
+            xml.start("member").raw(dbProxyEndpointInnerXml(endpoint)).end("member");
+        }
+        xml.end("DBProxyEndpoints");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBProxyEndpoints", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
+    private Response handleModifyDbProxyEndpoint(MultivaluedMap<String, String> params, String region) {
+        // Security groups left out of the request are kept; a list given replaces them.
+        DbProxyEndpoint endpoint = service.modifyDbProxyEndpoint(region,
+                params.getFirst("DBProxyEndpointName"),
+                params.getFirst("NewDBProxyEndpointName"),
+                hasMemberKeys(params, "VpcSecurityGroupIds") ? memberList(params, "VpcSecurityGroupIds") : null);
+        return Response.ok(AwsQueryResponse.envelope("ModifyDBProxyEndpoint", AwsNamespaces.RDS,
+                dbProxyEndpointXml(endpoint))).build();
+    }
+
+    private Response handleDeleteDbProxyEndpoint(MultivaluedMap<String, String> params, String region) {
+        DbProxyEndpoint endpoint = service.deleteDbProxyEndpoint(region, params.getFirst("DBProxyEndpointName"));
+        return Response.ok(AwsQueryResponse.envelope("DeleteDBProxyEndpoint", AwsNamespaces.RDS,
+                dbProxyEndpointXml(endpoint))).build();
+    }
+
+    private static String dbProxyEndpointXml(DbProxyEndpoint e) {
+        return new XmlBuilder().start("DBProxyEndpoint").raw(dbProxyEndpointInnerXml(e)).end("DBProxyEndpoint").build();
+    }
+
+    /** The DBProxyEndpoint members; a proxy's default endpoint has no ARN. */
+    private static String dbProxyEndpointInnerXml(DbProxyEndpoint e) {
+        XmlBuilder xml = new XmlBuilder().elem("DBProxyEndpointName", e.getDbProxyEndpointName());
+        if (e.getDbProxyEndpointArn() != null) {
+            xml.elem("DBProxyEndpointArn", e.getDbProxyEndpointArn());
+        }
+        xml.elem("DBProxyName", e.getDbProxyName())
+           .elem("Status", e.getStatus());
+        if (e.getVpcId() != null) {
+            xml.elem("VpcId", e.getVpcId());
+        }
+        xml.start("VpcSecurityGroupIds");
+        e.getVpcSecurityGroupIds().forEach(id -> xml.elem("member", id));
+        xml.end("VpcSecurityGroupIds");
+        xml.start("VpcSubnetIds");
+        e.getVpcSubnetIds().forEach(id -> xml.elem("member", id));
+        xml.end("VpcSubnetIds");
+        xml.elem("Endpoint", e.getEndpoint());
+        if (e.getCreatedDate() != null) {
+            xml.elem("CreatedDate", e.getCreatedDate().toString());
+        }
+        xml.elem("TargetRole", e.getTargetRole())
+           .elem("IsDefault", String.valueOf(e.isDefault()))
+           .elem("EndpointNetworkType", e.getEndpointNetworkType() != null ? e.getEndpointNetworkType() : "IPV4");
+        return xml.build();
     }
 
     private Response handleRegisterDbProxyTargets(MultivaluedMap<String, String> params, String region) {

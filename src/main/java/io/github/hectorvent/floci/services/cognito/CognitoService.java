@@ -3561,7 +3561,7 @@ public class CognitoService implements ResourceProvider {
                     deliveryTarget.deliveryMedium(), "CustomEmailSender_ResendCode",
                     VerificationCode.Purpose.SIGNUP_CONFIRMATION, code, clientMetadata)) {
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                        pool, client, user, "CustomMessage_ResendCode", Map.of());
+                        pool, client, user, "CustomMessage_ResendCode", clientMetadata);
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
                         code, List.of(deliveryTarget.deliveryMedium()), customMessage);
             }
@@ -3979,7 +3979,7 @@ public class CognitoService implements ResourceProvider {
                     deliveryTarget.deliveryMedium(), "CustomEmailSender_ForgotPassword",
                     VerificationCode.Purpose.PASSWORD_RESET, code, clientMetadata)) {
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                        pool, client, user, "CustomMessage_ForgotPassword", Map.of());
+                        pool, client, user, "CustomMessage_ForgotPassword", clientMetadata);
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.PASSWORD_RESET, code,
                         List.of(deliveryTarget.deliveryMedium()), customMessage);
             }

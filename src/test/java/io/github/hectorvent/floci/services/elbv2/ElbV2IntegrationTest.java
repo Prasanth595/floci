@@ -1459,4 +1459,75 @@ class ElbV2IntegrationTest {
                 .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
                         contains(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
     }
+
+    /**
+     * SetSubnets with neither Subnets nor SubnetMappings, left out or sent as empty lists, is a
+     * ValidationError, and the balancer stays on its subnets and in its VPC. A Network Load Balancer
+     * gets the message AWS gives it; an Application Load Balancer gets the one CreateLoadBalancer gives
+     * it, and a Gateway Load Balancer the Network one.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "application|false|At least two subnets in two different Availability Zones must be specified",
+        "application|true|At least two subnets in two different Availability Zones must be specified",
+        "network|false|At least one subnet must be specified",
+        "network|true|At least one subnet must be specified",
+        "gateway|false|At least one subnet must be specified",
+        "gateway|true|At least one subnet must be specified"
+    })
+    @Order(80)
+    void setSubnetsWithNeitherSubnetsNorSubnetMappingsIsRefused(String type, boolean emptyLists, String message) {
+        String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnetB = Ec2Service.defaultSubnetId("us-east-1", "b");
+        String arn = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "set-none-" + type + (emptyLists ? "-empty" : ""))
+                .formParam("Type", type)
+                .formParam("Subnets.member.1", subnetA)
+                .formParam("Subnets.member.2", subnetB)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        RequestSpecification setSubnets = given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", arn)
+                .header("Authorization", AUTH);
+        if (emptyLists) {
+            setSubnets.formParam("Subnets", "").formParam("SubnetMappings", "");
+        }
+        setSubnets
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo(message));
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", arn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
+                        contains(subnetA, subnetB))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.VpcId",
+                        equalTo(Ec2Service.defaultVpcId("us-east-1")));
+
+        given()
+                .formParam("Action", "DeleteLoadBalancer")
+                .formParam("LoadBalancerArn", arn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+    }
 }

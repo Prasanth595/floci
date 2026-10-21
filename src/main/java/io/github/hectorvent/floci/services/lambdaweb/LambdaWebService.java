@@ -26,6 +26,8 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -135,6 +137,7 @@ public class LambdaWebService implements Resettable {
     private final StorageFactory storageFactory;
     private final EmulatorConfig config;
     private final S3Service s3Service;
+    private final LambdaWebCode code;
     private final ObjectMapper objectMapper;
     private final Instance<RequestContext> requestContext;
 
@@ -148,11 +151,13 @@ public class LambdaWebService implements Resettable {
 
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
-                            S3Service s3Service, ObjectMapper objectMapper, Instance<RequestContext> requestContext) {
+                            S3Service s3Service, LambdaWebCode code, ObjectMapper objectMapper,
+                            Instance<RequestContext> requestContext) {
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
         this.config = config;
         this.s3Service = s3Service;
+        this.code = code;
         this.objectMapper = objectMapper;
         this.requestContext = requestContext;
     }
@@ -173,6 +178,7 @@ public class LambdaWebService implements Resettable {
         for (WebFunction fn : all) {
             fn.endpoints.values().forEach(endpoint -> indexDomains(fn, endpoint));
         }
+        code.retainOnly(all);
     }
 
     @Override
@@ -180,6 +186,7 @@ public class LambdaWebService implements Resettable {
         functions.clear();
         domains.clear();
         originHosts.clear();
+        code.clear();
     }
 
     /** Where a request to an endpoint domain goes. Domains are unique across accounts and regions. */
@@ -299,6 +306,7 @@ public class LambdaWebService implements Resettable {
         WebFunctionEndpoint endpoint = draftEndpoint(region, accountId, functionName, endpointConfig, false);
         return storeNewFunction(region, functionName, tags, fn -> {
             WebFunctionRevision revision = buildRevision(fn, revisionConfig);
+            keepCode(region, fn, revision);
             attachEndpoint(region, fn, endpoint, revision);
             fn.revisions.put(revision.revisionId, revision);
             fn.endpoints.put(endpoint.endpointName, endpoint);
@@ -376,6 +384,7 @@ public class LambdaWebService implements Resettable {
             WebFunction fn = function(region, functionName);
             fn.endpoints.values().forEach(this::unindexDomains);
             functions.delete(key(region, functionName));
+            code.deleteFunction(AwsArnUtils.parse(fn.functionArn).accountId(), region, functionName);
         }
         LOG.infov("Deleted web function {0}", functionName);
     }
@@ -396,6 +405,7 @@ public class LambdaWebService implements Resettable {
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             WebFunctionRevision revision = buildRevision(fn, request);
+            keepCode(region, fn, revision);
             fn.revisions.put(revision.revisionId, revision);
             for (WebFunctionEndpoint endpoint : fn.endpoints.values()) {
                 if ("LatestRevision".equals(endpoint.autoDeploymentMode)) {
@@ -456,6 +466,7 @@ public class LambdaWebService implements Resettable {
             fn.revisions.remove(revision.revisionId);
             fn.updatedAt = now();
             persist(region, fn);
+            code.deleteRevision(AwsArnUtils.parse(fn.functionArn).accountId(), region, functionName, revisionId);
         }
     }
 
@@ -520,7 +531,6 @@ public class LambdaWebService implements Resettable {
         }
         revision.serviceConfig = serviceConfigOf(LambdaWebJson.structure(request, "serviceConfig"),
                 defaultLogGroup(fn.functionName));
-        requireCodeObject(revision.buildConfig);
         revision.description = LambdaWebJson.text(request, "description");
         revision.kmsKeyArn = LambdaWebJson.text(request, "kmsKeyArn");
         String revisionId;
@@ -575,18 +585,32 @@ public class LambdaWebService implements Resettable {
         return LambdaWebJson.structure(LambdaWebJson.structure(service, "telemetryConfig"), "loggingConfig");
     }
 
-    /** The code object must exist in the bucket's current version or the version the request pins. */
-    private void requireCodeObject(WebFunctionRevision.BuildConfig build) {
+    /** Copies the code a revision runs: the bucket's current version, or the version the request pins. */
+    private void keepCode(String region, WebFunction fn, WebFunctionRevision revision) {
         if (s3Service == null) {
             return;
         }
-        try {
-            s3Service.headObject(build.bucket, build.key, build.versionId);
+        WebFunctionRevision.BuildConfig build = revision.buildConfig;
+        try (S3Service.ObjectRead object = s3Service.openObject(build.bucket, build.key, build.versionId)) {
+            code.store(AwsArnUtils.parse(fn.functionArn).accountId(), region, fn.functionName, revision.revisionId,
+                    object.body());
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not close the code object s3://" + build.bucket + "/" + build.key, e);
         } catch (AwsException e) {
             LOG.debugv("Web function code object s3://{0}/{1} is not readable: {2}", build.bucket, build.key,
                     e.getMessage());
-            throw new AwsException("ValidationException", "The specified S3 object does not exist: s3://"
-                    + build.bucket + "/" + build.key + ". Verify the object exists in the bucket.", 400);
+            String object = "s3://" + build.bucket + "/" + build.key;
+            if (build.versionId == null) {
+                throw new AwsException("ValidationException", "The specified S3 object does not exist: " + object
+                        + ". Verify the object exists in the bucket.", 400);
+            }
+            if (e.getHttpStatus() == 404) {
+                throw new AwsException("ValidationException", "The specified S3 object does not exist: " + object
+                        + " (versionId=" + build.versionId + "). Verify the object exists and the versionId is correct.",
+                        400);
+            }
+            throw new AwsException("ValidationException", "The S3 object " + object + " (versionId=" + build.versionId
+                    + ") is inaccessible. Verify the request parameters and permissions are correct.", 400);
         }
     }
 

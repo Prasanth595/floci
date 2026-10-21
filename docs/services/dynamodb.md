@@ -28,8 +28,9 @@
 | `TagResource` | Tag a table |
 | `UntagResource` | Remove tags |
 | `ListTagsOfResource` | List tags |
-| `DescribeContinuousBackups` | Get PITR backup configuration |
-| `UpdateContinuousBackups` | Enable/disable PITR |
+| `DescribeContinuousBackups` | Get the point-in-time recovery status and restore window |
+| `UpdateContinuousBackups` | Enable or disable point-in-time recovery |
+| `RestoreTableToPointInTime` | Create a new table from a table as it was at a point in time |
 | `CreateBackup` | Take an on-demand backup of a table |
 | `DescribeBackup` | Get a backup and the table it was taken from |
 | `ListBackups` | List backups by table, type and creation time |
@@ -231,6 +232,7 @@ region is rejected.
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_FLUSH_INTERVAL_MS` | `5000` | Flush interval for `hybrid`/`wal` storage modes (milliseconds) |
 | `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` | `4` | Seconds a vector index added by `UpdateTable` spends in resource allocation |
 | `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS` | `10` | Seconds that index then spends backfilling before it goes `ACTIVE` |
+| `FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS` | `300` | Seconds `LatestRestorableDateTime` of point-in-time recovery trails the current time. Set `0` to restore the latest writes with `UseLatestRestorableTime` |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local`, case-insensitive. Any other value fails startup. See [DynamoDB Local backend](#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
@@ -467,6 +469,24 @@ aws dynamodb restore-table-from-backup --backup-arn $BACKUP_ARN \
 `RestoreTableFromBackup` creates a new table with the keys, indexes, billing mode, throughput and encryption of the backup. As on AWS, the new table has no stream, TTL, point-in-time recovery, tags or deletion protection, and its table class is `STANDARD`. The overrides follow AWS. A GSI or LSI override must match a source index by key schema and projection, and a vector index override must match one by name. `BillingModeOverride` `PROVISIONED` needs throughput for the table and for every GSI that is kept.
 
 Deviations from AWS: a restore is done before the response is sent. The response still says `CREATING` with `RestoreInProgress: true`, as on AWS, but the table is `ACTIVE` right away. So `BackupInUseException` and `TableInUseException` for a restore in progress never happen. `BackupSizeBytes` is always 0. Backups made by AWS Backup (`BackupType` `AWS_BACKUP`) are not emulated.
+
+## Point-in-time recovery
+
+While point-in-time recovery is enabled, Floci keeps every item change of the table. `RestoreTableToPointInTime` creates a new table with the items as they were at `RestoreDateTime`, or at `LatestRestorableDateTime` with `UseLatestRestorableTime`. As on AWS, the new table takes the current settings of the source table, not the settings at that time. The overrides are the same as for `RestoreTableFromBackup`, and a source in another region needs `SSESpecificationOverride`.
+
+```bash
+aws dynamodb update-continuous-backups --table-name Users \
+  --point-in-time-recovery-specification PointInTimeRecoveryEnabled=true --endpoint-url $AWS_ENDPOINT_URL
+
+aws dynamodb restore-table-to-point-in-time --source-table-name Users \
+  --target-table-name UsersAnHourAgo --restore-date-time $(($(date +%s) - 3600)) --endpoint-url $AWS_ENDPOINT_URL
+```
+
+`EarliestRestorableDateTime` is the time point-in-time recovery was enabled, or the start of the recovery period once that has passed. `LatestRestorableDateTime` trails the current time by `FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS`, 5 minutes by default like AWS. As on AWS, a `RestoreDateTime` after it is still accepted up to the current time. Disabling point-in-time recovery drops the change history. The history survives a restart in the persistent storage modes.
+
+Deleting a table with point-in-time recovery enabled leaves a `SYSTEM` backup named `<table>$DeletedTableBackup`. It holds the table as it was at deletion, cannot be deleted, and expires after 35 days. `ListBackups` shows it with `BackupType` `SYSTEM` or `ALL`, and `RestoreTableFromBackup` restores it.
+
+Deviations from AWS: enabling point-in-time recovery right after `CreateTable` is accepted at once. AWS sometimes refuses it for a few seconds with `ContinuousBackupsUnavailableException`.
 
 
 ## Kinesis change data capture (CDC)

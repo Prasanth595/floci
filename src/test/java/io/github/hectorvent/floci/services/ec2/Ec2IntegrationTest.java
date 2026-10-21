@@ -2540,7 +2540,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ImportKeyPair")
             .formParam("KeyName", importedKeyName)
-            .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
+            .formParam("PublicKeyMaterial", encodedPublicKey())
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -2556,7 +2556,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ImportKeyPair")
             .formParam("KeyName", importedKeyName)
-            .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
+            .formParam("PublicKeyMaterial", encodedPublicKey())
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -2597,6 +2597,12 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    /** A whole RSA public key, base64-encoded as ImportKeyPair takes it: EC2 refuses a partial one. */
+    private static String encodedPublicKey() {
+        return Base64.getEncoder().encodeToString(
+                Ec2KeyMaterial.generateRsa().openSshPublicKey().getBytes(StandardCharsets.UTF_8));
     }
 
     @Test

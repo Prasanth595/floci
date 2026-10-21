@@ -312,6 +312,15 @@ class RedshiftServerlessIntegrationTest {
         call("ListSnapshots", "{\"startTime\":4102444800}")
                 .statusCode(200)
                 .body("snapshots", hasSize(0));
+        call("ListSnapshots", "{\"startTime\":4102444800.125}")
+                .statusCode(200)
+                .body("snapshots", hasSize(0));
+        call("ListSnapshots", "{\"startTime\":\"invalid\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("ListSnapshots", "{\"startTime\":123456789012345678901234567890}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
         call("RestoreFromSnapshot", "{\"namespaceName\":\"snap-life-ns\",\"workgroupName\":\"snap-life-wg\","
                 + "\"snapshotName\":\"snap-life\",\"snapshotArn\":\"" + snapshotArn + "\"}")
                 .statusCode(400)

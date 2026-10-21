@@ -1461,6 +1461,14 @@ public interface EmulatorConfig {
         @WithDefault("10")
         int vectorIndexBackfillSeconds();
 
+        /**
+         * Seconds LatestRestorableDateTime of point-in-time recovery trails the current time. AWS
+         * keeps it about five minutes behind.
+         * Env: FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS
+         */
+        @WithDefault("300")
+        int latestRestorableLagSeconds();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();
@@ -1768,13 +1776,32 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        /** When true, clusters have no database and are ACTIVE at once, without Docker. */
+        @WithDefault("false")
+        boolean mock();
+
+        /**
+         * Port every cluster endpoint is served on, as on AWS, where a DSQL endpoint is always
+         * reached on 5432. Clients connect to {@code <id>.dsql.<region>.<endpoint-suffix>} with TLS,
+         * and the server name they send picks the cluster.
+         */
+        @WithDefault("5432")
+        int port();
+
         /**
          * Domain under which cluster endpoints are named, {@code <id>.dsql.<region>.<suffix>}. The
          * default resolves to the loopback address on the host and to Floci inside its Docker
-         * network.
+         * network, so an endpoint works unchanged in both.
          */
         @WithDefault("localhost.floci.io")
         String endpointSuffix();
+
+        /** PostgreSQL image each cluster's database runs in. DSQL is PostgreSQL 16 compatible. */
+        @WithDefault("postgres:16-alpine")
+        String image();
+
+        /** Docker network for the database containers. Defaults to Floci's own network. */
+        Optional<String> dockerNetwork();
     }
 
     interface RdsDataServiceConfig {

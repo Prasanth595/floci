@@ -21,6 +21,8 @@ import io.github.hectorvent.floci.services.elbv2.model.RuleCondition;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -173,6 +175,73 @@ class ElbV2ServiceTest {
         assertEquals("ValidationError", both.getErrorCode());
         assertEquals("You can specify either subnets or subnet mappings, not both", both.getMessage());
         assertEquals(400, both.getHttpStatus());
+    }
+
+    /**
+     * SetSubnets with neither Subnets nor SubnetMappings, left out or sent as empty lists, is refused
+     * before any subnet is looked up, and the balancer keeps its zones and its VPC. A Network Load
+     * Balancer gets the message AWS gives it; an Application Load Balancer gets the one
+     * CreateLoadBalancer gives it, and a Gateway Load Balancer the Network one.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "application|At least two subnets in two different Availability Zones must be specified",
+        "network|At least one subnet must be specified",
+        "gateway|At least one subnet must be specified"
+    })
+    void setSubnetsWithNeitherSubnetsNorSubnetMappingsIsRefused(String type, String message) {
+        LoadBalancer lb = service.createLoadBalancer(REGION, "set-none-" + type, "internal", type, "ipv4",
+                ALB_SUBNETS, List.of(), Map.of());
+        ElbV2QueryHandler handler = new ElbV2QueryHandler(service);
+        clearInvocations(ec2Service);
+        for (boolean emptyLists : new boolean[] {false, true}) {
+            MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+            params.add("LoadBalancerArn", lb.getLoadBalancerArn());
+            if (emptyLists) {
+                params.add("Subnets", "");
+                params.add("SubnetMappings", "");
+            }
+            Response response = handler.handle("SetSubnets", params, REGION);
+            String xml = (String) response.getEntity();
+            assertEquals(400, response.getStatus(), xml);
+            assertTrue(xml.contains("<Code>ValidationError</Code>"), xml);
+            assertTrue(xml.contains("<Message>" + message + "</Message>"), xml);
+        }
+        LoadBalancer kept = service.describeLoadBalancers(REGION, List.of(lb.getLoadBalancerArn()), null, null,
+                null).getFirst();
+        assertEquals(ALB_SUBNETS, kept.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+        assertEquals("vpc-a", kept.getVpcId());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
+    }
+
+    /** The message depends on the balancer's type, so a balancer that does not exist is reported first. */
+    @Test
+    void setSubnetsForAMissingBalancerReportsItBeforeMissingSubnets() {
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("LoadBalancerArn",
+                "arn:aws:elasticloadbalancing:" + REGION + ":000000000000:loadbalancer/net/missing/0123456789abcdef");
+
+        Response response = new ElbV2QueryHandler(service).handle("SetSubnets", params, REGION);
+
+        String xml = (String) response.getEntity();
+        assertEquals(400, response.getStatus(), xml);
+        assertTrue(xml.contains("<Code>LoadBalancerNotFound</Code>"), xml);
+    }
+
+    /**
+     * Only the SetSubnets action refuses an empty list. A CloudFormation rollback moves a kept
+     * balancer back onto the subnets it had before the update, and for a balancer an earlier Floci
+     * version saved without subnets that is none.
+     */
+    @Test
+    void aMoveBackOntoNoSubnetsIsStillTaken() {
+        LoadBalancer lb = service.createLoadBalancer(REGION, "moved-back", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of());
+
+        service.setSubnets(REGION, lb.getLoadBalancerArn(), List.of());
+
+        assertTrue(service.describeLoadBalancers(REGION, List.of(lb.getLoadBalancerArn()), null, null, null)
+                .getFirst().getAvailabilityZones().isEmpty());
     }
 
     /**

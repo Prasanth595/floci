@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -3434,10 +3435,10 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeKeyPairs(MultivaluedMap<String, String> p, String region) {
-        boolean includePublicKey = Boolean.parseBoolean(p.getFirst("IncludePublicKey"));
+        boolean includePublicKey = Boolean.TRUE.equals(parseOptionalBoolean(p.getFirst("IncludePublicKey"), "IncludePublicKey"));
         List<String> keyNames = getList(p, "KeyName");
         List<String> keyPairIds = getList(p, "KeyPairId");
-        List<KeyPair> kps = service.describeKeyPairs(region, keyNames, keyPairIds);
+        List<KeyPair> kps = service.describeKeyPairs(region, keyNames, keyPairIds, getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeKeyPairsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3445,6 +3446,8 @@ public class Ec2QueryHandler {
         for (KeyPair kp : kps) {
             xml.start("item")
                     .elem("keyPairId", kp.getKeyPairId())
+                    .elem("keyType", Ec2Service.keyTypeOf(kp))
+                    .elem("createTime", kp.getCreateTime() != null ? ISO_FMT.format(kp.getCreateTime()) : null)
                     .elem("keyName", kp.getKeyName())
                     .elem("keyFingerprint", kp.getKeyFingerprint());
             if (includePublicKey) {
@@ -3458,13 +3461,14 @@ public class Ec2QueryHandler {
 
     /**
      * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
-     * DescribeKeyPairs reports for created and imported keys alike. ImportKeyPair keeps what it was
-     * given, so this is null unless the material is a single OpenSSH line whose blob is a whole key
-     * of the type the line names: a partial blob, a line labelled with another type and material of
-     * more than one line are not one key to report. PEM, DER and RFC 4716 bodies are not converted,
-     * since ImportKeyPair does not read those formats yet. The line is rebuilt from the blob's type,
-     * the blob and the name rather than copied, so no character of the stored text, such as a NUL
-     * that XML cannot carry, reaches the response.
+     * DescribeKeyPairs reports for created and imported keys alike. ImportKeyPair stores one OpenSSH
+     * line, but a key pair saved by an earlier version kept the material it was given, so this is
+     * null unless the material is a single OpenSSH line whose blob is a whole key of the type the
+     * line names: a partial blob, a line labelled with another type and material of more than one
+     * line are not one key to report, and PEM, DER and RFC 4716 bodies saved that way are not
+     * converted here. The line is rebuilt from the blob's type, the blob and the name rather than
+     * copied, so no character of the stored text, such as a NUL that XML cannot carry, reaches the
+     * response.
      */
     private static String openSshPublicKeyNamedFor(KeyPair kp) {
         String material = kp.getPublicKey();
@@ -3813,13 +3817,18 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
-        Map<String, List<String>> filters = getFilters(p);
-        List<Map<String, String>> tagItems = service.describeTags(region, filters);
+        String maxResults = p.getFirst("MaxResults");
+        PaginatedResult<Map<String, String>> result = service.describeTags(region, getFiltersList(p),
+                maxResults == null || maxResults.isEmpty() ? null : parseIntParam(p, "MaxResults", 0),
+                p.getFirst("NextToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTagsResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("tagSet");
-        for (Map<String, String> item : tagItems) {
+                .elem("requestId", UUID.randomUUID().toString());
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        xml.start("tagSet");
+        for (Map<String, String> item : result.items()) {
             xml.start("item")
                     .elem("resourceId", item.get("resourceId"))
                     .elem("resourceType", item.get("resourceType"))

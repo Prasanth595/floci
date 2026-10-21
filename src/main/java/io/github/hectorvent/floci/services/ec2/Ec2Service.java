@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -98,6 +99,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo
 import io.github.hectorvent.floci.services.ec2.net.Cidr4;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import jakarta.annotation.PostConstruct;
@@ -129,6 +131,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -234,6 +237,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private static final Set<String> EGRESS_ONLY_INTERNET_GATEWAY_FILTERS = Set.of(
             "attachment.state", "attachment.vpc-id",
             "egress-only-internet-gateway-id", "tag-key", "tag-value");
+    /**
+     * The filter names DescribeKeyPairs documents, with tag:&lt;key&gt; admitted through tag-key,
+     * plus key-type, which the documentation omits but which every key pair carries.
+     */
+    private static final Set<String> KEY_PAIR_FILTERS = Set.of(
+            "fingerprint", "key-name", "key-pair-id", "key-type", "tag-key");
+    /** The longest key-pair name CreateKeyPair and ImportKeyPair take. */
+    private static final int MAX_KEY_NAME_LENGTH = 255;
     private static final Set<String> AVAILABILITY_ZONE_FILTERS = Set.of(
             "group-long-name", "group-name", "message", "opt-in-status",
             "parent-zone-id", "parent-zone-name", "region-name", "state",
@@ -7427,13 +7438,33 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // The public half is what RunInstances injects into the guest's authorized_keys.
         // Without storing it, a key pair created here could never authenticate anything.
         kp.setPublicKey(generated.openSshPublicKey());
+        kp.setKeyType("rsa");
+        kp.setCreateTime(Instant.now());
         kp.setRegion(region);
         keyPairs.put(key(region, keyPairId), kp);
         return kp;
     }
 
     public List<KeyPair> describeKeyPairs(String region, List<String> keyNames, List<String> keyPairIds) {
+        return describeKeyPairs(region, keyNames, keyPairIds, List.of());
+    }
+
+    /** A convenience for filters of distinct names; a request's Filter.N goes through the ordered overload. */
+    public List<KeyPair> describeKeyPairs(String region, List<String> keyNames, List<String> keyPairIds,
+                                          Map<String, List<String>> filters) {
+        return describeKeyPairs(region, keyNames, keyPairIds, List.copyOf(filters.entrySet()));
+    }
+
+    /**
+     * Filter.N in request order, each a name and its values: AWS ANDs the filters, a repeated name
+     * included, and ORs the values within one.
+     */
+    public List<KeyPair> describeKeyPairs(String region, List<String> keyNames, List<String> keyPairIds,
+                                          List<Map.Entry<String, List<String>>> filters) {
         ensureDefaultResources(region);
+        // matchesFilter answers true for a name it does not know, so an unknown name would match
+        // every key pair rather than fail as it does in AWS.
+        requireSupportedFilters(filters.stream().map(Map.Entry::getKey).toList(), KEY_PAIR_FILTERS);
         List<KeyPair> regionKeyPairs = keyPairs.scan(k -> true).stream()
                 .filter(k -> k.getRegion().equals(region))
                 .collect(Collectors.toList());
@@ -7457,7 +7488,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return regionKeyPairs.stream()
                 .filter(k -> keyNames.isEmpty() || keyNames.contains(k.getKeyName()))
                 .filter(k -> keyPairIds.isEmpty() || keyPairIds.contains(k.getKeyPairId()))
+                .filter(k -> filters.stream().allMatch(f -> matchesFilter(k, f.getKey(), f.getValue(), region)))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * The key type DescribeKeyPairs reports. A key pair stored before the type was recorded has it
+     * read from what it holds: rsa when CreateKeyPair made it, since that has only ever generated
+     * RSA keys, and otherwise the type of its imported key, or none when ImportKeyPair would now
+     * refuse that material or reading it fails, which is logged.
+     */
+    static String keyTypeOf(KeyPair keyPair) {
+        if (keyPair.getKeyType() != null) {
+            return keyPair.getKeyType();
+        }
+        if (keyPair.getKeyMaterial() != null) {
+            return "rsa";
+        }
+        try {
+            Ec2KeyMaterial.Imported imported = Ec2KeyMaterial.readImportedKey(keyPair.getPublicKey());
+            return imported != null ? imported.keyType() : null;
+        } catch (RuntimeException e) {
+            // The record may hold any text an earlier ImportKeyPair stored. Text the reader cannot
+            // handle leaves the type out instead of failing every description in the region.
+            LOG.warnv(e, "Could not read the key type of stored key pair {0}", keyPair.getKeyPairId());
+            return null;
+        }
     }
 
     /**
@@ -7483,19 +7539,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public KeyPair importKeyPair(String region, String keyName, String publicKeyMaterial) {
         ensureDefaultResources(region);
         requireKeyName(keyName);
+        Ec2KeyMaterial.Imported imported = Ec2KeyMaterial.readImportedKey(publicKeyMaterial);
+        if (imported == null) {
+            throw new AwsException("InvalidKey.Format", "Key is not in valid OpenSSH public key format", 400);
+        }
         rejectDuplicateKeyName(region, keyName);
         String keyPairId = "key-" + randomHex(17);
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
         kp.setKeyName(keyName);
         // A per-key fingerprint, not a constant: callers compare it to detect that the key
-        // under a given name has been replaced. Falls back to the old placeholder only when
-        // the material does not parse, rather than reporting a digest of garbage.
-        String fingerprint = Ec2KeyMaterial.fingerprintOf(publicKeyMaterial);
-        kp.setKeyFingerprint(fingerprint != null
-                ? fingerprint
-                : "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00");
-        kp.setPublicKey(publicKeyMaterial);
+        // under a given name has been replaced.
+        kp.setKeyFingerprint(imported.fingerprint());
+        kp.setKeyType(imported.keyType());
+        // The key as one OpenSSH line, whatever format it came in: RunInstances writes it to the
+        // guest's authorized_keys, which reads neither RFC 4716 nor DER.
+        kp.setPublicKey(imported.openSshPublicKey());
+        kp.setCreateTime(Instant.now());
         kp.setRegion(region);
         keyPairs.put(key(region, keyPairId), kp);
         return kp;
@@ -7553,9 +7613,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return containerManager.isContainerRunning(instance.getDockerContainerId());
     }
 
+    /**
+     * A key-pair name as AWS documents it for CreateKeyPair and ImportKeyPair alike: up to 255
+     * ASCII characters, with no leading or trailing space.
+     */
     private static void requireKeyName(String keyName) {
         if (keyName == null || keyName.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
+        }
+        String reason = null;
+        if (keyName.length() > MAX_KEY_NAME_LENGTH) {
+            reason = "Length exceeds maximum of " + MAX_KEY_NAME_LENGTH + " characters.";
+        } else if (keyName.chars().anyMatch(c -> c > 0x7F)) {
+            reason = "Character sets beyond ASCII are not supported.";
+        } else if (keyName.startsWith(" ") || keyName.endsWith(" ")) {
+            reason = "Leading and trailing spaces are not allowed.";
+        }
+        if (reason != null) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + keyName + ") for parameter KeyName is invalid. " + reason, 400);
         }
     }
 
@@ -8939,23 +9015,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * AWS filter values take two wildcards, {@code *} for any run of characters and {@code ?} for
      * exactly one. Only {@code *} was honoured here, so a {@code ?} was matched literally and a
      * pattern like {@code ubuntu-?} found nothing, while {@link #wildcardToRegex} a few hundred
-     * lines down already treated both.
+     * lines down already treated both. The match is a two-pointer glob rather than a regex: a
+     * caller-supplied pattern of many stars made the regex backtrack for seconds, and its dot
+     * skipped line terminators that a tag value may hold.
      */
     private boolean wildcardMatches(String pattern, String value) {
-        if (pattern == null) {
-            return false;
-        }
-        if (!pattern.contains("*") && !pattern.contains("?")) {
-            return pattern.equals(value);
-        }
-        String regex = pattern.chars()
-                .mapToObj(ch -> switch (ch) {
-                    case '*' -> ".*";
-                    case '?' -> ".";
-                    default -> java.util.regex.Pattern.quote(String.valueOf((char) ch));
-                })
-                .collect(Collectors.joining());
-        return value.matches(regex);
+        return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
     }
 
     // ─── Tags ──────────────────────────────────────────────────────────────────
@@ -9340,74 +9405,87 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return List.copyOf(tagsOf(region, resourceId).orElse(List.of()));
     }
 
+    /** Every tag in {@code region} that matches {@code filters}, unpaged. */
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
-        ensureDefaultResources(region);
-        List<String> filterResourceIds   = filters != null ? filters.get("resource-id")   : null;
-        List<String> filterResourceTypes = filters != null ? filters.get("resource-type") : null;
-        List<String> filterKeys          = filters != null ? filters.get("key")            : null;
-        List<String> filterValues        = filters != null ? filters.get("value")          : null;
+        List<Map.Entry<String, List<String>>> filterList = filters != null
+                ? new ArrayList<>(filters.entrySet())
+                : List.of();
+        return describeTags(region, filterList, null, null).items();
+    }
 
-        List<Map<String, String>> result = new ArrayList<>();
-        Set<String> processedResourceIds = new LinkedHashSet<>();
+    /**
+     * DescribeTags. Filters are ANDed and the values of one filter ORed, each value taking the
+     * {@code *} and {@code ?} wildcards. {@code tag:<key>} is the documented alternate spelling of
+     * a {@code key} filter plus a {@code value} filter. Tags are listed by resource id, so a page
+     * boundary stays put while nothing is written; a null {@code maxResults} means unpaged, and any
+     * value sent outside 5 to 1000, zero and negatives included, is refused.
+     */
+    public PaginatedResult<Map<String, String>> describeTags(String region,
+                                                             List<Map.Entry<String, List<String>>> filters,
+                                                             Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidMaxResults",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 1000.", 400);
+        }
+        int offset = decodeToken(nextToken);
+        ensureDefaultResources(region);
+
+        Map<String, List<Tag>> tagsByResource = new TreeMap<>();
         String regionPrefix = region + "::";
         for (String tagKey : new ArrayList<>(tags.keys())) {
-            if (!tagKey.startsWith(regionPrefix)) {
-                continue;
-            }
-            String resourceId = tagKey.substring(regionPrefix.length());
-            processedResourceIds.add(resourceId);
-            String resourceType = inferResourceType(resourceId);
-
-            if (filterResourceIds != null && !filterResourceIds.contains(resourceId)) {
-                continue;
-            }
-            if (filterResourceTypes != null && !filterResourceTypes.contains(resourceType)) {
-                continue;
-            }
-            for (Tag tag : tagsOf(region, resourceId).orElse(List.of())) {
-                if (filterKeys != null && !filterKeys.contains(tag.getKey())) {
-                    continue;
-                }
-                if (filterValues != null && !filterValues.contains(tag.getValue())) {
-                    continue;
-                }
-                Map<String, String> item = new LinkedHashMap<>();
-                item.put("resourceId", resourceId);
-                item.put("resourceType", resourceType);
-                item.put("key", tag.getKey());
-                item.put("value", tag.getValue());
-                result.add(item);
+            if (tagKey.startsWith(regionPrefix)) {
+                String resourceId = tagKey.substring(regionPrefix.length());
+                tagsByResource.put(resourceId, tagsOf(region, resourceId).orElse(List.of()));
             }
         }
-
         for (Instance ext : listExternalInstances(callerAccountId(), region)) {
-            String resourceId = ext.getInstanceId();
-            if (processedResourceIds.contains(resourceId)) {
-                continue;
-            }
+            tagsByResource.putIfAbsent(ext.getInstanceId(), ext.getTags() != null ? ext.getTags() : List.of());
+        }
+
+        List<Map<String, String>> result = new ArrayList<>();
+        for (Map.Entry<String, List<Tag>> resource : tagsByResource.entrySet()) {
+            String resourceId = resource.getKey();
             String resourceType = inferResourceType(resourceId);
-            if (filterResourceIds != null && !filterResourceIds.contains(resourceId)) {
-                continue;
-            }
-            if (filterResourceTypes != null && !filterResourceTypes.contains(resourceType)) {
-                continue;
-            }
-            for (Tag tag : ext.getTags() != null ? ext.getTags() : List.<Tag>of()) {
-                if (filterKeys != null && !filterKeys.contains(tag.getKey())) {
-                    continue;
+            for (Tag tag : resource.getValue()) {
+                if (filters.stream().allMatch(filter -> matchesTagFilter(filter, resourceId, resourceType, tag))) {
+                    Map<String, String> item = new LinkedHashMap<>();
+                    item.put("resourceId", resourceId);
+                    item.put("resourceType", resourceType);
+                    item.put("key", tag.getKey());
+                    item.put("value", tag.getValue());
+                    result.add(item);
                 }
-                if (filterValues != null && !filterValues.contains(tag.getValue())) {
-                    continue;
-                }
-                Map<String, String> item = new LinkedHashMap<>();
-                item.put("resourceId", resourceId);
-                item.put("resourceType", resourceType);
-                item.put("key", tag.getKey());
-                item.put("value", tag.getValue());
-                result.add(item);
             }
         }
-        return result;
+
+        if (maxResults == null) {
+            return new PaginatedResult<>(result, null);
+        }
+        int total = result.size();
+        if (offset >= total) {
+            return new PaginatedResult<>(List.of(), null);
+        }
+        int toIndex = offset + Math.min(maxResults, total - offset);
+        return new PaginatedResult<>(new ArrayList<>(result.subList(offset, toIndex)),
+                toIndex < total ? encodeToken(toIndex) : null);
+    }
+
+    private boolean matchesTagFilter(Map.Entry<String, List<String>> filter, String resourceId,
+                                     String resourceType, Tag tag) {
+        String name = filter.getKey();
+        List<String> values = filter.getValue();
+        String value = tag.getValue() != null ? tag.getValue() : "";
+        if (name.startsWith("tag:")) {
+            return name.substring("tag:".length()).equals(tag.getKey()) && matchesFilterValue(values, value);
+        }
+        return switch (name) {
+            case "key" -> matchesFilterValue(values, tag.getKey());
+            case "value" -> matchesFilterValue(values, value);
+            case "resource-id" -> matchesFilterValue(values, resourceId);
+            case "resource-type" -> matchesFilterValue(values, resourceType);
+            default -> true;
+        };
     }
 
     private String inferResourceType(String resourceId) {
@@ -11894,6 +11972,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 case "instance-type" -> matchesValue(values, host.getInstanceType());
                 case "state" -> matchesValue(values, host.getState());
                 case "auto-placement" -> matchesValue(values, host.getAutoPlacement());
+                default -> true;
+            };
+        }
+        if (resource instanceof KeyPair keyPair) {
+            return switch (filterName) {
+                case "key-pair-id" -> matchesValue(values, keyPair.getKeyPairId());
+                case "key-name" -> matchesValue(values, keyPair.getKeyName());
+                case "fingerprint" -> matchesValue(values, keyPair.getKeyFingerprint());
+                case "key-type" -> matchesValue(values, keyTypeOf(keyPair));
                 default -> true;
             };
         }

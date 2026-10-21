@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.redshift.RedshiftIamDbUserResolver;
@@ -254,7 +255,8 @@ public class RedshiftServerlessJsonHandler {
     private Response handleListSnapshots(JsonNode request, String region) {
         PaginatedResult<RedshiftServerlessSnapshot> page = service.listSnapshots(
                 ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "namespaceArn"), ServerlessSupport.text(request, "ownerAccount"),
-                ServerlessSupport.epochSeconds(request, "startTime"), ServerlessSupport.epochSeconds(request, "endTime"), region,
+                AwsJsonTimestamp.epochSeconds(request, "startTime", "ValidationException"),
+                AwsJsonTimestamp.epochSeconds(request, "endTime", "ValidationException"), region,
                 ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("snapshots");

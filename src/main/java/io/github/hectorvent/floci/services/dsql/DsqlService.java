@@ -16,7 +16,9 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -30,7 +32,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -72,6 +73,7 @@ public class DsqlService implements Resettable {
     private final DsqlPrincipals principals;
     private final IamPolicyEvaluator policyEvaluator;
     private final ObjectMapper objectMapper;
+    private final boolean enabled;
     private final Map<String, Object> locks = new ConcurrentHashMap<>();
 
     @Inject
@@ -79,12 +81,13 @@ public class DsqlService implements Resettable {
                        DsqlDataPlane dataPlane, DsqlPrincipals principals, IamPolicyEvaluator policyEvaluator,
                        ObjectMapper objectMapper) {
         this(storageFactory.create("dsql", "dsql-clusters.json", new TypeReference<>() {}), regionResolver,
-                config.services().dsql().endpointSuffix(), dataPlane, principals, policyEvaluator, objectMapper);
+                config.services().dsql().endpointSuffix(), dataPlane, principals, policyEvaluator, objectMapper,
+                config.services().dsql().enabled());
     }
 
     DsqlService(AccountAwareStorageBackend<DsqlCluster> clusters, RegionResolver regionResolver,
                 String endpointSuffix, DsqlDataPlane dataPlane, DsqlPrincipals principals,
-                IamPolicyEvaluator policyEvaluator, ObjectMapper objectMapper) {
+                IamPolicyEvaluator policyEvaluator, ObjectMapper objectMapper, boolean enabled) {
         this.clusters = clusters;
         this.regionResolver = regionResolver;
         this.endpointSuffix = endpointSuffix;
@@ -92,6 +95,7 @@ public class DsqlService implements Resettable {
         this.principals = principals;
         this.policyEvaluator = policyEvaluator;
         this.objectMapper = objectMapper;
+        this.enabled = enabled;
     }
 
     // ── Clusters ──────────────────────────────────────────────────────────────
@@ -233,22 +237,6 @@ public class DsqlService implements Resettable {
         return cluster;
     }
 
-    /** The cluster whose endpoint is {@code host}, in any account: what the data plane serves. */
-    public Optional<DsqlCluster> clusterForEndpoint(String host) {
-        if (host == null) {
-            return Optional.empty();
-        }
-        String wanted = host.toLowerCase(Locale.ROOT);
-        return clusters.scanAllAccounts().stream()
-                .filter(cluster -> wanted.equals(cluster.getEndpoint()))
-                .findFirst();
-    }
-
-    /** Every cluster in every account, for the data plane to bring back after a restart. */
-    public List<DsqlCluster> allClusters() {
-        return clusters.scanAllAccounts();
-    }
-
     // ── VPC endpoint service ──────────────────────────────────────────────────
 
     public String vpcEndpointServiceName(String region, String identifier) {
@@ -378,6 +366,31 @@ public class DsqlService implements Resettable {
         }
     }
 
+    /**
+     * Brings every cluster's database back when Floci starts with clusters in its storage, and
+     * finishes a deletion that a stop interrupted.
+     */
+    void onStart(@Observes StartupEvent ignored) {
+        if (!enabled) {
+            return;
+        }
+        for (DsqlCluster cluster : clusters.scanAllAccounts()) {
+            String accountId = cluster.getAccountId();
+            String region = cluster.getRegion();
+            String identifier = cluster.getIdentifier();
+            if (DELETING.equals(cluster.getStatus())) {
+                dataPlane.deprovision(cluster, () -> {
+                    clusters.deleteForAccount(accountId, key(region, identifier));
+                    locks.remove(cluster.getArn());
+                });
+            } else if (!FAILED.equals(cluster.getStatus())) {
+                cluster.setDatabaseReady(false);
+                clusters.putForAccount(accountId, key(region, identifier), cluster);
+                dataPlane.provision(cluster, ready -> markReady(accountId, region, identifier, ready));
+            }
+        }
+    }
+
     @Override
     public void clear() {
         for (DsqlCluster cluster : clusters.scanAllAccounts()) {
@@ -389,10 +402,22 @@ public class DsqlService implements Resettable {
 
     // ── Internals ─────────────────────────────────────────────────────────────
 
+    /**
+     * Records whether the cluster's database came up. A cluster being created becomes ACTIVE or
+     * FAILED; one still waiting for its peers stays PENDING_SETUP until peering, unless its database
+     * failed.
+     */
     private void markReady(String accountId, String region, String identifier, boolean ready) {
-        clusters.getForAccount(accountId, key(region, identifier)).ifPresent(cluster -> {
-            if (CREATING.equals(cluster.getStatus())) {
-                cluster.setStatus(ready ? ACTIVE : FAILED);
+        clusters.getForAccount(accountId, key(region, identifier)).ifPresent(found -> {
+            synchronized (lockFor(found.getArn())) {
+                DsqlCluster cluster = clusters.getForAccount(accountId, key(region, identifier)).orElse(null);
+                if (cluster == null) {
+                    return;
+                }
+                cluster.setDatabaseReady(ready);
+                if (CREATING.equals(cluster.getStatus()) || (!ready && PENDING_SETUP.equals(cluster.getStatus()))) {
+                    cluster.setStatus(ready ? ACTIVE : FAILED);
+                }
                 clusters.putForAccount(accountId, key(region, identifier), cluster);
             }
         });
@@ -416,8 +441,9 @@ public class DsqlService implements Resettable {
 
     /**
      * Brings out of {@code PENDING_SETUP} every cluster of {@code cluster}'s group once each names
-     * every other, as DSQL does when the last peer is updated (measured: both ACTIVE after about
-     * 100 s; here at once).
+     * every other, as DSQL does when the last peer is updated (measured: CREATING, then both ACTIVE
+     * after about 100 s; here ACTIVE at once if the cluster's database answers, else CREATING until
+     * it does).
      */
     private void completePeering(DsqlCluster cluster) {
         if (cluster.getLinkedClusterArns() == null) {
@@ -439,7 +465,7 @@ public class DsqlService implements Resettable {
         for (DsqlCluster member : group) {
             synchronized (lockFor(member.getArn())) {
                 if (PENDING_SETUP.equals(member.getStatus())) {
-                    member.setStatus(ACTIVE);
+                    member.setStatus(member.isDatabaseReady() ? ACTIVE : CREATING);
                     clusters.put(key(member.getRegion(), member.getIdentifier()), member);
                 }
             }

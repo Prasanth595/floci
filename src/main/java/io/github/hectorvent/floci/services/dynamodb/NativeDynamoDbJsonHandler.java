@@ -60,6 +60,7 @@ public class NativeDynamoDbJsonHandler {
     // The order AWS prints the enum constraint in.
     private static final List<String> BACKUP_TYPE_FILTERS = List.of("ALL", "AWS_BACKUP", "USER", "SYSTEM");
     private static final int MAX_LIST_BACKUPS_LIMIT = 100;
+    private static final int MAX_RECOVERY_PERIOD_DAYS = 35;
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -108,6 +109,7 @@ public class NativeDynamoDbJsonHandler {
             case "ListBackups" -> handleListBackups(request, region);
             case "DeleteBackup" -> handleDeleteBackup(request, region);
             case "RestoreTableFromBackup" -> handleRestoreTableFromBackup(request, region);
+            case "RestoreTableToPointInTime" -> handleRestoreTableToPointInTime(request, region);
             case "TransactWriteItems" -> handleTransactWriteItems(request, region);
             case "TransactGetItems" -> handleTransactGetItems(request, region);
             case "TagResource" -> handleTagResource(request, region);
@@ -1864,31 +1866,50 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleDescribeContinuousBackups(JsonNode request, String region) {
-        String tableName = request.path("TableName").asText();
-        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        String tableName = requireTableNameParameter(request, "TableName");
+        DynamoDbTableNames.resolveWithRegion(tableName, region);
+        DynamoDbService.ContinuousBackups backups = dynamoDbService.describeContinuousBackups(tableName, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("ContinuousBackupsDescription", continuousBackupsDescriptionNode(table));
+        response.set("ContinuousBackupsDescription", continuousBackupsDescriptionNode(backups));
         return Response.ok(response).build();
     }
 
     private Response handleUpdateContinuousBackups(JsonNode request, String region) {
-        String tableName = request.path("TableName").asText();
+        String tableName = requireTableNameParameter(request, "TableName");
+        DynamoDbTableNames.resolveWithRegion(tableName, region);
         JsonNode spec = request.path("PointInTimeRecoverySpecification");
-        boolean enabled = spec.path("PointInTimeRecoveryEnabled").asBoolean(false);
-        Integer recoveryPeriodInDays = spec.has("RecoveryPeriodInDays")
-                ? spec.path("RecoveryPeriodInDays").asInt()
-                : null;
-        if (recoveryPeriodInDays != null && (recoveryPeriodInDays < 1 || recoveryPeriodInDays > 35)) {
+        if (spec.isMissingNode() || spec.isNull()) {
+            throwValidationErrors(List.of("Value null at 'pointInTimeRecoverySpecification' failed to satisfy "
+                    + "constraint: Member must not be null"));
+        }
+        List<String> violations = new ArrayList<>();
+        JsonNode period = spec.path("RecoveryPeriodInDays");
+        String periodConstraint = "Value '" + period.asText() + "' at 'pointInTimeRecoverySpecification."
+                + "recoveryPeriodInDays' failed to satisfy constraint: ";
+        if (period.isNumber() && period.asLong() < 1) {
+            violations.add(periodConstraint + "Member must have value greater than or equal to 1");
+        }
+        if (period.isNumber() && MAX_RECOVERY_PERIOD_DAYS < period.asLong()) {
+            violations.add(periodConstraint + "Member must have value less than or equal to " + MAX_RECOVERY_PERIOD_DAYS);
+        }
+        JsonNode enabled = spec.path("PointInTimeRecoveryEnabled");
+        if (enabled.isMissingNode() || enabled.isNull()) {
+            violations.add("Value null at 'pointInTimeRecoverySpecification.pointInTimeRecoveryEnabled' failed to "
+                    + "satisfy constraint: Member must not be null");
+        }
+        throwValidationErrors(violations);
+        Integer recoveryPeriodInDays = period.isNumber() ? period.asInt() : null;
+        if (!enabled.asBoolean() && recoveryPeriodInDays != null) {
             throw new AwsException("ValidationException",
-                    "RecoveryPeriodInDays must be between 1 and 35", 400);
+                    "Invalid Request: Cannot specify RecoveryPeriodInDays when disabling point-in-time recovery.", 400);
         }
 
-        TableDefinition table = dynamoDbService.updateContinuousBackups(
-                tableName, enabled, recoveryPeriodInDays, region);
+        DynamoDbService.ContinuousBackups backups = dynamoDbService.updateContinuousBackups(
+                tableName, enabled.asBoolean(), recoveryPeriodInDays, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("ContinuousBackupsDescription", continuousBackupsDescriptionNode(table));
+        response.set("ContinuousBackupsDescription", continuousBackupsDescriptionNode(backups));
         return Response.ok(response).build();
     }
 
@@ -1975,6 +1996,76 @@ public class NativeDynamoDbJsonHandler {
         String backupArn = textOrNull(request, "BackupArn");
         DynamoDbBackupArns.parse(backupArn);
         String targetTableName = requireTableNameParameter(request, "TargetTableName");
+        throwValidationErrors(restoreViolations(request, targetTableName));
+
+        TableBackup backup = dynamoDbService.describeBackup(backupArn, region);
+        TableDefinition table = tableService.restoreTable(DynamoDbService.snapshotOf(backup.getTable()),
+                targetTableName, parseRestoreOverrides(request), region);
+        ObjectNode description = tableToNode(table);
+        description.set("RestoreSummary", restoreSummaryNode(backup.getBackupArn(),
+                backup.getTable().getTableArn(), backup.getCreationDateTime()));
+        dynamoDbService.finishRestore(targetTableName, backup.getItems(), region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("TableDescription", description);
+        return Response.ok(response).build();
+    }
+
+    /**
+     * Restores synchronously, like {@link #handleRestoreTableFromBackup}. AWS checks a source table
+     * name for its length before the validation list, and a source table ARN before both.
+     */
+    private Response handleRestoreTableToPointInTime(JsonNode request, String region) {
+        String targetTableName = requireTableNameParameter(request, "TargetTableName");
+        String sourceTableName = textOrNull(request, "SourceTableName");
+        String sourceTableArn = textOrNull(request, "SourceTableArn");
+        if (sourceTableName == null && sourceTableArn == null) {
+            requireTableNameParameter(request, "SourceTableName");
+        }
+        DynamoDbTableNames.ResolvedTableRef source;
+        if (sourceTableArn != null) {
+            source = dynamoDbService.pointInTimeSourceArn(sourceTableArn, region,
+                    request.path("SSESpecificationOverride").isObject());
+        } else if (sourceTableName.length() < 3 || 255 < sourceTableName.length()) {
+            throw new AwsException("ValidationException",
+                    "TableName must be at least 3 characters long and at most 255 characters long", 400);
+        } else {
+            source = new DynamoDbTableNames.ResolvedTableRef(sourceTableName, region);
+        }
+        List<String> violations = new ArrayList<>();
+        if (sourceTableName != null) {
+            violations.addAll(nameViolations(sourceTableName, "sourceTableName"));
+        }
+        violations.addAll(restoreViolations(request, targetTableName));
+        throwValidationErrors(violations);
+        if (sourceTableName != null && sourceTableArn != null) {
+            throw new AwsException("ValidationException",
+                    "Invalid Request: Must provide exactly one of: sourceTableArn, sourceTableName", 400);
+        }
+        boolean useLatestRestorableTime = request.path("UseLatestRestorableTime").asBoolean(false);
+        Instant restoreDateTime = timestampOrNull(request, "RestoreDateTime");
+        if (useLatestRestorableTime && restoreDateTime != null) {
+            throw new AwsException("ValidationException", "Invalid Request: Both RestoreDateTime and "
+                    + "UseLatestRestorableTime cannot be set for point-in-time restore request. Please specify "
+                    + "either RestoreDateTime time or UseLatestRestorableTime", 400);
+        }
+
+        DynamoDbService.PointInTimeState state = dynamoDbService.pointInTimeState(source.name(), source.region(),
+                region, useLatestRestorableTime, restoreDateTime);
+        TableDefinition table = tableService.restoreTable(state.table(), targetTableName,
+                parseRestoreOverrides(request), region);
+        ObjectNode description = tableToNode(table);
+        description.set("RestoreSummary", restoreSummaryNode(null, state.table().getTableArn(),
+                state.restoreDateTime()));
+        dynamoDbService.finishRestore(targetTableName, state.items(), region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("TableDescription", description);
+        return Response.ok(response).build();
+    }
+
+    /** The validation list both restores share, in the AWS order. */
+    private static List<String> restoreViolations(JsonNode request, String targetTableName) {
         List<String> violations = new ArrayList<>(throughputViolations(request.path("ProvisionedThroughputOverride"),
                 "provisionedThroughputOverride"));
         JsonNode billingModeOverride = request.path("BillingModeOverride");
@@ -1995,19 +2086,7 @@ public class NativeDynamoDbJsonHandler {
                         member + ".provisionedThroughput"));
             }
         }
-        throwValidationErrors(violations);
-
-        TableBackup backup = dynamoDbService.describeBackup(backupArn, region);
-        TableDefinition table = tableService.restoreTable(DynamoDbService.snapshotOf(backup.getTable()),
-                targetTableName, parseRestoreOverrides(request), region);
-        ObjectNode description = tableToNode(table);
-        description.set("RestoreSummary", restoreSummaryNode(backup.getBackupArn(),
-                backup.getTable().getTableArn(), backup.getCreationDateTime()));
-        dynamoDbService.finishRestore(targetTableName, backup.getItems(), region);
-
-        ObjectNode response = objectMapper.createObjectNode();
-        response.set("TableDescription", description);
-        return Response.ok(response).build();
+        return violations;
     }
 
     private static RestoreOverrides parseRestoreOverrides(JsonNode request) {
@@ -3280,15 +3359,20 @@ public class NativeDynamoDbJsonHandler {
         return vectorIndexNode;
     }
 
-    private ObjectNode continuousBackupsDescriptionNode(TableDefinition table) {
+    /** AWS also answers PointInTimeRecoveryWindowDays, a member its API model does not list. */
+    private ObjectNode continuousBackupsDescriptionNode(DynamoDbService.ContinuousBackups backups) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("ContinuousBackupsStatus", "ENABLED");
 
         ObjectNode pitrNode = objectMapper.createObjectNode();
+        TableDefinition table = backups.table();
         pitrNode.put("PointInTimeRecoveryStatus",
                 table.isPointInTimeRecoveryEnabled() ? "ENABLED" : "DISABLED");
-        if (table.isPointInTimeRecoveryEnabled()) {
+        if (backups.window() != null) {
+            pitrNode.put("EarliestRestorableDateTime", epochSeconds(backups.window().earliest()));
+            pitrNode.put("LatestRestorableDateTime", epochSeconds(backups.window().latest()));
             pitrNode.put("RecoveryPeriodInDays", table.getPointInTimeRecoveryRecoveryPeriodInDays());
+            pitrNode.put("PointInTimeRecoveryWindowDays", table.getPointInTimeRecoveryRecoveryPeriodInDays());
         }
         node.set("PointInTimeRecoveryDescription", pitrNode);
         return node;

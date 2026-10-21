@@ -1017,7 +1017,7 @@ final class CognitoAuthFlowHandler {
         VerificationCode.Purpose purpose = "EMAIL_OTP".equals(challengeName)
                 ? VerificationCode.Purpose.EMAIL_OTP : VerificationCode.Purpose.SMS_OTP;
         Map<String, Object> customMessage = customEmailSenderTakesOver(pool, deliveryMedium) ? Map.of()
-                : fireCustomMessage(pool, client, user, "CustomMessage_Authentication", Map.of());
+                : fireCustomMessage(pool, client, user, "CustomMessage_Authentication", null);
         Map<String, String> challengeParams = new HashMap<>(
                 service.issueSignInOtp(pool, client, user, purpose, attributeName, deliveryMedium, customMessage));
         challengeParams.put("USERNAME", user.getUsername());
@@ -1873,14 +1873,15 @@ final class CognitoAuthFlowHandler {
      * Fires the CustomMessage trigger, if configured, so the function can override the
      * subject/body Cognito would otherwise deliver. Non-blocking: an unconfigured or
      * failing trigger falls back to the pool's default templated message, mirroring how
-     * {@link #firePostConfirmation} tolerates errors.
+     * {@link #firePostConfirmation} tolerates errors. {@code clientMetadata} is the request's
+     * ClientMetadata; a sign-in code's event carries none (measured, eu-west-1, 2026-10-20).
      */
     Map<String, Object> fireCustomMessage(UserPool pool, UserPoolClient client, CognitoUser user,
                                            String triggerSource, Map<String, String> clientMetadata) {
         Map<String, Object> req = new HashMap<>();
         req.put("codeParameter", CUSTOM_MESSAGE_CODE_PARAMETER);
         req.put("usernameParameter", user.getUsername());
-        req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
+        req.put("clientMetadata", requestClientMetadata(clientMetadata));
         return customMessageResponse(pool, client, user, triggerSource, req);
     }
 
@@ -1894,8 +1895,16 @@ final class CognitoAuthFlowHandler {
         Map<String, Object> req = new HashMap<>();
         req.put("codeParameter", CUSTOM_MESSAGE_CODE_PARAMETER);
         req.put("usernameParameter", CUSTOM_MESSAGE_USERNAME_PARAMETER);
-        req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
+        req.put("clientMetadata", requestClientMetadata(clientMetadata));
         return customMessageResponse(pool, null, user, "CustomMessage_AdminCreateUser", req);
+    }
+
+    /**
+     * A custom message or sender event's {@code clientMetadata}: the request's, or null when it
+     * carries none, as Cognito sends it (measured, eu-west-1, 2026-10-16 and 2026-10-20).
+     */
+    private static Map<String, String> requestClientMetadata(Map<String, String> clientMetadata) {
+        return clientMetadata == null || clientMetadata.isEmpty() ? null : clientMetadata;
     }
 
     private Map<String, Object> customMessageResponse(UserPool pool, UserPoolClient client, CognitoUser user,
@@ -1932,7 +1941,7 @@ final class CognitoAuthFlowHandler {
         Map<String, Object> req = new HashMap<>();
         req.put("type", "customEmailSenderRequestV1");
         req.put("code", encryptedCode);
-        req.put("clientMetadata", clientMetadata == null || clientMetadata.isEmpty() ? null : clientMetadata);
+        req.put("clientMetadata", requestClientMetadata(clientMetadata));
         byte[] payload;
         try {
             payload = MAPPER.writeValueAsBytes(
@@ -2186,7 +2195,7 @@ final class CognitoAuthFlowHandler {
         }
         boolean sms = "SMS_MFA".equals(factor);
         Map<String, Object> customMessage = customEmailSenderTakesOver(pool, sms ? "SMS" : "EMAIL") ? Map.of()
-                : fireCustomMessage(pool, client, user, "CustomMessage_Authentication", Map.of());
+                : fireCustomMessage(pool, client, user, "CustomMessage_Authentication", null);
         Map<String, String> parameters = new HashMap<>(service.issueMfaCode(pool, client, user,
                 sms ? VerificationCode.Purpose.SMS_MFA : VerificationCode.Purpose.EMAIL_MFA,
                 sms ? "phone_number" : "email", sms ? "SMS" : "EMAIL", customMessage));

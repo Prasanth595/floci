@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Address;
@@ -31,16 +32,21 @@ import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_FINGERPRINT;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -555,6 +561,87 @@ class Ec2ServicePersistenceTest {
         assertNull(described.getUserData());
         assertNull(restarted.describeLaunchTemplates(REGION, List.of("lt-legacy-user-data"),
                 List.of(), Map.of()).getFirst().getData().getUserData());
+    }
+
+    @Test
+    void keyPairTypeAndCreateTimeSurviveRestart(@TempDir Path dir) {
+        Ec2Service first = newService(dir);
+        KeyPair created = first.createKeyPair(REGION, "restart-created");
+        KeyPair imported = first.importKeyPair(REGION, "restart-imported", ED25519_KEY);
+
+        Ec2Service restarted = newService(dir);
+        Map<String, KeyPair> described = new HashMap<>();
+        for (KeyPair keyPair : restarted.describeKeyPairs(REGION, List.of(), List.of())) {
+            described.put(keyPair.getKeyName(), keyPair);
+        }
+
+        assertEquals("rsa", described.get("restart-created").getKeyType());
+        assertEquals(created.getCreateTime(), described.get("restart-created").getCreateTime());
+        assertEquals("ed25519", described.get("restart-imported").getKeyType());
+        assertEquals(imported.getCreateTime(), described.get("restart-imported").getCreateTime());
+    }
+
+    /**
+     * Key pairs saved before keyType and createTime were recorded still load and are described:
+     * with no createTime, which was never known, and with the type read from the stored key, rsa for
+     * the created one and ed25519 for the imported one. The imported material is kept exactly as
+     * the older ImportKeyPair stored it, comment and newline included.
+     */
+    @Test
+    void keyPairsSavedBeforeTypeAndCreateTimeWereRecordedStillLoad(@TempDir Path dir) throws IOException {
+        Ec2KeyMaterial.Generated generated = Ec2KeyMaterial.generateRsa();
+        String importedKey = ED25519_KEY + " me@host\n";
+        String legacyJson = """
+                {
+                  "us-east-1::key-0aaaaaaaaaaaaaaaa": {
+                    "keyName": "legacy-created",
+                    "keyPairId": "key-0aaaaaaaaaaaaaaaa",
+                    "keyFingerprint": "%s",
+                    "keyMaterial": %s,
+                    "publicKey": "%s",
+                    "region": "us-east-1",
+                    "tags": []
+                  },
+                  "us-east-1::key-0bbbbbbbbbbbbbbbb": {
+                    "keyName": "legacy-imported",
+                    "keyPairId": "key-0bbbbbbbbbbbbbbbb",
+                    "keyFingerprint": "%s",
+                    "publicKey": %s,
+                    "region": "us-east-1",
+                    "tags": [{"key": "Team", "value": "blue"}]
+                  }
+                }
+                """.formatted(generated.fingerprint(), jsonString(generated.privateKeyPem()),
+                generated.openSshPublicKey(), ED25519_FINGERPRINT, jsonString(importedKey));
+        Files.writeString(dir.resolve("ec2-key-pairs.json"), legacyJson);
+
+        Ec2Service restarted = newService(dir);
+        Map<String, KeyPair> described = new HashMap<>();
+        for (KeyPair keyPair : restarted.describeKeyPairs(REGION, List.of(), List.of())) {
+            described.put(keyPair.getKeyName(), keyPair);
+        }
+
+        assertEquals(2, described.size());
+        assertEquals("rsa", Ec2Service.keyTypeOf(described.get("legacy-created")));
+        assertEquals("ed25519", Ec2Service.keyTypeOf(described.get("legacy-imported")));
+        assertNull(described.get("legacy-created").getCreateTime());
+        assertNull(described.get("legacy-imported").getCreateTime());
+        assertEquals(importedKey, described.get("legacy-imported").getPublicKey());
+        assertEquals(List.of("legacy-imported"), restarted.describeKeyPairs(REGION, List.of(), List.of(),
+                Map.of("key-type", List.of("ed25519"), "tag:Team", List.of("blue"))).stream()
+                .map(KeyPair::getKeyName).toList());
+
+        String xml = (String) new Ec2QueryHandler(restarted, mock(EmulatorConfig.class), mock(FlowLogService.class),
+                mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                mock(Ec2IpamService.class), new RegionResolver(REGION, "000000000000"))
+                .handle("DescribeKeyPairs", new MultivaluedHashMap<>(), REGION).getEntity();
+        assertTrue(xml.contains("<keyType>rsa</keyType>"), xml);
+        assertTrue(xml.contains("<keyType>ed25519</keyType>"), xml);
+        assertFalse(xml.contains("<createTime>"), xml);
+    }
+
+    private static String jsonString(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\"";
     }
 
     private BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {

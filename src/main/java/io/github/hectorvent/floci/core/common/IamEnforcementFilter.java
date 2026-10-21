@@ -67,6 +67,8 @@ import java.util.regex.Pattern;
  *   <li>The action cannot be resolved (unknown mapping → permissive)</li>
  *   <li>The action is {@code sts:GetCallerIdentity}, which AWS allows without permissions. The
  *       key itself is still checked.</li>
+ *   <li>The action is {@code sts:GetSessionToken}, which AWS also allows without permissions:
+ *       policies cannot control authentication operations. The key itself is still checked.</li>
  * </ul>
  *
  * <p>Authenticated temporary callers of {@code sts:GetFederationToken} are refused here with
@@ -382,6 +384,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
         if ("sts:GetCallerIdentity".equals(action)) {
             return; // AWS returns caller identity even when an identity policy explicitly denies it
+        }
+        if ("sts:GetSessionToken".equals(action)) {
+            // AWS: "No permissions are required for users to perform this operation... You cannot
+            // use policies to control authentication operations." An explicit deny does not stop it.
+            return;
         }
 
         if ("sts:GetFederationToken".equals(action) && IamService.isTemporaryAccessKey(akid)) {
@@ -786,8 +793,34 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 || resourceInfo == null || resourceInfo.getResourceClass() == null) {
             return null;
         }
-        return catalog.byResourceClass(resourceInfo.getResourceClass())
+        Class<?> resourceClass = resourceInfo.getResourceClass();
+        if (SharedTagsController.class.equals(resourceClass) || V1TagsController.class.equals(resourceClass)) {
+            return taggedServiceAuthorization(ctx);
+        }
+        return catalog.byResourceClass(resourceClass)
                 .map(descriptor -> resolveRestAuthorization(descriptor, ctx))
+                .orElse(null);
+    }
+
+    /**
+     * A shared tagging route hands the request to the service its ARN names, so it is checked as that
+     * service whatever scope it is signed with. A service with no rule for the route leaves it unchecked, as
+     * any route no rule maps; an ARN naming no service Floci serves, which the controller refuses, is left
+     * to the signing scope.
+     */
+    private ResolvedAuthorization taggedServiceAuthorization(ContainerRequestContext ctx) {
+        String arn = arnBuilder.taggedArn(ctx);
+        if (!AwsArnUtils.isArn(arn)) {
+            return null;
+        }
+        String service = AwsArnUtils.parse(arn).service();
+        return catalog.byCredentialScope(service)
+                .map(descriptor -> {
+                    ResolvedAuthorization authorization = resolveRestAuthorization(descriptor, ctx);
+                    return authorization != null
+                            ? authorization
+                            : new ResolvedAuthorization(catalog.canonicalCredentialScope(service), null);
+                })
                 .orElse(null);
     }
 
@@ -1452,7 +1485,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         };
     }
 
-    /** Logs and Secrets Manager targets depend on the serving operation and the request's partition. */
+    /**
+     * Logs and Secrets Manager targets depend on the serving operation and the request's partition;
+     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in.
+     */
     private List<String> targetResources(String credentialScope, String action, ContainerRequestContext ctx,
                                          String region, String accountId) {
         if ("logs".equals(credentialScope)) {
@@ -1460,6 +1496,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
         if ("secretsmanager".equals(credentialScope)) {
             return arnBuilder.buildSecretsManagerResources(action, ctx, region, accountId, requestPartition());
+        }
+        if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope)) {
+            return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
         return arnBuilder.buildResources(credentialScope, ctx, region, accountId);
     }

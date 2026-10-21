@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
+import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.emr.model.EmrBlockPublicAccess;
@@ -167,9 +168,11 @@ public class EmrHandler {
 
     private Response handleListClusters(JsonNode request, String region) {
         List<String> states = stringList(request.path("ClusterStates"));
+        Instant createdAfter = AwsJsonTimestamp.epochSeconds(request, "CreatedAfter", "InvalidRequestException");
+        Instant createdBefore = AwsJsonTimestamp.epochSeconds(request, "CreatedBefore", "InvalidRequestException");
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Clusters");
-        for (EmrCluster c : service.listClusters(region, states)) {
+        for (EmrCluster c : service.listClusters(region, states, createdAfter, createdBefore)) {
             arr.add(clusterSummaryNode(c));
         }
         return Response.ok(response).build();

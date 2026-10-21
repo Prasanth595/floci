@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import org.jboss.logging.Logger;
 
@@ -52,8 +53,6 @@ public class PostgresProtocolHandler {
 
     private static final Logger LOG = Logger.getLogger(PostgresProtocolHandler.class);
 
-    private static final int SSL_REQUEST_CODE = 80877103;
-    private static final int STARTUP_PROTOCOL_VERSION = 196608; // v3.0
     private static final int MAX_HANDSHAKE_PACKET_LENGTH = 1_048_576;
 
     /**
@@ -154,7 +153,7 @@ public class PostgresProtocolHandler {
         OutputStream clientOut = new BufferedOutputStream(client.getOutputStream());
 
         // Phase 2: Challenge client with cleartext password request
-        sendMessage(clientOut, 'R', intBytes(3)); // AuthenticationCleartextPassword
+        PostgresWire.write(clientOut, 'R', PostgresWire.int32(3)); // AuthenticationCleartextPassword
         clientOut.flush();
 
         // Phase 3: Read client password
@@ -294,7 +293,7 @@ public class PostgresProtocolHandler {
                 notices.addAll(defaults.warnings());
                 roleDefaultsAfterHandover = defaults.afterHandover();
                 if (!defaults.atStartup().isEmpty()) {
-                    sendMessage(backendOut, 'X');
+                    PostgresWire.write(backendOut, 'X');
                     backendOut.flush();
                     closeQuietly(backend);
                     try {
@@ -455,7 +454,7 @@ public class PostgresProtocolHandler {
                 return null;
             }
 
-            sendMessage(clientOut, 'R', intBytes(0)); // AuthenticationOK
+            PostgresWire.write(clientOut, 'R', PostgresWire.int32(0)); // AuthenticationOK
             for (byte[] msg : bufferedMessages) {
                 clientOut.write(msg);
             }
@@ -478,10 +477,9 @@ public class PostgresProtocolHandler {
         while (true) {
             InputStream in = currentSocket.getInputStream();
             OutputStream out = currentSocket.getOutputStream();
-            int length = checkedPacketLength(readInt32(in), 8, "startup message");
-            int proto = readInt32(in);
+            PostgresWire.Startup startup = PostgresWire.readStartup(in, MAX_HANDSHAKE_PACKET_LENGTH, "startup message");
 
-            if (proto == SSL_REQUEST_CODE) {
+            if (startup.code() == PostgresWire.SSL_REQUEST) {
                 out.write('S');
                 out.flush();
                 currentSocket = acceptSsl(currentSocket, tlsCertificates);
@@ -491,14 +489,12 @@ public class PostgresProtocolHandler {
                 continue;
             }
 
-            if (proto != STARTUP_PROTOCOL_VERSION) {
-                LOG.warnv("Unexpected PostgreSQL startup protocol version: {0}", proto);
+            if (startup.code() != PostgresWire.PROTOCOL_3) {
+                LOG.warnv("Unexpected PostgreSQL startup protocol version: {0}", startup.code());
                 return null;
             }
 
-            byte[] payload = new byte[length - 8];
-            readFully(in, payload);
-            Map<String, String> params = parseStartupParams(payload);
+            Map<String, String> params = PostgresWire.startupParameters(startup.body());
             return new StartupMessage(currentSocket,
                     params.getOrDefault("user", "postgres"),
                     params.get("database"),
@@ -535,33 +531,6 @@ public class PostgresProtocolHandler {
         return !messages.isEmpty() && messages.get(messages.size() - 1)[0] == 'E';
     }
 
-    static Map<String, String> parseStartupParams(byte[] data) {
-        Map<String, String> params = new LinkedHashMap<>();
-        int i = 0;
-        while (i < data.length) {
-            int keyStart = i;
-            while (i < data.length && data[i] != 0) {
-                i++;
-            }
-            if (i >= data.length) {
-                break;
-            }
-            String key = new String(data, keyStart, i - keyStart, StandardCharsets.UTF_8);
-            i++; // skip null
-            if (key.isEmpty()) {
-                break; // final null terminator
-            }
-            int valStart = i;
-            while (i < data.length && data[i] != 0) {
-                i++;
-            }
-            String value = new String(data, valStart, i - valStart, StandardCharsets.UTF_8);
-            i++; // skip null
-            params.put(key, value);
-        }
-        return params;
-    }
-
     /**
      * Writes the backend StartupMessage: the proxy's own {@code user} and {@code database}, then
      * the client's other parameters in the order the client sent them. {@code _pq_.} names request
@@ -569,28 +538,16 @@ public class PostgresProtocolHandler {
      */
     private static void sendStartupToBackend(OutputStream out, String username, String dbName,
                                              Map<String, String> clientParameters) throws IOException {
-        ByteArrayOutputStream parameters = new ByteArrayOutputStream();
-        writeStartupParameter(parameters, "user", username);
-        writeStartupParameter(parameters, "database", dbName);
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("user", username);
+        parameters.put("database", dbName);
         for (Map.Entry<String, String> parameter : clientParameters.entrySet()) {
             String name = parameter.getKey();
             if (!"user".equals(name) && !"database".equals(name) && !name.startsWith("_pq_.")) {
-                writeStartupParameter(parameters, name, parameter.getValue());
+                parameters.put(name, parameter.getValue());
             }
         }
-        parameters.write(0); // final null
-
-        writeInt32(out, 4 + 4 + parameters.size());
-        writeInt32(out, STARTUP_PROTOCOL_VERSION);
-        parameters.writeTo(out);
-    }
-
-    private static void writeStartupParameter(ByteArrayOutputStream out, String name, String value)
-            throws IOException {
-        out.write(name.getBytes(StandardCharsets.UTF_8));
-        out.write(0);
-        out.write(value.getBytes(StandardCharsets.UTF_8));
-        out.write(0);
+        out.write(PostgresWire.startupMessage(parameters));
     }
 
     // ── Client auth phase ─────────────────────────────────────────────────────
@@ -604,9 +561,9 @@ public class PostgresProtocolHandler {
             LOG.warnv("Expected PasswordMessage ('p'), got {0}", (char) type);
             return null;
         }
-        int length = checkedPacketLength(readInt32(in), 5, "password message");
+        int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 5, MAX_HANDSHAKE_PACKET_LENGTH, "password message");
         byte[] data = new byte[length - 4];
-        readFully(in, data);
+        PostgresWire.readFully(in, data);
         // Strip trailing null terminator
         int end = data.length;
         while (end > 0 && data[end - 1] == 0) {
@@ -645,8 +602,8 @@ public class PostgresProtocolHandler {
             return false;
         }
 
-        int length = checkedPacketLength(readInt32(in), 8, "backend authentication message");
-        int authType = readInt32(in);
+        int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "backend authentication message");
+        int authType = PostgresWire.readInt32(in);
 
         if (authType == 0) {
             // Trust auth — no password needed
@@ -663,7 +620,7 @@ public class PostgresProtocolHandler {
         if (authType == 5) {
             // MD5Password — read 4-byte salt
             byte[] salt = new byte[4];
-            readFully(in, salt);
+            PostgresWire.readFully(in, salt);
             String md5pw = computeMd5Password(password, username, salt);
             sendPasswordMessage(out, md5pw);
             out.flush();
@@ -673,14 +630,14 @@ public class PostgresProtocolHandler {
         if (authType == 10) {
             // SCRAM-SHA-256 — drain the mechanisms list and perform SCRAM handshake
             byte[] mechanismsBytes = new byte[length - 8];
-            readFully(in, mechanismsBytes);
+            PostgresWire.readFully(in, mechanismsBytes);
             return performScramSha256(in, out, username, password);
         }
 
         LOG.warnv("Unsupported backend PostgreSQL auth type: {0}", authType);
         if (length > 8) {
             byte[] extra = new byte[length - 8];
-            readFully(in, extra);
+            PostgresWire.readFully(in, extra);
         }
         return false;
     }
@@ -731,19 +688,19 @@ public class PostgresProtocolHandler {
         saslInit.write((firstMsgBytes.length >> 8) & 0xFF);
         saslInit.write(firstMsgBytes.length & 0xFF);
         saslInit.write(firstMsgBytes);
-        sendMessage(out, 'p', saslInit.toByteArray());
+        PostgresWire.write(out, 'p', saslInit.toByteArray());
         out.flush();
 
         // Step 2: Read AuthenticationSASLContinue (authType=11)
         if (readAuthenticationType(in) != 'R') {
             return false;
         }
-        int len2 = checkedPacketLength(readInt32(in), 8, "SASL continue message");
-        if (readInt32(in) != 11) {
+        int len2 = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "SASL continue message");
+        if (PostgresWire.readInt32(in) != 11) {
             return false;
         }
         byte[] serverFirstBytes = new byte[len2 - 8];
-        readFully(in, serverFirstBytes);
+        PostgresWire.readFully(in, serverFirstBytes);
         String serverFirstMessage = new String(serverFirstBytes, StandardCharsets.UTF_8);
 
         // Parse server-first-message: r=<nonce>,s=<base64-salt>,i=<iterations>
@@ -772,19 +729,19 @@ public class PostgresProtocolHandler {
                 + ",p=" + Base64.getEncoder().encodeToString(clientProof);
 
         // Send SASLResponse: just the final message bytes
-        sendMessage(out, 'p', clientFinalMessage.getBytes(StandardCharsets.UTF_8));
+        PostgresWire.write(out, 'p', clientFinalMessage.getBytes(StandardCharsets.UTF_8));
         out.flush();
 
         // Step 4: Read AuthenticationSASLFinal (authType=12) — server signature (ignored)
         if (readAuthenticationType(in) != 'R') {
             return false;
         }
-        int len3 = checkedPacketLength(readInt32(in), 8, "SASL final message");
-        if (readInt32(in) != 12) {
+        int len3 = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "SASL final message");
+        if (PostgresWire.readInt32(in) != 12) {
             return false;
         }
         byte[] serverFinalBytes = new byte[len3 - 8];
-        readFully(in, serverFinalBytes);
+        PostgresWire.readFully(in, serverFinalBytes);
 
         // Step 5: Read final AuthenticationOK
         return readAuthOk(in);
@@ -847,11 +804,11 @@ public class PostgresProtocolHandler {
             LOG.warnv("Expected AuthenticationOK from backend, got type={0}", type);
             return false;
         }
-        int length = checkedPacketLength(readInt32(in), 8, "authentication response");
-        int authType = readInt32(in);
+        int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, MAX_HANDSHAKE_PACKET_LENGTH, "authentication response");
+        int authType = PostgresWire.readInt32(in);
         if (length > 8) {
             byte[] extra = new byte[length - 8];
-            readFully(in, extra);
+            PostgresWire.readFully(in, extra);
         }
         return authType == 0;
     }
@@ -859,7 +816,7 @@ public class PostgresProtocolHandler {
     private static void sendPasswordMessage(OutputStream out, String password) throws IOException {
         byte[] pwBytes = password.getBytes(StandardCharsets.UTF_8);
         // 'p' + Int32(4 + pwLen + 1) + password + null
-        sendMessage(out, 'p', pwBytes, new byte[]{0});
+        PostgresWire.write(out, 'p', pwBytes, new byte[]{0});
     }
 
     private static String computeMd5Password(String password, String username, byte[] salt) {
@@ -902,19 +859,7 @@ public class PostgresProtocolHandler {
 
     /** Reads the rest of a backend message whose type byte was {@code type}, returning it whole. */
     private static byte[] readMessage(InputStream in, int type) throws IOException {
-        int length = checkedPacketLength(readInt32(in), 4, "backend message");
-        byte[] payload = new byte[length - 4];
-        readFully(in, payload);
-
-        // Reconstruct full message: type + length(4) + payload
-        byte[] full = new byte[1 + 4 + payload.length];
-        full[0] = (byte) type;
-        full[1] = (byte) ((length >> 24) & 0xFF);
-        full[2] = (byte) ((length >> 16) & 0xFF);
-        full[3] = (byte) ((length >> 8) & 0xFF);
-        full[4] = (byte) (length & 0xFF);
-        System.arraycopy(payload, 0, full, 5, payload.length);
-        return full;
+        return PostgresWire.frame(type, PostgresWire.readBody(in, 4, MAX_HANDSHAKE_PACKET_LENGTH, "backend message"));
     }
 
     // ── IAM session role ──────────────────────────────────────────────────────
@@ -929,7 +874,7 @@ public class PostgresProtocolHandler {
     private static List<byte[]> assumeSessionRole(InputStream in, OutputStream out, String role)
             throws IOException {
         String sql = "SET SESSION AUTHORIZATION " + quoteIdentifier(role);
-        sendMessage(out, 'Q', sql.getBytes(StandardCharsets.UTF_8), new byte[]{0});
+        PostgresWire.write(out, 'Q', sql.getBytes(StandardCharsets.UTF_8), new byte[]{0});
         out.flush();
         return readUntilReadyForQuery(in);
     }
@@ -1211,7 +1156,7 @@ public class PostgresProtocolHandler {
 
     /** Runs {@code sql} as a simple query and returns every message up to ReadyForQuery. */
     private static List<byte[]> runQuery(InputStream in, OutputStream out, String sql) throws IOException {
-        sendMessage(out, 'Q', sql.getBytes(StandardCharsets.UTF_8), new byte[]{0});
+        PostgresWire.write(out, 'Q', sql.getBytes(StandardCharsets.UTF_8), new byte[]{0});
         out.flush();
         List<byte[]> messages = new ArrayList<>();
         while (true) {
@@ -1422,7 +1367,7 @@ public class PostgresProtocolHandler {
      */
     private static List<byte[]> applySessionSettings(InputStream in, OutputStream out,
                                                      List<SessionSetting> settings) throws IOException {
-        sendMessage(out, 'Q', setConfigStatement(settings).getBytes(StandardCharsets.UTF_8), new byte[]{0});
+        PostgresWire.write(out, 'Q', setConfigStatement(settings).getBytes(StandardCharsets.UTF_8), new byte[]{0});
         out.flush();
         return readUntilReadyForQuery(in);
     }
@@ -1531,20 +1476,8 @@ public class PostgresProtocolHandler {
 
     /** The {@code field} of an ErrorResponse, such as 'C' for SQLSTATE, or {@code fallback}. */
     static String errorField(byte[] errorResponse, char field, String fallback) {
-        int i = 5; // skip type byte and Int32 length
-        while (i < errorResponse.length && errorResponse[i] != 0) {
-            char fieldType = (char) errorResponse[i];
-            i++;
-            int start = i;
-            while (i < errorResponse.length && errorResponse[i] != 0) {
-                i++;
-            }
-            if (fieldType == field) {
-                return new String(errorResponse, start, i - start, StandardCharsets.UTF_8);
-            }
-            i++; // skip the field's null terminator
-        }
-        return fallback;
+        // The fields start after the type byte and the Int32 length.
+        return PostgresWire.parseFields(errorResponse, 5).getOrDefault(field, fallback);
     }
 
     /**
@@ -1632,9 +1565,8 @@ public class PostgresProtocolHandler {
                 return;
             }
             byte[] header = new byte[4];
-            readFully(from, header);
-            int length = ((header[0] & 0xFF) << 24) | ((header[1] & 0xFF) << 16)
-                    | ((header[2] & 0xFF) << 8) | (header[3] & 0xFF);
+            PostgresWire.readFully(from, header);
+            int length = PostgresWire.int32(header, 0);
             if (length < 4) {
                 return;
             }
@@ -1643,7 +1575,7 @@ public class PostgresProtocolHandler {
             if (type == 'S') {
                 // ParameterStatus is always small, so reading it whole to inspect costs nothing.
                 byte[] payload = new byte[remaining];
-                readFully(from, payload);
+                PostgresWire.readFully(from, payload);
                 String[] status = parameterStatus(payload, 0);
                 if (status != null && "session_authorization".equals(status[0])
                         && !iamRole.equals(status[1])) {
@@ -1700,89 +1632,14 @@ public class PostgresProtocolHandler {
 
     /** An ErrorResponse ('E') or NoticeResponse ('N') carrying severity, SQLSTATE and message. */
     static byte[] responseMessage(char type, String severity, String sqlState, String message) {
-        byte[] sevBytes = severity.getBytes(StandardCharsets.UTF_8);
-        byte[] stateBytes = sqlState.getBytes(StandardCharsets.UTF_8);
-        byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
-
-        // Fields: S=severity, C=sqlstate, M=message, then final null byte
-        ByteArrayOutputStream fields = new ByteArrayOutputStream();
-        fields.write('S'); fields.writeBytes(sevBytes); fields.write(0);
-        fields.write('C'); fields.writeBytes(stateBytes); fields.write(0);
-        fields.write('M'); fields.writeBytes(msgBytes); fields.write(0);
-        fields.write(0); // final null
-
-        ByteArrayOutputStream framed = new ByteArrayOutputStream();
-        try {
-            sendMessage(framed, type, fields.toByteArray());
-        } catch (IOException e) {
-            throw new IllegalStateException("writing to memory cannot fail", e);
-        }
-        return framed.toByteArray();
+        Map<Character, String> fields = new LinkedHashMap<>();
+        fields.put('S', severity);
+        fields.put('C', sqlState);
+        fields.put('M', message);
+        return PostgresWire.frame(type, PostgresWire.fields(fields));
     }
 
     // ── Wire helpers ──────────────────────────────────────────────────────────
-
-    private static void sendMessage(OutputStream out, char type, byte[]... parts) throws IOException {
-        int totalPayload = 0;
-        for (byte[] p : parts) {
-            totalPayload += p.length;
-        }
-        out.write((byte) type);
-        writeInt32(out, 4 + totalPayload); // length includes itself
-        for (byte[] p : parts) {
-            out.write(p);
-        }
-    }
-
-    private static byte[] intBytes(int value) {
-        return new byte[]{
-                (byte) ((value >> 24) & 0xFF),
-                (byte) ((value >> 16) & 0xFF),
-                (byte) ((value >> 8) & 0xFF),
-                (byte) (value & 0xFF)
-        };
-    }
-
-    private static void writeInt32(OutputStream out, int value) throws IOException {
-        out.write((value >> 24) & 0xFF);
-        out.write((value >> 16) & 0xFF);
-        out.write((value >> 8) & 0xFF);
-        out.write(value & 0xFF);
-    }
-
-    private static int readInt32(InputStream in) throws IOException {
-        int b0 = in.read();
-        int b1 = in.read();
-        int b2 = in.read();
-        int b3 = in.read();
-        if ((b0 | b1 | b2 | b3) < 0) {
-            throw new EOFException("Connection closed while reading Int32");
-        }
-        return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
-    }
-
-    private static int checkedPacketLength(int length, int minimum, String packetName) throws IOException {
-        if (length < minimum) {
-            throw new IOException("PostgreSQL " + packetName + " length is below the "
-                    + minimum + " byte minimum: " + length);
-        }
-        if (length > MAX_HANDSHAKE_PACKET_LENGTH) {
-            throw new IOException("PostgreSQL " + packetName + " length exceeds the "
-                    + MAX_HANDSHAKE_PACKET_LENGTH + " byte limit: " + length);
-        }
-        return length;
-    }
-
-    private static void readFully(InputStream in, byte[] buf) throws IOException {
-        int offset = 0;
-        while (offset < buf.length) {
-            int n = in.read(buf, offset, buf.length - offset);
-            if (n < 0) {
-                throw new EOFException("Connection closed while reading " + buf.length + " bytes");
-            }
-            offset += n;
-        }
-    }
 
     private static String bytesToHex(byte[] bytes) {
         StringBuilder sb = new StringBuilder(bytes.length * 2);
