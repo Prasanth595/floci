@@ -21,8 +21,10 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.UncheckedIOException;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
@@ -597,49 +599,49 @@ class LambdaWebServiceTest {
     }
 
     @Test
-    void eachRevisionKeepsTheCodeTheObjectHadWhenItWasCreated() {
+    void eachRevisionKeepsTheCodeTheObjectHadWhenItWasCreated() throws IOException {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
         LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
-        when(s3.getObject("code", "app.zip", null)).thenReturn(object("first"));
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object("first"));
         String first = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
-        when(s3.getObject("code", "app.zip", null)).thenReturn(object("second"));
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object("second"));
         String second = service.createRevision(REGION, "app", revisionConfig(30)).revisionId;
 
-        assertEquals("first", new String(code.read(ACCOUNT_ID, REGION, "app", first), StandardCharsets.UTF_8));
-        assertEquals("second", new String(code.read(ACCOUNT_ID, REGION, "app", second), StandardCharsets.UTF_8));
+        assertEquals("first", Files.readString(code.file(ACCOUNT_ID, REGION, "app", first)));
+        assertEquals("second", Files.readString(code.file(ACCOUNT_ID, REGION, "app", second)));
         service.deleteRevision(REGION, "app", first);
-        assertThrows(UncheckedIOException.class, () -> code.read(ACCOUNT_ID, REGION, "app", first));
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", first)));
         service.deleteFunction(REGION, "app");
-        assertThrows(UncheckedIOException.class, () -> code.read(ACCOUNT_ID, REGION, "app", second));
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", second)));
     }
 
     @Test
-    void aStartKeepsOnlyTheCopiesOfStoredRevisions() {
+    void aStartKeepsOnlyTheCopiesOfStoredRevisions() throws IOException {
         S3Service s3 = mock(S3Service.class);
-        when(s3.getObject("code", "app.zip", null)).thenReturn(object("code"));
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object("code"));
         FileStorageFactory storage = new FileStorageFactory(storageDir);
         String revisionId = service(storage, "http://localhost:4566", s3).createFunction(REGION, createRequest("app"))
                 .revisions.keySet().iterator().next();
         LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
-        code.store(ACCOUNT_ID, REGION, "app", "rev-stray", new byte[] {1});
+        code.store(ACCOUNT_ID, REGION, "app", "rev-stray", new ByteArrayInputStream(new byte[] {1}));
 
         service(new FileStorageFactory(storageDir), "http://localhost:4566", s3);
-        assertEquals("code", new String(code.read(ACCOUNT_ID, REGION, "app", revisionId), StandardCharsets.UTF_8));
-        assertThrows(UncheckedIOException.class, () -> code.read(ACCOUNT_ID, REGION, "app", "rev-stray"));
+        assertEquals("code", Files.readString(code.file(ACCOUNT_ID, REGION, "app", revisionId)));
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", "rev-stray")));
 
         service(new MemoryStorageFactory(), "http://localhost:4566", s3);
-        assertThrows(UncheckedIOException.class, () -> code.read(ACCOUNT_ID, REGION, "app", revisionId));
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", revisionId)));
     }
 
     @Test
-    void regionsThatLookAlikeKeepTheirOwnCopies() {
+    void regionsThatLookAlikeKeepTheirOwnCopies() throws IOException {
         LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
-        code.store(ACCOUNT_ID, ".", "app", "rev-aaaaa", new byte[] {1});
-        code.store(ACCOUNT_ID, "_", "app", "rev-aaaaa", new byte[] {2});
+        code.store(ACCOUNT_ID, ".", "app", "rev-aaaaa", new ByteArrayInputStream(new byte[] {1}));
+        code.store(ACCOUNT_ID, "_", "app", "rev-aaaaa", new ByteArrayInputStream(new byte[] {2}));
         code.deleteFunction(ACCOUNT_ID, ".", "app");
 
-        assertEquals(2, code.read(ACCOUNT_ID, "_", "app", "rev-aaaaa")[0]);
+        assertEquals(2, Files.readAllBytes(code.file(ACCOUNT_ID, "_", "app", "rev-aaaaa"))[0]);
     }
 
     @Test
@@ -649,24 +651,26 @@ class LambdaWebServiceTest {
         ObjectNode pinned = createRequest("app");
         ((ObjectNode) pinned.path("revisionConfig").path("buildConfig").path("codeConfig").path("s3Object"))
                 .put("versionId", "v1");
-        when(s3.getObject("code", "app.zip", "v1"))
+        when(s3.openObject("code", "app.zip", "v1"))
                 .thenThrow(new AwsException("NoSuchVersion", "The specified version does not exist.", 404));
         assertEquals("The specified S3 object does not exist: s3://code/app.zip (versionId=v1). Verify the object exists"
                 + " and the versionId is correct.", message(() -> service.createFunction(REGION, pinned)));
 
         doThrow(new AwsException("InvalidArgument", "Invalid version id specified", 400))
-                .when(s3).getObject("code", "app.zip", "v1");
+                .when(s3).openObject("code", "app.zip", "v1");
         assertEquals("The S3 object s3://code/app.zip (versionId=v1) is inaccessible. Verify the request parameters and"
                 + " permissions are correct.", message(() -> service.createFunction(REGION, pinned)));
 
-        when(s3.getObject("code", "app.zip", null))
+        when(s3.openObject("code", "app.zip", null))
                 .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
         assertEquals("The specified S3 object does not exist: s3://code/app.zip. Verify the object exists in the bucket.",
                 message(() -> service.createFunction(REGION, createRequest("app"))));
     }
 
-    private static S3Object object(String data) {
-        return new S3Object("code", "app.zip", data.getBytes(StandardCharsets.UTF_8), "application/zip");
+    private static S3Service.ObjectRead object(String data) {
+        byte[] bytes = data.getBytes(StandardCharsets.UTF_8);
+        return new S3Service.ObjectRead(new S3Object("code", "app.zip", bytes, "application/zip"),
+                new ByteArrayInputStream(bytes));
     }
 
     private static final class MemoryStorageFactory extends StorageFactory {

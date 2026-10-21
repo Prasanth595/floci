@@ -44,18 +44,46 @@ public class ZipExtractor {
     }
 
     public void extractTo(byte[] zipBytes, Path targetDir, int maxEntries, Runnable beforeInstall) throws IOException {
-        if (maxEntries < 1) {
-            throw new IOException("ZIP archive entry limit must be at least 1: " + maxEntries);
-        }
-        if (zipBytes.length > S3_MAX_COMPRESSED_BYTES) {
-            throw new IOException("ZIP archive exceeds the " + S3_MAX_COMPRESSED_BYTES
-                    + " byte compressed limit: " + zipBytes.length);
-        }
+        checkLimits(maxEntries, zipBytes.length);
 
         // Resolve to absolute path so that normalize() on entry paths stays comparable
         Path absTarget = targetDir.toAbsolutePath().normalize();
         Files.createDirectories(absTarget.getParent());
 
+        // ZipFile needs a seekable file, so the bytes are staged on disk. Stage inside the code
+        // store rather than java.io.tmpdir: the shared temp filesystem must not become a new
+        // unbounded consumer that concurrent deployments can exhaust and that unrelated
+        // services would then fail on. The code store already has to hold this package's
+        // *uncompressed* contents — always at least as large as the archive — so it is already
+        // provisioned for the size, and the staged copy is released as soon as extraction ends.
+        Path staged = Files.createTempFile(absTarget.getParent(), ".floci-staging-", ".zip");
+        try {
+            Files.write(staged, zipBytes);
+            extract(staged, absTarget, maxEntries, beforeInstall);
+        } finally {
+            Files.deleteIfExists(staged);
+        }
+    }
+
+    /** For an archive already on disk, which is opened in place instead of read into the heap and staged. */
+    public void extractTo(Path zipFile, Path targetDir, int maxEntries) throws IOException {
+        checkLimits(maxEntries, Files.size(zipFile));
+        Path absTarget = targetDir.toAbsolutePath().normalize();
+        Files.createDirectories(absTarget.getParent());
+        extract(zipFile, absTarget, maxEntries, null);
+    }
+
+    private static void checkLimits(int maxEntries, long compressedBytes) throws IOException {
+        if (maxEntries < 1) {
+            throw new IOException("ZIP archive entry limit must be at least 1: " + maxEntries);
+        }
+        if (compressedBytes > S3_MAX_COMPRESSED_BYTES) {
+            throw new IOException("ZIP archive exceeds the " + S3_MAX_COMPRESSED_BYTES
+                    + " byte compressed limit: " + compressedBytes);
+        }
+    }
+
+    private void extract(Path archive, Path absTarget, int maxEntries, Runnable beforeInstall) throws IOException {
         // Extract into a staging directory and swap it in, rather than writing over the target
         // in place. A deployment package is the complete contents of the function, so a file
         // dropped between two deploys has to disappear — writing in place only ever adds and
@@ -76,17 +104,8 @@ public class ZipExtractor {
         // CRC and sizes regardless of the flag, so reading it accepts the same archives real
         // AWS Lambda does — e.g. a Serverless Framework package bundling node_modules
         // (issue #2593).
-        //
-        // ZipFile needs a seekable file, so the bytes are staged on disk. Stage inside the code
-        // store rather than java.io.tmpdir: the shared temp filesystem must not become a new
-        // unbounded consumer that concurrent deployments can exhaust and that unrelated
-        // services would then fail on. The code store already has to hold this package's
-        // *uncompressed* contents — always at least as large as the archive — so it is already
-        // provisioned for the size, and the staged copy is released as soon as extraction ends.
-        Path staged = Files.createTempFile(absTarget.getParent(), ".floci-staging-", ".zip");
         try {
-            Files.write(staged, zipBytes);
-            try (ZipFile zip = new ZipFile(staged.toFile())) {
+            try (ZipFile zip = new ZipFile(archive.toFile())) {
                 Enumeration<? extends ZipEntry> entries = zip.entries();
                 int entryCount = 0;
                 long expandedBytes = 0;
@@ -151,7 +170,6 @@ public class ZipExtractor {
             }
             install(staging, absTarget);
         } finally {
-            Files.deleteIfExists(staged);
             // A no-op once install() moved it; on failure this discards the partial staging tree
             // and leaves the previous extraction untouched.
             deleteRecursively(staging);

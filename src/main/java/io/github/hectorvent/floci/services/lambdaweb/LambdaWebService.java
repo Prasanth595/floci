@@ -26,6 +26,8 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -304,9 +306,8 @@ public class LambdaWebService implements Resettable {
         WebFunctionEndpoint endpoint = draftEndpoint(region, accountId, functionName, endpointConfig, false);
         return storeNewFunction(region, functionName, tags, fn -> {
             WebFunctionRevision revision = buildRevision(fn, revisionConfig);
-            byte[] zip = readCode(revision.buildConfig);
+            keepCode(region, fn, revision);
             attachEndpoint(region, fn, endpoint, revision);
-            keepCode(region, fn, revision, zip);
             fn.revisions.put(revision.revisionId, revision);
             fn.endpoints.put(endpoint.endpointName, endpoint);
             indexDomains(fn, endpoint);
@@ -404,8 +405,7 @@ public class LambdaWebService implements Resettable {
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             WebFunctionRevision revision = buildRevision(fn, request);
-            byte[] zip = readCode(revision.buildConfig);
-            keepCode(region, fn, revision, zip);
+            keepCode(region, fn, revision);
             fn.revisions.put(revision.revisionId, revision);
             for (WebFunctionEndpoint endpoint : fn.endpoints.values()) {
                 if ("LatestRevision".equals(endpoint.autoDeploymentMode)) {
@@ -585,13 +585,17 @@ public class LambdaWebService implements Resettable {
         return LambdaWebJson.structure(LambdaWebJson.structure(service, "telemetryConfig"), "loggingConfig");
     }
 
-    /** The code a revision runs: the bucket's current version, or the version the request pins. */
-    private byte[] readCode(WebFunctionRevision.BuildConfig build) {
+    /** Copies the code a revision runs: the bucket's current version, or the version the request pins. */
+    private void keepCode(String region, WebFunction fn, WebFunctionRevision revision) {
         if (s3Service == null) {
-            return null;
+            return;
         }
-        try {
-            return s3Service.getObject(build.bucket, build.key, build.versionId).getData();
+        WebFunctionRevision.BuildConfig build = revision.buildConfig;
+        try (S3Service.ObjectRead object = s3Service.openObject(build.bucket, build.key, build.versionId)) {
+            code.store(AwsArnUtils.parse(fn.functionArn).accountId(), region, fn.functionName, revision.revisionId,
+                    object.body());
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not close the code object s3://" + build.bucket + "/" + build.key, e);
         } catch (AwsException e) {
             LOG.debugv("Web function code object s3://{0}/{1} is not readable: {2}", build.bucket, build.key,
                     e.getMessage());
@@ -607,12 +611,6 @@ public class LambdaWebService implements Resettable {
             }
             throw new AwsException("ValidationException", "The S3 object " + object + " (versionId=" + build.versionId
                     + ") is inaccessible. Verify the request parameters and permissions are correct.", 400);
-        }
-    }
-
-    private void keepCode(String region, WebFunction fn, WebFunctionRevision revision, byte[] zip) {
-        if (zip != null) {
-            code.store(AwsArnUtils.parse(fn.functionArn).accountId(), region, fn.functionName, revision.revisionId, zip);
         }
     }
 

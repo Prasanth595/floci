@@ -681,7 +681,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     /** The code goes in by {@code docker cp}, so it works when Floci itself runs in a container. */
     private void copyCode(String containerId, String accountId, String region, WebFunction fn,
                           WebFunctionRevision revision) {
-        byte[] zip = code.read(accountId, region, fn.functionName, revision.revisionId);
+        Path zip = code.file(accountId, region, fn.functionName, revision.revisionId);
         Path dir;
         try {
             dir = Files.createTempDirectory("floci-lambda-web-");

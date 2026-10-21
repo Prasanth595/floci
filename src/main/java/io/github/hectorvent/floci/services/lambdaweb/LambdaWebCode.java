@@ -8,10 +8,12 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -42,22 +44,14 @@ public class LambdaWebCode {
         this.baseDir = baseDir;
     }
 
-    void store(String accountId, String region, String functionName, String revisionId, byte[] zip) {
+    void store(String accountId, String region, String functionName, String revisionId, InputStream zip) {
         Path file = file(accountId, region, functionName, revisionId);
         try {
             Files.createDirectories(file.getParent());
-            Files.write(file, zip);
+            Files.copy(zip, file, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
             deleteRevision(accountId, region, functionName, revisionId);
             throw new UncheckedIOException("Could not keep the code of " + functionName + " revision " + revisionId, e);
-        }
-    }
-
-    byte[] read(String accountId, String region, String functionName, String revisionId) {
-        try {
-            return Files.readAllBytes(file(accountId, region, functionName, revisionId));
-        } catch (IOException e) {
-            throw new UncheckedIOException("Could not read the code of " + functionName + " revision " + revisionId, e);
         }
     }
 
@@ -115,7 +109,7 @@ public class LambdaWebCode {
         }
     }
 
-    private Path file(String accountId, String region, String functionName, String revisionId) {
+    Path file(String accountId, String region, String functionName, String revisionId) {
         return functionDir(accountId, region, functionName).resolve(segment(revisionId) + ".zip");
     }
 
