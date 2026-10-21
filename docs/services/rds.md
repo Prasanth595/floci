@@ -126,7 +126,11 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
 | `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
-| `DeleteDBProxy` | Delete a DB proxy |
+| `DeleteDBProxy` | Delete a DB proxy and its endpoints |
+| `CreateDBProxyEndpoint` | Add a read/write or read-only endpoint to a DB proxy; see the proxy note below |
+| `DescribeDBProxyEndpoints` | List proxy endpoints, each proxy's default endpoint first, filtered by `DBProxyName` and `DBProxyEndpointName` |
+| `ModifyDBProxyEndpoint` | Rename a proxy endpoint or replace its security groups |
+| `DeleteDBProxyEndpoint` | Delete a proxy endpoint |
 | `RegisterDBProxyTargets` | Register a cluster or instance as a proxy target |
 | `DeregisterDBProxyTargets` | Remove a cluster or instance from a proxy target group |
 | `DescribeDBProxyTargetGroups` | List a proxy's target groups |
@@ -346,6 +350,15 @@ services:
     is rejected with `InvalidParameterValue` unless the proxy's VPC and every subnet in
     `VpcSubnetIds` already carry an associated IPv6 CIDR block, matching AWS's own network
     prerequisites for RDS Proxy.
+    Proxy endpoints report the proxy's own host, so a client connects through one as through the
+    proxy, and an IAM token signed for that host verifies there. The host is read from the proxy
+    for each response, so when a restore gives the proxy a new host every endpoint reports it. `TargetRole` is recorded: Floci
+    proxies have one target, so a `READ_ONLY` endpoint reaches the same target as the proxy rather
+    than an Aurora reader. Each proxy's default endpoint (`default`, `IsDefault` true, `READ_WRITE`)
+    is built from the proxy, has no ARN, and cannot be modified or deleted
+    (`InvalidDBProxyEndpointStateFault`). Endpoint names are unique per account and Region, a proxy
+    holds at most 20 endpoints (`DBProxyEndpointQuotaExceededFault`), and an endpoint with no
+    `VpcSecurityGroupIds` gets its VPC's default security group.
 
 ## Aurora Serverless v2 scaling
 

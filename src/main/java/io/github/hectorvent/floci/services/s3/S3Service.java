@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -677,6 +678,12 @@ public class S3Service implements Resettable, ResourceProvider {
     public S3Object putObject(String bucketName, String key, byte[] data,
                               String contentType, Map<String, String> metadata, PutObjectOptions options) {
         return createObject(bucketName, key, data, contentType, metadata, options, "ObjectCreated:Put");
+    }
+
+    /** Like {@link #putObject(String, String, byte[], String, Map)}, with the body read from a stream. */
+    public S3Object putObjectFromStream(String bucketName, String key, InputStream body,
+                                        String contentType, Map<String, String> metadata) {
+        return putObject(bucketName, key, body, UploadChecksums.NONE, contentType, metadata, new PutObjectOptions());
     }
 
     /**
@@ -7349,15 +7356,8 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void deleteDirectory(Path dir) {
-        if (!Files.exists(dir)) return;
-        try (var walk = Files.walk(dir)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(path -> {
-                try {
-                    Files.deleteIfExists(path);
-                } catch (IOException e) {
-                    LOG.errorv(e, "Failed to delete: {0}", path);
-                }
-            });
+        try {
+            FileTrees.delete(dir);
         } catch (IOException e) {
             LOG.errorv(e, "Failed to delete directory: {0}", dir);
         }

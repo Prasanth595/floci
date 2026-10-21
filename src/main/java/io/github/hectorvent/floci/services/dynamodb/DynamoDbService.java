@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
@@ -47,6 +48,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -103,6 +105,8 @@ public class DynamoDbService {
     private final StorageBackend<String, ExportDescription> exportStore;
     private final StorageBackend<String, ImportTableDescription> importStore;
     private final StorageBackend<String, TableBackup> backupStore;
+    private final DynamoDbPointInTimeRecovery pointInTimeRecovery;
+    private final Clock clock;
     // Items stored per table: storageKey -> Map<itemKey, item>
     // itemKey is "pk" or "pk#sk" depending on table schema
     private final ConcurrentHashMap<String, ConcurrentSkipListMap<String, JsonNode>> itemsByTable = new ConcurrentHashMap<>();
@@ -170,9 +174,12 @@ public class DynamoDbService {
                 new TypeReference<Map<String, ImportTableDescription>>() {}),
              storageFactory.create("dynamodb", "dynamodb-backups.json",
                 new TypeReference<Map<String, TableBackup>>() {}),
+             storageFactory.create("dynamodb", "dynamodb-point-in-time.json",
+                new TypeReference<Map<String, PointInTimeChange>>() {}),
              regionResolver, streamService, kinesisForwarder, s3Service, objectMapper,
              config.services().dynamodb().vectorIndexAllocationSeconds(),
-             config.services().dynamodb().vectorIndexBackfillSeconds());
+             config.services().dynamodb().vectorIndexBackfillSeconds(),
+             config.services().dynamodb().latestRestorableLagSeconds(), Clock.systemUTC());
     }
 
     /** Package-private constructor for testing. */
@@ -239,11 +246,34 @@ public class DynamoDbService {
                     ObjectMapper objectMapper,
                     int vectorIndexAllocationSeconds,
                     int vectorIndexBackfillSeconds) {
+        this(tableStore, itemStore, exportStore, importStore, backupStore, new InMemoryStorage<>(), regionResolver,
+             streamService, kinesisForwarder, s3Service, objectMapper,
+             vectorIndexAllocationSeconds, vectorIndexBackfillSeconds, 0, Clock.systemUTC());
+    }
+
+    DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
+                    StorageBackend<String, Map<String, JsonNode>> itemStore,
+                    StorageBackend<String, ExportDescription> exportStore,
+                    StorageBackend<String, ImportTableDescription> importStore,
+                    StorageBackend<String, TableBackup> backupStore,
+                    StorageBackend<String, PointInTimeChange> pointInTimeStore,
+                    RegionResolver regionResolver,
+                    DynamoDbStreamService streamService,
+                    KinesisStreamingForwarder kinesisForwarder,
+                    S3Service s3Service,
+                    ObjectMapper objectMapper,
+                    int vectorIndexAllocationSeconds,
+                    int vectorIndexBackfillSeconds,
+                    int latestRestorableLagSeconds,
+                    Clock clock) {
         this.tableStore = tableStore;
         this.itemStore = itemStore;
         this.exportStore = exportStore;
         this.importStore = importStore;
         this.backupStore = backupStore;
+        this.pointInTimeRecovery = new DynamoDbPointInTimeRecovery(pointInTimeStore, regionResolver.getAccountId(),
+                Duration.ofSeconds(latestRestorableLagSeconds), clock);
+        this.clock = clock;
         this.regionResolver = regionResolver;
         this.streamService = streamService;
         this.kinesisForwarder = kinesisForwarder;
@@ -260,6 +290,7 @@ public class DynamoDbService {
         itemsByTable.clear();
         itemLocks.clear();
         txIdempotency.clear();
+        pointInTimeRecovery.clear();
         if (streamService != null) {
             streamService.clear();
         }
@@ -859,6 +890,12 @@ public class DynamoDbService {
                     "Attempt to change a resource which is still in use: Cannot delete table while "
                     + "indexes are being created, updated, or deleted.", 400);
         }
+        if (table.isPointInTimeRecoveryEnabled()) {
+            createSystemBackup(storageKey, table, region);
+        }
+        // A write still in flight on this table object stops recording once the flag is off.
+        table.setPointInTimeRecoveryEnabled(false);
+        pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
         tableStore.delete(storageKey);
         itemsByTable.remove(scopedItemsKey(storageKey));
         itemLocks.remove(scopedItemsKey(storageKey));
@@ -980,6 +1017,9 @@ public class DynamoDbService {
             }
             requireItemNestingWithinLimit(normalizedItem);
 
+            if (stagedItems == null) {
+                pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, existing);
+            }
             tableItems.put(itemKey, normalizedItem);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -1078,6 +1118,10 @@ public class DynamoDbService {
                 evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
             }
 
+            JsonNode current = items.get(itemKey);
+            if (stagedItems == null && current != null) {
+                pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, current);
+            }
             JsonNode removed = items.remove(itemKey);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -1291,6 +1335,9 @@ public class DynamoDbService {
                 requireUpdatedItemWithinSizeLimit(item);
             }
 
+            if (stagedItems == null) {
+                pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, existing);
+            }
             items.put(itemKey, item);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -1881,6 +1928,12 @@ public class DynamoDbService {
                         scopedItemsKey(participant.storageKey()), ignored -> new ConcurrentSkipListMap<>());
                 ConcurrentSkipListMap<String, JsonNode> stagedTable = staged.get(participant.storageKey());
                 JsonNode value = stagedTable.get(participant.itemKey());
+                JsonNode before = live.get(participant.itemKey());
+                if (value != before) {
+                    tableStore.get(participant.storageKey()).ifPresent(participantTable -> pointInTimeRecovery.recordItem(
+                            regionResolver.getAccountId(), participant.storageKey(), participantTable,
+                            participant.itemKey(), before));
+                }
                 if (value == null) {
                     live.remove(participant.itemKey());
                 } else {
@@ -2683,19 +2736,147 @@ public class DynamoDbService {
         LOG.infov("Updated TTL for table {0}: enabled={1}, attr={2}", canonicalTableName, enabled, ttlAttributeName);
     }
 
-    public TableDefinition updateContinuousBackups(String tableName, boolean enabled,
-                                                   Integer recoveryPeriodInDays, String region) {
+    /** The restore window is null while point-in-time recovery is disabled. */
+    public record ContinuousBackups(TableDefinition table, DynamoDbPointInTimeRecovery.RestoreWindow window) {}
+
+    /** The items of a source table as they were at {@code restoreDateTime}, with its current settings, as on AWS. */
+    public record PointInTimeState(TableDefinition table, List<JsonNode> items, Instant restoreDateTime) {}
+
+    public ContinuousBackups describeContinuousBackups(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
-        TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        return continuousBackups(storageKey, requireBackupSource(storageKey, canonicalTableName));
+    }
+
+    /** Enabling a disabled table starts the restore window over, as on AWS. */
+    public ContinuousBackups updateContinuousBackups(String tableName, boolean enabled,
+                                                     Integer recoveryPeriodInDays, String region) {
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = requireBackupSource(storageKey, canonicalTableName);
+        if (enabled && !table.isPointInTimeRecoveryEnabled()) {
+            pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
+            table.setPointInTimeRecoveryStartDateTime(clock.instant().truncatedTo(ChronoUnit.SECONDS));
+            table.setPointInTimeRecoveryRecoveryPeriodInDays(DEFAULT_RECOVERY_PERIOD_DAYS);
+        } else if (enabled && recoveryPeriodInDays != null) {
+            // AWS keeps the earliest time when the period grows, until the longer period has passed.
+            table.setPointInTimeRecoveryStartDateTime(
+                    pointInTimeRecovery.window(withPointInTimeStart(storageKey, table)).earliest());
+        }
         table.setPointInTimeRecoveryEnabled(enabled);
-        table.setPointInTimeRecoveryRecoveryPeriodInDays(
-                recoveryPeriodInDays != null ? recoveryPeriodInDays : table.getPointInTimeRecoveryRecoveryPeriodInDays());
+        if (!enabled) {
+            table.setPointInTimeRecoveryStartDateTime(null);
+            pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
+        }
+        if (recoveryPeriodInDays != null) {
+            table.setPointInTimeRecoveryRecoveryPeriodInDays(recoveryPeriodInDays);
+        }
         tableStore.put(storageKey, table);
         LOG.infov("Updated PITR for table {0}: enabled={1}, recoveryPeriodInDays={2}",
                 canonicalTableName, enabled, table.getPointInTimeRecoveryRecoveryPeriodInDays());
+        return continuousBackups(storageKey, table);
+    }
+
+    /**
+     * The checks run in the AWS order: the source table, the presence of a restore time, point-in-time
+     * recovery on the source, then the restore time. AWS restores any time up to now, although it
+     * reports a LatestRestorableDateTime minutes earlier and names only that one in the error.
+     */
+    public PointInTimeState pointInTimeState(String sourceTableName, String sourceRegion, String region,
+                                             boolean useLatestRestorableTime, Instant restoreDateTime) {
+        String canonicalTableName = canonicalTableName(sourceRegion, sourceTableName);
+        String storageKey = regionKey(sourceRegion, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("TableNotFoundException", sourceRegion.equals(region)
+                        ? "Table not found: " + canonicalTableName : "Table not found", 400));
+        if ("CREATING".equals(table.getTableStatus())) {
+            throw new AwsException("TableNotFoundException", "Table not found", 400);
+        }
+        if (!useLatestRestorableTime && restoreDateTime == null) {
+            throw new AwsException("ValidationException", "Invalid Request: Either one of RestoreDateTime or "
+                    + "UseLatestRestorableTime must be specified, but not both", 400);
+        }
+        if (!table.isPointInTimeRecoveryEnabled()) {
+            throw new AwsException("PointInTimeRecoveryUnavailableException",
+                    "Point in time recovery is not enabled for table '" + canonicalTableName + "'", 400);
+        }
+        String accountId = regionResolver.getAccountId();
+        DynamoDbPointInTimeRecovery.RestoreWindow window =
+                pointInTimeRecovery.window(withPointInTimeStart(storageKey, table));
+        Instant time = useLatestRestorableTime ? window.latest() : restoreDateTime;
+        if (time.isBefore(window.earliest()) || clock.instant().isBefore(time)) {
+            throw new AwsException("InvalidRestoreTimeException", "RestoreDateTime '" + time
+                    + "' must be within EarliestRestorableDateTime '" + window.earliest()
+                    + "' and LatestRestorableDateTime '" + window.latest() + "' for table '"
+                    + canonicalTableName + "'", 400);
+        }
+        ConcurrentSkipListMap<String, JsonNode> liveItems = itemsByTable.get(scopedItemsKey(storageKey));
+        List<JsonNode> items = pointInTimeRecovery.itemsAt(accountId, storageKey,
+                liveItems != null ? liveItems : Map.of(), time);
+        return new PointInTimeState(snapshotOf(table), items, time);
+    }
+
+    /**
+     * The table a SourceTableArn names. AWS restores across regions only with an
+     * SSESpecificationOverride, and treats an unknown region as another region.
+     */
+    public DynamoDbTableNames.ResolvedTableRef pointInTimeSourceArn(String sourceTableArn, String region,
+                                                                 boolean sseOverride) {
+        if (!sourceTableArn.startsWith("arn:")) {
+            throw invalidParameter("ARNs must start with 'arn:': " + sourceTableArn);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(sourceTableArn);
+        } catch (IllegalArgumentException e) {
+            throw invalidParameter("sourceTableArn is not a valid ARN");
+        }
+        if (!"dynamodb".equals(arn.service())) {
+            throw invalidParameter("Invalid resource Arn: " + sourceTableArn);
+        }
+        if (!arn.resource().startsWith("table/")) {
+            throw invalidParameter("sourceTableArn is not a valid ARN");
+        }
+        String tableName = arn.resource().substring("table/".length());
+        if (tableName.length() < 3 || 255 < tableName.length()
+                || !DynamoDbTableNames.TABLE_NAME_CHARS.matcher(tableName).matches()) {
+            throw new AwsException("ValidationException", "Invalid Request: Invalid TableArn: Invalid Table ARN", 400);
+        }
+        if (!arn.accountId().equals(regionResolver.getAccountId())) {
+            throw new AwsException("ValidationException",
+                    "This action is only supported by accounts that match the resource owner’s account.", 400);
+        }
+        if (!arn.region().equals(region) && !sseOverride) {
+            throw new AwsException("ValidationException",
+                    "Invalid Request: sseSpecificationOverride must be provided for cross-region restores", 400);
+        }
+        return new DynamoDbTableNames.ResolvedTableRef(tableName, arn.region());
+    }
+
+    private static AwsException invalidParameter(String message) {
+        return new AwsException("ValidationException", "One or more parameter values were invalid: " + message, 400);
+    }
+
+    private ContinuousBackups continuousBackups(String storageKey, TableDefinition table) {
+        return new ContinuousBackups(table, table.isPointInTimeRecoveryEnabled()
+                ? pointInTimeRecovery.window(withPointInTimeStart(storageKey, table))
+                : null);
+    }
+
+    /** A table that had point-in-time recovery enabled before Floci kept a history starts one now. */
+    private TableDefinition withPointInTimeStart(String storageKey, TableDefinition table) {
+        if (table.getPointInTimeRecoveryStartDateTime() == null) {
+            table.setPointInTimeRecoveryStartDateTime(clock.instant().truncatedTo(ChronoUnit.SECONDS));
+            tableStore.put(storageKey, table);
+        }
         return table;
+    }
+
+    /** The backup operations do not see a table that a restore is still creating. */
+    private TableDefinition requireBackupSource(String storageKey, String tableName) {
+        return tableStore.get(storageKey)
+                .filter(t -> !"CREATING".equals(t.getTableStatus()))
+                .orElseThrow(() -> new AwsException("TableNotFoundException", "Table not found: " + tableName, 400));
     }
 
     static boolean isExpired(JsonNode item, TableDefinition table) {
@@ -2713,8 +2894,10 @@ public class DynamoDbService {
                              TableDefinition table, List<String> itemKeys,
                              ConcurrentSkipListMap<String, JsonNode> items) {}
 
+    /** The TTL sweep also removes the system backups past their expiry. */
     void deleteExpiredItems() {
         deleteScannedItems(scanExpiredItems());
+        deleteExpiredBackups();
     }
 
     List<ExpiredTableScan> scanExpiredItems() {
@@ -2771,6 +2954,7 @@ public class DynamoDbService {
                     if (current == null || !isExpired(current, scan.table())) {
                         return null;
                     }
+                    pointInTimeRecovery.recordItem(scan.accountId(), scan.storageKey(), scan.table(), itemKey, current);
                     return items.remove(itemKey);
                 });
                 if (removed == null) {
@@ -4811,6 +4995,9 @@ public class DynamoDbService {
     // The live table object is shared and later mutated in place, so a backup keeps its own copy.
     private static final ObjectMapper SNAPSHOT_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
 
+    private static final int DEFAULT_RECOVERY_PERIOD_DAYS = 35;
+    private static final int SYSTEM_BACKUP_RETENTION_DAYS = 35;
+
     private static final Comparator<TableBackup> BACKUP_ORDER = Comparator
             .comparing(TableBackup::getCreationDateTime)
             .thenComparing(TableBackup::getBackupArn);
@@ -4824,6 +5011,29 @@ public class DynamoDbService {
                 .filter(t -> !"CREATING".equals(t.getTableStatus()))
                 .orElseThrow(() -> new AwsException("TableNotFoundException",
                         "Table not found: " + canonicalTableName, 400));
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        TableBackup backup = backupOf(storageKey, table, DynamoDbBackupArns.mint(table.getTableArn(), now), now);
+        backup.setBackupName(backupName);
+        backup.setBackupType("USER");
+        backup.setRegion(region);
+        backupStore.put(backup.getBackupArn(), backup);
+        LOG.infov("Created backup {0} of table {1}", backup.getBackupArn(), canonicalTableName);
+        return backup;
+    }
+
+    /** AWS keeps the backup it takes of a deleted table with point-in-time recovery for 35 days. */
+    private void createSystemBackup(String storageKey, TableDefinition table, String region) {
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        TableBackup backup = backupOf(storageKey, table, DynamoDbBackupArns.mintSystem(table.getTableArn(), now), now);
+        backup.setBackupName(table.getTableName() + "$DeletedTableBackup");
+        backup.setBackupType("SYSTEM");
+        backup.setExpiryDateTime(now.plus(Duration.ofDays(SYSTEM_BACKUP_RETENTION_DAYS)));
+        backup.setRegion(region);
+        backupStore.put(backup.getBackupArn(), backup);
+        LOG.infov("Created system backup {0} of deleted table {1}", backup.getBackupArn(), table.getTableName());
+    }
+
+    private TableBackup backupOf(String storageKey, TableDefinition table, String backupArn, Instant now) {
         ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedItemsKey(storageKey));
         List<JsonNode> snapshot = new ArrayList<>();
         if (items != null) {
@@ -4832,18 +5042,12 @@ public class DynamoDbService {
         TableDefinition source = snapshotOf(table);
         source.setItemCount(snapshot.size());
 
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
         TableBackup backup = new TableBackup();
-        backup.setBackupArn(DynamoDbBackupArns.mint(table.getTableArn(), now));
-        backup.setBackupName(backupName);
-        backup.setBackupType("USER");
+        backup.setBackupArn(backupArn);
         backup.setCreationDateTime(now);
         backup.setSizeBytes(source.getTableSizeBytes());
-        backup.setRegion(region);
         backup.setTable(source);
         backup.setItems(snapshot);
-        backupStore.put(backup.getBackupArn(), backup);
-        LOG.infov("Created backup {0} of table {1}", backup.getBackupArn(), canonicalTableName);
         return backup;
     }
 
@@ -4854,12 +5058,18 @@ public class DynamoDbService {
         }
         return backupStore.get(backupArn)
                 .filter(backup -> backup.getRegion().equals(region))
+                .filter(this::isUnexpired)
                 .orElseThrow(() -> new AwsException("BackupNotFoundException",
                         "Backup not found: " + backupArn, 400));
     }
 
     public TableBackup deleteBackup(String backupArn, String region) {
         TableBackup backup = describeBackup(backupArn, region);
+        if ("SYSTEM".equals(backup.getBackupType())) {
+            throw new AwsException("ValidationException", "Invalid Request: User is not allowed to delete the "
+                    + "system backup with arn " + backupArn + ". It will automatically expire on "
+                    + backup.getExpiryDateTime(), 400);
+        }
         backupStore.delete(backupArn);
         LOG.infov("Deleted backup {0}", backupArn);
         return backup;
@@ -4876,6 +5086,7 @@ public class DynamoDbService {
         Set<String> types = "ALL".equals(backupType) ? Set.of("USER", "SYSTEM") : Set.of(backupType);
         List<TableBackup> matching = backupStore.scan(key -> true).stream()
                 .filter(backup -> backup.getRegion().equals(region))
+                .filter(this::isUnexpired)
                 .filter(backup -> tableName == null || tableName.equals(backup.getTable().getTableName()))
                 .filter(backup -> types.contains(backup.getBackupType()))
                 .filter(backup -> lowerBound == null || !backup.getCreationDateTime().isBefore(lowerBound))
@@ -4917,6 +5128,21 @@ public class DynamoDbService {
         persistItems(storageKey);
         activateTable(tableName, region);
         LOG.infov("Restored {0} items into table {1}", items.size(), tableName);
+    }
+
+    private void deleteExpiredBackups() {
+        if (backupStore instanceof AccountAwareStorageBackend<TableBackup> aware) {
+            aware.deleteAllAccountsMatching(backup -> !isUnexpired(backup));
+            return;
+        }
+        for (String backupArn : new ArrayList<>(backupStore.keys())) {
+            backupStore.get(backupArn).filter(backup -> !isUnexpired(backup))
+                    .ifPresent(backup -> backupStore.delete(backupArn));
+        }
+    }
+
+    private boolean isUnexpired(TableBackup backup) {
+        return backup.getExpiryDateTime() == null || clock.instant().isBefore(backup.getExpiryDateTime());
     }
 
     private static boolean isAfter(TableBackup backup, DynamoDbBackupArns.BackupArn start) {

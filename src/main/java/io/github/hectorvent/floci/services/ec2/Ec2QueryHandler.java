@@ -3433,10 +3433,10 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeKeyPairs(MultivaluedMap<String, String> p, String region) {
-        boolean includePublicKey = Boolean.parseBoolean(p.getFirst("IncludePublicKey"));
+        boolean includePublicKey = Boolean.TRUE.equals(parseOptionalBoolean(p.getFirst("IncludePublicKey"), "IncludePublicKey"));
         List<String> keyNames = getList(p, "KeyName");
         List<String> keyPairIds = getList(p, "KeyPairId");
-        List<KeyPair> kps = service.describeKeyPairs(region, keyNames, keyPairIds);
+        List<KeyPair> kps = service.describeKeyPairs(region, keyNames, keyPairIds, getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeKeyPairsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3444,6 +3444,8 @@ public class Ec2QueryHandler {
         for (KeyPair kp : kps) {
             xml.start("item")
                     .elem("keyPairId", kp.getKeyPairId())
+                    .elem("keyType", Ec2Service.keyTypeOf(kp))
+                    .elem("createTime", kp.getCreateTime() != null ? ISO_FMT.format(kp.getCreateTime()) : null)
                     .elem("keyName", kp.getKeyName())
                     .elem("keyFingerprint", kp.getKeyFingerprint());
             if (includePublicKey) {
@@ -3457,13 +3459,14 @@ public class Ec2QueryHandler {
 
     /**
      * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
-     * DescribeKeyPairs reports for created and imported keys alike. ImportKeyPair keeps what it was
-     * given, so this is null unless the material is a single OpenSSH line whose blob is a whole key
-     * of the type the line names: a partial blob, a line labelled with another type and material of
-     * more than one line are not one key to report. PEM, DER and RFC 4716 bodies are not converted,
-     * since ImportKeyPair does not read those formats yet. The line is rebuilt from the blob's type,
-     * the blob and the name rather than copied, so no character of the stored text, such as a NUL
-     * that XML cannot carry, reaches the response.
+     * DescribeKeyPairs reports for created and imported keys alike. ImportKeyPair stores one OpenSSH
+     * line, but a key pair saved by an earlier version kept the material it was given, so this is
+     * null unless the material is a single OpenSSH line whose blob is a whole key of the type the
+     * line names: a partial blob, a line labelled with another type and material of more than one
+     * line are not one key to report, and PEM, DER and RFC 4716 bodies saved that way are not
+     * converted here. The line is rebuilt from the blob's type, the blob and the name rather than
+     * copied, so no character of the stored text, such as a NUL that XML cannot carry, reaches the
+     * response.
      */
     private static String openSshPublicKeyNamedFor(KeyPair kp) {
         String material = kp.getPublicKey();

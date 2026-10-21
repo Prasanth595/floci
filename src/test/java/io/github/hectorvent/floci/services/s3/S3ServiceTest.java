@@ -24,6 +24,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -569,6 +570,26 @@ class S3ServiceTest {
         assertNotNull(head.getChecksum().getChecksumCRC64NVME());
         assertEquals(ChecksumType.FULL_OBJECT, head.getChecksum().getChecksumType());
         assertEquals(stored.getETag(), head.getETag());
+    }
+
+    @Test
+    void putObjectFromStreamStoresWhatAByteArrayPutStores() {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        byte[] body = "payload".getBytes(StandardCharsets.UTF_8);
+
+        S3Object bytes = s3Service.putObject("test-bucket", "bytes", body, "application/zip", Map.of());
+        s3Service.putObjectFromStream("test-bucket", "streamed", new ByteArrayInputStream(body), "application/zip",
+                Map.of());
+
+        S3Object head = s3Service.headObject("test-bucket", "streamed");
+        assertEquals(bytes.getETag(), head.getETag());
+        assertEquals(bytes.getSize(), head.getSize());
+        assertEquals("application/zip", head.getContentType());
+        assertEquals(Map.of(), head.getMetadata());
+        assertEquals(bytes.getStorageClass(), head.getStorageClass());
+        assertEquals(bytes.getChecksum().getChecksumCRC64NVME(), head.getChecksum().getChecksumCRC64NVME());
+        assertEquals(ChecksumType.FULL_OBJECT, head.getChecksum().getChecksumType());
+        assertArrayEquals(body, s3Service.getObject("test-bucket", "streamed").getData());
     }
 
     @Test

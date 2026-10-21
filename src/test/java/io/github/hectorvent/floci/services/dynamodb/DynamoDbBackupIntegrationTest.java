@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -11,6 +9,9 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.CONTENT_TYPE;
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.ddb;
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.decimalAt;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -18,9 +19,6 @@ import static org.junit.jupiter.api.Assertions.*;
 @QuarkusTest
 class DynamoDbBackupIntegrationTest {
 
-    private static final String DYNAMODB_CONTENT_TYPE = "application/x-amz-json-1.0";
-    // JsonPath reads numbers as float, which drops whole seconds at epoch magnitude.
-    private static final ObjectMapper EXACT = new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
     private static final String TABLE_ARN_PREFIX = "arn:aws:dynamodb:us-east-1:000000000000:table/";
     private static final String BACKUP_ARN_PATTERN =
             "arn:aws:dynamodb:us-east-1:000000000000:table/%s/backup/\\d{14}-[0-9a-f]{8}";
@@ -178,7 +176,7 @@ class DynamoDbBackupIntegrationTest {
 
         given().header("Authorization", OTHER_REGION_AUTH)
                 .header("X-Amz-Target", "DynamoDB_20120810.DescribeBackup")
-                .contentType(DYNAMODB_CONTENT_TYPE)
+                .contentType(CONTENT_TYPE)
                 .body("{\"BackupArn\": \"" + backupArn + "\"}")
                 .when().post("/")
                 .then()
@@ -186,7 +184,7 @@ class DynamoDbBackupIntegrationTest {
                 .body("__type", containsString("BackupNotFoundException"));
         given().header("Authorization", OTHER_REGION_AUTH)
                 .header("X-Amz-Target", "DynamoDB_20120810.ListBackups")
-                .contentType(DYNAMODB_CONTENT_TYPE)
+                .contentType(CONTENT_TYPE)
                 .body("{\"TableName\": \"" + table + "\"}")
                 .when().post("/")
                 .then()
@@ -194,7 +192,7 @@ class DynamoDbBackupIntegrationTest {
                 .body("BackupSummaries", empty());
         given().header("Authorization", OTHER_ACCOUNT_AUTH)
                 .header("X-Amz-Target", "DynamoDB_20120810.DescribeBackup")
-                .contentType(DYNAMODB_CONTENT_TYPE)
+                .contentType(CONTENT_TYPE)
                 .body("{\"BackupArn\": \"" + backupArn + "\"}")
                 .when().post("/")
                 .then()
@@ -756,18 +754,5 @@ class DynamoDbBackupIntegrationTest {
         return ddb("RestoreTableFromBackup", """
                 {"BackupArn": "%s", "TargetTableName": "%s", %s}
                 """.formatted(backupArn, target, overrides));
-    }
-
-    private static BigDecimal decimalAt(ValidatableResponse response, String pointer) throws Exception {
-        return EXACT.readTree(response.extract().asString()).at(pointer).decimalValue();
-    }
-
-    private ValidatableResponse ddb(String action, String body) {
-        return given()
-                .header("X-Amz-Target", "DynamoDB_20120810." + action)
-                .contentType(DYNAMODB_CONTENT_TYPE)
-                .body(body)
-                .when().post("/")
-                .then();
     }
 }

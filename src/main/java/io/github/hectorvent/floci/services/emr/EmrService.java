@@ -126,13 +126,21 @@ public class EmrService {
         return requireCluster(id);
     }
 
-    public List<EmrCluster> listClusters(String region, List<String> states) {
+    public List<EmrCluster> listClusters(String region, List<String> states,
+                                          Instant createdAfter, Instant createdBefore) {
         List<EmrCluster> result = new ArrayList<>();
         for (EmrCluster c : clusterStore.scan(k -> true)) {
             if (!region.equals(c.getRegion())) {
                 continue;
             }
             if (states != null && !states.isEmpty() && !states.contains(c.getState())) {
+                continue;
+            }
+            Instant createdAt = c.getCreationDateTime();
+            if (createdAfter != null && (createdAt == null || !createdAt.isAfter(createdAfter))) {
+                continue;
+            }
+            if (createdBefore != null && (createdAt == null || !createdAt.isBefore(createdBefore))) {
                 continue;
             }
             result.add(c);

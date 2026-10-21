@@ -20,6 +20,7 @@ import jakarta.inject.Inject;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -247,6 +248,27 @@ public class CodeBuildService {
 
     public List<String> listProjects(String region) {
         return new ArrayList<>(projectsFor(region).keySet());
+    }
+
+    public List<String> listProjects(String region, String sortBy, String sortOrder) {
+        if (sortBy == null && sortOrder == null) {
+            return listProjects(region);
+        }
+        Comparator<Project> comparator = switch (sortBy == null ? "NAME" : sortBy) {
+            case "NAME" -> Comparator.comparing(Project::getName);
+            case "CREATED_TIME" -> Comparator.comparing(Project::getCreated,
+                    Comparator.nullsFirst(Comparator.naturalOrder()));
+            case "LAST_MODIFIED_TIME" -> Comparator.comparing(Project::getLastModified,
+                    Comparator.nullsFirst(Comparator.naturalOrder()));
+            default -> throw new AwsException("InvalidInputException", "Invalid sortBy: " + sortBy, 400);
+        };
+        if (isDescendingSortOrder(sortOrder, false)) {
+            comparator = comparator.reversed();
+        }
+        return projectsFor(region).values().stream()
+                .sorted(comparator.thenComparing(Project::getName))
+                .map(Project::getName)
+                .toList();
     }
 
     // ---- Report Groups ----
@@ -497,23 +519,35 @@ public class CodeBuildService {
                 .collect(Collectors.toList());
     }
 
-    public List<String> listBuilds(String region, String account) {
-        return buildsFor(account, region).values().stream()
-                .sorted((a, b) -> Double.compare(
-                        b.getStartTime() != null ? b.getStartTime() : 0,
-                        a.getStartTime() != null ? a.getStartTime() : 0))
-                .map(Build::getId)
-                .collect(Collectors.toList());
+    public List<String> listBuilds(String region, String account, String sortOrder) {
+        Comparator<String> comparator = Comparator.naturalOrder();
+        if (isDescendingSortOrder(sortOrder, true)) {
+            comparator = comparator.reversed();
+        }
+        return buildsFor(account, region).keySet().stream()
+                .sorted(comparator)
+                .toList();
     }
 
-    public List<String> listBuildsForProject(String region, String account, String projectName) {
+    public List<String> listBuildsForProject(String region, String account, String projectName,
+                                             String sortOrder) {
+        Comparator<Build> comparator = Comparator.comparing(Build::getBuildNumber)
+                .thenComparing(Build::getId);
+        if (isDescendingSortOrder(sortOrder, true)) {
+            comparator = comparator.reversed();
+        }
         return buildsFor(account, region).values().stream()
                 .filter(b -> projectName.equals(b.getProjectName()))
-                .sorted((a, b) -> Double.compare(
-                        b.getStartTime() != null ? b.getStartTime() : 0,
-                        a.getStartTime() != null ? a.getStartTime() : 0))
+                .sorted(comparator)
                 .map(Build::getId)
-                .collect(Collectors.toList());
+                .toList();
+    }
+
+    private boolean isDescendingSortOrder(String sortOrder, boolean defaultDescending) {
+        if (sortOrder != null && !"ASCENDING".equals(sortOrder) && !"DESCENDING".equals(sortOrder)) {
+            throw new AwsException("InvalidInputException", "Invalid sortOrder: " + sortOrder, 400);
+        }
+        return sortOrder == null ? defaultDescending : "DESCENDING".equals(sortOrder);
     }
 
     public void stopBuild(String region, String account, String buildId) {

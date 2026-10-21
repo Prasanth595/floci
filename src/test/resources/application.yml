@@ -151,6 +151,7 @@ floci:
       enabled: true
       vector-index-allocation-seconds: 0
       vector-index-backfill-seconds: 0
+      latest-restorable-lag-seconds: 0
       backend: native
     sns:
       enabled: true
@@ -231,6 +232,8 @@ floci:
       database-resuming-exception-enabled: false
     dsql:
       enabled: true
+      mock: true
+      port: 0
     redshift-data:
       enabled: true
       result-ttl-hours: 24

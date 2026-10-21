@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
@@ -1771,7 +1772,7 @@ class PostgresProtocolHandlerTest {
             int length = in.readInt();
             assertEquals(STARTUP_PROTOCOL_VERSION, in.readInt());
             byte[] payload = in.readNBytes(length - 8);
-            backendStartup.set(PostgresProtocolHandler.parseStartupParams(payload));
+            backendStartup.set(PostgresWire.startupParameters(payload));
 
             out.writeByte('R');
             out.writeInt(8);
@@ -2137,7 +2138,7 @@ class PostgresProtocolHandlerTest {
             int proto = in.readInt();
             assertEquals(STARTUP_PROTOCOL_VERSION, proto);
             byte[] payload = in.readNBytes(length - 8);
-            backendStartup.set(PostgresProtocolHandler.parseStartupParams(payload));
+            backendStartup.set(PostgresWire.startupParameters(payload));
             backendDatabase.set(backendStartup.get().get("database"));
 
             out.writeByte('R');

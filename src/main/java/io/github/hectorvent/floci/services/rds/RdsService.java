@@ -48,6 +48,7 @@ import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
+import io.github.hectorvent.floci.services.rds.model.DbProxyEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
@@ -182,6 +183,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private StorageBackend<String, RdsEvent> events = new InMemoryStorage<>();
     private final StorageBackend<String, EventSubscription> eventSubscriptions;
     private final StorageBackend<String, DbClusterEndpoint> clusterEndpoints;
+    private final StorageBackend<String, DbProxyEndpoint> proxyEndpoints;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     // CreateDBCluster/CreateDBInstance register the new resource only after the
@@ -257,6 +259,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 new TypeReference<Map<String, EventSubscription>>() {});
         this.clusterEndpoints = storageFactory.create("rds", "rds-cluster-endpoints.json",
                 new TypeReference<Map<String, DbClusterEndpoint>>() {});
+        this.proxyEndpoints = storageFactory.create("rds", "rds-proxy-endpoints.json",
+                new TypeReference<Map<String, DbProxyEndpoint>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
                 new TypeReference<Map<String, DbCluster>>() {});
         this.parameterGroups = storageFactory.create("rds", "rds-parameter-groups.json",
@@ -419,6 +423,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.snapshotData = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
         this.eventSubscriptions = new InMemoryStorage<>();
         this.clusterEndpoints = new InMemoryStorage<>();
+        this.proxyEndpoints = new InMemoryStorage<>();
     }
 
     public void restorePersistedRuntime() {
@@ -2523,6 +2528,16 @@ public class RdsService implements Resettable, ResourceProvider {
                 yield new TagHandle(subscription.getTags(), updated -> {
                     subscription.setTags(updated);
                     eventSubscriptions.put(eventSubscriptionKey(effectiveRegion, resourceId), subscription);
+                });
+            }
+            case "db-proxy-endpoint" -> {
+                DbProxyEndpoint endpoint = proxyEndpoints.scan(k -> k.startsWith(effectiveRegion + "::")).stream()
+                        .filter(candidate -> resourceName.equals(candidate.getDbProxyEndpointArn()))
+                        .findFirst()
+                        .orElseThrow(() -> proxyEndpointNotFound(resourceId));
+                yield new TagHandle(endpoint.getTags(), updated -> {
+                    endpoint.setTags(updated);
+                    proxyEndpoints.put(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()), endpoint);
                 });
             }
             case "db-proxy" -> {
@@ -6310,6 +6325,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 .or(() -> legacyTargetGroup
                         .filter(candidate -> targetGroupMatchesProxy(candidate, proxy)))
                 .orElse(null);
+        List<DbProxyEndpoint> endpoints = proxyEndpointsOf(effectiveRegion, name);
         boolean realMode = !config.services().rds().mock();
         if (realMode) {
             try {
@@ -6320,6 +6336,10 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         }
         try {
+            // A proxy's endpoints go with it.
+            for (DbProxyEndpoint endpoint : endpoints) {
+                proxyEndpoints.delete(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()));
+            }
             deleteTargetGroupKey(accountId, proxyKey);
             if (legacyTargetGroup.isPresent()) {
                 deleteTargetGroupKey(accountId, name);
@@ -6329,6 +6349,10 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             deleteProxyKey(accountId, proxyKey);
         } catch (RuntimeException deleteFailure) {
+            for (DbProxyEndpoint endpoint : endpoints) {
+                attemptRollback(deleteFailure, () -> proxyEndpoints.put(
+                        proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()), endpoint));
+            }
             attemptRollback(deleteFailure,
                     () -> putProxyForAccount(accountId, proxyKey, proxy));
             canonicalTargetGroup.ifPresent(targetGroup -> attemptRollback(deleteFailure,
@@ -6342,6 +6366,216 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         releaseProxyPort(proxy.getProxyPort());
         LOG.infov("DB proxy {0} deleted", name);
+    }
+
+    // ── DB Proxy endpoints ────────────────────────────────────────────────────
+
+    /** AWS's limit on the endpoints a caller adds to one proxy, besides its default endpoint. */
+    private static final int MAX_ENDPOINTS_PER_PROXY = 20;
+    private static final String DEFAULT_PROXY_ENDPOINT_NAME = "default";
+    private static final Set<String> PROXY_ENDPOINT_TARGET_ROLES = Set.of("READ_WRITE", "READ_ONLY");
+    private static final Set<String> PROXY_ENDPOINT_NETWORK_TYPES = Set.of("IPV4", "IPV6", "DUAL");
+
+    public record ProxyEndpointPage(List<DbProxyEndpoint> endpoints, String marker) {}
+
+    /**
+     * Adds an endpoint to a proxy. It reports the proxy's own host, so a client reaches the proxy's
+     * listener through it, and an IAM token signed for that host verifies there.
+     */
+    public synchronized DbProxyEndpoint createDbProxyEndpoint(String region, String dbProxyName, String endpointName,
+                                                              List<String> vpcSubnetIds,
+                                                              List<String> vpcSecurityGroupIds, String targetRole,
+                                                              String endpointNetworkType, Map<String, String> tags) {
+        String effectiveRegion = effectiveRegion(region);
+        requireParameter(dbProxyName, "DBProxyName");
+        String name = requireProxyEndpointName(endpointName, "DBProxyEndpointName");
+        if (vpcSubnetIds == null || vpcSubnetIds.isEmpty()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter VpcSubnetIds.", 400);
+        }
+        DbProxy proxy = getDbProxy(dbProxyName, effectiveRegion);
+        String role = isBlank(targetRole) ? "READ_WRITE" : targetRole;
+        if (!PROXY_ENDPOINT_TARGET_ROLES.contains(role)) {
+            throw new AwsException("InvalidParameterValue", "TargetRole must be READ_WRITE or READ_ONLY.", 400);
+        }
+        if ("READ_ONLY".equals(role) && "SQLSERVER".equalsIgnoreCase(proxy.getEngineFamily())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "A DB proxy for RDS for SQL Server supports only the READ_WRITE target role.", 400);
+        }
+        String networkType = isBlank(endpointNetworkType) ? "IPV4" : endpointNetworkType;
+        if (!PROXY_ENDPOINT_NETWORK_TYPES.contains(networkType)) {
+            throw new AwsException("InvalidParameterValue", "EndpointNetworkType must be IPV4, IPV6, or DUAL.", 400);
+        }
+        if (!"available".equals(proxy.getStatus())) {
+            throw new AwsException("InvalidDBProxyStateFault",
+                    "DB proxy " + proxy.getDbProxyName() + " is not available.", 400);
+        }
+        String key = proxyEndpointKey(effectiveRegion, name);
+        if (DEFAULT_PROXY_ENDPOINT_NAME.equals(name) || proxyEndpoints.get(key).isPresent()) {
+            throw new AwsException("DBProxyEndpointAlreadyExistsFault",
+                    "DB proxy endpoint " + name + " already exists.", 400);
+        }
+        if (proxyEndpointsOf(effectiveRegion, proxy.getDbProxyName()).size() >= MAX_ENDPOINTS_PER_PROXY) {
+            throw new AwsException("DBProxyEndpointQuotaExceededFault",
+                    "DB proxy " + proxy.getDbProxyName() + " already has " + MAX_ENDPOINTS_PER_PROXY
+                            + " endpoints.", 400);
+        }
+        String vpcId = resolveDbProxyVpc(vpcSubnetIds, effectiveRegion);
+        if (!"IPV4".equals(networkType)) {
+            validateVpcHasIpv6CidrBlock(vpcId, effectiveRegion);
+            validateSubnetsHaveIpv6CidrBlock(vpcSubnetIds, effectiveRegion);
+        }
+
+        DbProxyEndpoint endpoint = new DbProxyEndpoint();
+        endpoint.setDbProxyEndpointName(name);
+        endpoint.setDbProxyEndpointArn(regionResolver.buildArn("rds", effectiveRegion,
+                "db-proxy-endpoint:prx-endpoint-" + randomResourceSuffix()));
+        endpoint.setDbProxyName(proxy.getDbProxyName());
+        endpoint.setStatus("available");
+        endpoint.setVpcId(vpcId);
+        endpoint.setVpcSubnetIds(vpcSubnetIds);
+        endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()
+                ? defaultSecurityGroupOf(vpcId, effectiveRegion) : vpcSecurityGroupIds);
+        endpoint.setCreatedDate(Instant.now());
+        endpoint.setTargetRole(role);
+        endpoint.setEndpointNetworkType(networkType);
+        endpoint.setTags(tags);
+        proxyEndpoints.put(key, endpoint);
+        return withProxyHost(endpoint, proxy);
+    }
+
+    /**
+     * Each proxy in scope's default endpoint, then the endpoints added to it by name, narrowed by
+     * the request's proxy and endpoint names.
+     */
+    public synchronized ProxyEndpointPage describeDbProxyEndpoints(String region, String dbProxyName,
+                                                                   String endpointName, Integer maxRecords,
+                                                                   String marker) {
+        String effectiveRegion = effectiveRegion(region);
+        requireValidMaxRecords(maxRecords);
+        List<DbProxy> scope = !isBlank(dbProxyName)
+                ? List.of(getDbProxy(dbProxyName, effectiveRegion))
+                : listDbProxies(null, effectiveRegion).stream()
+                        .sorted(Comparator.comparing(DbProxy::getDbProxyName))
+                        .toList();
+        List<DbProxyEndpoint> all = new ArrayList<>();
+        for (DbProxy proxy : scope) {
+            all.add(defaultProxyEndpoint(proxy));
+            proxyEndpointsOf(effectiveRegion, proxy.getDbProxyName()).stream()
+                    .sorted(Comparator.comparing(DbProxyEndpoint::getDbProxyEndpointName))
+                    .map(endpoint -> withProxyHost(endpoint, proxy))
+                    .forEach(all::add);
+        }
+        List<DbProxyEndpoint> matching = all.stream()
+                .filter(e -> isBlank(endpointName) || endpointName.equals(e.getDbProxyEndpointName()))
+                .toList();
+        if (!isBlank(endpointName) && matching.isEmpty()) {
+            throw proxyEndpointNotFound(endpointName);
+        }
+        OffsetPage<DbProxyEndpoint> page = offsetPage(matching, maxRecords, marker);
+        return new ProxyEndpointPage(page.items(), page.marker());
+    }
+
+    /** Renames an endpoint or replaces its security groups; a proxy's default endpoint cannot change. */
+    public synchronized DbProxyEndpoint modifyDbProxyEndpoint(String region, String endpointName, String newName,
+                                                              List<String> vpcSecurityGroupIds) {
+        String effectiveRegion = effectiveRegion(region);
+        DbProxyEndpoint endpoint = requireProxyEndpoint(effectiveRegion, endpointName);
+        DbProxy proxy = getDbProxy(endpoint.getDbProxyName(), effectiveRegion);
+        if (!"available".equals(proxy.getStatus())) {
+            throw new AwsException("InvalidDBProxyStateFault",
+                    "DB proxy " + proxy.getDbProxyName() + " is not available.", 400);
+        }
+        String name = isBlank(newName) ? endpoint.getDbProxyEndpointName()
+                : requireProxyEndpointName(newName, "NewDBProxyEndpointName");
+        boolean renamed = !name.equals(endpoint.getDbProxyEndpointName());
+        if (renamed && (DEFAULT_PROXY_ENDPOINT_NAME.equals(name)
+                || proxyEndpoints.get(proxyEndpointKey(effectiveRegion, name)).isPresent())) {
+            throw new AwsException("DBProxyEndpointAlreadyExistsFault",
+                    "DB proxy endpoint " + name + " already exists.", 400);
+        }
+        String oldKey = proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName());
+        endpoint.setDbProxyEndpointName(name);
+        if (vpcSecurityGroupIds != null) {
+            endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        }
+        proxyEndpoints.put(proxyEndpointKey(effectiveRegion, name), endpoint);
+        if (renamed) {
+            proxyEndpoints.delete(oldKey);
+        }
+        return withProxyHost(endpoint, proxy);
+    }
+
+    /** Deletes an endpoint; the response reports it as {@code deleting}. */
+    public synchronized DbProxyEndpoint deleteDbProxyEndpoint(String region, String endpointName) {
+        String effectiveRegion = effectiveRegion(region);
+        DbProxyEndpoint endpoint = requireProxyEndpoint(effectiveRegion, endpointName);
+        proxyEndpoints.delete(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()));
+        endpoint.setStatus("deleting");
+        return withProxyHost(endpoint, getDbProxy(endpoint.getDbProxyName(), effectiveRegion));
+    }
+
+    /** A stored endpoint by name; the default endpoint is in a state no change can be made in. */
+    private DbProxyEndpoint requireProxyEndpoint(String region, String endpointName) {
+        String name = requireProxyEndpointName(endpointName, "DBProxyEndpointName");
+        if (DEFAULT_PROXY_ENDPOINT_NAME.equals(name)) {
+            throw new AwsException("InvalidDBProxyEndpointStateFault",
+                    "The default endpoint of a DB proxy cannot be modified or deleted.", 400);
+        }
+        return proxyEndpoints.get(proxyEndpointKey(region, name)).orElseThrow(() -> proxyEndpointNotFound(name));
+    }
+
+    private static String requireProxyEndpointName(String name, String parameter) {
+        requireParameter(name, parameter);
+        if (name.length() > 63 || !DB_PROXY_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterValue", parameter + " must be 1-63 characters, begin with a "
+                    + "letter, and contain only letters, digits, and single hyphens.", 400);
+        }
+        return name;
+    }
+
+    /** Reports the proxy's current host, which a restore can change after the endpoint was created. */
+    private static DbProxyEndpoint withProxyHost(DbProxyEndpoint endpoint, DbProxy proxy) {
+        endpoint.setEndpoint(proxy.getEndpoint());
+        return endpoint;
+    }
+
+    private static AwsException proxyEndpointNotFound(String name) {
+        return new AwsException("DBProxyEndpointNotFoundFault", "DB proxy endpoint " + name + " not found.", 404);
+    }
+
+    /** The endpoint RDS gives every proxy: read/write, in the proxy's VPC, at the proxy's host. */
+    private static DbProxyEndpoint defaultProxyEndpoint(DbProxy proxy) {
+        DbProxyEndpoint endpoint = new DbProxyEndpoint();
+        endpoint.setDbProxyEndpointName(DEFAULT_PROXY_ENDPOINT_NAME);
+        endpoint.setDbProxyName(proxy.getDbProxyName());
+        endpoint.setStatus(proxy.getStatus());
+        endpoint.setVpcId(proxy.getVpcId());
+        endpoint.setVpcSubnetIds(proxy.getVpcSubnetIds());
+        endpoint.setVpcSecurityGroupIds(proxy.getVpcSecurityGroupIds());
+        endpoint.setEndpoint(proxy.getEndpoint());
+        endpoint.setCreatedDate(proxy.getCreatedAt());
+        endpoint.setTargetRole("READ_WRITE");
+        endpoint.setDefault(true);
+        endpoint.setEndpointNetworkType(proxy.getEndpointNetworkType());
+        return endpoint;
+    }
+
+    private List<String> defaultSecurityGroupOf(String vpcId, String region) {
+        return ec2Service.getSecurityGroupsForVpc(region, vpcId, Map.of()).stream()
+                .filter(group -> "default".equals(group.getGroupName()))
+                .map(group -> group.getGroupId())
+                .toList();
+    }
+
+    private List<DbProxyEndpoint> proxyEndpointsOf(String region, String dbProxyName) {
+        String prefix = effectiveRegion(region) + "::";
+        return proxyEndpoints.scan(key -> key.startsWith(prefix)).stream()
+                .filter(endpoint -> dbProxyName.equals(endpoint.getDbProxyName()))
+                .toList();
+    }
+
+    private String proxyEndpointKey(String region, String endpointName) {
+        return effectiveRegion(region) + "::" + endpointName;
     }
 
     // ── DB Subnet Groups ──────────────────────────────────────────────────────

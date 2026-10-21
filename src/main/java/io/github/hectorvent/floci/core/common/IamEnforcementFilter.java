@@ -67,6 +67,8 @@ import java.util.regex.Pattern;
  *   <li>The action cannot be resolved (unknown mapping → permissive)</li>
  *   <li>The action is {@code sts:GetCallerIdentity}, which AWS allows without permissions. The
  *       key itself is still checked.</li>
+ *   <li>The action is {@code sts:GetSessionToken}, which AWS also allows without permissions:
+ *       policies cannot control authentication operations. The key itself is still checked.</li>
  * </ul>
  *
  * <p>Authenticated temporary callers of {@code sts:GetFederationToken} are refused here with
@@ -382,6 +384,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
         if ("sts:GetCallerIdentity".equals(action)) {
             return; // AWS returns caller identity even when an identity policy explicitly denies it
+        }
+        if ("sts:GetSessionToken".equals(action)) {
+            // AWS: "No permissions are required for users to perform this operation... You cannot
+            // use policies to control authentication operations." An explicit deny does not stop it.
+            return;
         }
 
         if ("sts:GetFederationToken".equals(action) && IamService.isTemporaryAccessKey(akid)) {

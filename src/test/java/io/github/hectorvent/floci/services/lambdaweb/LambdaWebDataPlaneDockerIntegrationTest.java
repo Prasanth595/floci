@@ -404,6 +404,15 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     }
 
     @Test
+    @Timeout(180)
+    void anEnvironmentRunsTheCodeTheRevisionWasCreatedFrom() throws Exception {
+        String domain = createFunction(30);
+        s3Service.putObject(BUCKET, functionName + ".zip", zip("process.exit(1);"), "application/zip", Map.of());
+
+        given().header("Host", domain).when().get("/status/200").then().statusCode(200).body(equalTo("status body"));
+    }
+
+    @Test
     @Timeout(240)
     void environmentsScaleUpToMaxEnvironmentsAndTheRateLimitThrottles() throws Exception {
         String domain = createFunction(30, 1);

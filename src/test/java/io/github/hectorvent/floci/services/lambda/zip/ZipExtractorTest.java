@@ -36,7 +36,7 @@ class ZipExtractorTest {
     }
 
     /** Build a ZIP whose entry names use the given separator, as PowerShell does. */
-    private static byte[] zipWith(String entryName, String content) throws IOException {
+    static byte[] zipWith(String entryName, String content) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (ZipOutputStream zos = new ZipOutputStream(baos)) {
             zos.putNextEntry(new ZipEntry(entryName));
@@ -450,6 +450,20 @@ class ZipExtractorTest {
         try (Stream<Path> entries = Files.list(codeStore)) {
             assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
                     "no staged archive or staging directory may survive extraction, successful or failed");
+        }
+    }
+
+    @Test
+    void extractsAnArchiveFileWithoutStagingACopy(@TempDir Path codeStore) throws IOException {
+        Path archive = codeStore.resolve("code.zip");
+        Files.write(archive, zipWith("index.js", "v1"));
+        Path target = codeStore.resolve("fn");
+
+        extractor.extractTo(archive, target, ZipExtractor.DEFAULT_MAX_ENTRIES);
+
+        assertEquals("v1", Files.readString(target.resolve("index.js")));
+        try (Stream<Path> entries = Files.list(codeStore)) {
+            assertEquals(List.of("code.zip", "fn"), entries.map(p -> p.getFileName().toString()).sorted().toList());
         }
     }
 
