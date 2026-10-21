@@ -2290,6 +2290,33 @@ class LambdaServiceTest {
         }
     }
 
+    @Test
+    void anS3PackageOverTheCompressedLimitGetsTheExtractionError() {
+        S3Service s3 = mock(S3Service.class);
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        LambdaFunctionStore functionStore = new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>());
+        LambdaAliasStore aliasStore = new LambdaAliasStore(storageFactory);
+        LambdaService s3Backed = new LambdaService(functionStore, null, new LambdaConcurrencyLimiter(),
+                mock(WarmPool.class), new CodeStore(Path.of("target/test-data/lambda-code")), new ZipExtractor(), null,
+                new RegionResolver(REGION, "000000000000"), null, aliasStore,
+                new LambdaTargetResolver(functionStore, aliasStore), s3, null, null, null, null,
+                storageFactory, null, null, null, null, new ObjectMapper());
+        long size = 250L * 1024 * 1024 + 1;
+        when(s3.openObject("code-bucket", "function.zip", null)).thenReturn(new S3Service.ObjectRead(
+                new S3Object("code-bucket", "function.zip", size, "application/zip", "\"etag\""),
+                new ByteArrayInputStream(new byte[0])));
+        Map<String, Object> request = baseRequest("oversized-" + UUID.randomUUID());
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
+
+        AwsException e = assertThrows(AwsException.class, () -> s3Backed.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", e.getErrorCode());
+        assertEquals("Failed to extract deployment package: ZIP archive exceeds the 262144000 byte compressed limit: "
+                + size, e.getMessage());
+    }
+
     /** What S3 in memory mode returns: the body is already in the heap. */
     private static S3Service.ObjectRead heldObject(String zipBase64) {
         byte[] data = Base64.getDecoder().decode(zipBase64);

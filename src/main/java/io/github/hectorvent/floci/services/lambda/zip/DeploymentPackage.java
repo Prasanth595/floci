@@ -44,13 +44,17 @@ public final class DeploymentPackage implements AutoCloseable {
     /**
      * Takes over {@code object} and closes it. S3 in memory mode already holds the bytes, and a
      * tasks bucket copy put from them shares them, so they are kept as they are. Otherwise the body
-     * is staged in {@code stagingDir}.
+     * is staged in {@code stagingDir}, unless it is over the compressed limit extraction enforces.
      */
     public static DeploymentPackage read(S3Service.ObjectRead object, Path stagingDir) throws IOException {
         try (object) {
             byte[] held = object.object().getData();
             if (held != null) {
                 return of(held);
+            }
+            long declared = object.object().getSize();
+            if (ZipExtractor.S3_MAX_COMPRESSED_BYTES < declared) {
+                return new DeploymentPackage(null, null, declared, null);
             }
             Files.createDirectories(stagingDir);
             Path staged = Files.createTempFile(stagingDir, ".floci-staging-", ".zip");
@@ -84,8 +88,12 @@ public final class DeploymentPackage implements AutoCloseable {
             throws IOException {
         if (file != null) {
             extractor.extractTo(file, targetDir, maxEntries, beforeInstall);
-        } else {
+        } else if (bytes != null) {
             extractor.extractTo(bytes, targetDir, maxEntries, beforeInstall);
+        } else {
+            // Over the compressed limit, so never staged: rejected with the message a staged copy would get.
+            ZipExtractor.checkLimits(maxEntries, size);
+            throw new IllegalStateException("A package of " + size + " bytes passed the compressed limit");
         }
     }
 

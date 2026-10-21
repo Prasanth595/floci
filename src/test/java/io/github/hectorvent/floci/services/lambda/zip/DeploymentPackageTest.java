@@ -23,6 +23,8 @@ import java.util.zip.ZipOutputStream;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -74,6 +76,29 @@ class DeploymentPackageTest {
         assertEquals("v1", Files.readString(target.resolve("index.js")));
         assertArrayEquals(zip, stored.toByteArray());
         assertEquals(List.of(), entries(staging));
+    }
+
+    @Test
+    void aBodyOverTheCompressedLimitIsRejectedUnread() throws IOException {
+        long size = ZipExtractor.S3_MAX_COMPRESSED_BYTES + 1;
+        InputStream unread = new InputStream() {
+            @Override
+            public int read() {
+                throw new AssertionError("the body was read");
+            }
+        };
+        S3Service.ObjectRead object = new S3Service.ObjectRead(
+                new S3Object("code", "app.zip", size, "application/zip", "\"etag\""), unread);
+        Path staging = dir.resolve("staging");
+
+        try (DeploymentPackage pkg = DeploymentPackage.read(object, staging)) {
+            IOException e = assertThrows(IOException.class, () -> pkg.extractTo(new ZipExtractor(),
+                    dir.resolve("code"), ZipExtractor.DEFAULT_MAX_ENTRIES, () -> fail("installed")));
+            assertEquals("ZIP archive exceeds the 262144000 byte compressed limit: 262144001", e.getMessage());
+        }
+
+        assertFalse(Files.exists(staging));
+        assertFalse(Files.exists(dir.resolve("code")));
     }
 
     private static S3Service.ObjectRead object(byte[] held, byte[] body) {
