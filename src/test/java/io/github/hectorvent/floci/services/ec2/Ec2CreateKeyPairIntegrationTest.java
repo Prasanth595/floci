@@ -218,8 +218,8 @@ class Ec2CreateKeyPairIntegrationTest {
 
     /**
      * DescribeKeyPairs reports the public half of the created key with the key-pair name as its
-     * comment, and, where it reports a type at all, the type that was created. AWS ends the reported
-     * key with a line break and Floci does not, so the line is compared without it.
+     * comment and the type that was created, and the key-type filter finds it under that type. AWS
+     * ends the reported key with a line break and Floci does not, so the line is compared without it.
      */
     private static void assertDescribedAs(String name, String id, byte[] blob, String keyType) {
         String type = "rsa".equals(keyType) ? "ssh-rsa" : "ssh-ed25519";
@@ -231,9 +231,15 @@ class Ec2CreateKeyPairIntegrationTest {
                 .extract().xmlPath();
         assertEquals(type + " " + Base64.getEncoder().encodeToString(blob) + " " + name,
                 described.getString("DescribeKeyPairsResponse.keySet.item.publicKey").strip());
-        String reportedType = described.getString("DescribeKeyPairsResponse.keySet.item.keyType");
-        assertTrue(reportedType.isEmpty() || reportedType.equals(keyType),
-                "an " + keyType + " key pair is described as " + reportedType);
+        assertEquals(keyType, described.getString("DescribeKeyPairsResponse.keySet.item.keyType"),
+                "the type of an " + keyType + " key pair");
+        ec2("DescribeKeyPairs", ACCOUNT_ID, REGION)
+                .formParam("Filter.1.Name", "key-name")
+                .formParam("Filter.1.Value.1", name)
+                .formParam("Filter.2.Name", "key-type")
+                .formParam("Filter.2.Value.1", keyType)
+                .post("/").then().statusCode(200)
+                .body("DescribeKeyPairsResponse.keySet.item.keyPairId", equalTo(id));
     }
 
     private static void assertNotCreated(String name) {

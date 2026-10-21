@@ -7438,7 +7438,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // The public half is what RunInstances injects into the guest's authorized_keys.
         // Without storing it, a key pair created here could never authenticate anything.
         kp.setPublicKey(generated.openSshPublicKey());
-        kp.setKeyType("rsa");
+        kp.setKeyType(type);
         kp.setCreateTime(Instant.now());
         kp.setRegion(region);
         keyPairs.put(key(region, keyPairId), kp);
@@ -7494,9 +7494,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * The key type DescribeKeyPairs reports. A key pair stored before the type was recorded has it
-     * read from what it holds: rsa when CreateKeyPair made it, since that has only ever generated
-     * RSA keys, and otherwise the type of its imported key, or none when ImportKeyPair would now
-     * refuse that material or reading it fails, which is logged.
+     * read from what it holds: rsa when CreateKeyPair made it, since CreateKeyPair made only RSA
+     * keys until it recorded their type, and otherwise the type of its imported key, or none when
+     * ImportKeyPair would now refuse that material or reading it fails, which is logged.
      */
     static String keyTypeOf(KeyPair keyPair) {
         if (keyPair.getKeyType() != null) {
