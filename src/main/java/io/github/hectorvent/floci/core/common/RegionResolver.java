@@ -86,8 +86,7 @@ public class RegionResolver {
         }
         String authorization = headers.getHeaderString("Authorization");
         if (authorization != null
-                && authorization.trim().startsWith(SigV4aSignature.ALGORITHM + " ")
-                && "s3".equals(SigV4CredentialScope.serviceName(authorization).orElse(null))) {
+                && authorization.trim().startsWith(SigV4aSignature.ALGORITHM + " ")) {
             return resolveRegionFromRegionSet(headers.getHeaderString("X-Amz-Region-Set"));
         }
         return resolveRegionFromAuth(authorization);

@@ -47,11 +47,11 @@ class RegionResolverTest {
     }
 
     @Test
-    void sigV4aNonS3ServiceDoesNotResolveFromRegionSet() {
+    void sigV4aAuthorizationResolvesFromRegionSet() {
         HttpHeaders headers = stubHeaders(
                 "AWS4-ECDSA-P256-SHA256 Credential=AKID/20260215/sqs/aws4_request, SignedHeaders=host, Signature=abc",
                 "eu-west-1");
-        assertEquals("sqs", resolver.resolveRegion(headers));
+        assertEquals("eu-west-1", resolver.resolveRegion(headers));
     }
 
     @Test

@@ -86,11 +86,9 @@ public class AccountContextFilter implements ContainerRequestFilter {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
             requestContext.setAccessKeyId(akid);
             requestContext.setSessionToken(sessionToken);
-            // A SigV4A scope has no region segment; the regions come from the signed region set
-            // for S3 requests. Non-S3 SigV4A scopes resolve as before and are rejected as unknown.
+            // A SigV4A scope has no region segment; the regions come from the signed region set.
             boolean sigV4a = auth.trim().startsWith(SigV4aSignature.ALGORITHM + " ");
-            boolean s3Scope = "s3".equals(SigV4CredentialScope.serviceName(auth).orElse(null));
-            String region = sigV4a && s3Scope
+            String region = sigV4a
                     ? regionResolver.resolveRegionFromRegionSet(ctx.getHeaderString("X-Amz-Region-Set"))
                     : regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
@@ -113,9 +111,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
                 requestContext.setSessionToken(sessionToken);
                 boolean sigV4a = SigV4aSignature.ALGORITHM.equals(
                         ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Algorithm"));
-                boolean s3Scope = "s3".equals(
-                        SigV4CredentialScope.serviceNameFromCredential(credential).orElse(null));
-                String region = sigV4a && s3Scope
+                String region = sigV4a
                         ? regionResolver.resolveRegionFromRegionSet(
                                 ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Region-Set"))
                         : regionResolver.resolveRegionFromPresignedCredential(credential);
