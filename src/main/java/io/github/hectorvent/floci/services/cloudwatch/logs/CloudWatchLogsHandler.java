@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.AccountPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogDestination;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
@@ -127,11 +129,26 @@ public class CloudWatchLogsHandler {
 
     private Response handleDescribeLogGroups(JsonNode request, String region) {
         String prefix = request.path("logGroupNamePrefix").asText(null);
+        int limit = 50;
+        if (request.hasNonNull("limit")) {
+            JsonNode value = request.get("limit");
+            if (!value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 1 || value.intValue() > 50) {
+                throw new AwsException("InvalidParameterException", "limit must be an integer between 1 and 50.", 400);
+            }
+            limit = value.intValue();
+        }
+        String nextToken = request.path("nextToken").asText(null);
+        if (request.hasNonNull("nextToken") && (!request.get("nextToken").isTextual() || nextToken.isEmpty())) {
+            throw new AwsException("InvalidParameterException", "Invalid nextToken.", 400);
+        }
         List<LogGroup> groups = logsService.describeLogGroups(prefix, region);
+        PaginatedResult<LogGroup> page = Pagination.paginate(groups, LogGroup::getLogGroupName, limit, nextToken,
+                "DescribeLogGroups:" + region + ":" + (prefix == null ? "" : prefix),
+                token -> new AwsException("InvalidParameterException", "Invalid nextToken.", 400));
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode groupsArray = objectMapper.createArrayNode();
-        for (LogGroup g : groups) {
+        for (LogGroup g : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("logGroupName", g.getLogGroupName());
             node.put("creationTime", g.getCreatedTime());
@@ -150,6 +167,9 @@ public class CloudWatchLogsHandler {
             groupsArray.add(node);
         }
         response.set("logGroups", groupsArray);
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 

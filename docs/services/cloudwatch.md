@@ -51,6 +51,10 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `GetQueryResults` | Get the status and results of a Logs Insights query |
 | `StopQuery` | Stop a query that has not completed yet |
 
+`DescribeLogGroups` returns names in ASCII order, with up to 50 groups per page by default.
+Set `limit` to an integer from 1 to 50 and pass the returned `nextToken` with the same region
+and name prefix to continue. The final page omits `nextToken`.
+
 Log group deletion protection defaults to disabled and is persisted with the log group. When it is
 enabled, `DeleteLogGroup` returns `ValidationException` until protection is explicitly disabled
 with `PutLogGroupDeletionProtection`.
