@@ -15,11 +15,10 @@ import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.REGION;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.createKeyPair;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.deleteKeyPair;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.openSshEd25519Key;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.sshEd25519Blob;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.createKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.deleteKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.openSshEd25519Key;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.sshEd25519Blob;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -38,6 +37,9 @@ import static org.mockito.Mockito.when;
 @QuarkusTest
 @TestProfile(Ec2CapturedImageReclaimIntegrationTest.ContainerBackedEc2.class)
 class Ec2CreateKeyPairLaunchIntegrationTest {
+
+    /** The region Ec2KeyPairFixtures signs its requests for. */
+    private static final String REGION = "us-east-1";
 
     @Inject
     Ec2Service service;

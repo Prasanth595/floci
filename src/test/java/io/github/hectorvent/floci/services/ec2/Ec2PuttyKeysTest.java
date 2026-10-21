@@ -54,7 +54,7 @@ class Ec2PuttyKeysTest {
 
         assertEquals("ssh-ed25519", file.algorithm());
         assertTrue(file.macIsValid());
-        assertArrayEquals(Ec2CreateKeyPairFixtures.openSshEd25519Key(pem.privateKeyPem()).getEncoded(),
+        assertArrayEquals(Ec2KeyPairFixtures.openSshEd25519Key(pem.privateKeyPem()).getEncoded(),
                 file.ed25519Key().getEncoded());
         assertArrayEquals(SshPublicKeys.decodeBlob(pem.openSshPublicKey()), file.publicBlob());
     }

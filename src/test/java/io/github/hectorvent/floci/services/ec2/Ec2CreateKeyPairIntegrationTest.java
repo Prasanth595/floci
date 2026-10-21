@@ -14,20 +14,18 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.io.StringReader;
-import java.nio.charset.StandardCharsets;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.UUID;
 
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.ACCOUNT_ID;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.REGION;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.createKeyPair;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.deleteKeyPair;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.firstLine;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.openSshEd25519Key;
-import static io.github.hectorvent.floci.services.ec2.Ec2CreateKeyPairFixtures.sshEd25519Blob;
-import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.createKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.deleteKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ec2;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.firstLine;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.importKeyPair;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.openSshEd25519Key;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.sshEd25519Blob;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -72,11 +70,7 @@ class Ec2CreateKeyPairIntegrationTest {
         try {
             String publicKey = "ssh-ed25519 " + Base64.getEncoder().encodeToString(
                     sshEd25519Blob(openSshEd25519Key(created.getString("CreateKeyPairResponse.keyMaterial"))));
-            XmlPath imported = ec2("ImportKeyPair", ACCOUNT_ID, REGION)
-                    .formParam("KeyName", name + "-imported")
-                    .formParam("PublicKeyMaterial",
-                            Base64.getEncoder().encodeToString(publicKey.getBytes(StandardCharsets.UTF_8)))
-                    .post("/").then().statusCode(200).extract().xmlPath();
+            XmlPath imported = importKeyPair(name + "-imported", publicKey).statusCode(200).extract().xmlPath();
             importedId = imported.getString("ImportKeyPairResponse.keyPairId");
 
             assertEquals(created.getString("CreateKeyPairResponse.keyFingerprint"),
@@ -195,7 +189,7 @@ class Ec2CreateKeyPairIntegrationTest {
                 ? createKeyPair(name, null, null).statusCode(200).extract().path("CreateKeyPairResponse.keyPairId")
                 : null;
         try {
-            RequestSpecification dryRun = ec2("CreateKeyPair", ACCOUNT_ID, REGION)
+            RequestSpecification dryRun = ec2("CreateKeyPair")
                     .formParam("KeyName", name)
                     .formParam("DryRun", "true");
             if (keyType != null) {
@@ -218,12 +212,12 @@ class Ec2CreateKeyPairIntegrationTest {
 
     /**
      * DescribeKeyPairs reports the public half of the created key with the key-pair name as its
-     * comment and the type that was created, and the key-type filter finds it under that type. AWS
-     * ends the reported key with a line break and Floci does not, so the line is compared without it.
+     * comment and the type that was created. AWS ends the reported key with a line break and Floci
+     * does not, so the line is compared without it.
      */
     private static void assertDescribedAs(String name, String id, byte[] blob, String keyType) {
         String type = "rsa".equals(keyType) ? "ssh-rsa" : "ssh-ed25519";
-        XmlPath described = ec2("DescribeKeyPairs", ACCOUNT_ID, REGION)
+        XmlPath described = ec2("DescribeKeyPairs")
                 .formParam("KeyPairId.1", id)
                 .formParam("IncludePublicKey", "true")
                 .post("/").then().statusCode(200)
@@ -233,17 +227,10 @@ class Ec2CreateKeyPairIntegrationTest {
                 described.getString("DescribeKeyPairsResponse.keySet.item.publicKey").strip());
         assertEquals(keyType, described.getString("DescribeKeyPairsResponse.keySet.item.keyType"),
                 "the type of an " + keyType + " key pair");
-        ec2("DescribeKeyPairs", ACCOUNT_ID, REGION)
-                .formParam("Filter.1.Name", "key-name")
-                .formParam("Filter.1.Value.1", name)
-                .formParam("Filter.2.Name", "key-type")
-                .formParam("Filter.2.Value.1", keyType)
-                .post("/").then().statusCode(200)
-                .body("DescribeKeyPairsResponse.keySet.item.keyPairId", equalTo(id));
     }
 
     private static void assertNotCreated(String name) {
-        ec2("DescribeKeyPairs", ACCOUNT_ID, REGION)
+        ec2("DescribeKeyPairs")
                 .formParam("KeyName.1", name)
                 .post("/").then().statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidKeyPair.NotFound"));

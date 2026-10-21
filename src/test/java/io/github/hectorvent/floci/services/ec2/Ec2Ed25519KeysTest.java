@@ -46,7 +46,7 @@ class Ec2Ed25519KeysTest {
         // ssh-keygen's line length, though OpenSSH reads any
         lines.subList(1, lines.size() - 2).forEach(line -> assertEquals(70, line.length(), line));
         assertArrayEquals(PUTTY_TEST_KEY,
-                Ec2CreateKeyPairFixtures.openSshEd25519Key(key.privateKeyPem()).getEncoded());
+                Ec2KeyPairFixtures.openSshEd25519Key(key.privateKeyPem()).getEncoded());
     }
 
     @Test
@@ -57,8 +57,8 @@ class Ec2Ed25519KeysTest {
         assertNotEquals(first.openSshPublicKey(), second.openSshPublicKey());
         assertNotEquals(first.fingerprint(), second.fingerprint());
         for (Ec2KeyMaterial.Generated key : List.of(first, second)) {
-            byte[] blob = Ec2CreateKeyPairFixtures.sshEd25519Blob(
-                    Ec2CreateKeyPairFixtures.openSshEd25519Key(key.privateKeyPem()));
+            byte[] blob = Ec2KeyPairFixtures.sshEd25519Blob(
+                    Ec2KeyPairFixtures.openSshEd25519Key(key.privateKeyPem()));
             assertEquals("ssh-ed25519 " + Base64.getEncoder().encodeToString(blob), key.openSshPublicKey());
         }
     }
