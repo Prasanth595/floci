@@ -22,7 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** The key pair calls and the throwaway keys shared by the EC2 key pair tests. */
 final class Ec2KeyPairFixtures {
 
-    static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20261020/us-east-1/ec2/aws4_request";
+    static final String REGION = "us-east-1";
+    static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20261020/" + REGION + "/ec2/aws4_request";
 
     /** A throwaway 2048-bit RSA key. */
     static final String RSA_KEY = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCp7mGC9"
@@ -86,7 +87,7 @@ final class Ec2KeyPairFixtures {
 
     /** CreateKeyPair with this name, whatever the answer. */
     static ValidatableResponse createKeyPair(String name) {
-        return ec2("CreateKeyPair").formParam("KeyName", name).post("/").then();
+        return createKeyPair(name, null, null);
     }
 
     /** CreateKeyPair with this name, and the KeyType and KeyFormat when they are not null. */

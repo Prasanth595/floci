@@ -47,7 +47,7 @@ class Ec2CreateKeyPairTest {
 
                 assertThat(created.keyFingerprint())
                         .isEqualTo(Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(blob)));
-                assertThat(describedPublicKey(ec2, created.keyPairId()))
+                assertThat(describedPublicKey(ec2, created.keyPairId(), KeyType.ED25519))
                         .isEqualTo("ssh-ed25519 " + Base64.getEncoder().encodeToString(blob) + " " + name);
             } finally {
                 ec2.deleteKeyPair(r -> r.keyPairId(created.keyPairId()));
@@ -78,7 +78,7 @@ class Ec2CreateKeyPairTest {
                     String mac = lines.get(privateHeader + 1 + privateLines).substring("Private-MAC: ".length());
 
                     assertThat(mac).isEqualTo(puttyMac(algorithm, name, publicBlob, privateBlob));
-                    assertThat(describedPublicKey(ec2, created.keyPairId()))
+                    assertThat(describedPublicKey(ec2, created.keyPairId(), keyType))
                             .isEqualTo(algorithm + " " + Base64.getEncoder().encodeToString(publicBlob) + " " + name);
                     if (keyType == KeyType.ED25519) {
                         assertThat(created.keyFingerprint()).isEqualTo(Base64.getEncoder().encodeToString(
@@ -136,10 +136,14 @@ class Ec2CreateKeyPairTest {
         }
     }
 
-    /** The described public key, without the line break AWS ends it with and Floci does not. */
-    private static String describedPublicKey(Ec2Client ec2, String keyPairId) {
+    /**
+     * The described public key, without the line break AWS ends it with and Floci does not, once the
+     * key pair is seen described with the type it was created with.
+     */
+    private static String describedPublicKey(Ec2Client ec2, String keyPairId, KeyType keyType) {
         KeyPairInfo described = ec2.describeKeyPairs(r -> r.keyPairIds(keyPairId).includePublicKey(true))
                 .keyPairs().get(0);
+        assertThat(described.keyType()).isEqualTo(keyType);
         return described.publicKey().strip();
     }
 

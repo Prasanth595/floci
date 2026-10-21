@@ -336,10 +336,10 @@ imported with; a name holding a control character, such as a line break, is left
 returns private key material.
 
 A key pair saved by an earlier version of Floci is described from what it stored. It has no
-`createTime`, and its `keyType` is read from the stored public key, created or imported, and is `rsa`
-for a created key pair saved before Floci kept its public key; it is left out when imported material
-would not import now or cannot be read. Its imported material is kept as it was given, and is what `RunInstances` copies into
-`authorized_keys`. Material that is not exactly one whole OpenSSH public key is described without
+`createTime`, and its `keyType` is read from the stored public key, created or imported, and is
+`rsa` for a created key pair saved before Floci kept its public key; it is left out when imported
+material would not import now or cannot be read. Its imported material is kept as it was given,
+and is what `RunInstances` copies into `authorized_keys`. Material that is not exactly one whole OpenSSH public key is described without
 one: PEM, DER or RFC 4716 text, material of more than one line, a line whose blob lacks a field its
 type requires (such as an `ssh-rsa` blob with no modulus), has bytes after its key or declares a
 different type than the line names, and a key of any type but `ssh-rsa`, `ssh-ed25519`,
