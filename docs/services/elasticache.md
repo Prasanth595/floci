@@ -6,6 +6,33 @@
 
 Floci manages real Valkey/Redis Docker containers and proxies TCP connections to them. This means any Redis client works — including IAM authentication.
 
+## Engine version and backend image
+
+`EngineVersion` is control-plane metadata. For Redis/Valkey replication groups and
+standalone cache clusters, Floci starts the image configured by
+`floci.services.elasticache.default-image` (`FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE`),
+whose default is `valkey/valkey:8`. The requested version does not select the image.
+For example, a request with `Engine=valkey` and `EngineVersion=7.2` can describe itself
+as 7.2 while `HELLO 2` or `INFO server` reports the Valkey 8 version in that image.
+Redis compatibility version fields can differ from the native Valkey version.
+
+To test with Valkey 7.2, configure the backend image before creating the cache:
+
+```bash
+FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE=valkey/valkey:7.2
+```
+
+This setting applies to every Redis/Valkey cache in that Floci process, including
+cluster-mode nodes. Restoring persisted runtimes after a Floci restart uses the
+current image setting too. Use separate Floci instances when tests require different
+backend versions, and select a patch tag or digest when an exact build is required.
+Changing `EngineVersion` alone does not upgrade or downgrade a running backend.
+Check `INFO server` (including `valkey_version` for Valkey) to verify the running build;
+describe responses report the stored request metadata.
+
+Memcached uses the separate `floci.services.elasticache.default-memcached-image`
+(`FLOCI_SERVICES_ELASTICACHE_DEFAULT_MEMCACHED_IMAGE`) setting, default `memcached:1.6`.
+
 ## Supported Management Actions
 
 <!-- floci:actions:start -->
