@@ -421,7 +421,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             LoadBalancer lb = requireLoadBalancer(region, arn);
             // Counted as on create, before any subnet is looked up. An empty list is not counted and moves
             // the balancer onto no subnets: a CloudFormation rollback needs that for a balancer an earlier
-            // version saved without subnets.
+            // Floci version saved without subnets.
             if (subnets != null && !subnets.isEmpty()) {
                 requireSubnets(lb.getType(), subnets);
             }
