@@ -1461,6 +1461,14 @@ public interface EmulatorConfig {
         @WithDefault("10")
         int vectorIndexBackfillSeconds();
 
+        /**
+         * Seconds LatestRestorableDateTime of point-in-time recovery trails the current time. AWS
+         * keeps it about five minutes behind.
+         * Env: FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS
+         */
+        @WithDefault("300")
+        int latestRestorableLagSeconds();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();

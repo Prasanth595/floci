@@ -54,6 +54,11 @@ final class DynamoDbBackupArns {
                 + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
+    /** AWS ends the id of a system backup with zeros instead of random hex digits. */
+    static String mintSystem(String tableArn, Instant creationDateTime) {
+        return tableArn + "/backup/" + String.format("%014d", creationDateTime.toEpochMilli()) + "-00000000";
+    }
+
     private static AwsException invalidBackupArn() {
         return new AwsException("ValidationException", "Invalid Backup ARN", 400);
     }

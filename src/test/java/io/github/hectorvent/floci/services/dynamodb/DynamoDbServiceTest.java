@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeHistory;
 import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -31,6 +32,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -4621,5 +4623,81 @@ class DynamoDbServiceTest {
         assertEquals(List.of("u1"), reloaded.getItems().stream().map(i -> i.path("userId").path("S").asText()).toList());
         assertEquals(1, reloaded.getTable().getItemCount());
         assertFalse(reloaded.getTable().isTtlEnabled());
+    }
+
+    @Test
+    void pointInTimeStateUndoesATtlDeletionAfterTheRestoreTime() throws Exception {
+        String region = "us-east-1";
+        createUsersTable(region);
+        service.updateTimeToLive("Users", "expiresAt", true, region);
+        service.updateContinuousBackups("Users", true, null, region);
+        ObjectNode expired = item("userId", "u1");
+        expired.set("expiresAt", attributeValue("N", "1"));
+        service.putItem("Users", expired, null, null, null, region, null);
+        Instant beforeSweep = pause();
+        service.deleteExpiredItems();
+
+        assertEquals(List.of("u1"), userIds(service.pointInTimeState("Users", region, region, false, beforeSweep)));
+        assertEquals(List.of(), userIds(service.pointInTimeState("Users", region, region, true, null)));
+    }
+
+    @Test
+    void pointInTimeHistorySurvivesARestart(@TempDir Path dir) throws Exception {
+        RegionResolver resolver = new RegionResolver("us-east-1", "000000000000");
+        StorageBackend<String, TableDefinition> tables = new InMemoryStorage<>();
+        StorageBackend<String, Map<String, JsonNode>> items = new InMemoryStorage<>();
+        Path historyFile = dir.resolve("dynamodb-point-in-time.json");
+        TypeReference<Map<String, PointInTimeHistory>> historyType = new TypeReference<>() {};
+        DynamoDbService before = new DynamoDbService(tables, items, null, null, new InMemoryStorage<>(),
+                new PersistentStorage<>(historyFile, historyType), resolver, null, null, null, mapper, 0, 0, 0);
+        before.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        before.updateContinuousBackups("Users", true, null, "us-east-1");
+        before.putItem("Users", item("userId", "u1"), null, null, null, "us-east-1", null);
+        Instant t1 = pause();
+        before.putItem("Users", item("userId", "u2"), null, null, null, "us-east-1", null);
+        Instant earliest = before.describeContinuousBackups("Users", "us-east-1").window().earliest();
+
+        PersistentStorage<String, PointInTimeHistory> reloaded = new PersistentStorage<>(historyFile, historyType);
+        reloaded.load();
+        DynamoDbService restarted = new DynamoDbService(tables, items, null, null, new InMemoryStorage<>(), reloaded,
+                resolver, null, null, null, mapper, 0, 0, 0);
+
+        assertEquals(earliest, restarted.describeContinuousBackups("Users", "us-east-1").window().earliest());
+        assertEquals(List.of("u1"), userIds(restarted.pointInTimeState("Users", "us-east-1", "us-east-1", false, t1)));
+        assertEquals(List.of("u1", "u2"),
+                userIds(restarted.pointInTimeState("Users", "us-east-1", "us-east-1", true, null)));
+    }
+
+    @Test
+    void pointInTimeRestoreTakesTimesAfterTheReportedLatestUpToNow() throws Exception {
+        String region = "us-east-1";
+        DynamoDbService lagged = new DynamoDbService(new InMemoryStorage<>(), new InMemoryStorage<>(), null, null,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new RegionResolver(region, "000000000000"),
+                null, null, null, mapper, 0, 0, 300);
+        lagged.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, region);
+        DynamoDbPointInTimeRecovery.RestoreWindow window =
+                lagged.updateContinuousBackups("Users", true, null, region).window();
+        assertEquals(window.earliest(), window.latest());
+        lagged.putItem("Users", item("userId", "u1"), null, null, null, region, null);
+        Instant afterWrite = pause();
+
+        assertEquals(List.of("u1"), userIds(lagged.pointInTimeState("Users", region, region, false, afterWrite)));
+        assertEquals(List.of(), userIds(lagged.pointInTimeState("Users", region, region, true, null)));
+        AwsException future = assertThrows(AwsException.class, () ->
+                lagged.pointInTimeState("Users", region, region, false, Instant.now().plusSeconds(60)));
+        assertEquals("InvalidRestoreTimeException", future.getErrorCode());
+    }
+
+    private static Instant pause() throws InterruptedException {
+        Thread.sleep(5);
+        Instant now = Instant.now();
+        Thread.sleep(5);
+        return now;
+    }
+
+    private static List<String> userIds(DynamoDbService.PointInTimeState state) {
+        return state.items().stream().map(i -> i.path("userId").path("S").asText()).sorted().toList();
     }
 }
