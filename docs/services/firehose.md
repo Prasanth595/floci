@@ -182,12 +182,12 @@ Floci does not write the `redshift_failed` manifest objects that AWS creates aft
 - A `ClusterJDBCURL` with a `redshift-serverless` host is accepted, but delivery looks the name up as a provisioned
   cluster, so a serverless workgroup is not a delivery target yet.
 - The `COPY` carries no credentials, so the proxy reads the staged object as an anonymous client. With S3
-  authorization enforced and a private intermediate bucket the load fails and is retried until the window ends; use a
+  authorization enforced and a private intermediate bucket the load fails and the staged object stays in S3; use a
   bucket the anonymous principal can read, or leave enforcement off.
 - `CopyOptions` are validated for shape only. The `COPY` emulation does not implement every Redshift option
-  (`LZOP`, `BZIP2`, `ZSTD`, `PARQUET` and others): such a statement is forwarded to PostgreSQL and fails, and the batch
-  is retried until the window ends. Firehose never writes an `LZOP` object, so the API reference's `lzop` example
-  would fail on AWS too.
+  (`LZOP`, `BZIP2`, `ZSTD`, `PARQUET` and others): such a statement is forwarded to PostgreSQL and fails, and the staged
+  object stays in S3; retrying failed loads will follow in a separate change. Firehose never writes an `LZOP` object,
+  so the API reference's `lzop` example would fail on AWS too.
 - The intermediate `Prefix` must not contain whitespace or quotes, because the `COPY` emulation cannot read such
   object keys. `DataFormatConversionConfiguration` is ignored on the Redshift `S3Configuration`, which AWS does not
   define.

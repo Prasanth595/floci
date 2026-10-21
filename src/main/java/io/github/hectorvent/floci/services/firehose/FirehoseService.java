@@ -33,16 +33,18 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.*;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -271,10 +273,13 @@ public class FirehoseService implements ResourceProvider {
     // checkpoint out with everything else.
     void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {
         flushExecutor.shutdownNow();
-        if (redshiftDeliveryExecutor instanceof ExecutorService es) {
-            es.shutdownNow();
-        }
         buffers.keySet().forEach(this::flushByKey);
+        if (redshiftDeliveryExecutor instanceof ExecutorService es) {
+            List<Runnable> dropped = es.shutdownNow();
+            if (!dropped.isEmpty()) {
+                LOG.warnv("Dropping {0} queued Redshift COPY task(s) on Firehose shutdown", dropped.size());
+            }
+        }
     }
 
     /**
@@ -1152,19 +1157,25 @@ public class FirehoseService implements ResourceProvider {
                     + "the batch stays in s3://{1}/{2}", streamName, bucket, key);
             return;
         }
-        redshiftDeliveryExecutor.execute(() -> {
-            RequestScopes.runAs(stream.getAccountId(), () -> {
-                try {
-                    String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
-                            regionResolver.getDefaultRegion());
-                    redshiftDelivery.copy(stream.getAccountId(), region, redshift, bucket, key);
-                } catch (Exception e) {
-                    LOG.errorv("Redshift delivery of s3://{0}/{1} into table {2} failed for stream {3}; "
-                            + "the batch stays in s3://{0}/{1}: {4}", bucket, key,
-                            redshift.getCopyCommand().getDataTableName(), streamName, describe(e));
-                }
+        try {
+            redshiftDeliveryExecutor.execute(() -> {
+                RequestScopes.runAs(stream.getAccountId(), () -> {
+                    try {
+                        String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
+                                regionResolver.getDefaultRegion());
+                        redshiftDelivery.copy(stream.getAccountId(), region, redshift, bucket, key);
+                    } catch (Exception e) {
+                        LOG.errorv("Redshift delivery of s3://{0}/{1} into table {2} failed for stream {3}; "
+                                + "the batch stays in s3://{0}/{1}: {4}", bucket, key,
+                                redshift.getCopyCommand().getDataTableName(), streamName, describe(e));
+                    }
+                });
             });
-        });
+        } catch (RejectedExecutionException e) {
+            LOG.errorv("Redshift delivery executor rejected task for s3://{0}/{1} into table {2} on stream {3}; "
+                    + "the batch stays in s3://{0}/{1}: {4}", bucket, key,
+                    redshift.getCopyCommand().getDataTableName(), streamName, describe(e));
+        }
     }
 
     private static String describe(Exception e) {

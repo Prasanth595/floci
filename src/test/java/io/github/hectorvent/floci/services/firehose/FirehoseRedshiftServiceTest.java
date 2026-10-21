@@ -13,12 +13,16 @@ import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -188,5 +192,60 @@ class FirehoseRedshiftServiceTest {
 
         verify(s3Service, never()).putObject(eq("bk"), anyString(), any(byte[].class), anyString(), anyMap(), any());
         verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void rejectedExecutionDoesNotRestoreRecordsToBuffer() throws Exception {
+        Executor rejectingExecutor = r -> {
+            throw new RejectedExecutionException("executor shut down");
+        };
+        FirehoseService rejectingService = new FirehoseService(storageFactory, s3Service,
+                new KinesisService(storageFactory, regionResolver), regionResolver, clock, config,
+                mock(FirehoseParquetConverter.class), mock(FirehoseLambdaTransformer.class), delivery, rejectingExecutor);
+
+        RedshiftDestination destination = mapper.readValue("""
+                {"RoleARN": "arn:aws:iam::000000000000:role/firehose",
+                 "ClusterJDBCURL": "jdbc:redshift://c1.abc.us-east-1.redshift.amazonaws.com:5439/dev",
+                 "Username": "admin", "Password": "Secret123",
+                 "CopyCommand": {"DataTableName": "events"},
+                 "S3Configuration": {"RoleARN": "arn:aws:iam::000000000000:role/firehose", "BucketARN": "arn:aws:s3:::stage"}}
+                """, RedshiftDestination.class);
+        rejectingService.createDeliveryStream("us-east-1", "fh-rejected", null, destination, List.of(), null, null);
+        rejectingService.putRecord("fh-rejected", new Record("{\"id\":1}".getBytes(StandardCharsets.UTF_8)));
+
+        rejectingService.flush("fh-rejected");
+        rejectingService.flush("fh-rejected");
+
+        verify(s3Service, times(1)).putObject(eq("stage"), anyString(), any(byte[].class), anyString(),
+                anyMap(), any());
+    }
+
+    @Test
+    void onPreShutdownFlushesBuffersBeforeShuttingDownDeliveryExecutor() throws Exception {
+        ExecutorService mockExecutor = mock(ExecutorService.class);
+        FirehoseService shutdownService = new FirehoseService(storageFactory, s3Service,
+                new KinesisService(storageFactory, regionResolver), regionResolver, clock, config,
+                mock(FirehoseParquetConverter.class), mock(FirehoseLambdaTransformer.class), delivery, mockExecutor);
+
+        RedshiftDestination destination = mapper.readValue("""
+                {"RoleARN": "arn:aws:iam::000000000000:role/firehose",
+                 "ClusterJDBCURL": "jdbc:redshift://c1.abc.us-east-1.redshift.amazonaws.com:5439/dev",
+                 "Username": "admin", "Password": "Secret123",
+                 "CopyCommand": {"DataTableName": "events"},
+                 "S3Configuration": {"RoleARN": "arn:aws:iam::000000000000:role/firehose", "BucketARN": "arn:aws:s3:::stage"}}
+                """, RedshiftDestination.class);
+        shutdownService.createDeliveryStream("us-east-1", "fh-shutdown", null, destination, List.of(), null, null);
+        shutdownService.putRecord("fh-shutdown", new Record("{\"id\":1}".getBytes(StandardCharsets.UTF_8)));
+
+        when(mockExecutor.shutdownNow()).thenReturn(List.of(() -> {}));
+
+        shutdownService.onPreShutdown(null);
+
+        InOrder inOrder = Mockito.inOrder(mockExecutor);
+        inOrder.verify(mockExecutor).execute(any());
+        inOrder.verify(mockExecutor).shutdownNow();
+
+        verify(s3Service, times(1)).putObject(eq("stage"), anyString(), any(byte[].class), anyString(),
+                anyMap(), any());
     }
 }

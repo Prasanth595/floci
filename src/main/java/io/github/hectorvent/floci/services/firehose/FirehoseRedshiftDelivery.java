@@ -1,8 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.DatabaseSecretCredentials;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
@@ -85,17 +84,10 @@ public class FirehoseRedshiftDelivery {
         RedshiftDestination.SecretsManagerConfiguration secrets = destination.getSecretsManagerConfiguration();
         if (secrets != null && Boolean.TRUE.equals(secrets.getEnabled())) {
             SecretVersion secret = secretsManagerService.getSecretValue(secrets.getSecretArn(), null, null, region);
-            JsonNode node;
-            try {
-                node = mapper.readTree(secret.getSecretString());
-            } catch (JsonProcessingException e) {
-                throw new IllegalStateException("Secret " + secrets.getSecretArn() + " is not valid JSON.", e);
-            }
-            if (!node.hasNonNull("username") || !node.hasNonNull("password")) {
-                throw new IllegalStateException("Secret " + secrets.getSecretArn()
-                        + " does not contain username and password fields.");
-            }
-            return new String[] {node.get("username").asText(), node.get("password").asText()};
+            DatabaseSecretCredentials credentials = DatabaseSecretCredentials.parse(mapper, secret.getSecretString())
+                    .orElseThrow(() -> new IllegalStateException("Secret " + secrets.getSecretArn()
+                            + " does not contain username and password fields."));
+            return new String[] {credentials.username(), credentials.password()};
         }
         if (destination.getPassword() == null) {
             throw new IllegalStateException("The Redshift destination for cluster " + cluster.getClusterIdentifier()
@@ -106,8 +98,8 @@ public class FirehoseRedshiftDelivery {
     }
 
     /**
-     * Timeouts matter here: every delivery stream flushes on one shared thread, so a connection that
-     * never answers would stall all of them, S3 destinations included, and the shutdown drain.
+     * Timeouts matter here: a connection that never answers would stall the Redshift delivery thread
+     * and delay emulator shutdown.
      */
     static Properties connectionProperties(String user, String password) {
         Properties properties = new Properties();
@@ -125,8 +117,7 @@ public class FirehoseRedshiftDelivery {
 
     /**
      * Runs the statement and closes the connection. Once the statement has returned the load is committed
-     * (autocommit), so a failure while closing must not surface as a failed delivery: the retry would load the same
-     * staged object a second time.
+     * (autocommit), so a failure while closing must not surface as a failed delivery.
      */
     static void executeAndClose(Connection connection, String sql) throws SQLException {
         try {

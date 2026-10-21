@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.DatabaseSecretCredentials;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
@@ -196,7 +197,7 @@ public class RdsDataService implements Resettable {
         requiredText(request, "secretArn");
         RdsDataResourceResolver.DatabaseTarget target =
                 resourceResolver.resolve(resourceArn, region);
-        Credentials credentials = credentials(request, target, region);
+        DatabaseSecretCredentials credentials = credentials(request, target, region);
         String database = databaseName(request, target);
 
         // The transaction's connection keeps the cluster awake until it commits, rolls back or expires.
@@ -302,7 +303,7 @@ public class RdsDataService implements Resettable {
 
         RdsDataResourceResolver.DatabaseTarget target =
                 resourceResolver.resolve(resourceArn, region);
-        Credentials credentials = credentials(request, target, region);
+        DatabaseSecretCredentials credentials = credentials(request, target, region);
         String database = databaseName(request, target);
         try (RdsBackendGate.Lease _ = enterBackend(target);
              Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
@@ -619,7 +620,7 @@ public class RdsDataService implements Resettable {
         };
     }
 
-    private Credentials credentials(JsonNode request, RdsDataResourceResolver.DatabaseTarget target, String region) {
+    private DatabaseSecretCredentials credentials(JsonNode request, RdsDataResourceResolver.DatabaseTarget target, String region) {
         String secretArn = textOrNull(request, "secretArn");
         if (secretArn != null && !secretArn.isBlank()) {
             SecretVersion secret;
@@ -628,7 +629,7 @@ public class RdsDataService implements Resettable {
             } catch (AwsException e) {
                 throw new AwsException("SecretsErrorException", e.getMessage(), 400);
             }
-            Credentials fromSecret = parseSecretCredentials(secret.getSecretString());
+            DatabaseSecretCredentials fromSecret = parseSecretCredentials(secret.getSecretString());
             if (fromSecret != null) {
                 return fromSecret;
             }
@@ -636,29 +637,23 @@ public class RdsDataService implements Resettable {
                     "The secret must contain username and password fields.", 400);
         }
         String username = target.username() != null && !target.username().isBlank() ? target.username() : "root";
-        return new Credentials(username, target.password());
+        return new DatabaseSecretCredentials(username, target.password());
     }
 
-    private Credentials parseSecretCredentials(String secretString) {
+    private DatabaseSecretCredentials parseSecretCredentials(String secretString) {
         if (secretString == null || secretString.isBlank()) {
             return null;
         }
+        JsonNode secret;
         try {
-            JsonNode secret = objectMapper.readTree(secretString);
-            String username = textOrNull(secret, "username");
-            if (username == null) {
-                username = textOrNull(secret, "user");
-            }
-            String password = textOrNull(secret, "password");
-            if (username != null && password != null) {
-                return new Credentials(username, password);
-            }
+            secret = objectMapper.readTree(secretString);
         } catch (Exception e) {
             throw new AwsException("InvalidSecretException",
                     "The secret must contain valid JSON credentials.", 400);
         }
-        throw new AwsException("InvalidSecretException",
-                "The secret must contain username and password fields.", 400);
+        return DatabaseSecretCredentials.parse(secret).orElseThrow(() ->
+                new AwsException("InvalidSecretException",
+                        "The secret must contain username and password fields.", 400));
     }
 
     private String databaseName(JsonNode request, RdsDataResourceResolver.DatabaseTarget target) {
@@ -890,9 +885,6 @@ public class RdsDataService implements Resettable {
                 lease.close();
             }
         }
-    }
-
-    private record Credentials(String username, String password) {
     }
 
     @FunctionalInterface
