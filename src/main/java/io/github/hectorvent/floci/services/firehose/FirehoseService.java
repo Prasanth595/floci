@@ -270,14 +270,26 @@ public class FirehoseService implements ResourceProvider {
     // persist them to disk via storageFactory.flushAll(). Each flush also commits the
     // source checkpoint it just made durable, so a graceful shutdown neither loses
     // records nor re-delivers them; storageFactory.flushAll() then writes that
-    // checkpoint out with everything else.
+    // checkpoint out with everything else. Redshift COPY tasks are allowed a brief
+    // window to complete before the delivery executor is forced down.
     void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {
         flushExecutor.shutdownNow();
         buffers.keySet().forEach(this::flushByKey);
         if (redshiftDeliveryExecutor instanceof ExecutorService es) {
-            List<Runnable> dropped = es.shutdownNow();
-            if (!dropped.isEmpty()) {
-                LOG.warnv("Dropping {0} queued Redshift COPY task(s) on Firehose shutdown", dropped.size());
+            es.shutdown();
+            try {
+                if (!es.awaitTermination(5, TimeUnit.SECONDS)) {
+                    List<Runnable> dropped = es.shutdownNow();
+                    if (!dropped.isEmpty()) {
+                        LOG.warnv("Dropping {0} queued Redshift COPY task(s) on Firehose shutdown", dropped.size());
+                    }
+                }
+            } catch (InterruptedException e) {
+                List<Runnable> dropped = es.shutdownNow();
+                if (!dropped.isEmpty()) {
+                    LOG.warnv("Dropping {0} queued Redshift COPY task(s) on Firehose shutdown", dropped.size());
+                }
+                Thread.currentThread().interrupt();
             }
         }
     }

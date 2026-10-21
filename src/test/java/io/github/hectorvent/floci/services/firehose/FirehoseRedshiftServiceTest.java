@@ -22,7 +22,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -221,7 +223,32 @@ class FirehoseRedshiftServiceTest {
     }
 
     @Test
-    void onPreShutdownFlushesBuffersBeforeShuttingDownDeliveryExecutor() throws Exception {
+    void onPreShutdownFlushesBuffersAndRunsCopyBeforeShuttingDown() throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        FirehoseService shutdownService = new FirehoseService(storageFactory, s3Service,
+                new KinesisService(storageFactory, regionResolver), regionResolver, clock, config,
+                mock(FirehoseParquetConverter.class), mock(FirehoseLambdaTransformer.class), delivery, executor);
+
+        RedshiftDestination destination = mapper.readValue("""
+                {"RoleARN": "arn:aws:iam::000000000000:role/firehose",
+                 "ClusterJDBCURL": "jdbc:redshift://c1.abc.us-east-1.redshift.amazonaws.com:5439/dev",
+                 "Username": "admin", "Password": "Secret123",
+                 "CopyCommand": {"DataTableName": "events"},
+                 "S3Configuration": {"RoleARN": "arn:aws:iam::000000000000:role/firehose", "BucketARN": "arn:aws:s3:::stage"}}
+                """, RedshiftDestination.class);
+        shutdownService.createDeliveryStream("us-east-1", "fh-shutdown", null, destination, List.of(), null, null);
+        shutdownService.putRecord("fh-shutdown", new Record("{\"id\":1}".getBytes(StandardCharsets.UTF_8)));
+
+        shutdownService.onPreShutdown(null);
+
+        verify(s3Service, times(1)).putObject(eq("stage"), anyString(), any(byte[].class), anyString(),
+                anyMap(), any());
+        verify(delivery, times(1)).copy(eq("000000000000"), eq("us-east-1"), any(), eq("stage"), anyString());
+        assertTrue(executor.isTerminated());
+    }
+
+    @Test
+    void onPreShutdownDropsQueuedTasksWhenTerminationTimesOut() throws Exception {
         ExecutorService mockExecutor = mock(ExecutorService.class);
         FirehoseService shutdownService = new FirehoseService(storageFactory, s3Service,
                 new KinesisService(storageFactory, regionResolver), regionResolver, clock, config,
@@ -234,18 +261,18 @@ class FirehoseRedshiftServiceTest {
                  "CopyCommand": {"DataTableName": "events"},
                  "S3Configuration": {"RoleARN": "arn:aws:iam::000000000000:role/firehose", "BucketARN": "arn:aws:s3:::stage"}}
                 """, RedshiftDestination.class);
-        shutdownService.createDeliveryStream("us-east-1", "fh-shutdown", null, destination, List.of(), null, null);
-        shutdownService.putRecord("fh-shutdown", new Record("{\"id\":1}".getBytes(StandardCharsets.UTF_8)));
+        shutdownService.createDeliveryStream("us-east-1", "fh-timeout", null, destination, List.of(), null, null);
+        shutdownService.putRecord("fh-timeout", new Record("{\"id\":1}".getBytes(StandardCharsets.UTF_8)));
 
+        when(mockExecutor.awaitTermination(org.mockito.ArgumentMatchers.anyLong(), any())).thenReturn(false);
         when(mockExecutor.shutdownNow()).thenReturn(List.of(() -> {}));
 
         shutdownService.onPreShutdown(null);
 
         InOrder inOrder = Mockito.inOrder(mockExecutor);
         inOrder.verify(mockExecutor).execute(any());
+        inOrder.verify(mockExecutor).shutdown();
+        inOrder.verify(mockExecutor).awaitTermination(5, TimeUnit.SECONDS);
         inOrder.verify(mockExecutor).shutdownNow();
-
-        verify(s3Service, times(1)).putObject(eq("stage"), anyString(), any(byte[].class), anyString(),
-                anyMap(), any());
     }
 }

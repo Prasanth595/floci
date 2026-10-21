@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jboss.logging.Logger;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -12,6 +13,7 @@ import java.util.Optional;
  */
 public record DatabaseSecretCredentials(String username, String password) {
 
+    private static final Logger LOG = Logger.getLogger(DatabaseSecretCredentials.class);
     private static final ObjectMapper DEFAULT_MAPPER = new ObjectMapper();
 
     public DatabaseSecretCredentials {
@@ -35,7 +37,9 @@ public record DatabaseSecretCredentials(String username, String password) {
         }
         try {
             return parse(mapper.readTree(secretString));
-        } catch (Exception e) {
+        } catch (Exception ignored) {
+            // An unparseable secret string is treated as missing credentials; callers handle Optional.empty()
+            LOG.debugv("Failed to parse database credentials from secret string: {0}", ignored.getMessage());
             return Optional.empty();
         }
     }
