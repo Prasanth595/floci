@@ -515,7 +515,7 @@ class Ec2RepeatedFilterNamesTest {
                 filter("instance-type", "t3.*")), "instanceType"));
     }
 
-    /** A caller-supplied pattern of many stars is matched in linear time, not by a backtracking regex. */
+    /** A caller-supplied pattern of many stars is matched by the two-pointer glob, not a backtracking regex. */
     @Test
     void instanceTypeOfferingsMatchAPatternOfManyStarsQuickly() {
         String pattern = "*".repeat(30) + "#";
