@@ -962,8 +962,10 @@ password in cleartext, MySQL sends a scramble, so the proxy would have to drive 
 `DescribeCertificates` lists the Region's RDS certificate authorities, `rds-ca-rsa2048-g1`,
 `rds-ca-rsa4096-g1` and `rds-ca-ecc384-g1`, with the thumbprint and validity AWS reports. They are
 vendored from the certificate bundles AWS publishes for each Region of the `aws` partition by
-`tools/aws/regen_rds_ca_certificates.py`. A Region with no vendored entry, such as a GovCloud,
-China or custom one, reports us-east-1's certificates under its own ARN.
+`tools/aws/regen_rds_ca_certificates.py`. As the user guide says, ap-south-1, ap-southeast-4,
+ca-west-1, eu-central-2, eu-south-2 and il-central-1 offer only `rds-ca-rsa2048-g1`, though their
+bundles carry all three. A Region with no vendored entry, such as a GovCloud, China or custom one,
+reports us-east-1's certificates under its own ARN.
 
 - `CertificateIdentifier` filters, without regard to case, and an unknown one is
   `CertificateNotFound`. `MaxRecords` (20 to 100) and `Marker` page the list. `Filters` is not taken,
@@ -977,10 +979,12 @@ China or custom one, reports us-east-1's certificates under its own ARN.
   `CreateDBInstanceReadReplica` and `ModifyDBInstance` take `CACertificateIdentifier`. An instance
   given none gets the account's default when it is created. An unknown identifier is
   `CertificateNotFound`. A modify changes it at once, as Floci applies every modification
-  immediately, and `CertificateRotationRestart` is accepted and has no effect.
+  immediately, and a blank value leaves it as it was. `CertificateRotationRestart` is accepted and
+  has no effect.
 - Instances report `CACertificateIdentifier` and `CertificateDetails` (`CAIdentifier`, with the
   CA's `ValidTill`, as Floci keeps no per-instance server certificate). An instance stored before
-  this was recorded reports the current default. `AWS::RDS::DBInstance` takes
+  this was recorded reports `rds-ca-rsa2048-g1`, since an override applies only to instances
+  created after it. `AWS::RDS::DBInstance` takes
   `CACertificateIdentifier` and resolves `CertificateDetails.CAIdentifier` and
   `CertificateDetails.ValidTill` in `Fn::GetAtt`.
 

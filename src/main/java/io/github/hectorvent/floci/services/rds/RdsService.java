@@ -3127,7 +3127,7 @@ public class RdsService implements Resettable, ResourceProvider {
             effective = effective.withStorageType(null);
         }
         validateAutoscalingMinimum(instance, effective.maxAllocatedStorage());
-        if (settings.caCertificateIdentifier() != null) {
+        if (!isBlank(settings.caCertificateIdentifier())) {
             effective = effective.withCaCertificateIdentifier(
                     resolveCaCertificate(settings.caCertificateIdentifier(), effectiveRegion));
         }
@@ -6428,11 +6428,14 @@ public class RdsService implements Resettable, ResourceProvider {
         return certificate(ca, effectiveRegion, true);
     }
 
-    /** The CA an instance reports; one stored before CAs were recorded reports today's default. */
+    /**
+     * The CA an instance reports. One stored before CAs were recorded reports RDS's default, since an
+     * override applies only to instances created after it.
+     */
     public InstanceCertificate instanceCertificate(DbInstance instance) {
-        String region = regionOfArn(instance.getDbInstanceArn());
+        String region = regionFromArn(instance.getDbInstanceArn());
         String identifier = instance.getCaCertificateIdentifier() != null
-                ? instance.getCaCertificateIdentifier() : defaultCaCertificate(region);
+                ? instance.getCaCertificateIdentifier() : RdsCaCertificates.DEFAULT_FOR_NEW_LAUNCHES;
         return RdsCaCertificates.find(region, identifier)
                 .map(ca -> new InstanceCertificate(ca.identifier(), ca.validTill()))
                 .orElse(new InstanceCertificate(identifier, null));
@@ -6458,14 +6461,6 @@ public class RdsService implements Resettable, ResourceProvider {
                 "cert:" + ca.identifier()).toString();
         return new Certificate(ca.identifier(), ca.thumbprint(), ca.validFrom(), ca.validTill(), arn, override,
                 override ? ca.validTill() : null);
-    }
-
-    private String regionOfArn(String arn) {
-        try {
-            return AwsArnUtils.parse(arn).region();
-        } catch (RuntimeException e) {
-            return regionResolver.getDefaultRegion();
-        }
     }
 
     private static AwsException certificateNotFound(String identifier) {

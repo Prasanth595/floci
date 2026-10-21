@@ -287,7 +287,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         if (maxAllocatedStorage != null) {
             instance.setMaxAllocatedStorage(maxAllocatedStorage);
         }
-        if (caCertificateIdentifier != null) {
+        if (caCertificateIdentifier != null && !caCertificateIdentifier.isBlank()) {
             instance.setCaCertificateIdentifier(caCertificateIdentifier);
         }
     }

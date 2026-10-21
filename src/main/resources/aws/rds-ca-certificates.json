@@ -126,22 +126,10 @@
     ],
     "ap-south-1": [
       {
-        "certificateIdentifier": "rds-ca-ecc384-g1",
-        "thumbprint": "e324edc0e63b1bbb089c61a71f5a2d2704842ff8",
-        "validFrom": "2021-05-19T17:50:59Z",
-        "validTill": "2121-05-19T18:50:59Z"
-      },
-      {
         "certificateIdentifier": "rds-ca-rsa2048-g1",
         "thumbprint": "cd4bec28c1b9b43688a7e9d5d24cc99ae506957f",
         "validFrom": "2021-05-19T17:40:34Z",
         "validTill": "2061-05-19T18:40:34Z"
-      },
-      {
-        "certificateIdentifier": "rds-ca-rsa4096-g1",
-        "thumbprint": "88ca6e7d91c33d4ea3d93180856995daa6777d2a",
-        "validFrom": "2021-05-19T17:45:20Z",
-        "validTill": "2121-05-19T18:45:20Z"
       }
     ],
     "ap-south-2": [
@@ -226,22 +214,10 @@
     ],
     "ap-southeast-4": [
       {
-        "certificateIdentifier": "rds-ca-ecc384-g1",
-        "thumbprint": "0b1fac83ddd56b735ffdb7f24a1c2f767fe30f1d",
-        "validFrom": "2022-05-25T16:58:33Z",
-        "validTill": "2122-05-25T17:58:33Z"
-      },
-      {
         "certificateIdentifier": "rds-ca-rsa2048-g1",
         "thumbprint": "1e79d7542516385da20dad542bbc52863c3d7b3c",
         "validFrom": "2022-05-25T16:49:16Z",
         "validTill": "2062-05-25T17:49:16Z"
-      },
-      {
-        "certificateIdentifier": "rds-ca-rsa4096-g1",
-        "thumbprint": "bc8bee1a43a375ad50c9cb6930cf168ed57d2cec",
-        "validFrom": "2022-05-25T16:54:59Z",
-        "validTill": "2122-05-25T17:54:59Z"
       }
     ],
     "ap-southeast-5": [
@@ -326,22 +302,10 @@
     ],
     "ca-west-1": [
       {
-        "certificateIdentifier": "rds-ca-ecc384-g1",
-        "thumbprint": "3e7c2666efb03c025209832403829d96d1c44093",
-        "validFrom": "2023-09-19T22:11:43Z",
-        "validTill": "2123-09-19T23:11:43Z"
-      },
-      {
         "certificateIdentifier": "rds-ca-rsa2048-g1",
         "thumbprint": "c3890f3c7a024e0195ff7477ead5318a7ce546a3",
         "validFrom": "2023-09-13T20:21:34Z",
         "validTill": "2063-09-13T21:21:33Z"
-      },
-      {
-        "certificateIdentifier": "rds-ca-rsa4096-g1",
-        "thumbprint": "7222729f941c0887377fe9a8d57b70bcf445b4c6",
-        "validFrom": "2023-09-19T22:01:39Z",
-        "validTill": "2123-09-19T23:01:39Z"
       }
     ],
     "eu-central-1": [
@@ -366,22 +330,10 @@
     ],
     "eu-central-2": [
       {
-        "certificateIdentifier": "rds-ca-ecc384-g1",
-        "thumbprint": "d7aae58891fc04d2c28ac6d4ae677ab3c837c18d",
-        "validFrom": "2022-06-06T21:29:17Z",
-        "validTill": "2122-06-06T22:29:17Z"
-      },
-      {
         "certificateIdentifier": "rds-ca-rsa2048-g1",
         "thumbprint": "bb78d17650755aa3777fc89ab59aa0249fc6ffb3",
         "validFrom": "2022-06-06T21:17:05Z",
         "validTill": "2062-06-06T22:17:05Z"
-      },
-      {
-        "certificateIdentifier": "rds-ca-rsa4096-g1",
-        "thumbprint": "be642d6da2be48f2c7f3e0d620cce3ef4b7b4640",
-        "validFrom": "2022-06-06T21:25:23Z",
-        "validTill": "2122-06-06T22:25:23Z"
       }
     ],
     "eu-north-1": [
@@ -426,22 +378,10 @@
     ],
     "eu-south-2": [
       {
-        "certificateIdentifier": "rds-ca-ecc384-g1",
-        "thumbprint": "3fb135a3d81a55906b2c3c5f77fec925391acbef",
-        "validFrom": "2022-05-23T18:41:28Z",
-        "validTill": "2122-05-23T19:41:27Z"
-      },
-      {
         "certificateIdentifier": "rds-ca-rsa2048-g1",
         "thumbprint": "2c288b6a49cc18046ac82a58a8494ccaee48b49d",
         "validFrom": "2022-05-23T18:16:32Z",
         "validTill": "2062-05-23T19:16:32Z"
-      },
-      {
-        "certificateIdentifier": "rds-ca-rsa4096-g1",
-        "thumbprint": "b539491a591ce23ed961aec6c658d8c7cac6857a",
-        "validFrom": "2022-05-23T18:34:22Z",
-        "validTill": "2122-05-23T19:34:22Z"
       }
     ],
     "eu-west-1": [
@@ -506,22 +446,10 @@
     ],
     "il-central-1": [
       {
-        "certificateIdentifier": "rds-ca-ecc384-g1",
-        "thumbprint": "f57aedc4124ad7cdb52f1ed6111a57dd134db73b",
-        "validFrom": "2022-12-02T20:32:20Z",
-        "validTill": "2122-12-02T21:32:20Z"
-      },
-      {
         "certificateIdentifier": "rds-ca-rsa2048-g1",
         "thumbprint": "b9e33b6381a161cb875f36761cbe499296b6edca",
         "validFrom": "2022-12-02T20:14:08Z",
         "validTill": "2062-12-02T21:14:08Z"
-      },
-      {
-        "certificateIdentifier": "rds-ca-rsa4096-g1",
-        "thumbprint": "c0e9dc569b31ad9e9ba8f26ecbb5a19afad50d52",
-        "validFrom": "2022-12-02T20:26:08Z",
-        "validTill": "2122-12-02T21:26:08Z"
       }
     ],
     "me-central-1": [

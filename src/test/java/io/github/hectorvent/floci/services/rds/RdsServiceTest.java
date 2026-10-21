@@ -56,6 +56,7 @@ import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -10402,6 +10403,17 @@ class RdsServiceTest {
         assertEquals("arn:aws:rds:xx-custom-1::cert:rds-ca-rsa2048-g1", custom.certificateArn());
     }
 
+    /** The user guide lists six Regions without rds-ca-rsa4096-g1 and rds-ca-ecc384-g1; Mumbai is one. */
+    @Test
+    void aRegionWithoutTheNewerCasOffersOnlyRsa2048() {
+        assertEquals(List.of("rds-ca-rsa2048-g1"),
+                certificateIds(rdsService.describeCertificates("ap-south-1", null, null, null)));
+        assertEquals("CertificateNotFound", assertThrows(AwsException.class,
+                () -> rdsService.describeCertificates("ap-south-1", "rds-ca-ecc384-g1", null, null)).getErrorCode());
+        assertEquals("CertificateNotFound", assertThrows(AwsException.class,
+                () -> rdsService.modifyCertificates("ap-south-1", "rds-ca-rsa4096-g1", null)).getErrorCode());
+    }
+
     @Test
     void modifyCertificatesSetsAndRemovesTheDefaultForNewInstances() {
         RdsService.Certificate set = rdsService.modifyCertificates("us-east-1", "RDS-CA-ECC384-G1", null);
@@ -10423,7 +10435,7 @@ class RdsServiceTest {
         assertEquals("rds-ca-rsa2048-g1",
                 rdsService.describeCertificates("us-east-1", null, null, null).defaultForNewLaunches());
 
-        for (org.junit.jupiter.api.function.Executable both : List.<org.junit.jupiter.api.function.Executable>of(
+        for (Executable both : List.<Executable>of(
                 () -> rdsService.modifyCertificates("us-east-1", "rds-ca-rsa4096-g1", true),
                 () -> rdsService.modifyCertificates("us-east-1", null, null),
                 () -> rdsService.modifyCertificates("us-east-1", "", false))) {
@@ -10463,17 +10475,21 @@ class RdsServiceTest {
         assertEquals("CertificateNotFound", assertThrows(AwsException.class, () -> rdsService.modifyDbInstance(
                 "plain", null, null, null, null, null, "us-east-1", null, bad)).getErrorCode());
         assertEquals("rds-ca-ecc384-g1", rdsService.getDbInstance("plain").getCaCertificateIdentifier());
-        // A modify that leaves the CA out keeps it.
+        // A modify that leaves the CA out, or sends it blank, keeps it.
         assertEquals("rds-ca-ecc384-g1", rdsService.modifyDbInstance("plain", null, true, null)
                 .getCaCertificateIdentifier());
+        DbInstanceSettings blank = DbInstanceSettings.unchanged().withCaCertificateIdentifier("");
+        assertEquals("rds-ca-ecc384-g1", rdsService.modifyDbInstance("plain", null, null, null, null, null,
+                "us-east-1", null, blank).getCaCertificateIdentifier());
     }
 
     @Test
-    void anInstanceStoredWithoutACaReportsTheCurrentDefault() {
+    void anInstanceStoredWithoutACaReportsRdsDefaultNotTheOverride() {
         DbInstance legacy = createInstanceWithCa("legacy", null);
         legacy.setCaCertificateIdentifier(null);
+        // An override applies only to instances created after it.
         rdsService.modifyCertificates("us-east-1", "rds-ca-rsa4096-g1", null);
-        assertEquals("rds-ca-rsa4096-g1", rdsService.instanceCertificate(legacy).caIdentifier());
+        assertEquals("rds-ca-rsa2048-g1", rdsService.instanceCertificate(legacy).caIdentifier());
     }
 
     @Test

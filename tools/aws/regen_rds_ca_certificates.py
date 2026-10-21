@@ -15,6 +15,10 @@ The bundles are read from `local/aws/rds-truststore/<region>-bundle.pem`, one pe
 and `--download` saves them there; a Region AWS serves no bundle for is left out. Other partitions
 are left out: the one GovCloud thumbprint AWS shows (re:Post, us-gov-east-1) is not its root's.
 
+The user guide ("Certificate bundles by AWS Region", UsingWithRDS.SSL.html) says rds-ca-rsa4096-g1
+and rds-ca-ecc384-g1 are not available in six Regions, though their bundles carry those roots. For
+those Regions only rds-ca-rsa2048-g1 is kept.
+
 Run from anywhere in the repo:
     python3 tools/aws/regen_rds_ca_certificates.py --download   # fetch the bundles into local/aws
     python3 tools/aws/regen_rds_ca_certificates.py              # rewrite the vendored file in place
@@ -46,6 +50,12 @@ PEM = re.compile(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", r
 COMMON_NAME_OID = bytes([0x55, 0x04, 0x03])
 IDENTIFIER = re.compile(r"rds-ca-(rsa2048|rsa4096|ecc384)-g1")
 INSTANT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+DEFAULT_CA = "rds-ca-rsa2048-g1"
+# Mumbai, Melbourne, Calgary, Zurich, Spain and Tel Aviv, as the user guide lists them.
+RSA2048_ONLY = frozenset({"ap-south-1", "ap-southeast-4", "ca-west-1", "eu-central-2", "eu-south-2",
+                          "il-central-1"})
+# What the truststore answers for a Region it serves no bundle for.
+NO_BUNDLE = frozenset({403, 404})
 
 
 def _tlv(data: bytes, offset: int) -> tuple[int, int, int]:
@@ -119,6 +129,13 @@ def certificates_in(pem_text: str, region: str) -> list[dict]:
     return sorted(found, key=lambda c: c["certificateIdentifier"])
 
 
+def offered_in(region: str, certificates: list[dict]) -> list[dict]:
+    """The CAs RDS offers in `region`, which is fewer than its bundle carries in RSA2048_ONLY."""
+    if region in RSA2048_ONLY:
+        return [c for c in certificates if c["certificateIdentifier"] == DEFAULT_CA]
+    return certificates
+
+
 def commercial_regions(partitions: Path) -> list[str]:
     doc = json.loads(partitions.read_text(encoding="utf-8"))
     aws = next(p for p in doc["partitions"] if p["id"] == "aws")
@@ -130,7 +147,7 @@ def build(bundles: Path, partitions: Path) -> dict:
     for region in commercial_regions(partitions):
         path = bundles / f"{region}-bundle.pem"
         if path.exists():
-            certificates = certificates_in(path.read_text(encoding="utf-8"), region)
+            certificates = offered_in(region, certificates_in(path.read_text(encoding="utf-8"), region))
             if certificates:
                 regions[region] = certificates
     return {
@@ -142,15 +159,25 @@ def build(bundles: Path, partitions: Path) -> dict:
     }
 
 
-def download(bundles: Path, partitions: Path) -> None:
+def download(bundles: Path, partitions: Path) -> list[str]:
+    """Saves each Region's bundle and returns the Regions that failed for a reason other than having none."""
     bundles.mkdir(parents=True, exist_ok=True)
+    failed = []
     for region in commercial_regions(partitions):
         try:
             with urllib.request.urlopen(BUNDLE_URL.format(region=region), timeout=30) as response:
                 (bundles / f"{region}-bundle.pem").write_bytes(response.read())
             print(f"saved {region}")
         except urllib.error.HTTPError as e:
-            print(f"skipped {region}: HTTP {e.code}")
+            if e.code in NO_BUNDLE:
+                print(f"skipped {region}: HTTP {e.code}, no bundle published")
+            else:
+                print(f"failed {region}: HTTP {e.code}", file=sys.stderr)
+                failed.append(region)
+        except OSError as e:  # URLError, a timeout or a refused connection
+            print(f"failed {region}: {e}", file=sys.stderr)
+            failed.append(region)
+    return failed
 
 
 def self_check(output: Path) -> list[str]:
@@ -165,8 +192,10 @@ def self_check(output: Path) -> list[str]:
         return ["regions must be an object that includes us-east-1"]
     for region, certificates in regions.items():
         identifiers = [c.get("certificateIdentifier") for c in certificates]
-        if "rds-ca-rsa2048-g1" not in identifiers:
-            problems.append(f"{region}: no rds-ca-rsa2048-g1")
+        if DEFAULT_CA not in identifiers:
+            problems.append(f"{region}: no {DEFAULT_CA}")
+        if region in RSA2048_ONLY and identifiers != [DEFAULT_CA]:
+            problems.append(f"{region}: offers only {DEFAULT_CA}")
         for c in certificates:
             if not IDENTIFIER.fullmatch(str(c.get("certificateIdentifier"))):
                 problems.append(f"{region}: bad identifier {c.get('certificateIdentifier')!r}")
@@ -187,7 +216,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.download:
-        download(args.bundles, args.partitions)
+        failed = download(args.bundles, args.partitions)
+        if failed:
+            print(f"error: no bundle saved for {', '.join(failed)}; run --download again", file=sys.stderr)
+            return 1
         return 0
     rel = args.output.relative_to(REPO_ROOT) if args.output.is_relative_to(REPO_ROOT) else args.output
     if not (args.bundles / "us-east-1-bundle.pem").exists():

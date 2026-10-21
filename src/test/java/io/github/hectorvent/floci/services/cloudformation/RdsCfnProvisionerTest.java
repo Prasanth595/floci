@@ -131,6 +131,14 @@ class RdsCfnProvisionerTest {
                 "us-east-1", "000000000000", "my-stack", existingPhysicalId, Map.of());
     }
 
+    /** Any {@code createDbInstance} call returns {@code instance}. */
+    private void stubCreateDbInstance(DbInstance instance) {
+        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), anyMap(), anyList(), nullable(String.class), nullable(String.class),
+                anyBoolean(), any(DbInstanceSettings.class))).thenReturn(instance);
+    }
+
     @Test
     void provisionsDbInstanceWithMappedArgsAndEndpointAttributes() {
         DbInstance instance = mock(DbInstance.class);
@@ -138,10 +146,7 @@ class RdsCfnProvisionerTest {
         when(instance.getEndpoint()).thenReturn(new DbEndpoint("mydb.local", 5432));
         when(instance.getDbInstanceArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db:mydb");
         when(instance.getDbiResourceId()).thenReturn("db-ABCDEFGHIJKLMNOP");
-        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), anyMap(), anyList(), nullable(String.class), nullable(String.class),
-                anyBoolean(), any(DbInstanceSettings.class))).thenReturn(instance);
+        stubCreateDbInstance(instance);
 
         StackResource r = provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres","EngineVersion":"16",
@@ -168,10 +173,7 @@ class RdsCfnProvisionerTest {
     void aDbInstanceTakesItsCaCertificateAndExposesItsDetails() {
         DbInstance instance = mock(DbInstance.class);
         when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), anyMap(), anyList(), nullable(String.class), nullable(String.class),
-                anyBoolean(), any(DbInstanceSettings.class))).thenReturn(instance);
+        stubCreateDbInstance(instance);
         when(rdsService.instanceCertificate(instance)).thenReturn(
                 new RdsService.InstanceCertificate("rds-ca-ecc384-g1", Instant.parse("2121-05-25T23:41:55Z")));
 
@@ -193,10 +195,7 @@ class RdsCfnProvisionerTest {
     void deletesANewDbInstanceWhoseAssociatedRolesAreRefused() {
         DbInstance instance = mock(DbInstance.class);
         when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), anyMap(), anyList(), nullable(String.class), nullable(String.class),
-                anyBoolean(), any(DbInstanceSettings.class))).thenReturn(instance);
+        stubCreateDbInstance(instance);
         when(rdsService.addRoleToDbInstance("us-east-1", "mydb", "arn:aws:iam::000000000000:role/a", "s3Import"))
                 .thenReturn(instance);
         when(rdsService.addRoleToDbInstance("us-east-1", "mydb", "arn:aws:iam::000000000000:role/b", "s3Import"))
@@ -218,10 +217,7 @@ class RdsCfnProvisionerTest {
     void provisionsDbInstanceInStackRegion() {
         DbInstance instance = mock(DbInstance.class);
         when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), anyMap(), anyList(), nullable(String.class), nullable(String.class),
-                anyBoolean(), any(DbInstanceSettings.class))).thenReturn(instance);
+        stubCreateDbInstance(instance);
 
         provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",
@@ -441,10 +437,7 @@ class RdsCfnProvisionerTest {
 
         DbInstance instance = mock(DbInstance.class);
         when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), anyMap(), anyList(), nullable(String.class), nullable(String.class),
-                anyBoolean(), any(DbInstanceSettings.class))).thenReturn(instance);
+        stubCreateDbInstance(instance);
 
         provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres",
@@ -729,10 +722,7 @@ class RdsCfnProvisionerTest {
 
         DbInstance instance = mock(DbInstance.class);
         when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), anyMap(), anyList(), nullable(String.class), nullable(String.class),
-                anyBoolean(), any(DbInstanceSettings.class))).thenReturn(instance);
+        stubCreateDbInstance(instance);
 
         StackResource resource = provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres",
@@ -1659,10 +1649,7 @@ class RdsCfnProvisionerTest {
         // costs only the new instance.
         DbInstance renamed = mock(DbInstance.class);
         when(renamed.getDbInstanceIdentifier()).thenReturn("newdb");
-        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), anyMap(), anyList(), nullable(String.class), nullable(String.class),
-                anyBoolean(), any(DbInstanceSettings.class))).thenReturn(renamed);
+        stubCreateDbInstance(renamed);
         when(rdsService.addRoleToDbInstance(any(), eq("newdb"), any(), any()))
                 .thenThrow(new AwsException("InvalidParameterValue", "feature not supported", 400));
 

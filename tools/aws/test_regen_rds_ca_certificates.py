@@ -102,3 +102,46 @@ def test_without_bundles_the_check_verifies_the_shape(tmp_path):
 
 def test_the_vendored_file_keeps_its_shape():
     assert r.self_check(r.OUTPUT) == []
+
+
+def test_the_six_regions_the_user_guide_names_offer_only_rsa2048():
+    def ca(identifier):
+        return {"certificateIdentifier": identifier, "thumbprint": "a" * 40,
+                "validFrom": "2021-05-25T22:34:57Z", "validTill": "2061-05-25T23:34:57Z"}
+    bundle = [ca("rds-ca-ecc384-g1"), ca("rds-ca-rsa2048-g1"), ca("rds-ca-rsa4096-g1")]
+    assert r.RSA2048_ONLY == {"ap-south-1", "ap-southeast-4", "ca-west-1", "eu-central-2", "eu-south-2",
+                              "il-central-1"}
+    for region in r.RSA2048_ONLY:
+        assert r.offered_in(region, bundle) == [ca("rds-ca-rsa2048-g1")]
+    assert r.offered_in("us-west-2", bundle) == bundle
+
+
+def test_the_shape_check_refuses_another_ca_in_the_six_regions(tmp_path):
+    output = tmp_path / "out.json"
+    entry = {"certificateIdentifier": "rds-ca-rsa2048-g1", "thumbprint": "a" * 40,
+             "validFrom": "2021-05-25T22:34:57Z", "validTill": "2061-05-25T23:34:57Z"}
+    output.write_text(json.dumps({"regions": {"us-east-1": [entry], "ap-south-1": [
+        entry, dict(entry, certificateIdentifier="rds-ca-ecc384-g1")]}}), encoding="utf-8")
+    assert r.self_check(output) == ["ap-south-1: offers only rds-ca-rsa2048-g1"]
+
+
+def test_download_skips_a_region_with_no_bundle_and_fails_on_anything_else(tmp_path, monkeypatch, capsys):
+    import io
+    import urllib.error
+
+    def urlopen(url, timeout):
+        if "/us-east-1/" in url:
+            return io.BytesIO(US_WEST_2_ECC384.encode())
+        if "/us-west-1/" in url:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        if "/us-west-2/" in url:
+            raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)
+        raise urllib.error.URLError("name resolution failed")
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", urlopen)
+    bundles = tmp_path / "bundles"
+    regions = partitions(tmp_path, ["us-east-1", "us-west-1", "us-west-2", "eu-west-1"])
+    assert r.download(bundles, regions) == ["eu-west-1", "us-west-2"]
+    assert sorted(p.name for p in bundles.iterdir()) == ["us-east-1-bundle.pem"]
+    assert r.main(["--download", "--bundles", str(bundles), "--partitions", str(regions)]) == 1
+    assert "no bundle saved for eu-west-1, us-west-2" in capsys.readouterr().err
