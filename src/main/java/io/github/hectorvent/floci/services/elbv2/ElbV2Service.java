@@ -292,8 +292,9 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
      * update finds the balancer it keeps through DuplicateLoadBalancerName, whatever subnets its
      * template names. SetSubnets also requires an Application Load Balancer's subnets to span two
      * Availability Zones, so {@link #setSubnets} runs this on a list that names subnets, once it has the
-     * balancer's type. No public report shows what AWS answers there, so it gets the create message
-     * and order.
+     * balancer's type, and {@link #setSubnetsFromRequest} on a SetSubnets that names none. No public
+     * report shows what AWS answers a SetSubnets with one subnet, so it gets the create message and
+     * order.
      */
     private static void requireSubnets(String lbType, List<String> subnets) {
         int count = subnets == null ? 0 : subnets.size();
@@ -439,9 +440,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     public void setSubnets(String region, String arn, List<String> subnets) {
         ec2Service.runWithSubnetReferencesHeld(region, () -> {
             LoadBalancer lb = requireLoadBalancer(region, arn);
-            // Counted as on create, before any subnet is looked up. An empty list is not counted and moves
-            // the balancer onto no subnets: a CloudFormation rollback needs that for a balancer an earlier
-            // Floci version saved without subnets.
+            // Counted as on create, before any subnet is looked up; an empty list is taken, as above.
             if (subnets != null && !subnets.isEmpty()) {
                 requireSubnets(lb.getType(), subnets);
             }

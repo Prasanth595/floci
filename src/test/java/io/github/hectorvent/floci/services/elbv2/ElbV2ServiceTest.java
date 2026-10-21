@@ -214,7 +214,10 @@ class ElbV2ServiceTest {
         verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
     }
 
-    /** The message depends on the balancer's type, so a balancer that does not exist is reported first. */
+    /**
+     * Through the SetSubnets action with neither form: the message depends on the balancer's type, so a
+     * balancer that does not exist is reported first.
+     */
     @Test
     void setSubnetsForAMissingBalancerReportsItBeforeMissingSubnets() {
         MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
@@ -226,22 +229,6 @@ class ElbV2ServiceTest {
         String xml = (String) response.getEntity();
         assertEquals(400, response.getStatus(), xml);
         assertTrue(xml.contains("<Code>LoadBalancerNotFound</Code>"), xml);
-    }
-
-    /**
-     * Only the SetSubnets action refuses an empty list. A CloudFormation rollback moves a kept
-     * balancer back onto the subnets it had before the update, and for a balancer an earlier Floci
-     * version saved without subnets that is none.
-     */
-    @Test
-    void aMoveBackOntoNoSubnetsIsStillTaken() {
-        LoadBalancer lb = service.createLoadBalancer(REGION, "moved-back", "internal", "application", "ipv4",
-                ALB_SUBNETS, List.of(), Map.of());
-
-        service.setSubnets(REGION, lb.getLoadBalancerArn(), List.of());
-
-        assertTrue(service.describeLoadBalancers(REGION, List.of(lb.getLoadBalancerArn()), null, null, null)
-                .getFirst().getAvailabilityZones().isEmpty());
     }
 
     /**
@@ -1070,9 +1057,9 @@ class ElbV2ServiceTest {
     }
 
     /**
-     * Only a list that names subnets is counted. A CloudFormation update moves a balancer an earlier
-     * Floci version saved without subnets onto the template's subnets, and when the update rolls back,
-     * the move back onto none is taken.
+     * setSubnets counts only a list that names subnets; the SetSubnets action refuses an empty one before
+     * it gets here. A CloudFormation update moves a balancer an earlier Floci version saved without
+     * subnets onto the template's subnets, and when the update rolls back, the move back onto none is taken.
      */
     @Test
     void aRollbackOntoNoSubnetsIsNotCounted() {
@@ -1088,7 +1075,10 @@ class ElbV2ServiceTest {
                 .getFirst().getAvailabilityZones().isEmpty());
     }
 
-    /** The count depends on the balancer's type, so a balancer that does not exist is reported first. */
+    /**
+     * Through setSubnets with one subnet: the count depends on the balancer's type, so a balancer that
+     * does not exist is reported first.
+     */
     @Test
     void setSubnetsOntoOneSubnetReportsAMissingBalancerFirst() {
         AwsException refusal = assertThrows(AwsException.class, () -> service.setSubnets(REGION,
