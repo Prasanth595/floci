@@ -93,12 +93,21 @@ public abstract class AbstractRedisAuthProxy {
     /** Closes a socket, tolerating errors. Implementations may add their own logging. */
     protected abstract void closeQuietly(Socket socket);
 
+    /** Establishes the client transport before reading credentials. */
+    protected Socket clientTransport(Socket client) throws IOException {
+        return client;
+    }
+
     public void start(int proxyPort) throws IOException {
         serverSocket = new ServerSocket(proxyPort);
         running = true;
         Thread.ofVirtual().name(threadPrefix + "-proxy-accept-" + resourceId).start(this::acceptLoop);
         log.infov("{0} proxy started for {1} on port {2} → {3}:{4}",
                 serviceName, resourceId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
+    }
+
+    int localPort() {
+        return serverSocket.getLocalPort();
     }
 
     public void stop() {
@@ -140,6 +149,16 @@ public abstract class AbstractRedisAuthProxy {
         try {
             client.setTcpNoDelay(true);
             client.setSoTimeout(handshakeTimeoutMillis);
+            Socket transport = clientTransport(client);
+            if (transport != client) {
+                handshakingClients.add(transport);
+                handshakingClients.remove(client);
+                client = transport;
+            }
+            if (!running) {
+                closeQuietly(client);
+                return;
+            }
             RespReader reader = new RespReader(client.getInputStream());
             while (true) {
                 String[] cmd = reader.readCommand();

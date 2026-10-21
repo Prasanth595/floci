@@ -3,8 +3,11 @@ package io.github.hectorvent.floci.services.elasticache.proxy;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
 import java.io.IOException;
 import java.net.Socket;
+import java.util.function.Supplier;
 
 /**
  * TCP auth proxy for a single ElastiCache replication group.
@@ -19,16 +22,38 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     private final AuthMode authMode;
     private final PasswordValidator passwordValidator;
     private final SigV4Validator sigV4Validator;
+    private final Supplier<SSLContext> tlsContext;
 
     public ElastiCacheAuthProxy(String groupId, AuthMode authMode,
                                 String backendHost, int backendPort,
                                 PasswordValidator passwordValidator,
                                 SigV4Validator sigV4Validator) {
+        this(groupId, authMode, backendHost, backendPort, passwordValidator, sigV4Validator, null);
+    }
+
+    public ElastiCacheAuthProxy(String groupId, AuthMode authMode,
+                                String backendHost, int backendPort,
+                                PasswordValidator passwordValidator, SigV4Validator sigV4Validator,
+                                Supplier<SSLContext> tlsContext) {
         super(LOG, "ElastiCache", "ec", groupId, backendHost, backendPort);
         this.groupId = groupId;
         this.authMode = authMode;
         this.passwordValidator = passwordValidator;
         this.sigV4Validator = sigV4Validator;
+        this.tlsContext = tlsContext;
+    }
+
+    @Override
+    protected Socket clientTransport(Socket client) throws IOException {
+        if (tlsContext == null || !passwordValidator.transitEncryptionEnabled()) {
+            return client;
+        }
+        SSLSocket encrypted = (SSLSocket) tlsContext.get().getSocketFactory()
+                .createSocket(client, client.getInetAddress().getHostAddress(), client.getPort(), true);
+        encrypted.setUseClientMode(false);
+        encrypted.setSoTimeout(client.getSoTimeout());
+        encrypted.startHandshake();
+        return encrypted;
     }
 
     @Override
@@ -110,6 +135,10 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     @FunctionalInterface
     public interface PasswordValidator {
         boolean validatePassword(String username, String password);
+
+        default boolean transitEncryptionEnabled() {
+            return false;
+        }
 
         default boolean hasMembers() {
             return false;

@@ -1630,8 +1630,17 @@ public class ElastiCacheService implements ResourceProvider {
         if (cluster.getServerlessCacheName() == null) {
             proxyManager.startProxy(cluster.getCacheClusterId(), cluster.getAuthMode(),
                     cluster.getConfigurationEndpoint().port(), handle.getHost(), handle.getPort(),
-                    (username, password) -> validateCacheClusterPassword(
-                            accountId, cluster.getCacheClusterId(), username, password));
+                    new ElastiCacheAuthProxy.PasswordValidator() {
+                        @Override
+                        public boolean validatePassword(String username, String password) {
+                            return validateCacheClusterPassword(accountId, cluster.getCacheClusterId(), username, password);
+                        }
+
+                        @Override
+                        public boolean transitEncryptionEnabled() {
+                            return cluster.getAuthMode() != AuthMode.NO_AUTH;
+                        }
+                    });
         } else {
             proxyManager.startProxy(cluster.getCacheClusterId(), AuthMode.NO_AUTH,
                     cluster.getConfigurationEndpoint().port(), handle.getHost(), handle.getPort(),
@@ -1677,6 +1686,11 @@ public class ElastiCacheService implements ResourceProvider {
             public AuthMode memberAuthMode(String username) {
                 ElastiCacheUser user = member(username);
                 return user == null ? null : user.getAuthMode();
+            }
+
+            @Override
+            public boolean transitEncryptionEnabled() {
+                return true;
             }
 
             @Override
@@ -2507,6 +2521,12 @@ public class ElastiCacheService implements ResourceProvider {
             @Override
             public AuthMode authMode() {
                 return groups.getForAccount(accountId, groupId).map(ReplicationGroup::getAuthMode).orElse(null);
+            }
+
+            @Override
+            public boolean transitEncryptionEnabled() {
+                return groups.getForAccount(accountId, groupId)
+                        .map(ReplicationGroup::isEncryptedInTransit).orElse(true);
             }
 
             @Override
