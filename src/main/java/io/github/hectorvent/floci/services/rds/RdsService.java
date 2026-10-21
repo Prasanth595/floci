@@ -903,16 +903,17 @@ public class RdsService implements Resettable, ResourceProvider {
 
             if (!mock && hasBackend(backendHost, backendPort)) {
                 final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+                InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
                 try {
                     proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                    backendRuntimeIdForInstance(instance),
+                    backendIdentity.runtimeId(),
                             engine, iamEnabled, proxyPort, backendHost, backendPort,
                             instance.getEndpoint().address(),
                             instance.getMasterUsername(), instance.getMasterPassword(), dbName,
                             (user, pw) -> validateDbPasswordForScope(
                                     accountId, instanceRegion, id, user, pw),
                             proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                    instanceRegion, accountId, dbUserResourceId(instance)));
+                                    instanceRegion, accountId, backendIdentity.dbUserResourceId()));
                 } catch (RuntimeException | Error e) {
                     try {
                         deleteInstanceForScope(accountId, effectiveRegion, id);
@@ -3573,7 +3574,7 @@ public class RdsService implements Resettable, ResourceProvider {
             final String accountId = accountIdFromArn(instance.getDbInstanceArn());
             final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
             proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                    backendRuntimeIdForInstance(instance),
+                    instanceBackendIdentity(instance).runtimeId(),
                     instance.getEngine(),
                     instance.isIamDatabaseAuthenticationEnabled(),
                     instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
@@ -3823,8 +3824,9 @@ public class RdsService implements Resettable, ResourceProvider {
                         ? instance.getMasterUsername() : "root";
                 final String accountId = accountIdFromArn(instance.getDbInstanceArn());
                 final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+                InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
                 proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                    backendRuntimeIdForInstance(instance),
+                        backendIdentity.runtimeId(),
                         instance.getEngine(),
                         instance.isIamDatabaseAuthenticationEnabled(),
                         instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
@@ -3833,7 +3835,8 @@ public class RdsService implements Resettable, ResourceProvider {
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
                         proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
-                                instance.getEndpoint().port(), instanceRegion, accountId, dbUserResourceId(instance)));
+                                instance.getEndpoint().port(), instanceRegion, accountId,
+                                backendIdentity.dbUserResourceId()));
             } else {
                 // No backing container: created or last rebooted while no daemon was reachable.
                 instance = doEnsureInstanceBackend(id, effectiveRegion);
@@ -3844,29 +3847,21 @@ public class RdsService implements Resettable, ResourceProvider {
         return instance;
     }
 
-    private String backendRuntimeIdForInstance(DbInstance instance) {
+    private InstanceBackendIdentity instanceBackendIdentity(DbInstance instance) {
         String clusterId = instance.getDbClusterIdentifier();
         if (clusterId != null && !clusterId.isBlank()) {
             DbCluster cluster = findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
                     regionFromArn(instance.getDbInstanceArn()), clusterId);
             if (cluster != null) {
-                return cluster.getDbClusterArn();
+                return new InstanceBackendIdentity(
+                        cluster.getDbClusterArn(), cluster.getDbClusterResourceId());
             }
         }
-        return instance.getDbInstanceArn();
+        return new InstanceBackendIdentity(
+                instance.getDbInstanceArn(), instance.getDbiResourceId());
     }
 
-    private String dbUserResourceId(DbInstance instance) {
-        String clusterId = instance.getDbClusterIdentifier();
-        if (clusterId != null && !clusterId.isBlank()) {
-            DbCluster cluster = findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
-                    regionFromArn(instance.getDbInstanceArn()), clusterId);
-            if (cluster != null) {
-                return cluster.getDbClusterResourceId();
-            }
-        }
-        return instance.getDbiResourceId();
-    }
+    private record InstanceBackendIdentity(String runtimeId, String dbUserResourceId) {}
 
     /**
      * The binding the proxy validates IAM auth tokens against. As on RDS a token is good for the
@@ -3953,6 +3948,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 ? instance.getMasterUsername() : "root";
         final String accountId = accountIdFromArn(instance.getDbInstanceArn());
         final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+        InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
         int relayPort = instance.getProxyPort();
         DbEndpoint relayEndpoint = instance.getEndpoint();
         boolean allocatedRelayPort = false;
@@ -3963,14 +3959,15 @@ public class RdsService implements Resettable, ResourceProvider {
                 relayEndpoint = proxyEndpoint(relayPort);
             }
             proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                    backendRuntimeIdForInstance(instance),
+                    backendIdentity.runtimeId(),
                     instance.getEngine(), instance.isIamDatabaseAuthenticationEnabled(),
                     relayPort, backendHost, backendPort, relayEndpoint.address(),
                     effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw),
                     proxyBinding(instance.getEngine(), relayEndpoint.address(),
-                            relayEndpoint.port(), instanceRegion, accountId, dbUserResourceId(instance)));
+                            relayEndpoint.port(), instanceRegion, accountId,
+                            backendIdentity.dbUserResourceId()));
         } catch (RuntimeException e) {
             if (allocatedRelayPort) {
                 releaseProxyPort(relayPort);
@@ -5952,7 +5949,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     effectiveRegion, "DB instance", instanceId);
             backendHost = instance.getContainerHost();
             backendPort = instance.getContainerPort();
-            backendRuntimeId = backendRuntimeIdForInstance(instance);
+            backendRuntimeId = instanceBackendIdentity(instance).runtimeId();
             engine = instance.getEngine();
             masterUser = instance.getMasterUsername();
             masterPassword = instance.getMasterPassword();
@@ -8258,7 +8255,7 @@ public class RdsService implements Resettable, ResourceProvider {
             validateProxyTargetScope(instance.getDbInstanceArn(), accountId, proxyRegion,
                     "DB instance", target.getRdsResourceId());
             engine = instance.getEngine();
-            backendRuntimeId = backendRuntimeIdForInstance(instance);
+            backendRuntimeId = instanceBackendIdentity(instance).runtimeId();
             backendHost = instance.getContainerHost();
             backendPort = instance.getContainerPort();
             masterUser = instance.getMasterUsername();
@@ -8522,17 +8519,19 @@ public class RdsService implements Resettable, ResourceProvider {
                 if (hasBackend(backendHost, backendPort)) {
                     String effectiveMasterUser = instance.getMasterUsername() != null
                             ? instance.getMasterUsername() : "root";
+                    InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
                     proxyManager.startProxy(rdsResourceRelayKey(
                                     instance.getDbInstanceArn(), instance.getDbInstanceIdentifier()),
-                            backendRuntimeIdForInstance(instance), instance.getEngine(),
+                            backendIdentity.runtimeId(), instance.getEngine(),
                             instance.isIamDatabaseAuthenticationEnabled(), proxyPort,
                             backendHost, backendPort, instance.getEndpoint().address(),
                             effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                             (user, pw) -> validateDbPasswordForScope(
                                     accountId, instanceRegion,
                                     instance.getDbInstanceIdentifier(), user, pw),
-                            proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                    instanceRegion, accountId, dbUserResourceId(instance)));
+                            proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
+                                    instance.getEndpoint().port(), instanceRegion, accountId,
+                                    backendIdentity.dbUserResourceId()));
                 }
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
                 putInstanceForScope(accountId, instanceRegion,
