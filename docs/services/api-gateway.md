@@ -517,6 +517,12 @@ Response caching needs both switches AWS requires: `cacheClusterEnabled` on the 
 
 The five REST VPC Link operations (`CreateVpcLink`, `GetVpcLink`, `GetVpcLinks`, `UpdateVpcLink`, `DeleteVpcLink`) are emulated at `/vpclinks`. `CreateVpcLink` requires a name and at least one target ARN, answers `202`, and provisions the link as `AVAILABLE` immediately rather than transitioning through `PENDING`. Since Floci has no real VPC, a valid link routes straight to the integration URI; what is enforced is that the link exists and is available. `UpdateVpcLink` follows AWS's patch-operation table: only `replace` on `/name` and `/description` is accepted, and any other operation or path returns `BadRequestException` rather than being applied or silently ignored.
 
+
+REST API VPC links also support `GetTags`, `TagResource` and `UntagResource` with the ARN
+`arn:{partition}:apigateway:{region}::/vpclinks/{vpcLinkId}`. Creation tags and later updates
+are shared with `GetVpcLink`; tagging does not replace the link. These are REST API (v1)
+links, separate from HTTP API (v2) VPC links.
+
 ### Examples
 
 ```bash

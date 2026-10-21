@@ -4657,6 +4657,18 @@ public class ApiGatewayService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid VPC link identifier specified", 404));
     }
 
+    public void tagVpcLink(String region, String vpcLinkId, Map<String, String> tags) {
+        VpcLink link = getVpcLink(region, vpcLinkId);
+        link.getTags().putAll(tags);
+        vpcLinkStore.put(vpcLinkKey(region, vpcLinkId), link);
+    }
+
+    public void untagVpcLink(String region, String vpcLinkId, List<String> tagKeys) {
+        VpcLink link = getVpcLink(region, vpcLinkId);
+        tagKeys.forEach(link.getTags()::remove);
+        vpcLinkStore.put(vpcLinkKey(region, vpcLinkId), link);
+    }
+
     public List<VpcLink> getVpcLinks(String region) {
         return vpcLinkStore.scan(k -> k.startsWith(region + "::"));
     }
