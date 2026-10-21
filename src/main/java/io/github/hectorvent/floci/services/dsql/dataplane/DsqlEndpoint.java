@@ -70,6 +70,8 @@ public class DsqlEndpoint {
     private final Map<Long, DsqlDatabases.Backend> cancelKeys = new ConcurrentHashMap<>();
     private final Map<String, Set<Socket>> connections = new ConcurrentHashMap<>();
     private volatile ServerSocket server;
+    private volatile Duration transactionAgeLimit = Duration.ofSeconds(300);
+    private volatile Duration transactionIdleGrace = Duration.ofSeconds(15);
 
     /** A cluster being served, and where its database answers. */
     record Route(String host, String arn, String region, String accountId, DsqlDatabases.Backend backend) {
@@ -176,6 +178,21 @@ public class DsqlEndpoint {
 
     int handshakeTimeoutMillis() {
         return HANDSHAKE_TIMEOUT_MILLIS;
+    }
+
+    /** How long a transaction may live, 300 seconds as on DSQL; tests shorten it. */
+    Duration transactionAgeLimit() {
+        return transactionAgeLimit;
+    }
+
+    /** How long past its age limit an idle transaction is let be, 15 seconds as on DSQL (measured). */
+    Duration transactionIdleGrace() {
+        return transactionIdleGrace;
+    }
+
+    void transactionAgeLimit(Duration limit, Duration idleGrace) {
+        this.transactionAgeLimit = limit;
+        this.transactionIdleGrace = idleGrace;
     }
 
     /**

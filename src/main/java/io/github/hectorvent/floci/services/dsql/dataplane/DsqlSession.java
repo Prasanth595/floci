@@ -17,6 +17,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28,15 +29,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
 /**
  * One client connection to a DSQL endpoint, as Aurora DSQL serves it (measured on AWS, eu-west-1,
- * 2026-10-16): TLS is mandatory, the password is an IAM token for the endpoint, the startup is read
- * as DSQL reads it, DSQL's own statements become the {@code sys} calls that implement them, their
- * errors come back without the source locations and {@code sys} lines DSQL never shows, and a
- * connection lives an hour.
+ * 2026-10-16 to 2026-10-21): TLS is mandatory, the password is an IAM token for the endpoint, the
+ * startup is read as DSQL reads it, DSQL's own statements become the {@code sys} calls that
+ * implement them, their errors come back in DSQL's words, a transaction lives 300 seconds and a
+ * connection an hour.
  */
 final class DsqlSession {
 
@@ -44,6 +46,7 @@ final class DsqlSession {
     // A startup packet is refused above PostgreSQL's own limit, 10,000 bytes, and a message above 64 MB.
     private static final int MAX_STARTUP = 10_000;
     private static final int MAX_MESSAGE = 64 * 1024 * 1024;
+    private static final String SERIALIZATION_FAILURE = "40001";
     private static final String ACCESS_DENIED = "unable to accept connection, access denied";
 
     private final Socket socket;
@@ -61,6 +64,19 @@ final class DsqlSession {
     private volatile String principalArn;
     private volatile int backendPid;
     private volatile long cancelKey;
+    // What the age limit needs: where each side is written, whether a statement is still running
+    // (a Query or Sync whose ReadyForQuery has not come back), and the open transaction's start.
+    private final Object clientWrites = new Object();
+    private final Object databaseWrites = new Object();
+    private final AtomicInteger awaitingReady = new AtomicInteger();
+    private volatile OutputStream clientOut;
+    private volatile OutputStream databaseOut;
+    private volatile Socket clientSocket;
+    private volatile Socket databaseSocket;
+    private volatile Instant lastClientMessage = Instant.now();
+    private volatile Instant transactionStart;
+    private volatile char transactionStatus = 'I';
+    private volatile boolean statementOutlived;
 
     DsqlSession(Socket socket, DsqlEndpoint endpoint) {
         this.socket = socket;
@@ -163,6 +179,10 @@ final class DsqlSession {
             principalArn = admission.principalArn();
             backendOut.write(PostgresWire.startupMessage(backendStartup));
             backendOut.flush();
+            clientOut = out;
+            databaseOut = backendOut;
+            clientSocket = tls;
+            databaseSocket = backend;
 
             Thread toClient = Thread.ofVirtual().name("dsql-backend-" + sessionId)
                     .start(() -> relayToClient(backendIn, out, admission.route(), tls));
@@ -193,64 +213,185 @@ final class DsqlSession {
     private void relayToBackend(InputStream in, OutputStream backendOut) throws IOException {
         while (true) {
             PostgresWire.Message message = PostgresWire.read(in, MAX_MESSAGE, "message");
-            switch (message.type()) {
-                case 'Q' -> {
-                    String query = PostgresWire.cString(message.body(), 0).value();
-                    PostgresWire.write(backendOut, 'Q', PostgresWire.cStringBytes(rewriteSimpleQuery(query)));
-                }
-                case 'P' -> {
-                    PostgresWire.CString name = PostgresWire.cString(message.body(), 0);
-                    PostgresWire.CString query = PostgresWire.cString(message.body(), name.next());
-                    DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(query.value());
-                    String tag = rewritten.overridesTags() && rewritten.commandTags().size() == 1
-                            ? rewritten.commandTags().get(0) : null;
-                    synchronized (batches) {
-                        extendedBatch().parses.addLast(new Named(name.value(), tag));
-                    }
-                    PostgresWire.write(backendOut, 'P', PostgresWire.cStringBytes(name.value()),
-                            PostgresWire.cStringBytes(rewritten.sql()),
-                            Arrays.copyOfRange(message.body(), query.next(), message.body().length));
-                }
-                case 'B' -> {
-                    PostgresWire.CString portal = PostgresWire.cString(message.body(), 0);
-                    PostgresWire.CString statement = PostgresWire.cString(message.body(), portal.next());
-                    synchronized (batches) {
-                        extendedBatch().binds.addLast(new Named(portal.value(), statement.value()));
-                    }
-                    PostgresWire.write(backendOut, message);
-                }
-                case 'E' -> {
-                    String portal = PostgresWire.cString(message.body(), 0).value();
-                    synchronized (batches) {
-                        extendedBatch().results.addLast(new Named(portal, null));
-                    }
-                    PostgresWire.write(backendOut, message);
-                }
-                case 'C' -> {
-                    String kind = message.body()[0] == 'S' ? "S" : "P";
-                    synchronized (batches) {
-                        extendedBatch().closes.addLast(new Named(PostgresWire.cString(message.body(), 1).value(), kind));
-                    }
-                    PostgresWire.write(backendOut, message);
-                }
-                case 'S', 'F' -> {
-                    // A Sync, or a FunctionCall, is answered by a ReadyForQuery of its own.
-                    synchronized (batches) {
-                        extendedBatch();
-                        openBatch = null;
-                    }
-                    PostgresWire.write(backendOut, message);
-                }
-                case 'X' -> {
-                    PostgresWire.write(backendOut, message);
-                    backendOut.flush();
+            if (message.type() != 'X') {
+                lastClientMessage = Instant.now();
+                if (transactionStatus == 'T' && pastAgeLimit()) {
+                    // DSQL ends a transaction past its age at the client's next message, a ROLLBACK
+                    // included, and the connection with it (measured).
+                    terminate();
                     return;
                 }
-                default -> PostgresWire.write(backendOut, message);
+                if (message.type() == 'Q' || message.type() == 'S' || message.type() == 'F') {
+                    awaitingReady.incrementAndGet();
+                }
             }
-            if (in.available() == 0) {
+            synchronized (databaseWrites) {
+                if (relayOne(message, backendOut)) {
+                    return;
+                }
+                if (in.available() == 0) {
+                    backendOut.flush();
+                }
+            }
+        }
+    }
+
+    /** Hands one client message to the database, DSQL's syntax rewritten; true once the client said goodbye. */
+    private boolean relayOne(PostgresWire.Message message, OutputStream backendOut) throws IOException {
+        switch (message.type()) {
+            case 'Q' -> {
+                String query = PostgresWire.cString(message.body(), 0).value();
+                PostgresWire.write(backendOut, 'Q', PostgresWire.cStringBytes(rewriteSimpleQuery(query)));
+            }
+            case 'P' -> {
+                PostgresWire.CString name = PostgresWire.cString(message.body(), 0);
+                PostgresWire.CString query = PostgresWire.cString(message.body(), name.next());
+                DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(query.value());
+                String tag = rewritten.overridesTags() && rewritten.commandTags().size() == 1
+                        ? rewritten.commandTags().get(0) : null;
+                synchronized (batches) {
+                    extendedBatch().parses.addLast(new Named(name.value(), tag));
+                }
+                PostgresWire.write(backendOut, 'P', PostgresWire.cStringBytes(name.value()),
+                        PostgresWire.cStringBytes(rewritten.sql()),
+                        Arrays.copyOfRange(message.body(), query.next(), message.body().length));
+            }
+            case 'B' -> {
+                PostgresWire.CString portal = PostgresWire.cString(message.body(), 0);
+                PostgresWire.CString statement = PostgresWire.cString(message.body(), portal.next());
+                synchronized (batches) {
+                    extendedBatch().binds.addLast(new Named(portal.value(), statement.value()));
+                }
+                PostgresWire.write(backendOut, message);
+            }
+            case 'E' -> {
+                String portal = PostgresWire.cString(message.body(), 0).value();
+                synchronized (batches) {
+                    extendedBatch().results.addLast(new Named(portal, null));
+                }
+                PostgresWire.write(backendOut, message);
+            }
+            case 'C' -> {
+                String kind = message.body()[0] == 'S' ? "S" : "P";
+                synchronized (batches) {
+                    extendedBatch().closes.addLast(new Named(PostgresWire.cString(message.body(), 1).value(), kind));
+                }
+                PostgresWire.write(backendOut, message);
+            }
+            case 'S', 'F' -> {
+                // A Sync, or a FunctionCall, is answered by a ReadyForQuery of its own.
+                synchronized (batches) {
+                    endBatch();
+                }
+                PostgresWire.write(backendOut, message);
+            }
+            case 'X' -> {
+                PostgresWire.write(backendOut, message);
                 backendOut.flush();
+                return true;
             }
+            default -> PostgresWire.write(backendOut, message);
+        }
+        return false;
+    }
+
+    private boolean pastAgeLimit() {
+        Instant start = transactionStart;
+        return start != null && Duration.between(start, Instant.now()).compareTo(endpoint.transactionAgeLimit()) > 0;
+    }
+
+    private long transactionAge() {
+        Instant start = transactionStart;
+        return start == null ? 0 : Duration.between(start, Instant.now()).toSeconds();
+    }
+
+    /**
+     * Follows the transaction the database reports. One that opens is ended as DSQL ends it once it
+     * idles past its age limit and grace (measured: 315 s after BEGIN, whatever it last ran); one
+     * that fails stays until it idles as long, as DSQL's idle-in-transaction timeout lets it.
+     */
+    private void transactionStatus(char status) {
+        char previous = transactionStatus;
+        transactionStatus = status;
+        Duration idle = endpoint.transactionAgeLimit().plus(endpoint.transactionIdleGrace());
+        if (status == 'I') {
+            transactionStart = null;
+        } else if (status == 'T' && transactionStart == null) {
+            Instant start = lastClientMessage;
+            transactionStart = start;
+            after(start.plus(idle), () -> {
+                if (start.equals(transactionStart) && transactionStatus == 'T' && awaitingReady.get() == 0) {
+                    terminate();
+                }
+            });
+        } else if (status == 'E' && previous != 'E') {
+            Instant failed = Instant.now();
+            Instant start = transactionStart;
+            after(failed.plus(idle), () -> {
+                if (start == transactionStart && transactionStatus == 'E' && awaitingReady.get() == 0
+                        && !lastClientMessage.isAfter(failed)) {
+                    close("FATAL", "25P03", "terminating connection due to idle-in-transaction timeout", null);
+                }
+            });
+        }
+    }
+
+    private void after(Instant when, Runnable check) {
+        Thread.ofVirtual().name("dsql-age-" + sessionId).start(() -> {
+            try {
+                // toMillis drops what is below a millisecond, which would wake the check before when
+                // and report an age a second short.
+                Thread.sleep(Math.max(0, Duration.between(Instant.now(), when).toMillis() + 1));
+            } catch (InterruptedException ignored) {
+                // The connection ended first.
+                return;
+            }
+            check.run();
+        });
+    }
+
+    /** DSQL's end of a transaction past its age: the age error, then the connection's (measured). */
+    private void terminate() {
+        long limit = endpoint.transactionAgeLimit().toSeconds();
+        try {
+            synchronized (clientWrites) {
+                PostgresWire.write(clientOut, 'E', error("ERROR", "54000", "transaction age limit of " + limit
+                        + "s exceeded", "Current transaction age " + transactionAge() + "s exceeds " + limit + "s", null));
+            }
+        } catch (IOException ignored) {
+            // The client left first; the connection is closed below either way.
+        }
+        close("FATAL", "08P01", "terminating connection because protocol synchronization was lost", null);
+    }
+
+    private void close(String severity, String state, String message, String detail) {
+        try {
+            synchronized (clientWrites) {
+                PostgresWire.write(clientOut, 'E', error(severity, state, message, detail, null));
+                clientOut.flush();
+            }
+        } catch (IOException ignored) {
+            // The client left first; both sides are closed below either way.
+        }
+        closeQuietly(clientSocket);
+        closeQuietly(databaseSocket);
+    }
+
+    /**
+     * A statement that ran past the transaction's age ends, as DSQL ends it, in the age error, which
+     * fails the transaction: the database raises it, so its state is DSQL's.
+     */
+    private void failOutlivedStatement() throws IOException {
+        long limit = endpoint.transactionAgeLimit().toSeconds();
+        awaitingReady.incrementAndGet();
+        synchronized (databaseWrites) {
+            synchronized (batches) {
+                endBatch();
+            }
+            PostgresWire.write(databaseOut, 'Q', PostgresWire.cStringBytes(DsqlStatements.reject("54000",
+                    "transaction age limit of " + limit + "s exceeded",
+                    "Current transaction age " + transactionAge() + "s exceeds " + limit + "s")));
+            databaseOut.flush();
         }
     }
 
@@ -261,11 +402,20 @@ final class DsqlSession {
     private String rewriteSimpleQuery(String query) {
         DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(query);
         synchronized (batches) {
-            Batch batch = extendedBatch();
+            Batch batch = endBatch();
             rewritten.commandTags().forEach(tag -> batch.results.addLast(new Named(null, tag)));
-            openBatch = null;
         }
         return rewritten.sql();
+    }
+
+    /**
+     * The batch a Query, Sync or FunctionCall ends, the extended-protocol messages since the last
+     * Sync included, which its ReadyForQuery answers. Called holding {@code batches}.
+     */
+    private Batch endBatch() {
+        Batch batch = extendedBatch();
+        openBatch = null;
+        return batch;
     }
 
     /** The batch the extended-protocol messages since the last Sync belong to. Called holding {@code batches}. */
@@ -379,8 +529,19 @@ final class DsqlSession {
                     }
                 }
                 switch (message.type()) {
+                    case 'D' -> {
+                        if (transactionStatus == 'T' && pastAgeLimit()) {
+                            // DSQL answers a statement that outlived the transaction's age with no rows.
+                            statementOutlived = true;
+                            continue;
+                        }
+                    }
                     case 'C' -> {
                         Named result = settle(batch -> batch.results);
+                        if (transactionStatus == 'T' && pastAgeLimit()) {
+                            statementOutlived = true;
+                            continue;
+                        }
                         String override = result == null ? null : result.name() == null ? result.value()
                                 : statementTags.get(portalStatements.get(result.name()));
                         if (override != null) {
@@ -411,6 +572,7 @@ final class DsqlSession {
                     case 'E', 'N' -> message = new PostgresWire.Message(message.type(),
                             inDsqlWords(message.type(), message.body()));
                     case 'Z' -> {
+                        awaitingReady.updateAndGet(n -> Math.max(0, n - 1));
                         synchronized (batches) {
                             batches.pollFirst();
                         }
@@ -418,13 +580,25 @@ final class DsqlSession {
                             // Outside a transaction no portal outlives its Sync.
                             portalStatements.clear();
                         }
+                        char status = (char) message.body()[0];
+                        if (statementOutlived && status == 'T') {
+                            statementOutlived = false;
+                            failOutlivedStatement();
+                            continue;
+                        }
+                        statementOutlived = false;
+                        if (started) {
+                            transactionStatus(status);
+                        }
                     }
                     default -> {
                     }
                 }
-                PostgresWire.write(out, message);
-                if (backendIn.available() == 0) {
-                    out.flush();
+                synchronized (clientWrites) {
+                    PostgresWire.write(out, message);
+                    if (backendIn.available() == 0) {
+                        out.flush();
+                    }
                 }
             }
         } catch (IOException ignored) {
@@ -434,14 +608,23 @@ final class DsqlSession {
     }
 
     /**
-     * An error or notice as DSQL words it (measured on AWS). An error carries no source location,
-     * PostgreSQL's own included, while a notice keeps its location. The context keeps what the
-     * client's SQL ran and drops what Floci's {@code sys} functions ran, as DSQL's context never
-     * shows its own: the context lists the innermost call first, so everything up to the last
+     * An error or notice as DSQL words it (measured on AWS). An optimistic concurrency conflict is
+     * DSQL's OC000. An error carries no source location, PostgreSQL's own included, while a notice
+     * keeps its location. The context keeps what the client's SQL ran, such as the statement a
+     * foreign key's cascade ran, and drops what Floci's {@code sys} functions ran, as DSQL's context
+     * never shows its own: the context lists the innermost call first, so everything up to the last
      * line of a {@code sys} function, the statements it ran included, is theirs.
      */
     static byte[] inDsqlWords(byte type, byte[] body) {
         Map<Character, String> fields = PostgresWire.parseFields(body, 0);
+        if (type == 'E' && SERIALIZATION_FAILURE.equals(fields.get('C'))) {
+            Map<Character, String> conflict = new LinkedHashMap<>();
+            conflict.put('S', fields.getOrDefault('S', "ERROR"));
+            conflict.put('V', fields.getOrDefault('V', "ERROR"));
+            conflict.put('C', SERIALIZATION_FAILURE);
+            conflict.put('M', "change conflicts with another transaction (OC000)");
+            return PostgresWire.fields(conflict);
+        }
         boolean changed = false;
         String where = fields.get('W');
         if (where != null) {

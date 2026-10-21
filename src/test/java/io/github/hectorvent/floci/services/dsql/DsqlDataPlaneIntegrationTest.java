@@ -40,6 +40,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -176,6 +178,8 @@ class DsqlDataPlaneIntegrationTest {
             assertEquals("28000", unmapped.getSQLState());
 
             statement.execute("AWS IAM GRANT app_role TO '" + ROLE_ARN + "'");
+            statement.execute("CREATE TABLE owned_by_admin (id int PRIMARY KEY, n int)");
+            statement.executeQuery("CREATE INDEX ASYNC owned_by_admin_n ON owned_by_admin (n)").close();
             try (Connection app = connect("app_role", token("DbConnect", accessKeyId, secret, Instant.now(), 900,
                          sessionToken));
                  Statement query = app.createStatement()) {
@@ -184,6 +188,9 @@ class DsqlDataPlaneIntegrationTest {
                     assertEquals("app_role", row.getString(1));
                     assertEquals(ROLE_ARN, row.getString(2));
                 }
+                PSQLException notOwner = assertThrows(PSQLException.class, () -> query.executeQuery(
+                        "SELECT sys._invalidate_index('public.owned_by_admin_n'::regclass)").close());
+                assertEquals("42501", notOwner.getSQLState());
             }
 
             statement.execute("AWS IAM GRANT app_role TO '" + ROLE_ARN + "'");
@@ -318,9 +325,11 @@ class DsqlDataPlaneIntegrationTest {
             assertEquals(List.of("ERROR 42P05"), client.untilReady());
             assertEquals(List.of("SELECT 1"), client.untilReady());
 
-            client.send(close("s1"), parse("s1", grant), bind("s1"), execute(), parse("s2", revoke), bind("s2"),
-                    execute(), sync(), query("SELECT 3"));
-            assertEquals(List.of("AWS IAM GRANT", "AWS IAM REVOKE"), client.untilReady());
+            // Each grant is DDL, of which DSQL runs one per transaction, so each has a Sync of its own.
+            client.send(close("s1"), parse("s1", grant), bind("s1"), execute(), sync(), parse("s2", revoke),
+                    bind("s2"), execute(), sync(), query("SELECT 3"));
+            assertEquals(List.of("AWS IAM GRANT"), client.untilReady());
+            assertEquals(List.of("AWS IAM REVOKE"), client.untilReady());
             assertEquals(List.of("SELECT 1"), client.untilReady());
         }
         try (Connection admin = connect("admin", adminToken()); Statement statement = admin.createStatement()) {
@@ -386,6 +395,170 @@ class DsqlDataPlaneIntegrationTest {
             assertTrue(row.next());
             assertEquals("first", row.getString(1));
             assertEquals("arn:aws:iam::" + ACCOUNT + ":root", row.getString(2));
+        }
+    }
+
+    @Test
+    void theDatabaseSpeaksDsqlsDialect() throws Exception {
+        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA dialect");
+            statement.execute("CREATE TABLE dialect.t (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), n int)");
+
+            String jobId;
+            try (ResultSet job = statement.executeQuery("CREATE INDEX ASYNC t_n ON dialect.t (n)")) {
+                assertTrue(job.next());
+                jobId = job.getString("job_id");
+            }
+            assertEquals(26, jobId.length());
+            try (ResultSet waited = statement.executeQuery("CALL sys.wait_for_job('" + jobId + "')")) {
+                assertTrue(waited.next());
+                assertTrue(waited.getBoolean(1));
+            }
+
+            SQLException plainIndex = assertThrows(SQLException.class, () ->
+                    statement.execute("CREATE INDEX t_plain ON dialect.t (n)"));
+            assertEquals("0A000", plainIndex.getSQLState());
+            assertEquals("unsupported mode. please use CREATE INDEX ASYNC.",
+                    ((PSQLException) plainIndex).getServerErrorMessage().getMessage());
+            assertEquals(null, ((PSQLException) plainIndex).getServerErrorMessage().getWhere());
+
+            SQLException truncate = assertThrows(SQLException.class, () -> statement.execute("TRUNCATE dialect.t"));
+            assertEquals("0A000", truncate.getSQLState());
+            assertEquals("unsupported statement: Truncate",
+                    ((PSQLException) truncate).getServerErrorMessage().getMessage());
+
+            connection.setAutoCommit(false);
+            statement.execute("CREATE TABLE dialect.a (id int PRIMARY KEY)");
+            SQLException twoDdl = assertThrows(SQLException.class, () ->
+                    statement.execute("CREATE TABLE dialect.b (id int PRIMARY KEY)"));
+            assertEquals("multiple ddl statements not supported in a transaction",
+                    ((PSQLException) twoDdl).getServerErrorMessage().getMessage());
+            connection.rollback();
+
+            SQLException rowLimit = assertThrows(SQLException.class, () ->
+                    statement.execute("INSERT INTO dialect.t (n) SELECT g FROM generate_series(1, 3001) g"));
+            assertEquals("54000", rowLimit.getSQLState());
+            assertEquals("transaction row limit exceeded",
+                    ((PSQLException) rowLimit).getServerErrorMessage().getMessage());
+            connection.rollback();
+        }
+    }
+
+    /**
+     * The limits hold whatever a client does to its own table or to its session's settings: DSQL
+     * has neither the triggers nor the settings Floci keeps them with.
+     */
+    @Test
+    void theLimitsHoldWhateverTheClientChanges() throws Exception {
+        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE guarded (id int PRIMARY KEY)");
+            statement.execute("ALTER TABLE guarded DISABLE TRIGGER USER");
+            statement.execute("ALTER TABLE guarded DISABLE TRIGGER ALL");
+            PSQLException dropped = assertThrows(PSQLException.class, () ->
+                    statement.execute("DROP TRIGGER dsql_rows_inserted ON guarded"));
+            assertEquals("42704", dropped.getSQLState());
+            assertEquals("trigger \"dsql_rows_inserted\" for table \"guarded\" does not exist",
+                    dropped.getServerErrorMessage().getMessage());
+            assertEquals(null, dropped.getServerErrorMessage().getWhere());
+
+            statement.execute("SELECT set_config(chr(100) || 'sql.async_index', 'on', false)");
+            PSQLException plainIndex = assertThrows(PSQLException.class, () ->
+                    statement.execute("CREATE INDEX guarded_plain ON guarded (id)"));
+            assertEquals("unsupported mode. please use CREATE INDEX ASYNC.",
+                    plainIndex.getServerErrorMessage().getMessage());
+
+            connection.setAutoCommit(false);
+            statement.execute("SELECT set_config(chr(100) || 'sql.row_count', '-100000', true)");
+            PSQLException rowLimit = assertThrows(PSQLException.class, () ->
+                    statement.execute("INSERT INTO guarded SELECT g FROM generate_series(1, 3001) g"));
+            assertEquals("54000", rowLimit.getSQLState());
+            connection.rollback();
+            statement.execute("SELECT set_config(chr(100) || 'sql.internal', 'on', true)");
+            PSQLException trigger = assertThrows(PSQLException.class, () -> statement.execute(
+                    "CREATE TRIGGER mine AFTER INSERT ON guarded FOR EACH STATEMENT EXECUTE FUNCTION sys._count_dml()"));
+            assertEquals("CREATE TRIGGER not supported", trigger.getServerErrorMessage().getMessage());
+            connection.rollback();
+        }
+    }
+
+    @Test
+    void anUnnamedUniqueIndexOverDuplicatesFailsItsJob() throws Exception {
+        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE dupes (id int PRIMARY KEY, n int)");
+            statement.execute("INSERT INTO dupes VALUES (1, 7), (2, 7)");
+            String jobId;
+            try (ResultSet job = statement.executeQuery("CREATE UNIQUE INDEX ASYNC ON dupes (n)")) {
+                assertTrue(job.next());
+                jobId = job.getString("job_id");
+            }
+            try (ResultSet job = statement.executeQuery(
+                    "SELECT status, details, object_name FROM sys.jobs WHERE job_id = '" + jobId + "'")) {
+                assertTrue(job.next());
+                assertEquals("failed", job.getString(1));
+                assertEquals("found duplicate key(s) while validating index uniqueness", job.getString(2));
+                assertEquals("public.dupes_n_idx", job.getString(3));
+            }
+
+            PSQLException cache = assertThrows(PSQLException.class, () ->
+                    statement.execute("CREATE SEQUENCE huge CACHE 99999999999999999999"));
+            assertEquals("22003", cache.getSQLState());
+            assertEquals("value \"99999999999999999999\" is out of range for type bigint",
+                    cache.getServerErrorMessage().getMessage());
+        }
+    }
+
+    @Test
+    void aForeignKeyIsEnforcedAndItsCascadeCountsTowardTheRowLimit() throws Exception {
+        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE fk_parent (id int PRIMARY KEY)");
+            statement.execute("CREATE TABLE fk_child (id int PRIMARY KEY,"
+                    + " parent_id int REFERENCES fk_parent (id) ON DELETE CASCADE)");
+
+            PSQLException orphan = assertThrows(PSQLException.class, () ->
+                    statement.execute("INSERT INTO fk_child VALUES (1, 999)"));
+            assertEquals("23503", orphan.getSQLState());
+            assertEquals(null, orphan.getServerErrorMessage().getFile());
+
+            statement.execute("INSERT INTO fk_parent VALUES (1)");
+            statement.execute("INSERT INTO fk_child SELECT g, 1 FROM generate_series(1, 1500) g");
+            statement.execute("INSERT INTO fk_child SELECT g, 1 FROM generate_series(1501, 3000) g");
+            PSQLException tooMany = assertThrows(PSQLException.class, () ->
+                    statement.execute("DELETE FROM fk_parent WHERE id = 1"));
+
+            assertEquals("54000", tooMany.getSQLState());
+            assertEquals("transaction row limit exceeded", tooMany.getServerErrorMessage().getMessage());
+            assertEquals(null, tooMany.getServerErrorMessage().getWhere());
+            assertEquals(null, tooMany.getServerErrorMessage().getFile());
+        }
+    }
+
+    @Test
+    void aWriteConflictIsDsqlsOc000() throws Exception {
+        try (Connection setup = connect("admin", adminToken()); Statement statement = setup.createStatement()) {
+            statement.execute("CREATE TABLE conflict (id int PRIMARY KEY, n int)");
+            statement.execute("INSERT INTO conflict VALUES (1, 0)");
+        }
+        try (Connection first = connect("admin", adminToken()); Connection second = connect("admin", adminToken())) {
+            first.setAutoCommit(false);
+            second.setAutoCommit(false);
+            try (Statement firstStatement = first.createStatement(); Statement secondStatement = second.createStatement()) {
+                secondStatement.executeQuery("SELECT n FROM conflict WHERE id = 1").close();
+                firstStatement.executeUpdate("UPDATE conflict SET n = 1 WHERE id = 1");
+                CompletableFuture<SQLException> blocked = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        secondStatement.executeUpdate("UPDATE conflict SET n = 2 WHERE id = 1");
+                        return null;
+                    } catch (SQLException e) {
+                        return e;
+                    }
+                });
+                first.commit();
+                SQLException conflict = blocked.get(30, TimeUnit.SECONDS);
+                assertEquals("40001", conflict.getSQLState());
+                assertEquals("change conflicts with another transaction (OC000)",
+                        ((PSQLException) conflict).getServerErrorMessage().getMessage());
+                second.rollback();
+            }
         }
     }
 

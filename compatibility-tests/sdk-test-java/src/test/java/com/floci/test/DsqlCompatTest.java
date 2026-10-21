@@ -143,7 +143,7 @@ class DsqlCompatTest {
 
     @Test
     @Order(4)
-    void adminSignsInWithTheSdksToken() throws Exception {
+    void adminSignsInWithTheSdksTokenAndTheDatabaseSpeaksDsql() throws Exception {
         String token = dsql.utilities().generateDbConnectAdminAuthToken(b -> b.hostname(endpoint).region(REGION));
 
         try (Connection connection = connect("admin", token); Statement statement = connection.createStatement()) {
@@ -152,12 +152,19 @@ class DsqlCompatTest {
                 assertThat(row.getString(1)).isEqualTo("admin");
                 assertThat(row.getString(2)).isEqualTo("repeatable read");
             }
-            statement.execute("CREATE TABLE compat_orders (id int PRIMARY KEY, n int)");
-            statement.execute("INSERT INTO compat_orders VALUES (1, 7)");
-            try (ResultSet row = statement.executeQuery("SELECT n FROM compat_orders WHERE id = 1")) {
-                assertThat(row.next()).isTrue();
-                assertThat(row.getInt(1)).isEqualTo(7);
+            statement.execute("CREATE TABLE compat_orders (id uuid PRIMARY KEY, n int)");
+            String jobId;
+            try (ResultSet job = statement.executeQuery("CREATE INDEX ASYNC compat_orders_n ON compat_orders (n)")) {
+                assertThat(job.next()).isTrue();
+                jobId = job.getString("job_id");
             }
+            try (ResultSet waited = statement.executeQuery("CALL sys.wait_for_job('" + jobId + "')")) {
+                assertThat(waited.next()).isTrue();
+                assertThat(waited.getBoolean(1)).isTrue();
+            }
+            assertThatThrownBy(() -> statement.execute("TRUNCATE compat_orders"))
+                    .isInstanceOf(SQLException.class)
+                    .hasMessageContaining("unsupported statement: Truncate");
         }
     }
 

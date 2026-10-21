@@ -5,8 +5,8 @@
 **Endpoint:** `http://localhost:4566` (control plane), `<cluster-id>.dsql.<region>.localhost.floci.io:5432` (clusters)
 
 Floci runs each Aurora DSQL cluster as a real PostgreSQL 16 database in a Docker container, behind one
-endpoint that admits clients the way DSQL does: TLS and an IAM token as the password. The answers,
-messages and SQLSTATEs below were measured on AWS.
+endpoint that admits clients the way DSQL does: TLS, an IAM token as the password, and DSQL's
+dialect and limits. The answers, messages and SQLSTATEs below were measured on AWS.
 
 ## Supported Actions
 
@@ -83,37 +83,59 @@ When Floci runs in Docker, publish `5432` alongside `4566`.
 ## SQL
 
 The database is PostgreSQL 16 at `REPEATABLE READ`, as DSQL's is, with the role `admin`, which owns
-the `public` schema and can create roles and databases. A connection closes after an hour, as DSQL
-closes it.
+the `public` schema and can create roles and databases, and DSQL's dialect installed in it:
 
+- `CREATE [UNIQUE] INDEX ASYNC` answers a `job_id`; `sys.jobs` and `sys.wait_for_job` report the
+  job. A unique index over duplicate keys fails its job with `found duplicate key(s) while validating
+  index uniqueness` and stays, invalid, as on DSQL. A plain `CREATE INDEX` is refused.
 - `AWS IAM GRANT <role> TO '<arn>'` and `AWS IAM REVOKE <role> FROM '<arn>'`, for an IAM role or
   user, with `sys.iam_pg_role_mappings`. A superuser role cannot be mapped, only a role holding the
   `ADMIN` option on a role can map it (`admin` maps the roles it created), and a mapped role cannot
   be dropped until its mappings are revoked.
+- One DDL statement per transaction, no DDL with DML, and at most 3,000 modified rows per
+  transaction.
+- A transaction lives 300 seconds, as on DSQL. A client message after that, a `ROLLBACK` included,
+  ends it with `54000` `transaction age limit of 300s exceeded` and closes the connection with
+  `08P01`. An idle transaction is ended the same way, unasked, 15 seconds after its limit. A
+  statement still running at the limit completes, then fails with the same `54000` and returns no
+  rows, and the connection stays. A failed transaction left idle as long is closed with `25P03`.
+  A connection closes after an hour.
+- Refused with DSQL's SQLSTATE and message: temporary and partitioned tables, triggers, `CREATE
+  TYPE`, PL/pgSQL functions and `DO`, extensions, array columns, `jsonb` and `bytea` keys,
+  `TRUNCATE`, `LISTEN`/`NOTIFY`, `VACUUM`, sequences without a `CACHE` of 1 or at least 65536,
+  `ALTER TABLE ... ADD COLUMN` with a constraint or default, `ADD CONSTRAINT`, `FOR SHARE` and `FOR
+  NO KEY UPDATE`, advisory locks, and isolation levels other than repeatable read.
+- Foreign keys work as on DSQL: declared in `CREATE TABLE`, enforced, with their `ON DELETE` and
+  `ON UPDATE` actions and `DEFERRABLE`; rows a cascade changes count toward the 3,000-row limit.
+  Adding one with `ALTER TABLE` is refused, as DSQL refuses it.
 - `sys.iam_session_user()` answers the connection's IAM principal and `sys.current_session_id()`
-  its session id, as on DSQL.
+  its session id; `sys.dsql_major_version()`, `sys.cluster_size()` and `sys.cluster_size_limit()`
+  answer as on DSQL.
 - `dsql` is a reserved prefix, as on DSQL: `SET`, `RESET`, `set_config`, `ALTER ROLE ... SET` and a
   function's `SET` clause of a `dsql.` parameter fail with `42602` and `"dsql" is a reserved
   prefix.`, and `SHOW` of one with `42704`. `set_config` of another dotted parameter is `0A000`, though
   `SET` of one works.
-- Errors carry no source location, as DSQL's carry none, and no line of Floci's `sys` functions in
-  their context; notices keep their location.
+- Errors carry no source location, as DSQL's carry none, and nothing Floci's `sys` functions ran
+  in their context; notices keep their location. A write conflict is DSQL's `40001` `change
+  conflicts with another transaction (OC000)`.
 
 ### Differences from AWS
 
-- The rest of DSQL's SQL dialect is not applied yet: `CREATE INDEX ASYNC` and its jobs are refused
-  as PostgreSQL refuses them, what DSQL refuses works, and DSQL's transaction limits (one DDL
-  statement, 3,000 rows, 300 seconds) do not apply.
-- `sys` also holds the tables behind Floci's IAM mappings.
-- Floci checks the statements a client sends, not what a `DO` block or a function body runs. In
-  one, `SET`, `RESET` and `set_config` of a `dsql.` parameter set it where DSQL refuses it, since
-  only a PostgreSQL extension written in C can reserve a prefix, and so does `set_config` of a name
-  built at run time, as in `set_config(chr(100) || 'sql.x', ...)`. Nothing Floci reads lives in such
-  a parameter. Likewise a `DROP ROLE` in one drops a mapped role: `sys.iam_pg_role_mappings` no
+- DSQL is optimistic: conflicting transactions both run and the second to commit fails. Floci's
+  database is PostgreSQL, so a write that conflicts waits for the other transaction and fails when
+  it commits, with DSQL's error.
+- `sys` also holds the tables behind Floci's jobs, IAM mappings, session identities and
+  transaction counts, and each table has the three `dsql_rows_*` triggers that count its writes.
+  Disabling them changes nothing, and dropping one is refused as for a trigger that does not exist.
+- Floci checks the statements a client sends, not what a SQL function's body runs. In one, `SET`,
+  `RESET` and `set_config` of a `dsql.` parameter set it where DSQL refuses it, since only a
+  PostgreSQL extension written in C can reserve a prefix, and so does `set_config` of a name built
+  at run time, as in `set_config(chr(100) || 'sql.x', ...)`. Nothing Floci reads lives in such a
+  parameter. Likewise a `DROP ROLE` in one drops a mapped role: `sys.iam_pg_role_mappings` no
   longer lists its mappings, and the next `AWS IAM GRANT` or `REVOKE` removes them.
-- DSQL is optimistic: conflicting transactions both run and the second to commit fails with
-  `40001`. Floci's database is PostgreSQL, so a write that conflicts waits for the other
-  transaction, then fails with PostgreSQL's `40001`.
+- DSQL's primary key covers every column of its table, and its definition reads `PRIMARY KEY (id)
+  INCLUDE (...)`; Floci's reads `PRIMARY KEY (id)`.
+- A statement Floci refuses carries no position (`LINE 1: ...` in psql), where DSQL gives one.
 - DSQL accepts connections while a cluster is still `CREATING`; Floci's cluster is `CREATING` only
   while its database starts, and serves once its database answers.
 
