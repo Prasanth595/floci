@@ -76,6 +76,8 @@ import org.mockito.MockMakers;
 import org.mockito.MockedStatic;
 
 import java.io.StringReader;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
@@ -94,10 +96,12 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
@@ -116,6 +120,7 @@ import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.TRUNCAT
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -4565,6 +4570,84 @@ class Ec2ServiceTest {
         AwsException error = assertThrows(AwsException.class, () -> service.importKeyPair(
                 "us-east-1", "shared-key-name", Ec2KeyMaterial.generateRsa().openSshPublicKey()));
         assertEquals("InvalidKeyPair.Duplicate", error.getErrorCode());
+    }
+
+    /**
+     * A second CreateKeyPair or ImportKeyPair for a name, arriving after the first has found the name
+     * free but before its key pair is stored, is refused as a duplicate. The store holds the first
+     * request's write until the second has finished or waits on a lock the first holds, which forces
+     * that interleaving on every run.
+     */
+    @ParameterizedTest
+    @CsvSource({"create, create", "import, import", "create, import", "import, create"})
+    void secondRequestForAKeyPairNameBeingStoredIsRefused(String first, String second) throws Exception {
+        CountDownLatch firstStoring = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        AtomicBoolean holdNextPut = new AtomicBoolean(true);
+        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<KeyPair>(
+                new InMemoryStorage<>(), null, "000000000000") {
+            @Override
+            public void put(String key, KeyPair value) {
+                if (holdNextPut.compareAndSet(true, false)) {
+                    firstStoring.countDown();
+                    try {
+                        assertTrue(releaseFirst.await(30, TimeUnit.SECONDS), "the first write was never released");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(e);
+                    }
+                }
+                super.put(key, value);
+            }
+        };
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+        String publicKey = Ec2KeyMaterial.generateRsa().openSshPublicKey();
+        Function<String, KeyPair> request = action -> "create".equals(action)
+                ? service.createKeyPair("us-east-1", "contested")
+                : service.importKeyPair("us-east-1", "contested", publicKey);
+        AtomicReference<Thread> firstWorker = new AtomicReference<>();
+        AtomicReference<Thread> secondWorker = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<KeyPair> firstResult = workers.submit(() -> {
+                firstWorker.set(Thread.currentThread());
+                return request.apply(first);
+            });
+            assertTrue(firstStoring.await(10, TimeUnit.SECONDS), "the first request never stored its key pair");
+            Future<KeyPair> secondResult = workers.submit(() -> {
+                secondWorker.set(Thread.currentThread());
+                return request.apply(second);
+            });
+            Awaitility.await().atMost(Duration.ofSeconds(30)).until(() -> secondResult.isDone()
+                    || isBlockedOnMonitorOf(secondWorker.get(), firstWorker.get()));
+            releaseFirst.countDown();
+
+            KeyPair stored = firstResult.get(30, TimeUnit.SECONDS);
+            ExecutionException refusal = assertThrows(ExecutionException.class,
+                    () -> secondResult.get(30, TimeUnit.SECONDS), "both requests got the name");
+            AwsException duplicate = assertInstanceOf(AwsException.class, refusal.getCause());
+            assertEquals("InvalidKeyPair.Duplicate", duplicate.getErrorCode());
+            assertEquals("The keypair 'contested' already exists", duplicate.getMessage());
+            assertEquals(400, duplicate.getHttpStatus());
+            assertEquals(List.of(stored.getKeyPairId()), service.describeKeyPairs("us-east-1", List.of(), List.of())
+                    .stream().map(KeyPair::getKeyPairId).toList());
+        } finally {
+            releaseFirst.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    private static boolean isBlockedOnMonitorOf(Thread waiter, Thread owner) {
+        if (waiter == null) {
+            return false;
+        }
+        ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(waiter.threadId());
+        return info != null && info.getThreadState() == Thread.State.BLOCKED
+                && info.getLockOwnerId() == owner.threadId();
     }
 
     @Test
