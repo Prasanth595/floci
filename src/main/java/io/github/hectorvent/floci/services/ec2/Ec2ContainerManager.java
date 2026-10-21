@@ -528,10 +528,10 @@ public class Ec2ContainerManager {
                     return;
                 }
 
-                // Set public-facing addresses only for instances whose subnet
-                // opts in via MapPublicIpOnLaunch (#1984). Private-subnet
-                // instances have no public IP/DNS, matching real EC2.
-                if (instance.isAssociatePublicIp()) {
+                // Set public-facing addresses only for instances due one, by the rule mock instances
+                // follow too, or holding an Elastic IP their interface carries, which RunInstances
+                // recorded. Private-subnet instances have no public IP/DNS, matching real EC2.
+                if (instance.getPublicIpAddress() != null || AutomaticPublicAddress.isDue(instance, false)) {
                     exposeReachablePublicAddress(instance);
                 }
 
@@ -988,8 +988,10 @@ public class Ec2ContainerManager {
                                 config.services().ec2().awsFaithfulPrivateIp());
                     }
                     // Docker hands out a new bridge IP on restart, so the previously reported
-                    // public address can now point at another container entirely.
-                    if (instance.isAssociatePublicIp() || instance.getPublicIpAddress() != null) {
+                    // public address can now point at another container entirely. An address the
+                    // stop left in place is an Elastic IP's; a released automatic one is replaced
+                    // only when the shared rule allows it.
+                    if (instance.getPublicIpAddress() != null || AutomaticPublicAddress.isDue(instance, true)) {
                         exposeReachablePublicAddress(instance);
                     }
                     metadataServer.registerContainer(containerIp, instanceId, instance);
@@ -1124,7 +1126,7 @@ public class Ec2ContainerManager {
         }
         instance.setContainerBridgeIp(containerIp);
         exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
-        if (instance.isAssociatePublicIp() || instance.getPublicIpAddress() != null) {
+        if (instance.getPublicIpAddress() != null || AutomaticPublicAddress.isDue(instance, true)) {
             exposeReachablePublicAddress(instance);
         }
         metadataServer.registerContainer(containerIp, instance.getInstanceId(), instance);
@@ -1598,6 +1600,9 @@ public class Ec2ContainerManager {
      */
     static String[] sshdInstallProbeCommand() {
         return new String[]{"sh", "-c",
+            // dnf and yum are Python programs: an image's PYTHONHOME or LD_LIBRARY_PATH made them
+            // fail to start, so sshd was never installed.
+            Ec2MetadataProxy.CLEAR_APPLICATION_PATHS + ";" +
             "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then" +
                     "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;" +
                     // yum is probed after dnf, and the order is load-bearing: Amazon Linux

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
+import io.github.hectorvent.floci.services.ecr.model.RegistrySettings;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
@@ -28,6 +29,11 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -903,6 +909,23 @@ class EcrServiceTest {
     }
 
     @Test
+    void putImage_retagKeepsTheFirstPushTime() {
+        InMemoryStorage<String, ImageMetadata> metaStore = new InMemoryStorage<>();
+        EcrService withMeta = new EcrService(new InMemoryStorage<>(), metaStore, pullThroughCacheRuleStore,
+                registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        when(registryManager.httpClient()).thenReturn(Mockito.mock(RegistryHttpClient.class));
+        withMeta.createRepository(REPO, null, null, null, null, null, null, REGION);
+        String manifest = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.docker.distribution.manifest.v2+json\"}";
+
+        withMeta.putImage(REPO, manifest, null, "v1", null, null, REGION);
+        Instant firstPush = metaStore.scan(k -> true).get(0).getPushedAt();
+        withMeta.putImage(REPO, manifest, null, "release", null, null, REGION);
+
+        assertEquals(1, metaStore.scan(k -> true).size());
+        assertEquals(firstPush, metaStore.scan(k -> true).get(0).getPushedAt());
+    }
+
+    @Test
     void putImageTagMutability_roundTrips() {
         service.createRepository(REPO, null, null, null, null, null, null, REGION);
         Repository updated = service.putImageTagMutability(REPO, null, "IMMUTABLE", REGION);
@@ -1311,4 +1334,135 @@ class EcrServiceTest {
         }
     }
 
+    // ------------------------------------------------------------
+    // Registry settings
+    // ------------------------------------------------------------
+
+    private static final String REGISTRY_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+
+    private static RegistrySettings.ReplicationRule replicateTo(String region, String registryId, String prefix) {
+        return new RegistrySettings.ReplicationRule(
+                List.of(new RegistrySettings.ReplicationDestination(region, registryId)),
+                prefix == null ? null : List.of(new RegistrySettings.RepositoryFilter(prefix, "PREFIX_MATCH")));
+    }
+
+    private static RegistrySettings.ScanningRule scan(String frequency, String filter) {
+        return new RegistrySettings.ScanningRule(frequency,
+                List.of(new RegistrySettings.RepositoryFilter(filter, "WILDCARD")));
+    }
+
+    private static void assertInvalid(Runnable call) {
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class, call::run).getErrorCode());
+    }
+
+    @Test
+    void registryPolicy_roundTripsAndIsNotFoundOnceDeleted() {
+        AwsException missing = assertThrows(AwsException.class, () -> service.getRegistryPolicy(REGION));
+        assertEquals("RegistryPolicyNotFoundException", missing.getErrorCode());
+
+        service.putRegistryPolicy(REGISTRY_POLICY, REGION);
+        assertEquals(REGISTRY_POLICY, service.getRegistryPolicy(REGION));
+        assertEquals(REGISTRY_POLICY, service.deleteRegistryPolicy(REGION));
+
+        assertEquals("RegistryPolicyNotFoundException",
+                assertThrows(AwsException.class, () -> service.getRegistryPolicy(REGION)).getErrorCode());
+        assertEquals("RegistryPolicyNotFoundException",
+                assertThrows(AwsException.class, () -> service.deleteRegistryPolicy(REGION)).getErrorCode());
+    }
+
+    @Test
+    void registryPolicy_mustBeAJsonObject() {
+        assertInvalid(() -> service.putRegistryPolicy("not json", REGION));
+        assertInvalid(() -> service.putRegistryPolicy("[]", REGION));
+        assertInvalid(() -> service.putRegistryPolicy("", REGION));
+    }
+
+    @Test
+    void replication_roundTripsAndAnEmptyListClearsIt() {
+        assertTrue(service.replicationRules(REGION).isEmpty());
+
+        List<RegistrySettings.ReplicationRule> rules = List.of(
+                replicateTo("us-west-2", ACCOUNT, "prod"),
+                replicateTo("eu-west-1", "111111111111", null));
+        assertEquals(rules, service.putReplicationConfiguration(rules, REGION));
+        assertEquals(rules, service.replicationRules(REGION));
+
+        assertTrue(service.putReplicationConfiguration(List.of(), REGION).isEmpty());
+        assertTrue(service.replicationRules(REGION).isEmpty());
+    }
+
+    @Test
+    void scanning_defaultsToBasicAndRoundTrips() {
+        RegistrySettings initial = service.registryScanningConfiguration(REGION);
+        assertEquals("BASIC", initial.getScanType());
+        assertTrue(initial.getScanningRules().isEmpty());
+
+        List<RegistrySettings.ScanningRule> rules = List.of(scan("CONTINUOUS_SCAN", "prod-*"), scan("SCAN_ON_PUSH", "*"));
+        RegistrySettings saved = service.putRegistryScanningConfiguration("ENHANCED", rules, REGION);
+        assertEquals("ENHANCED", saved.getScanType());
+        assertEquals(rules, service.registryScanningConfiguration(REGION).getScanningRules());
+    }
+
+    @Test
+    void scanning_refusesContinuousScanWithBasic() {
+        assertInvalid(() -> service.putRegistryScanningConfiguration(
+                "BASIC", List.of(scan("CONTINUOUS_SCAN", "*")), REGION));
+        assertInvalid(() -> service.putRegistryScanningConfiguration(
+                null, List.of(scan("CONTINUOUS_SCAN", "*")), REGION));
+        assertDoesNotThrow(() -> service.putRegistryScanningConfiguration(
+                "ENHANCED", List.of(scan("CONTINUOUS_SCAN", "*")), REGION));
+    }
+
+    @Test
+    void registrySettings_areKeptPerAccountAndRegion() {
+        InMemoryStorage<String, RegistrySettings> store = new InMemoryStorage<>();
+        EcrService first = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                store, registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        EcrService other = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                store, registryManager, Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, "111111111111"));
+
+        first.putRegistryPolicy(REGISTRY_POLICY, REGION);
+        assertEquals(REGISTRY_POLICY, first.getRegistryPolicy(REGION));
+        assertThrows(AwsException.class, () -> first.getRegistryPolicy("us-west-2"));
+        assertThrows(AwsException.class, () -> other.getRegistryPolicy(REGION));
+        assertEquals("111111111111", other.registryId());
+    }
+
+    /**
+     * Terraform puts the policy, replication and scanning configuration in parallel. Each round
+     * starts the three puts together on a registry with no settings yet, and all three must stay.
+     */
+    @Test
+    void registrySettings_parallelPutsAllSurvive() throws Exception {
+        EcrService parallel = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), registryManager, Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, ACCOUNT));
+        List<RegistrySettings.ReplicationRule> rules = List.of(replicateTo("eu-west-1", ACCOUNT, null));
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            for (int round = 0; round < 300; round++) {
+                String region = "round-" + round;
+                CyclicBarrier start = new CyclicBarrier(3);
+                List<Runnable> puts = List.of(
+                        () -> parallel.putRegistryPolicy(REGISTRY_POLICY, region),
+                        () -> parallel.putReplicationConfiguration(rules, region),
+                        () -> parallel.putRegistryScanningConfiguration("ENHANCED", List.of(), region));
+                CompletableFuture.allOf(puts.stream().map(put -> CompletableFuture.runAsync(() -> {
+                    try {
+                        start.await(5, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                    put.run();
+                }, pool)).toArray(CompletableFuture[]::new)).get(10, TimeUnit.SECONDS);
+
+                assertEquals(REGISTRY_POLICY, parallel.getRegistryPolicy(region), region);
+                assertEquals(rules, parallel.replicationRules(region), region);
+                assertEquals("ENHANCED", parallel.registryScanningConfiguration(region).getScanType(), region);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
 }

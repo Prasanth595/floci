@@ -473,4 +473,33 @@ class S3VirtualHostIntegrationTest {
         .then()
             .statusCode(404);
     }
+
+    @Test
+    @Order(91)
+    void keyWithPercentSignIsStoredLiterally() {
+        String percentBucket = "vhost-percent-key";
+        String percentHost = percentBucket + ".localhost";
+        given().header("Host", percentHost).when().put("/").then().statusCode(200);
+
+        for (String wirePath : new String[] {"/a%25/b", "/archive/" + percentBucket + "/a%25b"}) {
+            given()
+                .urlEncodingEnabled(false)
+                .header("Host", percentHost)
+                .contentType("text/plain")
+                .body("x")
+            .when()
+                .put(wirePath)
+            .then()
+                .statusCode(200);
+        }
+
+        given()
+            .header("Host", percentHost)
+            .queryParam("list-type", "2")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200)
+            .body("ListBucketResult.Contents.Key", containsInAnyOrder("a%/b", "archive/" + percentBucket + "/a%b"));
+    }
 }

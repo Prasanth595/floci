@@ -1,12 +1,13 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -37,7 +38,7 @@ class CloudFormationParameterValuesIntegrationTest {
     void createStackRefusesAParameterWithNoValueAndNoDefault() {
         String stackName = "cfn-param-missing-" + Long.toString(System.nanoTime(), 36);
 
-        request("CreateStack", stackName)
+        cfn("CreateStack", stackName)
             .formParam("TemplateBody", BLANK_ENV_TEMPLATE)
         .when()
             .post("/")
@@ -54,7 +55,7 @@ class CloudFormationParameterValuesIntegrationTest {
     void everyParameterWithoutAValueIsNamed() {
         String stackName = "cfn-param-several-" + Long.toString(System.nanoTime(), 36);
 
-        request("CreateStack", stackName)
+        cfn("CreateStack", stackName)
             .formParam("TemplateBody", """
                     {
                       "Parameters": {
@@ -85,7 +86,7 @@ class CloudFormationParameterValuesIntegrationTest {
     void aMissingValueIsReportedBeforeADependencyCycle() {
         String stackName = "cfn-param-cycle-" + Long.toString(System.nanoTime(), 36);
 
-        request("CreateStack", stackName)
+        cfn("CreateStack", stackName)
             .formParam("TemplateBody", """
                     {
                       "Parameters": {"Env": {"Type": "String"}},
@@ -110,7 +111,7 @@ class CloudFormationParameterValuesIntegrationTest {
         String stackName = "cfn-param-empty-" + Long.toString(System.nanoTime(), 36);
         String queueName = "param-empty-" + Long.toString(System.nanoTime(), 36);
 
-        request("CreateStack", stackName)
+        cfn("CreateStack", stackName)
             .formParam("TemplateBody", """
                     {
                       "Parameters": {
@@ -141,7 +142,7 @@ class CloudFormationParameterValuesIntegrationTest {
     void createChangeSetRefusesAParameterWithNoValue() {
         String stackName = "cfn-param-changeset-" + Long.toString(System.nanoTime(), 36);
 
-        request("CreateChangeSet", stackName)
+        cfn("CreateChangeSet", stackName)
             .formParam("ChangeSetName", "deploy")
             .formParam("ChangeSetType", "CREATE")
             .formParam("TemplateBody", BLANK_ENV_TEMPLATE)
@@ -163,7 +164,7 @@ class CloudFormationParameterValuesIntegrationTest {
     void samTemplateWithoutAValueIsRefusedBeforeTheTransform() {
         String stackName = "cfn-param-sam-" + Long.toString(System.nanoTime(), 36);
 
-        request("CreateChangeSet", stackName)
+        cfn("CreateChangeSet", stackName)
             .formParam("ChangeSetName", "deploy")
             .formParam("ChangeSetType", "CREATE")
             .formParam("TemplateBody", """
@@ -200,7 +201,7 @@ class CloudFormationParameterValuesIntegrationTest {
                     "Properties": {"QueueName": {"Fn::Sub": "%s-${Env}"}, "VisibilityTimeout": %d}}}
                 }
                 """;
-        request("CreateStack", stackName)
+        cfn("CreateStack", stackName)
             .formParam("TemplateBody", template.formatted(queueName, 30))
             .formParam("Parameters.member.1.ParameterKey", "Env")
             .formParam("Parameters.member.1.ParameterValue", "dev")
@@ -211,21 +212,21 @@ class CloudFormationParameterValuesIntegrationTest {
         try {
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
-            request("UpdateStack", stackName)
+            cfn("UpdateStack", stackName)
                 .formParam("TemplateBody", template.formatted(queueName, 60))
             .when()
                 .post("/")
             .then()
                 .statusCode(400)
                 .body("ErrorResponse.Error.Message", equalTo("Parameters: [Env] must have values"));
-            request("UpdateStack", stackName)
+            cfn("UpdateStack", stackName)
                 .formParam("UsePreviousTemplate", "true")
             .when()
                 .post("/")
             .then()
                 .statusCode(400)
                 .body("ErrorResponse.Error.Message", equalTo("Parameters: [Env] must have values"));
-            request("CreateChangeSet", stackName)
+            cfn("CreateChangeSet", stackName)
                 .formParam("ChangeSetName", "omits-env")
                 .formParam("ChangeSetType", "UPDATE")
                 .formParam("TemplateBody", template.formatted(queueName, 60))
@@ -239,7 +240,7 @@ class CloudFormationParameterValuesIntegrationTest {
                 .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
                 .body(containsString("<ParameterValue>dev</ParameterValue>"));
 
-            request("CreateChangeSet", stackName)
+            cfn("CreateChangeSet", stackName)
                 .formParam("ChangeSetName", "keeps-env")
                 .formParam("ChangeSetType", "UPDATE")
                 .formParam("TemplateBody", template.formatted(queueName, 45))
@@ -250,7 +251,7 @@ class CloudFormationParameterValuesIntegrationTest {
             .then()
                 .statusCode(200);
 
-            request("UpdateStack", stackName)
+            cfn("UpdateStack", stackName)
                 .formParam("TemplateBody", template.formatted(queueName, 60))
                 .formParam("Parameters.member.1.ParameterKey", "Env")
                 .formParam("Parameters.member.1.UsePreviousValue", "true")
@@ -279,7 +280,7 @@ class CloudFormationParameterValuesIntegrationTest {
         String stackName = "cfn-param-previous-" + suffix;
         String queueName = "param-previous-" + suffix;
 
-        request("CreateStack", stackName)
+        cfn("CreateStack", stackName)
             .formParam("TemplateBody", BLANK_ENV_TEMPLATE)
             .formParam("Parameters.member.1.ParameterKey", "Env")
             .formParam("Parameters.member.1.UsePreviousValue", "true")
@@ -289,7 +290,7 @@ class CloudFormationParameterValuesIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Message", equalTo("Parameters: [Env] must have values"));
 
-        request("CreateStack", stackName)
+        cfn("CreateStack", stackName)
             .formParam("TemplateBody", """
                     {"Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "%s"}}}}
                     """.formatted(queueName))
@@ -306,7 +307,7 @@ class CloudFormationParameterValuesIntegrationTest {
                         "Properties": {"QueueName": "%s", "Tags": [{"Key": "added", "Value": {"Ref": "Added"}}]}}}
                     }
                     """;
-            request("UpdateStack", stackName)
+            cfn("UpdateStack", stackName)
                 .formParam("TemplateBody", added.formatted("", queueName))
                 .formParam("Parameters.member.1.ParameterKey", "Added")
                 .formParam("Parameters.member.1.UsePreviousValue", "true")
@@ -316,7 +317,7 @@ class CloudFormationParameterValuesIntegrationTest {
                 .statusCode(400)
                 .body("ErrorResponse.Error.Message", equalTo("Parameters: [Added] must have values"));
 
-            request("UpdateStack", stackName)
+            cfn("UpdateStack", stackName)
                 .formParam("TemplateBody", added.formatted(", \"Default\": \"fallback\"", queueName))
                 .formParam("Parameters.member.1.ParameterKey", "Added")
                 .formParam("Parameters.member.1.UsePreviousValue", "true")
@@ -342,7 +343,7 @@ class CloudFormationParameterValuesIntegrationTest {
     void aRequestItsStackRefusesGetsThatRefusal() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String missing = "cfn-param-missing-stack-" + suffix;
-        request("UpdateStack", missing)
+        cfn("UpdateStack", missing)
             .formParam("TemplateBody", BLANK_ENV_TEMPLATE)
             .formParam("Parameters.member.1.ParameterKey", "Env")
             .formParam("Parameters.member.1.UsePreviousValue", "true")
@@ -353,7 +354,7 @@ class CloudFormationParameterValuesIntegrationTest {
             .body("ErrorResponse.Error.Message", equalTo("Stack with id " + missing + " does not exist"));
 
         String taken = "cfn-param-taken-" + suffix;
-        request("CreateStack", taken)
+        cfn("CreateStack", taken)
             .formParam("TemplateBody", BLANK_ENV_TEMPLATE)
             .formParam("Parameters.member.1.ParameterKey", "Env")
             .formParam("Parameters.member.1.ParameterValue", "")
@@ -363,7 +364,7 @@ class CloudFormationParameterValuesIntegrationTest {
             .statusCode(200);
         try {
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(taken).status());
-            request("CreateStack", taken)
+            cfn("CreateStack", taken)
                 .formParam("TemplateBody", BLANK_ENV_TEMPLATE)
             .when()
                 .post("/")
@@ -382,7 +383,7 @@ class CloudFormationParameterValuesIntegrationTest {
     @Test
     void aPlaceholderStackRefusesTheUpdateButNotTheAttachingCreate() {
         String stackName = "cfn-param-placeholder-" + Long.toString(System.nanoTime(), 36);
-        request("CreateChangeSet", stackName)
+        cfn("CreateChangeSet", stackName)
             .formParam("ChangeSetName", "first")
             .formParam("ChangeSetType", "CREATE")
             .formParam("TemplateBody", BLANK_ENV_TEMPLATE)
@@ -393,7 +394,7 @@ class CloudFormationParameterValuesIntegrationTest {
         .then()
             .statusCode(200);
         try {
-            request("UpdateStack", stackName)
+            cfn("UpdateStack", stackName)
                 .formParam("TemplateBody", BLANK_ENV_TEMPLATE)
             .when()
                 .post("/")
@@ -402,7 +403,7 @@ class CloudFormationParameterValuesIntegrationTest {
                 .body("ErrorResponse.Error.Message",
                         containsString("is in REVIEW_IN_PROGRESS state and can not be updated."));
 
-            request("CreateChangeSet", stackName)
+            cfn("CreateChangeSet", stackName)
                 .formParam("ChangeSetName", "second")
                 .formParam("ChangeSetType", "CREATE")
                 .formParam("TemplateBody", BLANK_ENV_TEMPLATE)
@@ -428,15 +429,16 @@ class CloudFormationParameterValuesIntegrationTest {
         String stackName = "cfn-param-nested-" + suffix;
         String templateUrl = putChildTemplate(bucket);
         try {
-            request("CreateStack", stackName)
+            cfn("CreateStack", stackName)
                 .formParam("TemplateBody", parentTemplate(templateUrl, "{}"))
             .when()
                 .post("/")
             .then()
                 .statusCode(200);
             CfnStackWaits.StackState state = CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
-            assertEquals("Parameters: [Env] must have values", state.reason());
-            request("DescribeStackEvents", stackName)
+            assertEquals("The following resource(s) failed to create: [Child]. Rollback requested by user.",
+                    state.reason());
+            cfn("DescribeStackEvents", stackName)
             .when()
                 .post("/")
             .then()
@@ -461,7 +463,7 @@ class CloudFormationParameterValuesIntegrationTest {
         String stackName = "cfn-param-nested-update-" + suffix;
         String templateUrl = putChildTemplate(bucket);
         try {
-            request("CreateStack", stackName)
+            cfn("CreateStack", stackName)
                 .formParam("TemplateBody", parentTemplate(templateUrl, "{\"Env\": \"dev\"}"))
             .when()
                 .post("/")
@@ -469,14 +471,14 @@ class CloudFormationParameterValuesIntegrationTest {
                 .statusCode(200);
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
-            request("UpdateStack", stackName)
+            cfn("UpdateStack", stackName)
                 .formParam("TemplateBody", parentTemplate(templateUrl, "{\"Size\": \"2\"}"))
             .when()
                 .post("/")
             .then()
                 .statusCode(200);
             CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
-            request("DescribeStackEvents", stackName)
+            cfn("DescribeStackEvents", stackName)
             .when()
                 .post("/")
             .then()
@@ -505,7 +507,7 @@ class CloudFormationParameterValuesIntegrationTest {
         String stackName = "cfn-param-nested-if-" + suffix;
         String templateUrl = putChildTemplate(bucket);
         try {
-            request("CreateStack", stackName)
+            cfn("CreateStack", stackName)
                 .formParam("TemplateBody", """
                         {
                           "Conditions": {"Always": {"Fn::Equals": ["a", "a"]}},
@@ -549,7 +551,7 @@ class CloudFormationParameterValuesIntegrationTest {
         given().body("{\"Type\": \"String\", \"Default\": \"dev\"}")
             .when().put("/" + bucket + "/env.json").then().statusCode(200);
         try {
-            request("CreateStack", stackName)
+            cfn("CreateStack", stackName)
                 .formParam("TemplateBody", """
                         {
                           "Parameters": {"Env": {"Fn::Transform": {"Name": "AWS::Include",
@@ -565,7 +567,7 @@ class CloudFormationParameterValuesIntegrationTest {
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             getQueueUrl(queueName + "-dev").then().statusCode(200);
 
-            request("CreateStack", stackName + "-other")
+            cfn("CreateStack", stackName + "-other")
                 .formParam("TemplateBody", """
                         {
                           "Parameters": {"Other": {"Type": "String"}, "Env": {"Fn::Transform": {"Name": "AWS::Include",
@@ -621,19 +623,12 @@ class CloudFormationParameterValuesIntegrationTest {
                 """.formatted(templateUrl, parameters);
     }
 
-    private static RequestSpecification request(String action, String stackName) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", action)
-            .formParam("StackName", stackName);
-    }
-
     private static Response describeStacks(String stackName) {
-        return request("DescribeStacks", stackName).when().post("/");
+        return cfn("DescribeStacks", stackName).when().post("/");
     }
 
     private static void deleteStack(String stackName) {
-        request("DeleteStack", stackName).when().post("/").then().statusCode(200);
+        cfn("DeleteStack", stackName).when().post("/").then().statusCode(200);
     }
 
     private static Response getQueueUrl(String queueName) {

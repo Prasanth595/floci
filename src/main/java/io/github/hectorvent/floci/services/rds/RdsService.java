@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
+import io.github.hectorvent.floci.services.rds.export.SnapshotExportSource;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
@@ -47,6 +48,7 @@ import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
+import io.github.hectorvent.floci.services.rds.model.DbProxyEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
@@ -60,6 +62,7 @@ import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.model.PointInTimeRestoreRequest;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
 import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
+import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyBinding;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
@@ -180,6 +183,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private StorageBackend<String, RdsEvent> events = new InMemoryStorage<>();
     private final StorageBackend<String, EventSubscription> eventSubscriptions;
     private final StorageBackend<String, DbClusterEndpoint> clusterEndpoints;
+    private final StorageBackend<String, DbProxyEndpoint> proxyEndpoints;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     // CreateDBCluster/CreateDBInstance register the new resource only after the
@@ -255,6 +259,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 new TypeReference<Map<String, EventSubscription>>() {});
         this.clusterEndpoints = storageFactory.create("rds", "rds-cluster-endpoints.json",
                 new TypeReference<Map<String, DbClusterEndpoint>>() {});
+        this.proxyEndpoints = storageFactory.create("rds", "rds-proxy-endpoints.json",
+                new TypeReference<Map<String, DbProxyEndpoint>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
                 new TypeReference<Map<String, DbCluster>>() {});
         this.parameterGroups = storageFactory.create("rds", "rds-parameter-groups.json",
@@ -417,6 +423,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.snapshotData = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
         this.eventSubscriptions = new InMemoryStorage<>();
         this.clusterEndpoints = new InMemoryStorage<>();
+        this.proxyEndpoints = new InMemoryStorage<>();
     }
 
     public void restorePersistedRuntime() {
@@ -729,6 +736,11 @@ public class RdsService implements Resettable, ResourceProvider {
         // resolved with the other validations, before a port is taken or a container started
         DbInstanceSettings resolvedSettings = withEffectiveWindows(settings, null)
                 .withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
+        if (isBlank(dbClusterIdentifier) && !isAuroraEngine(engineParam)) {
+            resolvedSettings.validateStorageType();
+        } else {
+            resolvedSettings = resolvedSettings.withStorageType(null);
+        }
         DbInstanceSettings.validateMonitoringPairOnCreate(
                 settings.monitoringInterval(), settings.monitoringRoleArn());
         boolean mock = config.services().rds().mock();
@@ -954,6 +966,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 instance.getMasterUsername(), instance.getMasterPassword(), instance.getAvailabilityZone(), instance.getVpcId(),
                 instance.getCreatedAt(), instance.getEndpoint() != null ? instance.getEndpoint().port() : instance.getProxyPort(),
                 instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId(), instance.getDbInstanceClass());
+        snapshot.setStorageType(instance.getStorageType());
         snapshot.setDbName(instance.getDbName());
         snapshot.setSnapshotType("manual");
         snapshot.setOptionGroupName(instance.getOptionGroupName());
@@ -1104,6 +1117,7 @@ public class RdsService implements Resettable, ResourceProvider {
         copy.setEngine(source.getEngine());
         copy.setEngineVersion(source.getEngineVersion());
         copy.setAllocatedStorage(source.getAllocatedStorage());
+        copy.setStorageType(source.getStorageType());
         copy.setStatus(source.getStatus());
         copy.setMasterUsername(source.getMasterUsername());
         copy.setMasterPassword(source.getMasterPassword());
@@ -1213,6 +1227,15 @@ public class RdsService implements Resettable, ResourceProvider {
                                                        List<String> vpcSecurityGroupIds,
                                                        Map<String, String> tags, String region,
                                                        Integer requestedPort, Boolean iamEnabled) {
+        return restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone,
+                multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags, region, requestedPort, iamEnabled, null);
+    }
+
+    public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass,
+                                                       String availabilityZone, boolean multiAz, String dbSubnetGroupName,
+                                                       List<String> vpcSecurityGroupIds,
+                                                       Map<String, String> tags, String region,
+                                                       Integer requestedPort, Boolean iamEnabled, String storageType) {
         String effectiveRegion = effectiveRegion(region);
         DbSnapshot snapshot = Optional.ofNullable(findSnapshotForScope(currentAccountId(), effectiveRegion, snapshotId))
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
@@ -1226,7 +1249,8 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         // Use the parameters from the snapshot
         DbInstanceSettings restoreSettings = new DbInstanceSettings(
-                snapshot.isStorageEncrypted(), snapshot.getKmsKeyId(), null, null, null, null);
+                snapshot.isStorageEncrypted(), snapshot.getKmsKeyId(), null, null, null, null)
+                .withStorageType(storageType != null ? storageType : snapshot.getStorageType());
         DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 snapshot.getDbName(), targetClass, snapshot.getAllocatedStorage(), Boolean.TRUE.equals(iamEnabled),
@@ -1327,7 +1351,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 source.isStorageEncrypted() ? Boolean.TRUE : null,
                 source.isStorageEncrypted() ? source.getKmsKeyId() : null,
                 request.backupRetentionPeriod(), request.preferredBackupWindow(), null,
-                request.copyTagsToSnapshot());
+                request.copyTagsToSnapshot()).withStorageType(
+                        request.storageType() != null ? request.storageType() : source.getStorageType());
         DbInstance instance = createDbInstance(targetId, engineParam, source.getEngineVersion(),
                 source.getMasterUsername(), source.getMasterPassword(), dbName,
                 firstNonBlank(request.dbInstanceClass(), source.getDbInstanceClass()),
@@ -1534,7 +1559,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 source.isStorageEncrypted() ? Boolean.TRUE : null,
                 source.isStorageEncrypted() && sameRegion ? source.getKmsKeyId() : null,
                 0, source.getPreferredBackupWindow(), source.getPreferredMaintenanceWindow(),
-                copyTagsToSnapshot);
+                copyTagsToSnapshot).withStorageType(
+                        request.storageType() != null ? request.storageType() : source.getStorageType());
         Map<String, String> tags = request.tags() != null ? request.tags() : Map.of();
 
         DbInstance replica = createDbInstance(id, engineParam, source.getEngineVersion(),
@@ -2265,6 +2291,69 @@ public class RdsService implements Resettable, ResourceProvider {
         return resource.substring("cluster-snapshot:".length());
     }
 
+    /**
+     * The DB snapshot or DB cluster snapshot {@code sourceArn} names, as an export task reads it.
+     * Floci keeps PostgreSQL data in its snapshots, so a snapshot of any other engine cannot be
+     * exported, and an ARN naming a live cluster rather than a snapshot is refused.
+     */
+    public SnapshotExportSource snapshotExportSource(String sourceArn, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(sourceArn);
+        } catch (IllegalArgumentException malformed) {
+            throw new AwsException("InvalidParameterValue", "Invalid SourceArn: " + sourceArn, 400);
+        }
+        String resource = arn.resource();
+        boolean clusterSnapshot = resource.startsWith("cluster-snapshot:");
+        if (!"rds".equals(arn.service()) || !(clusterSnapshot || resource.startsWith("snapshot:"))) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceArn must name a DB snapshot or a DB cluster snapshot: " + sourceArn, 400);
+        }
+        boolean ours = AwsRegions.partitionFor(effectiveRegion).equals(arn.partition())
+                && effectiveRegion.equals(arn.region()) && accountId.equals(arn.accountId());
+        String snapshotId = resource.substring(resource.indexOf(':') + 1);
+        if (clusterSnapshot) {
+            if (!ours) {
+                throw new AwsException("DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshot " + snapshotId + " not found.", 404);
+            }
+            DbClusterSnapshot snapshot = requireClusterSnapshot(accountId, effectiveRegion, snapshotId);
+            requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
+            String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, snapshotId))
+                    .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
+                            "DB cluster snapshot data for " + snapshotId + " not found.", 404));
+            return new SnapshotExportSource(snapshot.getDbClusterSnapshotArn(),
+                    imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
+                    snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                    snapshot.getSnapshotCreateTime(), sqlDump);
+        }
+        DbSnapshot snapshot = ours ? findSnapshotForScope(accountId, effectiveRegion, snapshotId) : null;
+        if (snapshot == null) {
+            throw new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404);
+        }
+        requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
+        String sqlDump = getSnapshotDataForScope(accountId, effectiveRegion, snapshotId)
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot data for " + snapshotId + " not found.", 404));
+        return new SnapshotExportSource(snapshot.getDbSnapshotArn(),
+                imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
+                snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                snapshot.getSnapshotCreateTime(), sqlDump);
+    }
+
+    private static void requireExportable(String status, DatabaseEngine engine, String sourceArn) {
+        if (!"available".equals(status)) {
+            throw new AwsException("InvalidExportSourceState",
+                    "The snapshot " + sourceArn + " is not available for export.", 400);
+        }
+        if (engine != DatabaseEngine.POSTGRES) {
+            throw new AwsException("InvalidExportSourceState",
+                    "Floci exports PostgreSQL snapshots only: " + sourceArn, 400);
+        }
+    }
+
     /** Cluster snapshot dumps share the snapshot data store with instance snapshots under their own prefix. */
     private String clusterSnapshotDataKey(String region, String snapshotId) {
         return dbResourceKey(region, "cluster-snapshot:" + snapshotId);
@@ -2439,6 +2528,16 @@ public class RdsService implements Resettable, ResourceProvider {
                 yield new TagHandle(subscription.getTags(), updated -> {
                     subscription.setTags(updated);
                     eventSubscriptions.put(eventSubscriptionKey(effectiveRegion, resourceId), subscription);
+                });
+            }
+            case "db-proxy-endpoint" -> {
+                DbProxyEndpoint endpoint = proxyEndpoints.scan(k -> k.startsWith(effectiveRegion + "::")).stream()
+                        .filter(candidate -> resourceName.equals(candidate.getDbProxyEndpointArn()))
+                        .findFirst()
+                        .orElseThrow(() -> proxyEndpointNotFound(resourceId));
+                yield new TagHandle(endpoint.getTags(), updated -> {
+                    endpoint.setTags(updated);
+                    proxyEndpoints.put(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()), endpoint);
                 });
             }
             case "db-proxy" -> {
@@ -2872,7 +2971,11 @@ public class RdsService implements Resettable, ResourceProvider {
                 List.of("availability"), Instant.now(), instance.getDbInstanceArn()));
     }
 
-    public List<RdsEvent> describeEvents(String sourceIdentifier, String sourceType,
+    /**
+     * The events of {@code region}: an event belongs to the region its source ARN names. An event
+     * recorded without a source ARN stays visible everywhere, as before.
+     */
+    public List<RdsEvent> describeEvents(String region, String sourceIdentifier, String sourceType,
                                          Instant startTime, Instant endTime, Integer durationMinutes) {
         Instant now = Instant.now();
         pruneExpiredEvents(now);
@@ -2880,6 +2983,8 @@ public class RdsService implements Resettable, ResourceProvider {
         Instant effectiveStart = startTime != null ? startTime
                 : effectiveEnd.minusSeconds((durationMinutes != null ? durationMinutes : 60) * 60L);
         return events.scan(_ -> true).stream()
+                .filter(event -> region == null || event.sourceArn() == null
+                        || region.equals(AwsArnUtils.regionOrDefault(event.sourceArn(), region)))
                 .filter(event -> sourceIdentifier == null || sourceIdentifier.equals(event.sourceIdentifier()))
                 .filter(event -> sourceType == null || sourceType.equals(event.sourceType()))
                 .filter(event -> !event.date().isBefore(effectiveStart) && !event.date().isAfter(effectiveEnd))
@@ -3010,6 +3115,12 @@ public class RdsService implements Resettable, ResourceProvider {
         // current size and engine version: a refusal here must leave the whole request unapplied.
         DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
+        if (isBlank(instance.getDbClusterIdentifier()) && !isAuroraEngine(engineName(instance))) {
+            effective.validateStorageType();
+        } else {
+            effective = effective.withStorageType(null);
+        }
+        validateAutoscalingMinimum(instance, effective.maxAllocatedStorage());
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (optionGroupName != null && !optionGroupName.isBlank()) {
             validateInstanceOptionGroup(optionGroupName,
@@ -3080,6 +3191,22 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private static void validateInstanceSettings(DbInstanceSettings settings) {
         settings.validate();
+    }
+
+    private static void validateAutoscalingMinimum(DbInstance instance, Integer maximum) {
+        String clusterId = instance.getDbClusterIdentifier();
+        String engine = engineName(instance);
+        int allocated = instance.getAllocatedStorage();
+        if (maximum == null || allocated <= 0 || maximum == allocated
+                || clusterId != null && !clusterId.isBlank()
+                || isAuroraEngine(engine)
+                || engine != null && engine.toLowerCase(Locale.ROOT).startsWith("custom-")) {
+            return;
+        }
+        if ((long) maximum * 10 < (long) allocated * 11) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Invalid max storage size for " + (engine == null ? null : engine.toLowerCase(Locale.ROOT)), 400);
+        }
     }
 
     /**
@@ -3301,7 +3428,8 @@ public class RdsService implements Resettable, ResourceProvider {
         List<SizeRange> sizes = smallestIncrease <= maximum
                 ? List.of(new SizeRange(current, current), new SizeRange(smallestIncrease, maximum))
                 : List.of(new SizeRange(current, current));
-        return List.of(new StorageModification(DbInstance.DEFAULT_STORAGE_TYPE, sizes));
+        return List.of(new StorageModification("gp2", sizes), new StorageModification("gp3", sizes),
+                new StorageModification("io1", sizes), new StorageModification("io2", sizes));
     }
 
     // ── Stop, start and reboot ────────────────────────────────────────────────
@@ -4584,12 +4712,9 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private void publishZeroCapacity(String accountId, String region, Dimension dimension, Instant at) {
         for (String metricName : List.of("ServerlessDatabaseCapacity", "ACUUtilization", "CPUUtilization")) {
-            MetricDatum datum = new MetricDatum();
-            datum.setMetricName(metricName);
-            datum.setUnit("ServerlessDatabaseCapacity".equals(metricName) ? "Count" : "Percent");
-            datum.setDimensions(List.of(dimension));
-            datum.setTimestamp(at.getEpochSecond());
-            datum.setValue(0.0);
+            MetricDatum datum = MetricDatum.of(metricName,
+                    "ServerlessDatabaseCapacity".equals(metricName) ? "Count" : "Percent", 0.0, List.of(dimension),
+                    at.getEpochSecond());
             metricsService.publishMetricForAccount(accountId, "AWS/RDS", datum, region,
                     "rds-auto-pause:" + dimension.name() + "=" + dimension.value() + ":" + metricName + ":" + at);
         }
@@ -5866,7 +5991,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                 : validateDbPasswordForScope(
                                         proxyAccountId, targetRegion, targetId, user, pw),
                         proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
-                                targetRegion, proxyAccountId, proxy.getDbProxyResourceId()));
+                                targetRegion, proxyAccountId, proxy.getDbProxyResourceId()),
+                        RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY);
             }
             putTargetGroupForAccount(proxyAccountId, proxyKey, updatedTargetGroup);
             if (updatedProxy != null) {
@@ -6199,6 +6325,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 .or(() -> legacyTargetGroup
                         .filter(candidate -> targetGroupMatchesProxy(candidate, proxy)))
                 .orElse(null);
+        List<DbProxyEndpoint> endpoints = proxyEndpointsOf(effectiveRegion, name);
         boolean realMode = !config.services().rds().mock();
         if (realMode) {
             try {
@@ -6209,6 +6336,10 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         }
         try {
+            // A proxy's endpoints go with it.
+            for (DbProxyEndpoint endpoint : endpoints) {
+                proxyEndpoints.delete(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()));
+            }
             deleteTargetGroupKey(accountId, proxyKey);
             if (legacyTargetGroup.isPresent()) {
                 deleteTargetGroupKey(accountId, name);
@@ -6218,6 +6349,10 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             deleteProxyKey(accountId, proxyKey);
         } catch (RuntimeException deleteFailure) {
+            for (DbProxyEndpoint endpoint : endpoints) {
+                attemptRollback(deleteFailure, () -> proxyEndpoints.put(
+                        proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()), endpoint));
+            }
             attemptRollback(deleteFailure,
                     () -> putProxyForAccount(accountId, proxyKey, proxy));
             canonicalTargetGroup.ifPresent(targetGroup -> attemptRollback(deleteFailure,
@@ -6231,6 +6366,216 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         releaseProxyPort(proxy.getProxyPort());
         LOG.infov("DB proxy {0} deleted", name);
+    }
+
+    // ── DB Proxy endpoints ────────────────────────────────────────────────────
+
+    /** AWS's limit on the endpoints a caller adds to one proxy, besides its default endpoint. */
+    private static final int MAX_ENDPOINTS_PER_PROXY = 20;
+    private static final String DEFAULT_PROXY_ENDPOINT_NAME = "default";
+    private static final Set<String> PROXY_ENDPOINT_TARGET_ROLES = Set.of("READ_WRITE", "READ_ONLY");
+    private static final Set<String> PROXY_ENDPOINT_NETWORK_TYPES = Set.of("IPV4", "IPV6", "DUAL");
+
+    public record ProxyEndpointPage(List<DbProxyEndpoint> endpoints, String marker) {}
+
+    /**
+     * Adds an endpoint to a proxy. It reports the proxy's own host, so a client reaches the proxy's
+     * listener through it, and an IAM token signed for that host verifies there.
+     */
+    public synchronized DbProxyEndpoint createDbProxyEndpoint(String region, String dbProxyName, String endpointName,
+                                                              List<String> vpcSubnetIds,
+                                                              List<String> vpcSecurityGroupIds, String targetRole,
+                                                              String endpointNetworkType, Map<String, String> tags) {
+        String effectiveRegion = effectiveRegion(region);
+        requireParameter(dbProxyName, "DBProxyName");
+        String name = requireProxyEndpointName(endpointName, "DBProxyEndpointName");
+        if (vpcSubnetIds == null || vpcSubnetIds.isEmpty()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter VpcSubnetIds.", 400);
+        }
+        DbProxy proxy = getDbProxy(dbProxyName, effectiveRegion);
+        String role = isBlank(targetRole) ? "READ_WRITE" : targetRole;
+        if (!PROXY_ENDPOINT_TARGET_ROLES.contains(role)) {
+            throw new AwsException("InvalidParameterValue", "TargetRole must be READ_WRITE or READ_ONLY.", 400);
+        }
+        if ("READ_ONLY".equals(role) && "SQLSERVER".equalsIgnoreCase(proxy.getEngineFamily())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "A DB proxy for RDS for SQL Server supports only the READ_WRITE target role.", 400);
+        }
+        String networkType = isBlank(endpointNetworkType) ? "IPV4" : endpointNetworkType;
+        if (!PROXY_ENDPOINT_NETWORK_TYPES.contains(networkType)) {
+            throw new AwsException("InvalidParameterValue", "EndpointNetworkType must be IPV4, IPV6, or DUAL.", 400);
+        }
+        if (!"available".equals(proxy.getStatus())) {
+            throw new AwsException("InvalidDBProxyStateFault",
+                    "DB proxy " + proxy.getDbProxyName() + " is not available.", 400);
+        }
+        String key = proxyEndpointKey(effectiveRegion, name);
+        if (DEFAULT_PROXY_ENDPOINT_NAME.equals(name) || proxyEndpoints.get(key).isPresent()) {
+            throw new AwsException("DBProxyEndpointAlreadyExistsFault",
+                    "DB proxy endpoint " + name + " already exists.", 400);
+        }
+        if (proxyEndpointsOf(effectiveRegion, proxy.getDbProxyName()).size() >= MAX_ENDPOINTS_PER_PROXY) {
+            throw new AwsException("DBProxyEndpointQuotaExceededFault",
+                    "DB proxy " + proxy.getDbProxyName() + " already has " + MAX_ENDPOINTS_PER_PROXY
+                            + " endpoints.", 400);
+        }
+        String vpcId = resolveDbProxyVpc(vpcSubnetIds, effectiveRegion);
+        if (!"IPV4".equals(networkType)) {
+            validateVpcHasIpv6CidrBlock(vpcId, effectiveRegion);
+            validateSubnetsHaveIpv6CidrBlock(vpcSubnetIds, effectiveRegion);
+        }
+
+        DbProxyEndpoint endpoint = new DbProxyEndpoint();
+        endpoint.setDbProxyEndpointName(name);
+        endpoint.setDbProxyEndpointArn(regionResolver.buildArn("rds", effectiveRegion,
+                "db-proxy-endpoint:prx-endpoint-" + randomResourceSuffix()));
+        endpoint.setDbProxyName(proxy.getDbProxyName());
+        endpoint.setStatus("available");
+        endpoint.setVpcId(vpcId);
+        endpoint.setVpcSubnetIds(vpcSubnetIds);
+        endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()
+                ? defaultSecurityGroupOf(vpcId, effectiveRegion) : vpcSecurityGroupIds);
+        endpoint.setCreatedDate(Instant.now());
+        endpoint.setTargetRole(role);
+        endpoint.setEndpointNetworkType(networkType);
+        endpoint.setTags(tags);
+        proxyEndpoints.put(key, endpoint);
+        return withProxyHost(endpoint, proxy);
+    }
+
+    /**
+     * Each proxy in scope's default endpoint, then the endpoints added to it by name, narrowed by
+     * the request's proxy and endpoint names.
+     */
+    public synchronized ProxyEndpointPage describeDbProxyEndpoints(String region, String dbProxyName,
+                                                                   String endpointName, Integer maxRecords,
+                                                                   String marker) {
+        String effectiveRegion = effectiveRegion(region);
+        requireValidMaxRecords(maxRecords);
+        List<DbProxy> scope = !isBlank(dbProxyName)
+                ? List.of(getDbProxy(dbProxyName, effectiveRegion))
+                : listDbProxies(null, effectiveRegion).stream()
+                        .sorted(Comparator.comparing(DbProxy::getDbProxyName))
+                        .toList();
+        List<DbProxyEndpoint> all = new ArrayList<>();
+        for (DbProxy proxy : scope) {
+            all.add(defaultProxyEndpoint(proxy));
+            proxyEndpointsOf(effectiveRegion, proxy.getDbProxyName()).stream()
+                    .sorted(Comparator.comparing(DbProxyEndpoint::getDbProxyEndpointName))
+                    .map(endpoint -> withProxyHost(endpoint, proxy))
+                    .forEach(all::add);
+        }
+        List<DbProxyEndpoint> matching = all.stream()
+                .filter(e -> isBlank(endpointName) || endpointName.equals(e.getDbProxyEndpointName()))
+                .toList();
+        if (!isBlank(endpointName) && matching.isEmpty()) {
+            throw proxyEndpointNotFound(endpointName);
+        }
+        OffsetPage<DbProxyEndpoint> page = offsetPage(matching, maxRecords, marker);
+        return new ProxyEndpointPage(page.items(), page.marker());
+    }
+
+    /** Renames an endpoint or replaces its security groups; a proxy's default endpoint cannot change. */
+    public synchronized DbProxyEndpoint modifyDbProxyEndpoint(String region, String endpointName, String newName,
+                                                              List<String> vpcSecurityGroupIds) {
+        String effectiveRegion = effectiveRegion(region);
+        DbProxyEndpoint endpoint = requireProxyEndpoint(effectiveRegion, endpointName);
+        DbProxy proxy = getDbProxy(endpoint.getDbProxyName(), effectiveRegion);
+        if (!"available".equals(proxy.getStatus())) {
+            throw new AwsException("InvalidDBProxyStateFault",
+                    "DB proxy " + proxy.getDbProxyName() + " is not available.", 400);
+        }
+        String name = isBlank(newName) ? endpoint.getDbProxyEndpointName()
+                : requireProxyEndpointName(newName, "NewDBProxyEndpointName");
+        boolean renamed = !name.equals(endpoint.getDbProxyEndpointName());
+        if (renamed && (DEFAULT_PROXY_ENDPOINT_NAME.equals(name)
+                || proxyEndpoints.get(proxyEndpointKey(effectiveRegion, name)).isPresent())) {
+            throw new AwsException("DBProxyEndpointAlreadyExistsFault",
+                    "DB proxy endpoint " + name + " already exists.", 400);
+        }
+        String oldKey = proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName());
+        endpoint.setDbProxyEndpointName(name);
+        if (vpcSecurityGroupIds != null) {
+            endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        }
+        proxyEndpoints.put(proxyEndpointKey(effectiveRegion, name), endpoint);
+        if (renamed) {
+            proxyEndpoints.delete(oldKey);
+        }
+        return withProxyHost(endpoint, proxy);
+    }
+
+    /** Deletes an endpoint; the response reports it as {@code deleting}. */
+    public synchronized DbProxyEndpoint deleteDbProxyEndpoint(String region, String endpointName) {
+        String effectiveRegion = effectiveRegion(region);
+        DbProxyEndpoint endpoint = requireProxyEndpoint(effectiveRegion, endpointName);
+        proxyEndpoints.delete(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()));
+        endpoint.setStatus("deleting");
+        return withProxyHost(endpoint, getDbProxy(endpoint.getDbProxyName(), effectiveRegion));
+    }
+
+    /** A stored endpoint by name; the default endpoint is in a state no change can be made in. */
+    private DbProxyEndpoint requireProxyEndpoint(String region, String endpointName) {
+        String name = requireProxyEndpointName(endpointName, "DBProxyEndpointName");
+        if (DEFAULT_PROXY_ENDPOINT_NAME.equals(name)) {
+            throw new AwsException("InvalidDBProxyEndpointStateFault",
+                    "The default endpoint of a DB proxy cannot be modified or deleted.", 400);
+        }
+        return proxyEndpoints.get(proxyEndpointKey(region, name)).orElseThrow(() -> proxyEndpointNotFound(name));
+    }
+
+    private static String requireProxyEndpointName(String name, String parameter) {
+        requireParameter(name, parameter);
+        if (name.length() > 63 || !DB_PROXY_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterValue", parameter + " must be 1-63 characters, begin with a "
+                    + "letter, and contain only letters, digits, and single hyphens.", 400);
+        }
+        return name;
+    }
+
+    /** Reports the proxy's current host, which a restore can change after the endpoint was created. */
+    private static DbProxyEndpoint withProxyHost(DbProxyEndpoint endpoint, DbProxy proxy) {
+        endpoint.setEndpoint(proxy.getEndpoint());
+        return endpoint;
+    }
+
+    private static AwsException proxyEndpointNotFound(String name) {
+        return new AwsException("DBProxyEndpointNotFoundFault", "DB proxy endpoint " + name + " not found.", 404);
+    }
+
+    /** The endpoint RDS gives every proxy: read/write, in the proxy's VPC, at the proxy's host. */
+    private static DbProxyEndpoint defaultProxyEndpoint(DbProxy proxy) {
+        DbProxyEndpoint endpoint = new DbProxyEndpoint();
+        endpoint.setDbProxyEndpointName(DEFAULT_PROXY_ENDPOINT_NAME);
+        endpoint.setDbProxyName(proxy.getDbProxyName());
+        endpoint.setStatus(proxy.getStatus());
+        endpoint.setVpcId(proxy.getVpcId());
+        endpoint.setVpcSubnetIds(proxy.getVpcSubnetIds());
+        endpoint.setVpcSecurityGroupIds(proxy.getVpcSecurityGroupIds());
+        endpoint.setEndpoint(proxy.getEndpoint());
+        endpoint.setCreatedDate(proxy.getCreatedAt());
+        endpoint.setTargetRole("READ_WRITE");
+        endpoint.setDefault(true);
+        endpoint.setEndpointNetworkType(proxy.getEndpointNetworkType());
+        return endpoint;
+    }
+
+    private List<String> defaultSecurityGroupOf(String vpcId, String region) {
+        return ec2Service.getSecurityGroupsForVpc(region, vpcId, Map.of()).stream()
+                .filter(group -> "default".equals(group.getGroupName()))
+                .map(group -> group.getGroupId())
+                .toList();
+    }
+
+    private List<DbProxyEndpoint> proxyEndpointsOf(String region, String dbProxyName) {
+        String prefix = effectiveRegion(region) + "::";
+        return proxyEndpoints.scan(key -> key.startsWith(prefix)).stream()
+                .filter(endpoint -> dbProxyName.equals(endpoint.getDbProxyName()))
+                .toList();
+    }
+
+    private String proxyEndpointKey(String region, String endpointName) {
+        return effectiveRegion(region) + "::" + endpointName;
     }
 
     // ── DB Subnet Groups ──────────────────────────────────────────────────────
@@ -7910,7 +8255,8 @@ public class RdsService implements Resettable, ResourceProvider {
                         : validateDbPasswordForScope(
                                 accountId, proxyRegion, targetId, user, password),
                 proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
-                        proxyRegion, accountId, proxy.getDbProxyResourceId()));
+                        proxyRegion, accountId, proxy.getDbProxyResourceId()),
+                RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY);
     }
 
     private DbProxyTargetGroup copyProxyTargetGroup(DbProxyTargetGroup source) {
@@ -9550,9 +9896,12 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (NumberFormatException e) {
                 throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
             }
+            if (from < 0) {
+                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
+            }
         }
         int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
-        int start = Math.min(Math.max(from, 0), matching.size());
+        int start = Math.min(from, matching.size());
         int to = Math.min(matching.size(), start + limit);
         return new OffsetPage<>(matching.subList(start, to), to < matching.size() ? Integer.toString(to) : null);
     }
@@ -9824,6 +10173,79 @@ public class RdsService implements Resettable, ResourceProvider {
             throw notFound.get();
         }
         return cluster;
+    }
+
+    // ── Log files ─────────────────────────────────────────────────────────────
+
+    /** One page of an instance's log files, plus the marker to continue from. */
+    public record LogFilePage(List<RdsLogFiles.LogFile> files, String marker) {}
+
+    /**
+     * The instance's log files, read from its database container's log and named as RDS names them.
+     * An instance without a container (mock RDS) has none.
+     */
+    public LogFilePage describeDbLogFiles(String region, String instanceId, String filenameContains,
+                                          Long fileLastWritten, Long fileSize, Integer maxRecords, String marker) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireValidMaxRecords(maxRecords);
+        if (fileLastWritten != null && fileLastWritten < 0) {
+            throw new AwsException("InvalidParameterValue", "FileLastWritten must not be negative.", 400);
+        }
+        if (fileSize != null && fileSize < 0) {
+            throw new AwsException("InvalidParameterValue", "FileSize must not be negative.", 400);
+        }
+        List<RdsLogFiles.LogFile> files = RdsLogFiles.matching(logFiles(region, instanceId),
+                filenameContains, fileLastWritten, fileSize);
+        OffsetPage<RdsLogFiles.LogFile> page = offsetPage(files, maxRecords, marker);
+        return new LogFilePage(page.items(), page.marker());
+    }
+
+    /** One block of a log file; see {@link RdsLogFiles#portion}. */
+    public RdsLogFiles.Portion downloadDbLogFilePortion(String region, String instanceId, String logFileName,
+                                                        String marker, Integer numberOfLines) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(logFileName, "LogFileName");
+        RdsLogFiles.LogFile file = logFiles(region, instanceId).stream()
+                .filter(f -> f.name().equals(logFileName))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("DBLogFileNotFoundFault",
+                        "DBLogFile " + logFileName + " not found for DB instance " + instanceId + ".", 404));
+        return RdsLogFiles.portion(file, marker, numberOfLines);
+    }
+
+    private List<RdsLogFiles.LogFile> logFiles(String region, String instanceId) {
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        if (instance.getStatus() != null && instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("DBInstanceNotReady",
+                    "DB instance " + instanceId + " is not in available state.", 400);
+        }
+        if (config.services().rds().mock()) {
+            return List.of();
+        }
+        // Container ids are not persisted, and a container can be removed outside Floci: when there is
+        // no id, or Docker no longer knows it, the backend is found or started once before giving up.
+        String containerId = instance.getContainerId();
+        List<String> raw = containerId != null ? readContainerLog(containerId) : null;
+        if (raw == null) {
+            containerId = ensureInstanceBackend(instanceId, effectiveRegion).getContainerId();
+            raw = containerId != null ? readContainerLog(containerId) : null;
+        }
+        if (raw == null) {
+            throw new AwsException("DBInstanceNotReady",
+                    "DB instance " + instanceId + " has no running database container.", 400);
+        }
+        String engine = !isBlank(instance.getEngineIdentifier()) ? instance.getEngineIdentifier()
+                : instance.getEngine() != null ? instance.getEngine().name() : null;
+        return RdsLogFiles.files(engine, RdsLogFiles.parseDockerLines(raw));
+    }
+
+    private List<String> readContainerLog(String containerId) {
+        try {
+            return containerManager.readLog(containerId);
+        } catch (IllegalStateException e) {
+            throw new AwsException("InternalFailure", e.getMessage(), 500);
+        }
     }
 
     // ── IAM role associations ─────────────────────────────────────────────────

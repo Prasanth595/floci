@@ -22,7 +22,9 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -529,6 +531,57 @@ class HttpApiRequestAuthorizerTest {
                 .header("Authorization", "Bearer my-token")
                 .when().get("/execute-api/" + httpApiId + "/test/hello")
                 .then().statusCode(200);
+    }
+
+    // ──────────────────────────── Test: The refusals carry the API's CORS headers ────────────────────────────
+
+    /**
+     * Measured on AWS (eu-west-1, 2026-10-18): once the API has a CORS configuration, a Lambda
+     * authorizer's refusals, 401 without the identity source and 403 when it denies, carry
+     * {@code Access-Control-Allow-Origin} and {@code Access-Control-Expose-Headers} for an allowed
+     * origin, and no CORS header for another.
+     */
+    @Test
+    @Order(62)
+    void refusalsCarryTheCorsHeadersOfTheApi() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"corsConfiguration":{"allowOrigins":["https://app.example.com"],"allowMethods":["GET"],
+                         "allowHeaders":["authorization"],"exposeHeaders":["x-probe"],"maxAge":300}}
+                        """)
+                .when().patch("/v2/apis/" + httpApiId)
+                .then().statusCode(200);
+        try {
+            // Route still has identitySourceAuthorizerId from the previous tests
+            given()
+                    .header("Origin", "https://app.example.com")
+                    .when().get("/execute-api/" + httpApiId + "/test/hello")
+                    .then().statusCode(401)
+                    .header("Access-Control-Allow-Origin", equalTo("https://app.example.com"))
+                    .header("Access-Control-Expose-Headers", equalTo("x-probe"));
+
+            given()
+                    .contentType(ContentType.JSON)
+                    .body("""
+                            {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                            """.formatted(simpleDenyAuthorizerId))
+                    .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                    .then().statusCode(200);
+            given()
+                    .header("Origin", "https://app.example.com")
+                    .when().get("/execute-api/" + httpApiId + "/test/hello")
+                    .then().statusCode(403)
+                    .header("Access-Control-Allow-Origin", equalTo("https://app.example.com"))
+                    .header("Access-Control-Expose-Headers", equalTo("x-probe"));
+            given()
+                    .header("Origin", "https://evil.example")
+                    .when().get("/execute-api/" + httpApiId + "/test/hello")
+                    .then().statusCode(403)
+                    .header("Access-Control-Allow-Origin", nullValue());
+        } finally {
+            given().when().delete("/v2/apis/" + httpApiId + "/cors").then().statusCode(204);
+        }
     }
 
     // ──────────────────────────── Test: Query string identity source validation ────────────────────────────

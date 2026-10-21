@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -96,7 +97,8 @@ class CloudFormationVpcEndpointIntegrationTest {
                 if (type.isEmpty()) {
                     CfnStackWaits.StackState failed = CfnStackWaits.awaitTerminal(stack, CFN_AUTH);
                     assertEquals("ROLLBACK_COMPLETE", failed.status(), failed.reason());
-                    assertTrue(failed.reason().contains("IpAddressType"), failed.reason());
+                    String failure = CfnStackWaits.failedResourceReason(stack, CFN_AUTH);
+                    assertTrue(failure.contains("IpAddressType"), failure);
                     break;
                 }
                 assertEquals("CreateStack".equals(action) ? "CREATE_COMPLETE" : "UPDATE_COMPLETE",

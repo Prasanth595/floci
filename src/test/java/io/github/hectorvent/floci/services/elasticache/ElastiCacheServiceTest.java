@@ -273,7 +273,7 @@ class ElastiCacheServiceTest {
         ElastiCacheService.CreateReplicationGroupRequest request = new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", null, null, null, null, null,
                 null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(),
-                List.of("missing-group"));
+                List.of("missing-group"), null);
 
         AwsException refused = assertThrows(AwsException.class, () -> service.createReplicationGroup(request));
 
@@ -307,7 +307,7 @@ class ElastiCacheServiceTest {
     void anEmptyUserGroupAdmitsNobody() {
         service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp", "test", AuthMode.IAM, null, "us-east-1", "valkey", null, null, null, null, null,
-                null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null));
+                null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null));
         service.createUserGroup("empty-users", "valkey", List.of(), "us-east-1");
         service.modifyReplicationGroup("grp", List.of("empty-users"), null);
 
@@ -396,7 +396,7 @@ class ElastiCacheServiceTest {
         ElastiCacheService.CreateReplicationGroupRequest request = new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", null, null, null, null, null,
                 null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(),
-                List.of("reserved"));
+                List.of("reserved"), null);
 
         assertThrows(RuntimeException.class, () -> service.createReplicationGroup(request));
 
@@ -647,14 +647,14 @@ class ElastiCacheServiceTest {
         return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
                 AuthMode.NO_AUTH, null, "us-east-1", "valkey", "8.2", "cache.t4g.micro",
                 "default.valkey8.cluster.on", null, null, numNodeGroups, replicasPerNodeGroup,
-                null, true, null, null, ReplicationGroupSettings.defaults(), Map.of(), null);
+                null, true, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null);
     }
 
     private static ElastiCacheService.CreateReplicationGroupRequest singleNodeRequest(
             String groupId, Integer port) {
         return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
                 AuthMode.NO_AUTH, null, "us-east-1", null, null, null, null, null, null,
-                null, null, null, null, null, port, ReplicationGroupSettings.defaults(), Map.of(), null);
+                null, null, null, null, null, port, ReplicationGroupSettings.defaults(), Map.of(), null, null);
     }
 
     // botocore models Port as an optional input on CreateReplicationGroup ("the port number on
@@ -744,7 +744,7 @@ class ElastiCacheServiceTest {
                 new ElastiCacheService.CreateReplicationGroupRequest("grp", "test",
                         AuthMode.NO_AUTH, null, "us-east-1", "valkey", "8.2", "cache.t4g.micro",
                         "default.valkey8.cluster.on", null, null, 2, 1,
-                        null, true, null, 16390, ReplicationGroupSettings.defaults(), Map.of(), null));
+                        null, true, null, 16390, ReplicationGroupSettings.defaults(), Map.of(), null, null));
 
         assertEquals(16390, group.getConfigurationEndpoint().port());
         assertEquals(16390, group.getClusterNodes().getFirst().getProxyPort());
@@ -1600,7 +1600,7 @@ class ElastiCacheServiceTest {
         return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
                 AuthMode.NO_AUTH, null, "us-east-1", null, null, null,
                 parameterGroupName, null, null, null, null,
-                null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null);
+                null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null);
     }
 
     @Test
@@ -1752,7 +1752,7 @@ class ElastiCacheServiceTest {
             svc.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                     "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", null, null, null, null, null,
                     null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(),
-                    List.of("shared-ug")));
+                    List.of("shared-ug"), null));
         });
         accountA.start();
         assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "create never reached container start");
@@ -2450,7 +2450,7 @@ class ElastiCacheServiceTest {
         service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 "rg-cluster", "desc", AuthMode.NO_AUTH, null, "us-east-1", null, null, null,
                 null, "rg-used-group", null, null, null, null, null, null, null,
-                ReplicationGroupSettings.defaults(), Map.of(), null));
+                ReplicationGroupSettings.defaults(), Map.of(), null, null));
 
         AwsException ex = assertThrows(AwsException.class, () -> service.deleteCacheSubnetGroup("rg-used-group"));
         assertEquals("CacheSubnetGroupInUse", ex.getErrorCode());

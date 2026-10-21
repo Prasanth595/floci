@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -83,29 +83,22 @@ final class SesExportFilters {
     }
 
     /**
-     * Rejects a filter block that is not an object and a member that is not a list of strings,
-     * rather than reading it as no filter at all and quietly returning rows the caller excluded,
-     * then holds each member to the length the model gives it.
+     * The SES v2 shape check has already rejected a filter block or member of the wrong JSON type.
+     * This rejects a {@code null} element of a member list, which that check leaves to the
+     * operation, then holds each member to the length the model gives it.
      */
     static void validate(JsonNode insights) {
         List<String> violations = new ArrayList<>();
         requireFilterBlock(insights.path("Include"), "include", violations);
         requireFilterBlock(insights.path("Exclude"), "exclude", violations);
         if (!violations.isEmpty()) {
-            String header = violations.size() == 1
-                    ? "1 validation error detected: "
-                    : violations.size() + " validation errors detected: ";
-            throw new AwsException("BadRequestException",
-                    header + String.join("; ", violations), 400);
+            throw SmithyValidationErrors.badRequest(violations);
         }
     }
 
     private static void requireFilterBlock(JsonNode filters, String path, List<String> violations) {
         if (filters.isMissingNode() || filters.isNull()) {
             return;
-        }
-        if (!filters.isObject()) {
-            throw new AwsException("SerializationException", null, 400);
         }
         for (Member member : Member.values()) {
             List<String> values = stringArrayOrAbsent(filters, member.wireName);

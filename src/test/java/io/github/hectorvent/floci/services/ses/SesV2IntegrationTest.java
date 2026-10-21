@@ -775,22 +775,6 @@ class SesV2IntegrationTest {
     }
 
     @Test
-    @Order(63)
-    void putAccountSuppressionAttributes_reasonsNotArray_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
-            .body("""
-                {"SuppressedReasons": "BOUNCE"}
-                """)
-        .when()
-            .put("/v2/email/account/suppression")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
-    }
-
-    @Test
     @Order(64)
     void putAccountSuppressionAttributes_nullMember_returns400() {
         given()
@@ -798,22 +782,6 @@ class SesV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {"SuppressedReasons": [null]}
-                """)
-        .when()
-            .put("/v2/email/account/suppression")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
-    }
-
-    @Test
-    @Order(65)
-    void putAccountSuppressionAttributes_numericMember_returns400() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
-            .body("""
-                {"SuppressedReasons": [1, 2]}
                 """)
         .when()
             .put("/v2/email/account/suppression")

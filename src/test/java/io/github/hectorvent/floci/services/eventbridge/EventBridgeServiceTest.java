@@ -1556,4 +1556,17 @@ class EventBridgeServiceTest {
         assertEquals("Parameter Source is not valid. Reason: Source is a required argument.",
                 result.entries().get(0).get("ErrorMessage"));
     }
+
+    @Test
+    void serviceEventEntryCarriesTheResourceAndAnEmptyResourcesListWithoutOne() {
+        Map<String, Object> entry = EventBridgeService.serviceEventEntry("aws.ssm", "Parameter Store Change",
+                "{\"operation\":\"Create\"}", "arn:aws:ssm:us-east-1:000000000000:parameter/a");
+
+        assertEquals(Map.of("Source", "aws.ssm", "DetailType", "Parameter Store Change",
+                "Detail", "{\"operation\":\"Create\"}",
+                "Resources", new ObjectMapper().createArrayNode().add("arn:aws:ssm:us-east-1:000000000000:parameter/a")),
+                entry);
+        assertEquals(0, ((ArrayNode) EventBridgeService.serviceEventEntry("s", "d", "{}", null).get("Resources")).size());
+        assertEquals(0, ((ArrayNode) EventBridgeService.serviceEventEntry("s", "d", "{}", " ").get("Resources")).size());
+    }
 }

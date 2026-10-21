@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.WebIdentityToken;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -57,6 +58,7 @@ public class StsQueryHandler {
     private final OidcIssuerKeyLookup oidcIssuerKeys;
     private final SAMLProviderService samlProviderService;
     private final SAMLTrustPolicyEvaluator samlTrustEvaluator;
+    private final DelegationRequestService delegationRequestService;
     private final Clock clock;
 
     /** CSPRNG for session secret keys and session tokens; ordinary IDs keep using {@link ThreadLocalRandom}. */
@@ -75,9 +77,11 @@ public class StsQueryHandler {
                            WebIdentityTokenVerifier tokenVerifier,
                            OidcIssuerKeyLookup oidcIssuerKeys,
                            SAMLProviderService samlProviderService,
-                           SAMLTrustPolicyEvaluator samlTrustEvaluator) {
+                           SAMLTrustPolicyEvaluator samlTrustEvaluator,
+                           DelegationRequestService delegationRequestService) {
         this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
-                tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, Clock.systemUTC());
+                tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, delegationRequestService,
+                Clock.systemUTC());
     }
 
     StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -87,6 +91,7 @@ public class StsQueryHandler {
                     OidcIssuerKeyLookup oidcIssuerKeys,
                     SAMLProviderService samlProviderService,
                     SAMLTrustPolicyEvaluator samlTrustEvaluator,
+                    DelegationRequestService delegationRequestService,
                     Clock clock) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
@@ -98,6 +103,7 @@ public class StsQueryHandler {
         this.oidcIssuerKeys = oidcIssuerKeys;
         this.samlProviderService = samlProviderService;
         this.samlTrustEvaluator = samlTrustEvaluator;
+        this.delegationRequestService = delegationRequestService;
         this.clock = clock;
     }
 
@@ -112,6 +118,7 @@ public class StsQueryHandler {
             case "AssumeRoleWithSAML"          -> handleAssumeRoleWithSAML(params);
             case "GetFederationToken"          -> handleGetFederationToken(params);
             case "DecodeAuthorizationMessage"  -> handleDecodeAuthorizationMessage(params);
+            case "GetDelegatedAccessToken"     -> handleGetDelegatedAccessToken(params);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported by STS.", AwsNamespaces.STS, 400);
         };
@@ -182,16 +189,20 @@ public class StsQueryHandler {
      * in the header or presigned in the query, which for an IAM user or a session is the account
      * that owns the key rather than the default one. A role session is matched as the role that
      * issued it, whose ARN keeps the path the session ARN drops. The trust policy's conditions see
-     * the request's keys: the global keys, {@code aws:PrincipalArn}, {@code sts:RoleSessionName},
-     * and {@code sts:ExternalId} when the caller sends one.
+     * the request's keys: the global keys, {@code sts:RoleSessionName}, {@code sts:ExternalId}
+     * when the caller sends one, and the keys that say who is calling, which the resolved caller
+     * writes itself so that a trust policy reads the same principal as any other policy. A
+     * credential that resolves to no identity is the account root stand-in, carrying the account
+     * id as its {@code aws:userid} and {@code Account} as its {@code aws:PrincipalType}, as that
+     * principal does wherever else Floci builds it.
      */
     private Response enforceTrustPolicy(String roleArn, IamRole role, String roleAccountId,
                                         MultivaluedMap<String, String> params) {
         String callerAccount = regionResolver.getAccountId();
-        Optional<IamService.CallerArns> callerArns = iamService.resolveCallerArns(callerAccessKeyId());
-        String callerArn = callerArns.map(IamService.CallerArns::callerArn)
-                .orElse(regionResolver.buildGlobalArn("iam", callerAccount, "root"));
-        String principalArn = callerArns.map(IamService.CallerArns::principalArn).orElse(callerArn);
+        IamService.CallerArns caller = iamService.resolveCallerArns(callerAccessKeyId())
+                .orElseGet(() -> IamService.CallerArns.accountRoot(
+                        regionResolver.buildGlobalArn("iam", callerAccount, "root"), callerAccount));
+        String callerArn = caller.callerArn();
 
         if (role == null || !IamService.roleArnMatches(roleArn, role)) {
             return AwsQueryResponse.error("AccessDenied",
@@ -209,8 +220,8 @@ public class StsQueryHandler {
         if (externalId != null) {
             requestContext.put("sts:ExternalId", List.of(externalId));
         }
-        if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), callerArn, principalArn,
-                callerAccount, requestContext)) {
+        if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
+                requestContext)) {
             return null;
         }
         return AwsQueryResponse.error("AccessDenied",
@@ -575,6 +586,56 @@ public class StsQueryHandler {
                 .elem("PackedPolicySize", "0")
                 .build();
         return Response.ok(AwsQueryResponse.envelope("GetFederationToken", AwsNamespaces.STS, result)).build();
+    }
+
+    /**
+     * Exchanges a trade-in token for credentials in the customer's account.
+     *
+     * <p>The credentials expire at the moment the customer released the token plus the request's
+     * {@code SessionDuration}, not at redemption: "the delegation period starts when customer
+     * releases the exchange token, not when the product provider redeems it", and "all credentials
+     * obtained from the same exchange token expire at the same time". A token can therefore be
+     * exchanged repeatedly, each exchange yielding a shorter session than the one before.
+     *
+     * <p>{@code AssumedPrincipal} is the request's approver rather than its owner. Accepting a
+     * request "records the details and the state of the identity that called this API", and "this
+     * is the identity that gets mapped to the delegated credential", which the user guide says the
+     * same way: the provider obtains the "approver's temporary credentials". The two differ in the
+     * case {@code OnlySendByOwner} is for, where the owner could not approve and forwarded the
+     * request on. {@code PackedPolicySize} is left out: the model deprecates it and states it is
+     * not populated for this operation.
+     */
+    private Response handleGetDelegatedAccessToken(MultivaluedMap<String, String> params) {
+        Response validation = validateRequired(params, "TradeInToken");
+        if (validation != null) {
+            return validation;
+        }
+        DelegationRequestService.Redeemed redeemed = delegationRequestService.redeem(
+                regionResolver.getAccountId(), getParam(params, "TradeInToken"));
+        DelegationRequest request = redeemed.request();
+
+        String accessKeyId = "ASIA" + randomId(16);
+        String secretKey = randomSecret(40);
+        String sessionToken = randomSecret(200);
+        // The session acts in the customer's account as the identity that approved the request,
+        // bounded by the rendered permission policy wherever the request carries one and by that
+        // identity's own permissions either way. The account is the owner's: a request is visible
+        // only from the account that claimed it, so the approver is an identity there too. It is
+        // registered as a delegated session rather than an issued one, the approver being whatever
+        // accepted the request: a role ARN slot is read by name, so an approver named like a role
+        // would act with that role's permissions. No issuing key is recorded, the permissions
+        // coming from the customer's side of the delegation rather than from the partner key that
+        // redeemed the token.
+        iamService.registerDelegatedSession(accessKeyId, secretKey, sessionToken, request.getApproverId(),
+                redeemed.credentialExpiry(), request.getPermissionPolicy(),
+                request.getOwnerAccountId());
+
+        String result = new XmlBuilder()
+                .raw(credentialsXml(accessKeyId, secretKey, sessionToken, redeemed.credentialExpiry()))
+                .elem("AssumedPrincipal", request.getApproverId())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GetDelegatedAccessToken",
+                AwsNamespaces.STS, result)).build();
     }
 
     private Response handleDecodeAuthorizationMessage(MultivaluedMap<String, String> params) {

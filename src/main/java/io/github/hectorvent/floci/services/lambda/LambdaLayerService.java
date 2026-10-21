@@ -5,8 +5,10 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -19,7 +21,6 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
@@ -328,9 +329,7 @@ public class LambdaLayerService {
                     "Member must satisfy enum value set: " + COMPATIBLE_ARCHITECTURES));
         }
         if (!errors.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    errors.size() + (errors.size() == 1 ? " validation error" : " validation errors")
-                            + " detected: " + String.join("; ", errors), 400);
+            throw SmithyValidationErrors.validationException(errors);
         }
         return parsed;
     }
@@ -448,16 +447,16 @@ public class LambdaLayerService {
      */
     public LambdaLayerVersion getLayerVersionByArn(String layerVersionArn) {
         if (layerVersionArn == null || layerVersionArn.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'arn' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'arn' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         if (layerVersionArn.length() > MAX_LAYER_VERSION_ARN_LENGTH
                 || !LAYER_VERSION_ARN.matcher(layerVersionArn).matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + layerVersionArn + "' at 'arn' failed to satisfy"
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + layerVersionArn + "' at 'arn' failed to satisfy"
                             + " constraint: Member must satisfy regular expression pattern: "
-                            + LAYER_VERSION_ARN_PATTERN, 400);
+                            + LAYER_VERSION_ARN_PATTERN);
         }
         // The live service rejects a layer from another partition outright, and with a different
         // error than an unresolvable ARN, so this precedes the lookup.
@@ -597,19 +596,8 @@ public class LambdaLayerService {
     }
 
     private void deleteDirectory(Path dir) {
-        if (!Files.exists(dir)) {
-            return;
-        }
         try {
-            Files.walk(dir)
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(p -> {
-                        try {
-                            Files.delete(p);
-                        } catch (IOException e) {
-                            LOG.warnv("Failed to delete {0}: {1}", p, e.getMessage());
-                        }
-                    });
+            FileTrees.delete(dir);
         } catch (IOException e) {
             LOG.warnv("Failed to delete layer directory {0}: {1}", dir, e.getMessage());
         }

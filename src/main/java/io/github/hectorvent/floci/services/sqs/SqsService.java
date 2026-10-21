@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.EmulatorConfig.SqsServiceConfig.EndpointStrategy;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -271,6 +273,7 @@ public class SqsService implements Resettable, ResourceProvider {
      * the AWS limit widens this bound so the configured default stays settable explicitly. */
     private final int maxAllowedMessageSize;
     private final String baseUrl;
+    private final EndpointStrategy endpointStrategy;
     private final RegionResolver regionResolver;
     private final boolean clearFifoDeduplicationCacheOnPurge;
     private final SnsService snsService;
@@ -316,7 +319,8 @@ public class SqsService implements Resettable, ResourceProvider {
                 clock,
                 config.services().sqs().receiptHandleSecret(),
                 requestContextInstance,
-                iamService
+                iamService,
+                config.services().sqs().endpointStrategy()
         );
     }
 
@@ -398,6 +402,19 @@ public class SqsService implements Resettable, ResourceProvider {
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService, Clock clock, String receiptHandleSecret,
                Instance<RequestContext> requestContextInstance, IamService iamService) {
+        this(queueStore, messageStore, dedupStore, dedupIdentityStore, defaultVisibilityTimeout, maxMessageSize,
+                baseUrl, regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, clock,
+                receiptHandleSecret, requestContextInstance, iamService, EndpointStrategy.FLOCI);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               StorageBackend<String, Map<String, Map<String, String>>> dedupIdentityStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService, Clock clock, String receiptHandleSecret,
+               Instance<RequestContext> requestContextInstance, IamService iamService,
+               EndpointStrategy endpointStrategy) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -406,6 +423,7 @@ public class SqsService implements Resettable, ResourceProvider {
         this.maxMessageSize = maxMessageSize;
         this.maxAllowedMessageSize = Math.max(AWS_MAXIMUM_MESSAGE_SIZE, maxMessageSize);
         this.baseUrl = baseUrl;
+        this.endpointStrategy = endpointStrategy;
         this.regionResolver = regionResolver;
         this.clearFifoDeduplicationCacheOnPurge = clearFifoDeduplicationCacheOnPurge;
         this.snsService = snsService;
@@ -629,7 +647,7 @@ public class SqsService implements Resettable, ResourceProvider {
         attributes = validateMessageRetentionPeriod(attributes);
 
         String accountId = regionResolver.getAccountId();
-        String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
+        String queueUrl = buildQueueUrl(region, accountId, queueName);
         String storageKey = regionKey(region, queueUrl);
 
         // If queue already exists with same name, check for attribute conflicts
@@ -639,18 +657,30 @@ public class SqsService implements Resettable, ResourceProvider {
                 Set<String> readOnlyAttrs = Set.of("QueueArn", "CreatedTimestamp", "LastModifiedTimestamp",
                         "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible",
                         "ApproximateNumberOfMessagesDelayed");
+                Map<String, String> effective = new LinkedHashMap<>(existing.getAttributes());
+                applyDerivedAttributes(effective);
                 for (Map.Entry<String, String> entry : attributes.entrySet()) {
                     if (readOnlyAttrs.contains(entry.getKey())) {
                         continue;
                     }
-                    String storedValue = existing.getAttributes().get(entry.getKey());
-                    if (storedValue != null && !storedValue.equals(entry.getValue())) {
+                    // Compare against what GetQueueAttributes reports, not the raw stored map:
+                    // SqsManagedSseEnabled is derived on read and never stored, so the stored map
+                    // alone would let a differing value through.
+                    String storedValue = effective.get(entry.getKey());
+                    String requested = entry.getValue();
+                    // The effective MaximumMessageSize is canonical ("1024"); canonicalise the
+                    // already-validated request too so "01024" is not a conflict with itself,
+                    // and an empty value maps to the same default the effective map reports.
+                    if ("MaximumMessageSize".equals(entry.getKey())) {
+                        requested = String.valueOf(parseMaxMessageSize(requested));
+                    }
+                    if (storedValue != null && !storedValue.equals(requested)) {
                         throw new AwsException("QueueAlreadyExists",
                                 "A queue already exists with the same name but different attributes.", 400);
                     }
                 }
             }
-            return existing;
+            return withCurrentQueueUrl(existing, region);
         }
 
         Queue queue = new Queue(queueName, queueUrl);
@@ -715,22 +745,26 @@ public class SqsService implements Resettable, ResourceProvider {
 
     public List<Queue> listQueues(String namePrefix, String region) {
         String prefix = region + "::";
+        List<Queue> queues;
         if (namePrefix == null || namePrefix.isEmpty()) {
-            return queueStore.scan(key -> key.startsWith(prefix));
+            queues = queueStore.scan(key -> key.startsWith(prefix));
+        } else {
+            queues = queueStore.scan(key -> {
+                if (!key.startsWith(prefix)) {
+                    return false;
+                }
+                String queueUrl = key.substring(prefix.length());
+                String name = queueUrl.substring(queueUrl.lastIndexOf('/') + 1);
+                return name.startsWith(namePrefix);
+            });
         }
-        return queueStore.scan(key -> {
-            if (!key.startsWith(prefix)) {
-                return false;
-            }
-            String queueUrl = key.substring(prefix.length());
-            String name = queueUrl.substring(queueUrl.lastIndexOf('/') + 1);
-            return name.startsWith(namePrefix);
-        });
+        queues.forEach(q -> withCurrentQueueUrl(q, region));
+        return queues;
     }
 
     public String getQueueUrl(String queueName, String region) {
         String accountId = regionResolver.getAccountId();
-        String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
+        String queueUrl = buildQueueUrl(region, accountId, queueName);
         String storageKey = regionKey(region, queueUrl);
         if (queueStore.get(storageKey).isEmpty()) {
             throw new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -760,6 +794,25 @@ public class SqsService implements Resettable, ResourceProvider {
         attrs.put("ApproximateNumberOfMessagesNotVisible", String.valueOf(counts.inFlight()));
         attrs.put("ApproximateNumberOfMessagesDelayed", String.valueOf(counts.delayed()));
 
+        applyDerivedAttributes(attrs);
+
+        if (attributeNames == null || attributeNames.contains("All")) {
+            return attrs;
+        }
+        Map<String, String> filtered = new LinkedHashMap<>();
+        for (String name : attributeNames) {
+            if (attrs.containsKey(name)) {
+                filtered.put(name, attrs.get(name));
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * Fills in the attributes reported on read but not necessarily stored. Shared by
+     * GetQueueAttributes and the CreateQueue conflict check so the two cannot drift.
+     */
+    private void applyDerivedAttributes(Map<String, String> attrs) {
         // Derived at read time and never stored, so it cannot go stale behind a
         // KmsMasterKeyId that was later cleared. A KMS key always wins; otherwise an
         // explicit SqsManagedSseEnabled stands, and a queue with neither reports the AWS
@@ -779,17 +832,6 @@ public class SqsService implements Resettable, ResourceProvider {
         attrs.putIfAbsent("DelaySeconds", "0");
         attrs.putIfAbsent("ReceiveMessageWaitTimeSeconds", "0");
         attrs.putIfAbsent("MessageRetentionPeriod", "345600");
-
-        if (attributeNames == null || attributeNames.contains("All")) {
-            return attrs;
-        }
-        Map<String, String> filtered = new LinkedHashMap<>();
-        for (String name : attributeNames) {
-            if (attrs.containsKey(name)) {
-                filtered.put(name, attrs.get(name));
-            }
-        }
-        return filtered;
     }
 
     /**
@@ -1500,7 +1542,7 @@ public class SqsService implements Resettable, ResourceProvider {
         String prefix = region + "::";
         for (Queue q : queueStore.scan(k -> k.startsWith(prefix))) {
             if (targetArn.equals(redriveDlqArn(q))) {
-                sourceQueues.add(q.getQueueUrl());
+                sourceQueues.add(withCurrentQueueUrl(q, region).getQueueUrl());
             }
         }
         return sourceQueues;
@@ -1948,6 +1990,30 @@ public class SqsService implements Resettable, ResourceProvider {
     public String senderIdFor(String queueUrl) {
         String fromUrl = accountFromQueueUrl(normalizeQueueUrl(queueUrl));
         return fromUrl != null ? fromUrl : regionResolver.getAccountId();
+    }
+
+    /**
+     * The QueueUrl handed back to clients. The {@code floci} strategy, the default, returns floci's
+     * own endpoint form, {@code <base-url>/<account>/<name>}. The {@code aws} strategy returns
+     * the AWS form, {@code https://sqs.<region>.<dnsSuffix>/<account>/<name>}, for tooling that
+     * parses queue URLs. Lookups key off the URL path, so either form is accepted on input.
+     */
+    private String buildQueueUrl(String region, String accountId, String queueName) {
+        if (endpointStrategy != EndpointStrategy.AWS) {
+            return baseUrl + "/" + accountId + "/" + queueName;
+        }
+        String effectiveRegion = region != null && !region.isBlank() ? region : regionResolver.getDefaultRegion();
+        return "https://" + AwsEndpoints.host("sqs", effectiveRegion) + "/" + accountId + "/" + queueName;
+    }
+
+    /**
+     * Reports a stored queue under the URL a fresh CreateQueue would return, so queues persisted
+     * by an earlier version, or under the other endpoint strategy, list consistently.
+     */
+    private Queue withCurrentQueueUrl(Queue queue, String region) {
+        String accountId = queue.getAccountId() != null ? queue.getAccountId() : regionResolver.getAccountId();
+        queue.setQueueUrl(buildQueueUrl(region, accountId, queue.getQueueName()));
+        return queue;
     }
 
     /**

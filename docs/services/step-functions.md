@@ -722,6 +722,23 @@ Local, the execution starts and fails with `States.Runtime` only if the state th
 it is entered. This keeps a generated mock file usable when the collection it was built
 from is empty and the state is never reached.
 
+## HTTP Task request bodies
+
+For `arn:aws:states:::http:invoke`, `Transform.RequestBodyEncoding: URL_ENCODED` sends
+an object body as form data. Set `Headers.Content-Type` to
+`application/x-www-form-urlencoded`. Nested objects use bracketed keys, and text is
+percent-encoded as UTF-8. `RequestEncodingOptions.ArrayFormat` supports `INDICES`
+(the default), `REPEAT`, `COMMAS`, and `BRACKETS`, following the
+[AWS HTTP Task encoding options](https://docs.aws.amazon.com/step-functions/latest/dg/call-https-apis.html#connect-http-task-url-encoding).
+`NONE` keeps the JSON-body path unchanged.
+
+Floci currently supports object roots and scalar `COMMAS` arrays. Non-object roots
+(other than an absent or null body) and `COMMAS` arrays containing objects or arrays
+fail explicitly instead of being silently coerced. These are Floci limitations,
+not documented AWS restrictions; their exact AWS behavior has not been verified.
+EventBridge connection lookup and connection-level parameter merging are not
+implemented by the HTTP Task.
+
 ## Executions abandoned by a restart
 
 An execution runs in the Floci process. When Floci restarts while an execution is `RUNNING`,
@@ -781,6 +798,26 @@ Service integration resources carry the partition of the state machine's region
 (`arn:aws-cn:states:::lambda:invoke` in China, as the CDK writes them), and Floci dispatches them
 in every partition. State machine and execution ARNs follow the region they are created in. See
 [AWS Partitions](../configuration/partitions.md).
+
+## API Gateway tasks
+
+`arn:...:states:::apigateway:invoke` supports regional, same-account REST APIs with `POST`,
+`IAM_ROLE`, a named stage and resource path, and an object request body without null values.
+Headers accept multiple string values and HTTP token names. AWS-reserved headers are rejected.
+Literal reserved names, including `Expect`, `Upgrade`, `Authorization` and `Host`, and the
+`X-Amz-`, `X-Amzn-` and `X-Forwarded-` prefixes are rejected case-insensitively when a
+definition is created, updated or validated, including JSONata arguments and nested workflows.
+An explicit `Content-Length` must equal the serialized body size; the HTTP client writes that header.
+Private endpoints, resource-policy authentication, query parameters and `AllowNullValues` remain unsupported.
+
+With IAM enforcement enabled, the execution role must trust Step Functions. The task uses its
+`Credentials.RoleArn` when supplied, including assume-role authorization, identity policies,
+permissions boundaries and SCPs. With enforcement disabled, missing roles and absent policies do not
+block execution. Temporary signing credentials are revoked after each request.
+
+Successful responses preserve their headers and status. JSON response text is parsed regardless of
+its content type, matching the live AWS integration; other text remains a string. Non-2xx responses
+raise catchable `ApiGateway.<status>` failures.
 
 ## Configuration
 

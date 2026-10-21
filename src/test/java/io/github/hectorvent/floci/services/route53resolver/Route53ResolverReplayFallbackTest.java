@@ -37,7 +37,8 @@ class Route53ResolverReplayFallbackTest {
     void setUp() {
         endpointIpRequests = new InMemoryStorage<>();
         service = new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), endpointIpRequests, objectMapper);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), endpointIpRequests, new InMemoryStorage<>(),
+                objectMapper);
     }
 
     private JsonNode createRequest(String token, String ip) {

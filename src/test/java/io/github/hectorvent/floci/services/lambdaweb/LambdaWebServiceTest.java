@@ -16,9 +16,15 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
@@ -30,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -50,10 +57,18 @@ class LambdaWebServiceTest {
     }
 
     private LambdaWebService service(StorageFactory storage) {
+        return service(storage, "http://localhost:4566");
+    }
+
+    private LambdaWebService service(StorageFactory storage, String baseUrl) {
+        return service(storage, baseUrl, null);
+    }
+
+    private LambdaWebService service(StorageFactory storage, String baseUrl, S3Service s3Service) {
         EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config, null,
-                mapper, null);
+        when(config.effectiveBaseUrl()).thenReturn(baseUrl);
+        LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config,
+                s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null);
         service.initializeStorage();
         return service;
     }
@@ -365,6 +380,27 @@ class LambdaWebServiceTest {
     }
 
     @Test
+    void revisionMatchesComparesTheConfigurationAfterDefaults() {
+        LambdaWebService service = service();
+        WebFunction fn = service.createFunction(REGION, createRequest("app"));
+        WebFunctionRevision revision = fn.revisions.values().iterator().next();
+        assertTrue(service.revisionMatches(revision, revisionConfig(30)));
+        assertFalse(service.revisionMatches(revision, revisionConfig(31)));
+        ObjectNode described = revisionConfig(30).put("description", "d");
+        assertFalse(service.revisionMatches(revision, described));
+        // The default log group is the function's, so writing it out matches and dropping a custom one does not.
+        ObjectNode explicit = revisionConfig(30);
+        ((ObjectNode) explicit.get("serviceConfig")).putObject("telemetryConfig").putObject("loggingConfig")
+                .put("logGroup", "/aws/lambda/web/app");
+        assertTrue(service.revisionMatches(revision, explicit));
+        ObjectNode custom = revisionConfig(30);
+        ((ObjectNode) custom.get("serviceConfig")).putObject("telemetryConfig").putObject("loggingConfig")
+                .put("logGroup", "custom-group");
+        WebFunctionRevision customized = service.createRevision(REGION, "app", custom);
+        assertFalse(service.revisionMatches(customized, revisionConfig(30)));
+    }
+
+    @Test
     void identifiersAcceptArnsOfTheHomeRegionAndAccount() {
         LambdaWebService service = service();
         WebFunction fn = service.createFunction(REGION, createRequest("app"));
@@ -454,6 +490,21 @@ class LambdaWebServiceTest {
                 + " input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
                 policy("{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"*\"},"
                         + "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + resource + "\"}]}"))));
+        // An ARN may carry a path, any other AWS principal may not.
+        assertEquals("The provided input'arn:aws:iam::000000000000:role/has space'was invalid. Member must satisfy"
+                + " expression: [\\w+=/:,.@-]* Please check your input and try again.",
+                message(() -> service.putResourcePolicy(REGION, missing,
+                        policy(members.formatted("{\"AWS\":\"arn:aws:iam::000000000000:role/has space\"}", invoke,
+                                "\"" + resource + "\"")))));
+        assertEquals("The provided input'foo/bar'was invalid. Member must satisfy expression: [\\w+=,.@\\:-]*"
+                + " Please check your input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy(members.formatted("{\"AWS\":\"foo/bar\"}", invoke, "\"" + resource + "\"")))));
+        assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
+                policy(members.formatted("{\"AWS\":\"arn:aws:iam::000000000000:user/path/alice\"}", invoke,
+                        "\"" + resource + "\"")))).getErrorCode());
+        assertEquals("ValidationException", error(() -> service.putResourcePolicy(REGION, missing,
+                policy(members.formatted("{\"CanonicalUser\":\"arn:aws:iam::000000000000:foo/bar\"}", invoke,
+                        "\"" + resource + "\"")))).getErrorCode(), "only an AWS principal may carry a path");
         assertEquals("Lambda blocked the creation of this policy because it would grant public access to your function.",
                 message(() -> service.putResourcePolicy(REGION, missing, policy("{\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Principal\":{\"AWS\":[\"arn:aws:iam::000000000000:root\",\"*\"]},"
@@ -508,9 +559,18 @@ class LambdaWebServiceTest {
         ObjectNode update = mapper.createObjectNode().put("description", "updated");
         first.updateEndpoint(REGION, "durable", "dev", update);
 
+        String domain = first.getEndpoint(REGION, "durable", "dev").domainName;
+        assertEquals("dev", first.locate(domain).orElseThrow().endpoint().endpointName);
+
         LambdaWebService second = service(new FileStorageFactory(storageDir));
         WebFunction restored = second.getFunction(REGION, "durable");
         assertEquals(created.functionArn, restored.functionArn);
+        LambdaWebService.WebFunctionTarget target = second.locate(domain).orElseThrow();
+        assertEquals(ACCOUNT_ID, target.accountId());
+        assertEquals(REGION, target.region());
+        assertEquals("durable", target.function().functionName);
+        assertEquals("dev", target.endpoint().endpointName);
+        assertTrue(second.locate("nope.001.lambda-web.us-east-1.localhost:4566").isEmpty());
         assertEquals(2, restored.revisions.size());
         WebFunctionEndpoint endpoint = second.getEndpoint(REGION, "durable", "dev");
         assertEquals("updated", endpoint.description);
@@ -520,6 +580,97 @@ class LambdaWebServiceTest {
         assertEquals(endpoint.revisionWeights.get(0).revisionId,
                 second.listRevisions(REGION, "durable", mapper.createObjectNode()).items().get(0).revisionId,
                 "the LatestRevision endpoint moved to the newer revision and that move was written back");
+        second.deleteEndpoint(REGION, "durable", "dev");
+        assertTrue(second.locate(domain).isEmpty(), "a deleted endpoint's domain is gone");
+    }
+
+    @Test
+    void aCloudFrontOriginNamesAnEndpointDomainWithoutCaseTrailingDotOrPort() {
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://Floci.Example.:4566");
+        service.createFunction(REGION, createRequest("app"));
+        String domain = service.getEndpoint(REGION, "app", "dev").domainName;
+        assertTrue(domain.endsWith(".001.lambda-web.us-east-1.Floci.Example.:4566"), domain);
+        String host = domain.substring(0, domain.indexOf('.')) + ".001.lambda-web.us-east-1.floci.example";
+
+        assertEquals(domain, service.endpointDomain(host).orElseThrow());
+        assertTrue(service.endpointDomain("nope.001.lambda-web.us-east-1.floci.example").isEmpty());
+        service.deleteEndpoint(REGION, "app", "dev");
+        assertTrue(service.endpointDomain(host).isEmpty(), "a deleted endpoint's domain is gone");
+    }
+
+    @Test
+    void eachRevisionKeepsTheCodeTheObjectHadWhenItWasCreated() throws IOException {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object("first"));
+        String first = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object("second"));
+        String second = service.createRevision(REGION, "app", revisionConfig(30)).revisionId;
+
+        assertEquals("first", Files.readString(code.file(ACCOUNT_ID, REGION, "app", first)));
+        assertEquals("second", Files.readString(code.file(ACCOUNT_ID, REGION, "app", second)));
+        service.deleteRevision(REGION, "app", first);
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", first)));
+        service.deleteFunction(REGION, "app");
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", second)));
+    }
+
+    @Test
+    void aStartKeepsOnlyTheCopiesOfStoredRevisions() throws IOException {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object("code"));
+        FileStorageFactory storage = new FileStorageFactory(storageDir);
+        String revisionId = service(storage, "http://localhost:4566", s3).createFunction(REGION, createRequest("app"))
+                .revisions.keySet().iterator().next();
+        LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
+        code.store(ACCOUNT_ID, REGION, "app", "rev-stray", new ByteArrayInputStream(new byte[] {1}));
+
+        service(new FileStorageFactory(storageDir), "http://localhost:4566", s3);
+        assertEquals("code", Files.readString(code.file(ACCOUNT_ID, REGION, "app", revisionId)));
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", "rev-stray")));
+
+        service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", revisionId)));
+    }
+
+    @Test
+    void regionsThatLookAlikeKeepTheirOwnCopies() throws IOException {
+        LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
+        code.store(ACCOUNT_ID, ".", "app", "rev-aaaaa", new ByteArrayInputStream(new byte[] {1}));
+        code.store(ACCOUNT_ID, "_", "app", "rev-aaaaa", new ByteArrayInputStream(new byte[] {2}));
+        code.deleteFunction(ACCOUNT_ID, ".", "app");
+
+        assertEquals(2, Files.readAllBytes(code.file(ACCOUNT_ID, "_", "app", "rev-aaaaa"))[0]);
+    }
+
+    @Test
+    void aVersionThatCannotBeReadIsNamedInTheError() {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        ObjectNode pinned = createRequest("app");
+        ((ObjectNode) pinned.path("revisionConfig").path("buildConfig").path("codeConfig").path("s3Object"))
+                .put("versionId", "v1");
+        when(s3.openObject("code", "app.zip", "v1"))
+                .thenThrow(new AwsException("NoSuchVersion", "The specified version does not exist.", 404));
+        assertEquals("The specified S3 object does not exist: s3://code/app.zip (versionId=v1). Verify the object exists"
+                + " and the versionId is correct.", message(() -> service.createFunction(REGION, pinned)));
+
+        doThrow(new AwsException("InvalidArgument", "Invalid version id specified", 400))
+                .when(s3).openObject("code", "app.zip", "v1");
+        assertEquals("The S3 object s3://code/app.zip (versionId=v1) is inaccessible. Verify the request parameters and"
+                + " permissions are correct.", message(() -> service.createFunction(REGION, pinned)));
+
+        when(s3.openObject("code", "app.zip", null))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+        assertEquals("The specified S3 object does not exist: s3://code/app.zip. Verify the object exists in the bucket.",
+                message(() -> service.createFunction(REGION, createRequest("app"))));
+    }
+
+    private static S3Service.ObjectRead object(String data) {
+        byte[] bytes = data.getBytes(StandardCharsets.UTF_8);
+        return new S3Service.ObjectRead(new S3Object("code", "app.zip", bytes, "application/zip"),
+                new ByteArrayInputStream(bytes));
     }
 
     private static final class MemoryStorageFactory extends StorageFactory {

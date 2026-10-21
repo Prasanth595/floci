@@ -391,6 +391,7 @@ public interface EmulatorConfig {
         CodeDeployStorageConfig codedeploy();
         TranscribeStorageConfig transcribe();
         TaggingStorageConfig tagging();
+        ResourceGroupsStorageConfig resourceGroups();
         ElasticBeanstalkStorageConfig elasticbeanstalk();
         CloudTrailStorageConfig cloudtrail();
         RumStorageConfig rum();
@@ -624,6 +625,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface ResourceGroupsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface TaggingStorageConfig {
         Optional<String> mode();
 
@@ -735,6 +743,7 @@ public interface EmulatorConfig {
         RdsServiceConfig rds();
         RedshiftServiceConfig redshift();
         RdsDataServiceConfig rdsData();
+        DsqlServiceConfig dsql();
         RedshiftDataServiceConfig redshiftData();
         RedshiftServerlessServiceConfig redshiftServerless();
         EventBridgeServiceConfig eventbridge();
@@ -764,6 +773,7 @@ public interface EmulatorConfig {
         AppConfigDataServiceConfig appconfigdata();
         EcrServiceConfig ecr();
         ResourceGroupsTaggingServiceConfig tagging();
+        ResourceGroupsServiceConfig resourceGroups();
         BedrockServiceConfig bedrock();
         BedrockRuntimeServiceConfig bedrockRuntime();
         EksServiceConfig eks();
@@ -887,6 +897,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("pypiserver/pypiserver:v2.4.2")
         String pypiImage();
+
+        /**
+         * Image used for the per-repository BaGetter container backing the {@code nuget} format.
+         * Same reasoning as {@link #npmImage()}: BaGetter has no native concept of multiple named
+         * feeds inside one instance either, so this gets one container per CodeArtifact
+         * repository too, and there is no single external instance a URL override could name.
+         */
+        @WithDefault("bagetter/bagetter:1.6.5")
+        String nugetImage();
     }
 
     interface ConnectServiceConfig {
@@ -1085,6 +1104,9 @@ public interface EmulatorConfig {
     interface ServiceQuotasServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("5")
+        int standardOnDemandVcpus();
     }
 
     interface VerifiedPermissionsServiceConfig {
@@ -1337,6 +1359,25 @@ public interface EmulatorConfig {
 
         @WithDefault("local-emulator-secret")
         String receiptHandleSecret();
+
+        /**
+         * Shape of the QueueUrl returned by CreateQueue, GetQueueUrl, ListQueues and
+         * ListDeadLetterSourceQueues.
+         * <ul>
+         *   <li>{@code floci}: floci's own endpoint form, {@code <base-url>/<account>/<name>}.</li>
+         *   <li>{@code aws}: the AWS form, {@code https://sqs.<region>.<dnsSuffix>/<account>/<name>},
+         *       with the DNS suffix of the region's partition.</li>
+         * </ul>
+         * Either form is accepted on input under either setting, since queue lookups key off the
+         * URL path and ignore the host.
+         */
+        @WithDefault("floci")
+        EndpointStrategy endpointStrategy();
+
+        enum EndpointStrategy {
+            FLOCI,
+            AWS
+        }
     }
 
     interface S3ServiceConfig {
@@ -1379,6 +1420,23 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean globalBucketNamespace();
+
+        /**
+         * Run the background sweep that applies bucket lifecycle expiration rules: Expiration,
+         * NoncurrentVersionExpiration and AbortIncompleteMultipartUpload. When off, rules are
+         * stored and reported in {@code x-amz-expiration} but nothing expires.
+         * Env: FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED
+         */
+        @WithDefault("true")
+        boolean lifecycleSweepEnabled();
+
+        /**
+         * How often the lifecycle sweep runs. S3 itself applies lifecycle about once a day, to
+         * expiry times rounded to midnight UTC, so the interval only bounds how late Floci is.
+         * Env: FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS
+         */
+        @WithDefault("60")
+        long lifecycleSweepIntervalSeconds();
     }
 
     interface DynamoDbServiceConfig {
@@ -1402,6 +1460,14 @@ public interface EmulatorConfig {
          */
         @WithDefault("10")
         int vectorIndexBackfillSeconds();
+
+        /**
+         * Seconds LatestRestorableDateTime of point-in-time recovery trails the current time. AWS
+         * keeps it about five minutes behind.
+         * Env: FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS
+         */
+        @WithDefault("300")
+        int latestRestorableLagSeconds();
 
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
@@ -1706,6 +1772,19 @@ public interface EmulatorConfig {
         int auroraResumeDelayMillis();
     }
 
+    interface DsqlServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Domain under which cluster endpoints are named, {@code <id>.dsql.<region>.<suffix>}. The
+         * default resolves to the loopback address on the host and to Floci inside its Docker
+         * network.
+         */
+        @WithDefault("localhost.floci.io")
+        String endpointSuffix();
+    }
+
     interface RdsDataServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1937,6 +2016,10 @@ public interface EmulatorConfig {
     interface CognitoServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Google federation issuer; override to use a local OIDC provider for testing. */
+        @WithDefault("https://accounts.google.com")
+        String googleIssuer();
 
         /**
          * Rejects an app client whose token validity is outside AWS's limits: access and ID tokens
@@ -2186,15 +2269,16 @@ public interface EmulatorConfig {
 
         /**
          * Approved parent directories for task definition host volume bind mounts
-         * (volumes[].host.sourcePath). A sourcePath must resolve under one of these roots.
-         * Empty (the default) rejects every host volume sourcePath unless
+         * (volumes[].host.sourcePath) and container devices (linuxParameters.devices[].hostPath).
+         * A host path must resolve under one of these roots. Empty (the default) rejects every
+         * host volume sourcePath and device hostPath unless
          * {@link #allowUnsafeHostVolumes()} is set, subject to the always-on traversal,
          * bare-root, and Docker socket blocks below.
          */
         Optional<List<String>> hostVolumeRoots();
 
         /**
-         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes,
+         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes and devices,
          * allowing any absolute path. Traversal segments, the bare root "/", and the Docker
          * socket (or any ancestor directory that contains it) are still always rejected.
          */
@@ -2277,6 +2361,11 @@ public interface EmulatorConfig {
         String proxyImage();
     }
 
+    interface ResourceGroupsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface ResourceGroupsTaggingServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -2342,6 +2431,14 @@ public interface EmulatorConfig {
          */
         @WithDefault("60")
         int requestTimeoutSeconds();
+
+        /**
+         * How long to collect an upstream error response body before returning the
+         * known model error without its details. Bounds a backend that sends an error
+         * status and then stalls, since the request timeout stops at the headers.
+         */
+        @WithDefault("1000")
+        int errorBodyTimeoutMillis();
     }
 
     interface TextractServiceConfig {
@@ -3066,6 +3163,10 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        /** Enables RunInstances and StartInstances checks against current running vCPU usage. */
+        @WithDefault("false")
+        boolean enforceVcpuQuotas();
+
         /**
          * When true, DescribeInstances and IMDS report each instance's CFN- and
          * subnet-allocated private IP (AWS-faithful) instead of the Docker
@@ -3162,6 +3263,39 @@ public interface EmulatorConfig {
         /** When true, instances go straight to RUNNING without launching Docker containers. */
         @WithDefault("false")
         boolean mock();
+
+        /**
+         * The automatic public IPv4 address a mock instance gets when its launch asks for one.
+         * Mock instances have no container to reach, so the default gives them none: an address
+         * from a real AWS range would send a client that connects to it to someone else's host.
+         * {@code documentation} draws addresses from 203.0.113.0/24, a range reserved for
+         * documentation that routes nowhere; {@code fixed} gives every instance
+         * {@link #mockPublicAddress()}, which an Elastic IP on its primary private address then
+         * shows too. Elastic IPs are allocated from 203.0.113.0/24 whatever this says, and
+         * instances with containers always report the container's reachable address.
+         *
+         * Env var: FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES
+         */
+        @WithDefault("none")
+        MockPublicAddresses mockPublicAddresses();
+
+        /**
+         * The public IPv4 address of every mock instance due an automatic one when
+         * {@link #mockPublicAddresses()} is {@code fixed}: an address the caller can reach, such
+         * as this host's own. Unset means 127.0.0.1.
+         *
+         * Env var: FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS
+         */
+        Optional<String> mockPublicAddress();
+
+        enum MockPublicAddresses {
+            /** No automatic public address. */
+            NONE,
+            /** An address from 203.0.113.0/24, distinct from other live instances while one is free. */
+            DOCUMENTATION,
+            /** The configured {@code mock-public-address}. */
+            FIXED
+        }
 
         /**
          * When true, instance containers are bounded to the CPU and memory limits defined for
@@ -3492,6 +3626,15 @@ public interface EmulatorConfig {
     }
 
     interface InitHooksConfig {
+        /**
+         * Root of the Floci-native hook directories ({@code boot.d}, {@code start.d}, {@code ready.d},
+         * {@code stop.d}, {@code shutdown.d}). The image mounts them under the default; a binary on
+         * the host points this at a directory of its own. The LocalStack-compat tree under
+         * {@code /etc/localstack/init} is always read as well.
+         */
+        @WithDefault("/etc/floci/init")
+        String dir();
+
         @WithDefault("/bin/sh")
         String shellExecutable();
 

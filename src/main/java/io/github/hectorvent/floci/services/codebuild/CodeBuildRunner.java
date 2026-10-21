@@ -7,14 +7,17 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -38,12 +41,12 @@ import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -73,6 +76,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     private final EmulatorConfig config;
     private final ContainerDetector containerDetector;
     private final RegionResolver regionResolver;
+    private final ContainerReachableEndpoint containerEndpoint;
 
     private final ConcurrentHashMap<String, String> runningContainers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
@@ -87,7 +91,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                            SecretsManagerService secretsManagerService,
                            EmulatorConfig config,
                            ContainerDetector containerDetector,
-                           RegionResolver regionResolver) {
+                           RegionResolver regionResolver,
+                           ContainerReachableEndpoint containerEndpoint) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -98,6 +103,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         this.config = config;
         this.containerDetector = containerDetector;
         this.regionResolver = regionResolver;
+        this.containerEndpoint = containerEndpoint;
     }
 
     /**
@@ -253,7 +259,13 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
 
             // Copy downloaded source files into the container (no-op for NO_SOURCE builds)
-            copySourceToContainer(containerId, workspace, containerSrcDir);
+            try {
+                copySourceToContainer(containerId, workspace, containerSrcDir);
+            } catch (RuntimeException e) {
+                if (stopFlag.get()) { finishStopped(build); return; }
+                completePhaseWithError(build, "DOWNLOAD_SOURCE", "FAILED", e.getMessage());
+                throw e;
+            }
 
             // INSTALL
             if (stopFlag.get()) { finishStopped(build); return; }
@@ -485,35 +497,32 @@ public class CodeBuildRunner implements ContainerTeardown {
         return result;
     }
 
-    private String resolveEndpointUrl() {
+    String resolveEndpointUrl() {
         if (containerDetector.isRunningInContainer()) {
             String suffix = config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX);
-            return "http://" + suffix + ":" + config.port();
+            return "http://" + suffix + ":" + containerEndpoint.port();
         } else {
-            return "http://host.docker.internal:" + config.port();
+            return "http://host.docker.internal:" + containerEndpoint.port();
         }
     }
 
     // Copies files from the local workspace into the container's working directory.
     // Skips silently when the workspace is empty (e.g. NO_SOURCE builds).
-    private void copySourceToContainer(String containerId, Path sourceDir, String remotePath) {
-        try {
-            if (!Files.exists(sourceDir)) return;
-            boolean hasFiles;
-            try (Stream<Path> ls = Files.list(sourceDir)) {
-                hasFiles = ls.findAny().isPresent();
-            }
-            if (!hasFiles) return;
+    void copySourceToContainer(String containerId, Path sourceDir, String remotePath) {
+        copySourceToContainer(containerId, sourceDir, remotePath, RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
 
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            createTarFromDir(sourceDir, bos);
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath(remotePath)
-                    .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
-                    .exec();
-        } catch (Exception e) {
-            LOG.warnv("Could not copy source to container {0}: {1}", containerId, e.getMessage());
+    void copySourceToContainer(String containerId, Path sourceDir, String remotePath, long backoffMillis) {
+        if (!Files.exists(sourceDir)) return;
+        try (Stream<Path> ls = Files.list(sourceDir)) {
+            if (ls.findAny().isEmpty()) return;
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not inspect CodeBuild source directory " + sourceDir, e);
         }
+
+        RetryingTarCopier.copyStreamed(dockerClient, containerId, remotePath,
+                "codebuild-source", out -> createTarFromDir(sourceDir, out),
+                RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, backoffMillis);
     }
 
     // Pulls the container's working directory back into the local workspace so
@@ -560,7 +569,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    private void createTarFromDir(Path dir, ByteArrayOutputStream out) throws IOException {
+    private void createTarFromDir(Path dir, OutputStream out) throws IOException {
         try (TarArchiveOutputStream tar = newTarStream(out);
              Stream<Path> stream = Files.walk(dir)) {
             for (Path path : (Iterable<Path>) stream::iterator) {
@@ -584,7 +593,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    private static TarArchiveOutputStream newTarStream(ByteArrayOutputStream out) {
+    private static TarArchiveOutputStream newTarStream(OutputStream out) {
         TarArchiveOutputStream tar = new TarArchiveOutputStream(out);
         tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
         tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_STAR);
@@ -853,11 +862,8 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     private void deleteDirectory(Path path) {
         try {
-            if (!Files.exists(path)) { return; }
-            Files.walk(path).sorted(Comparator.reverseOrder()).forEach(p -> {
-                try { Files.delete(p); } catch (Exception ignored) {}
-            });
-        } catch (Exception e) {
+            FileTrees.delete(path);
+        } catch (IOException e) {
             LOG.debugv("Could not delete workspace {0}: {1}", path, e.getMessage());
         }
     }

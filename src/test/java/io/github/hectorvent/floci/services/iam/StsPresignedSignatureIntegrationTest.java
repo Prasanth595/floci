@@ -2,9 +2,9 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
+import io.github.hectorvent.floci.testing.SignedIamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
@@ -33,18 +33,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Verifies SigV4 authentication carried in the query string: a presigned request authenticates its
+ * caller only when its signature, scope, date and expiry are genuine, and the same verifier covers
+ * JSON, REST and Query services.
+ *
+ * <p>Signature validation and IAM enforcement come from {@link SignedIamEnforcementProfile}, which
+ * this class shares with the other classes that test signed requests under IAM enforcement.
+ */
 @QuarkusTest
-@TestProfile(StsPresignedSignatureIntegrationTest.SignaturesAndEnforcement.class)
+@TestProfile(SignedIamEnforcementProfile.class)
 class StsPresignedSignatureIntegrationTest {
     @Inject IamService iam;
-
-    public static class SignaturesAndEnforcement implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.auth.validate-signatures", "true",
-                    "floci.services.iam.enforcement-enabled", "true");
-        }
-    }
 
     @ParameterizedTest
     @ValueSource(strings = {"valid", "forged", "missing", "expired", "scope", "body", "future", "date", "expiry", "algorithm", "host", "blank",

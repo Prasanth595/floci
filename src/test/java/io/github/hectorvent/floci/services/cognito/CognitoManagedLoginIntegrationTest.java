@@ -4,12 +4,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -17,6 +19,7 @@ import org.mockito.ArgumentCaptor;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -67,7 +70,6 @@ class CognitoManagedLoginIntegrationTest {
     private static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
     private static final Pattern HIDDEN_FIELD = Pattern.compile("<input type=\"hidden\" name=\"([^\"]*)\" value=\"([^\"]*)\">");
     private static final Pattern FORM_ACTION = Pattern.compile("<form method=\"post\" action=\"([^\"]*)\">");
-    private static final Pattern SIX_DIGIT_CODE = Pattern.compile("\\b(\\d{6})\\b");
     private static final String PRE_TOKEN_GENERATION_ARN = "arn:aws:lambda:::pre-token-generation";
     private static final String ADMIN_SCOPE = "aws.cognito.signin.user.admin";
     private static final String POST_AUTHENTICATION_ARN = "arn:aws:lambda:::post-authentication";
@@ -79,6 +81,9 @@ class CognitoManagedLoginIntegrationTest {
      */
     @InjectMock
     LambdaService lambdaService;
+
+    @Inject
+    MutableClock clock;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -673,6 +678,50 @@ class CognitoManagedLoginIntegrationTest {
         JsonNode idToken = jwtPayload(redeem(null, pool.clientId(), code(again), VERIFIER)
                 .then().statusCode(200).extract().path("id_token"));
         assertEquals(pool.username(), idToken.path("cognito:username").asText());
+    }
+
+    /**
+     * {@code auth_time} is when the user signed in, not when the tokens were issued: an authorize that
+     * the session lets skip the form ten minutes later gets new tokens with the sign-in's
+     * {@code auth_time}, and so does every refresh of them, as on AWS. The session takes its time from
+     * the clock, which the test moves on instead of waiting.
+     */
+    @Test
+    void tokensFromTheSessionAndTheirRefreshKeepTheAuthTimeOfTheSignIn() throws Exception {
+        Pool pool = newPool();
+        long beforeSignIn = clock.instant().getEpochSecond();
+        Response signedIn = signIn(null, pool, authorizeRequest(pool.clientId()));
+        long afterSignIn = clock.instant().getEpochSecond();
+        JsonNode signInIdToken = jwtPayload(redeem(null, pool.clientId(), code(signedIn), VERIFIER)
+                .then().statusCode(200).extract().path("id_token"));
+        long authTime = signInIdToken.path("auth_time").asLong();
+        assertTrue(authTime >= beforeSignIn && authTime <= afterSignIn, "auth_time is the sign-in's: " + authTime);
+        clock.advance(Duration.ofMinutes(10));
+
+        Response again = browserGet(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId()),
+                signedIn.getCookie("cognito"));
+        Response tokens = redeem(null, pool.clientId(), code(again), VERIFIER);
+
+        tokens.then().statusCode(200);
+        JsonNode idToken = jwtPayload(tokens.path("id_token"));
+        assertNotEquals(signInIdToken.path("jti").asText(), idToken.path("jti").asText(), "new tokens were issued");
+        assertEquals(authTime, idToken.path("auth_time").asLong());
+        assertEquals(authTime, jwtPayload(tokens.path("access_token")).path("auth_time").asLong());
+        String refreshToken = tokens.path("refresh_token");
+        JsonNode viaInitiateAuth = cognitoJson("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"REFRESH_TOKEN_AUTH","AuthParameters":{"REFRESH_TOKEN":"%s"}}
+                """.formatted(pool.clientId(), refreshToken)).path("AuthenticationResult");
+        JsonNode viaGetTokens = cognitoJson("GetTokensFromRefreshToken", """
+                {"ClientId":"%s","RefreshToken":"%s"}
+                """.formatted(pool.clientId(), refreshToken)).path("AuthenticationResult");
+        Response viaTokenEndpoint = refreshGrant(null, pool.clientId(), refreshToken);
+        viaTokenEndpoint.then().statusCode(200);
+        for (String token : List.of(viaInitiateAuth.path("IdToken").asText(),
+                viaInitiateAuth.path("AccessToken").asText(), viaGetTokens.path("IdToken").asText(),
+                viaGetTokens.path("AccessToken").asText(), viaTokenEndpoint.path("id_token"),
+                viaTokenEndpoint.path("access_token"))) {
+            assertEquals(authTime, jwtPayload(token).path("auth_time").asLong());
+        }
     }
 
     @Test
@@ -1371,9 +1420,7 @@ class CognitoManagedLoginIntegrationTest {
     private static String latestEmailCode(String email) throws Exception {
         JsonNode messages = emailsTo(email);
         assertEquals(1, messages.size(), messages.toString());
-        Matcher matcher = SIX_DIGIT_CODE.matcher(messages.get(0).path("Body").path("text_part").asText());
-        assertTrue(matcher.find(), messages.toString());
-        return matcher.group(1);
+        return CognitoCodes.emailSignInCode(messages.get(0).path("Body").path("text_part").asText());
     }
 
     private static JsonNode emailsTo(String email) {

@@ -574,6 +574,22 @@
     "ProvisionedConcurrencyConfig",
     "RuntimePolicy"
   ],
+  "AWS::Lambda::WebFunction": [
+    "FunctionName"
+  ],
+  "AWS::Lambda::WebFunctionEndpoint": [
+    "FunctionName",
+    "EndpointName",
+    "EndpointType",
+    "Regions"
+  ],
+  "AWS::Lambda::WebFunctionRevision": [
+    "FunctionName",
+    "Description",
+    "KmsKeyArn",
+    "BuildConfig",
+    "ServiceConfig"
+  ],
   "AWS::Logs::LogGroup": [
     "LogGroupName"
   ],
@@ -702,6 +718,20 @@
   "AWS::S3::BucketPolicy": [
     "Bucket"
   ],
+  "AWS::S3Vectors::Index": [
+    "DataType",
+    "Dimension",
+    "DistanceMetric",
+    "EncryptionConfiguration",
+    "IndexName",
+    "MetadataConfiguration",
+    "VectorBucketArn",
+    "VectorBucketName"
+  ],
+  "AWS::S3Vectors::VectorBucket": [
+    "VectorBucketName",
+    "EncryptionConfiguration"
+  ],
   "AWS::Scheduler::ScheduleGroup": [
     "Name"
   ],
@@ -735,6 +765,10 @@
   "AWS::StepFunctions::StateMachine": [
     "StateMachineName",
     "StateMachineType"
+  ],
+  "AWS::WAFv2::IPSet": [
+    "Name",
+    "Scope"
   ],
   "AWS::WAFv2::WebACL": [
     "Name",

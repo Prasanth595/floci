@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -48,6 +49,9 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(AutoScalingGroupCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** The shape AWS::AutoScaling::LaunchConfiguration's resource schema declares for MetadataOptions. */
+    private static final String METADATA_OPTIONS =
+            CfnPropertyTypes.propertyShape(LAUNCH_CONFIGURATION, "MetadataOptions");
 
     private final AutoScalingService autoScalingService;
 
@@ -202,13 +206,39 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                     // it stays null rather than collapsing to false.
                     associatePublicIp == null || associatePublicIp.isBlank()
                             ? null
-                            : Boolean.parseBoolean(associatePublicIp));
+                            : Boolean.parseBoolean(associatePublicIp), null, List.of(), metadataOptions(props, ctx));
             deleteRenamedResource(ctx, name, n -> autoScalingService.deleteLaunchConfiguration(region, n),
                     "launch configuration");
         }
         // Ref returns the launch configuration name.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
+    }
+
+    /**
+     * The block read against its schema types, as CloudFormation checks it before the handler sees
+     * it: a value of the wrong type fails template validation, and a hop limit beyond 32 bits the
+     * handler's model validation. Fn::If may select the block or AWS::NoValue, and a member set to
+     * AWS::NoValue is absent.
+     */
+    private LaunchTemplateData.MetadataOptions metadataOptions(JsonNode props, ProvisionContext ctx) {
+        if (props == null || !props.has("MetadataOptions")) {
+            return null;
+        }
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(ctx.engine());
+        JsonNode node = types.read("MetadataOptions", props.get("MetadataOptions"), METADATA_OPTIONS);
+        types.finish();
+        if (node == null) {
+            return null;
+        }
+        LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
+        options.setHttpTokens(blankToNull(node.path("HttpTokens").asText(null)));
+        options.setHttpEndpoint(blankToNull(node.path("HttpEndpoint").asText(null)));
+        JsonNode hopLimit = node.path("HttpPutResponseHopLimit");
+        if (hopLimit.isInt()) {
+            options.setHttpPutResponseHopLimit(hopLimit.intValue());
+        }
+        return options;
     }
 
     private LaunchConfiguration requireLaunchConfiguration(String region, String name) {

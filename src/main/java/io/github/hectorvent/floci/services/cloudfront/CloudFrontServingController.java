@@ -8,9 +8,12 @@ import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebIamAuth;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
 import io.github.hectorvent.floci.services.s3.ByteRange;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.quarkus.vertx.http.HttpServer;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpVersion;
@@ -106,26 +109,36 @@ public class CloudFrontServingController {
 
     private final CloudFrontService service;
     private final S3Service s3Service;
+    private final LambdaWebService lambdaWebService;
+    private final LambdaWebIamAuth lambdaWebIamAuth;
     private final CurrentVertxRequest currentVertxRequest;
+    private final HttpServer httpServer;
     private final CloudFrontOriginHttpClient httpClient;
+    private final CloudFrontOriginHttpClient flociClient = CloudFrontOriginHttpClient.toFloci();
 
     @Inject
     public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
-                                       EmulatorConfig emulatorConfig,
-                                       CurrentVertxRequest currentVertxRequest) {
+                                       LambdaWebService lambdaWebService, LambdaWebIamAuth lambdaWebIamAuth,
+                                       EmulatorConfig emulatorConfig, CurrentVertxRequest currentVertxRequest,
+                                       HttpServer httpServer) {
         this.service = service;
         this.s3Service = s3Service;
+        this.lambdaWebService = lambdaWebService;
+        this.lambdaWebIamAuth = lambdaWebIamAuth;
         this.currentVertxRequest = currentVertxRequest;
+        this.httpServer = httpServer;
         this.httpClient = new CloudFrontOriginHttpClient(
                 emulatorConfig.services().cloudfront().allowedPrivateOriginHosts().orElse(List.of()));
     }
 
     @PreDestroy
     void closeHttpClient() {
-        try {
-            httpClient.close();
-        } catch (Exception e) {
-            LOG.debugv("Could not close CloudFront origin HTTP client: {0}", e.getMessage());
+        for (CloudFrontOriginHttpClient client : List.of(httpClient, flociClient)) {
+            try {
+                client.close();
+            } catch (Exception e) {
+                LOG.debugv("Could not close CloudFront origin HTTP client: {0}", e.getMessage());
+            }
         }
     }
 
@@ -487,7 +500,7 @@ public class CloudFrontServingController {
                 CloudFrontOriginRequestBuilder.build(viewerRequest(method, viewerScheme),
                         forwarding(config, normalized), distribution.getDomainName());
         return fetchFromCustomOrigin(
-                origin, forwardUri, originRequest, viewerScheme, method, viewerBody);
+                distribution, origin, forwardUri, originRequest, viewerScheme, method, viewerBody);
     }
 
     /** The live viewer request, with CloudFront's signing parameters removed from its query. */
@@ -754,13 +767,22 @@ public class CloudFrontServingController {
      * Fetches from a custom (non-S3) origin. {@code forwardUri} already includes the origin path;
      * {@code originRequest} carries the forwarded query and headers.
      */
-    private OriginResponse fetchFromCustomOrigin(Origin origin, String forwardUri,
+    private OriginResponse fetchFromCustomOrigin(Distribution distribution, Origin origin, String forwardUri,
                                                  CloudFrontOriginRequestBuilder.OriginRequest originRequest,
                                                  String viewerScheme, String method, ViewerBody viewerBody) {
         boolean includeBody = !"HEAD".equals(method);
         try {
-            URI target = buildCustomOriginUri(
-                    origin, viewerScheme, forwardUri, originRequest.rawQuery());
+            // Floci serves its own Web Function endpoints, whatever port and protocol the origin names.
+            String webEndpoint = webFunctionEndpoint(origin);
+            if (webEndpoint != null && originRequest.headers().stream()
+                    .anyMatch(header -> "Host".equalsIgnoreCase(header.name()))) {
+                // CloudFront checks the endpoint's certificate against the forwarded viewer Host, which it never names.
+                LOG.debugv("CloudFront forwards the viewer Host to Web Function origin {0}", origin.getId());
+                return OriginResponse.error(502, "Bad Gateway.");
+            }
+            URI target = webEndpoint != null
+                    ? flociListenerUri(forwardUri, originRequest.rawQuery())
+                    : buildCustomOriginUri(origin, viewerScheme, forwardUri, originRequest.rawQuery());
             HttpRequest.Builder rb = HttpRequest.newBuilder()
                     .uri(target);
             // Origin custom headers: CloudFront adds these to every request it forwards to the origin
@@ -777,11 +799,18 @@ public class CloudFrontServingController {
                     }
                 }
             }
+            if (webEndpoint != null) {
+                originHeaders.put("Host", webEndpoint);
+                if (alwaysAmzAuth(origin)) {
+                    originHeaders.putAll(lambdaWebIamAuth.cloudFrontSignature(distribution.getArn()));
+                }
+            }
             rb.method(method, HttpRequest.BodyPublishers.noBody());
             // Both bodies are streamed, so neither has to fit in memory: the viewer's goes out with its
             // own Content-Length, or chunked as it came, and the origin's comes back as it arrives.
             ViewerBody requestBody = originRequestBody(method, viewerBody);
-            CloudFrontOriginHttpClient.OpenResponse resp = httpClient.open(rb.build(), originRequest.headers(),
+            CloudFrontOriginHttpClient.OpenResponse resp = (webEndpoint != null ? flociClient : httpClient).open(
+                    rb.build(), originRequest.headers(),
                     originHeaders, requestBody != null ? requestBody.stream() : null,
                     requestBody != null ? requestBody.length() : -1, originTimeouts(origin));
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
@@ -805,6 +834,31 @@ public class CloudFrontServingController {
                     safeOriginName(origin), e.getClass().getSimpleName());
             return OriginResponse.error(502, "Bad Gateway.");
         }
+    }
+
+    /** Whether the origin's access control is always-amz-auth, the one a Web Function origin is signed under. */
+    private boolean alwaysAmzAuth(Origin origin) {
+        String oacId = origin.getOriginAccessControlId();
+        return oacId != null && !oacId.isBlank()
+                && "always-amz-auth".equals(service.getOriginAccessControl(oacId).getSigningBehavior());
+    }
+
+    private String webFunctionEndpoint(Origin origin) {
+        try {
+            return lambdaWebService.endpointDomain(normalizeOriginHost(origin.getDomainName())).orElse(null);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The plain HTTP port at the address the viewer reached Floci at, which also serves the Web
+     * Function endpoints. A viewer over TLS reached the HTTPS port instead.
+     */
+    private URI flociListenerUri(String forwardUri, String rawQuery) {
+        SocketAddress local = currentVertxRequest.getCurrent().request().localAddress();
+        String host = local.hostAddress().indexOf(':') >= 0 ? "[" + local.hostAddress() + "]" : local.hostAddress();
+        return buildCustomOriginUri("http", host, httpServer.getPort(), forwardUri, rawQuery);
     }
 
     /**
@@ -1017,7 +1071,7 @@ public class CloudFrontServingController {
         } else {
             String forwardUri = CloudFrontRequestRouter.resolveForwardUri(errOrigin.getOriginPath(), errNormalized, null);
             page = fetchFromCustomOrigin(
-                    errOrigin, forwardUri, CloudFrontOriginRequestBuilder.OriginRequest.empty(),
+                    distribution, errOrigin, forwardUri, CloudFrontOriginRequestBuilder.OriginRequest.empty(),
                     viewerScheme, includeBody ? "GET" : "HEAD", null);
         }
         if (page.status() >= 400) {

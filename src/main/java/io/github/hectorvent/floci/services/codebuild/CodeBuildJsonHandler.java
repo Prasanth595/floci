@@ -38,7 +38,7 @@ public class CodeBuildJsonHandler {
             case "UpdateProject" -> updateProject(request, region);
             case "DeleteProject" -> deleteProject(request, region);
             case "BatchGetProjects" -> batchGetProjects(request, region);
-            case "ListProjects" -> listProjects(region);
+            case "ListProjects" -> listProjects(request, region);
             case "CreateReportGroup" -> createReportGroup(request, region, account);
             case "UpdateReportGroup" -> updateReportGroup(request, region);
             case "DeleteReportGroup" -> deleteReportGroup(request, region);
@@ -129,8 +129,9 @@ public class CodeBuildJsonHandler {
         return Response.ok(Map.of("projects", found, "projectsNotFound", notFound)).build();
     }
 
-    private Response listProjects(String region) {
-        List<String> names = service.listProjects(region);
+    private Response listProjects(JsonNode req, String region) {
+        List<String> names = service.listProjects(region,
+                req.path("sortBy").asText(null), req.path("sortOrder").asText(null));
         return Response.ok(Map.of("projects", names)).build();
     }
 

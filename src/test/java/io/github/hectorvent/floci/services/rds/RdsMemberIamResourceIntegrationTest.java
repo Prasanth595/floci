@@ -101,6 +101,10 @@ class RdsMemberIamResourceIntegrationTest {
                     return connection.isValid(5);
                 }
             });
+            try (Connection connection = connect(port, MASTER_PASSWORD);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("GRANT rds_iam TO " + MASTER_USER);
+            }
             String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
                     accessKeyId, SESSION_SECRET, Instant.now().minusSeconds(60), 900, SESSION_TOKEN);
             iamService.putRolePolicy(roleName, "connect", connectPolicy(resourceId));

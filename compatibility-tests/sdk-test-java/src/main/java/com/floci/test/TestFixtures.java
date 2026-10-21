@@ -50,9 +50,12 @@ import software.amazon.awssdk.services.databasemigration.DatabaseMigrationClient
 import software.amazon.awssdk.services.datasync.DataSyncClient;
 import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.dlm.DlmClient;
+import software.amazon.awssdk.services.dsql.DsqlClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.Subnet;
+import software.amazon.awssdk.services.ec2.model.Vpc;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.efs.EfsClient;
@@ -110,6 +113,7 @@ import software.amazon.awssdk.services.redshiftdata.RedshiftDataClient;
 import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
 import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2Client;
 import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2ClientBuilder;
+import software.amazon.awssdk.services.resourcegroups.ResourceGroupsClient;
 import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTaggingApiClient;
 import software.amazon.awssdk.services.route53.Route53Client;
 import software.amazon.awssdk.services.route53.model.Change;
@@ -121,6 +125,7 @@ import software.amazon.awssdk.services.route53.model.CreateHostedZoneResponse;
 import software.amazon.awssdk.services.route53.model.RRType;
 import software.amazon.awssdk.services.route53.model.ResourceRecord;
 import software.amazon.awssdk.services.route53.model.ResourceRecordSet;
+import software.amazon.awssdk.services.route53resolver.Route53ResolverClient;
 import software.amazon.awssdk.services.rum.RumClient;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -142,6 +147,7 @@ import software.amazon.awssdk.services.scheduler.SchedulerClient;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.securityhub.SecurityHubClient;
 import software.amazon.awssdk.services.servicediscovery.ServiceDiscoveryClient;
+import software.amazon.awssdk.services.servicequotas.ServiceQuotasClient;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
@@ -175,6 +181,8 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
@@ -272,6 +280,33 @@ public final class TestFixtures {
      */
     public static String availabilityZone() {
         return REGION.id() + "a";
+    }
+
+    /**
+     * A default subnet in each of the first two availability zones of {@link #region()}'s default VPC,
+     * for tests that create a load balancer: CreateLoadBalancer needs subnets for every type, and an
+     * Application Load Balancer needs them in two zones.
+     */
+    public static List<String> defaultVpcSubnets() {
+        try (Ec2Client ec2 = ec2Client()) {
+            List<Vpc> defaults = ec2.describeVpcs(r -> r.filters(f -> f.name("is-default").values("true"))).vpcs();
+            if (defaults.isEmpty()) {
+                throw new IllegalStateException("no default VPC in " + REGION.id() + " to put a load balancer in");
+            }
+            String vpcId = defaults.get(0).vpcId();
+            Map<String, String> byZone = new TreeMap<>();
+            for (Subnet subnet : ec2.describeSubnets(r -> r.filters(f -> f.name("vpc-id").values(vpcId)))
+                    .subnets()) {
+                if (Boolean.TRUE.equals(subnet.defaultForAz())) {
+                    byZone.putIfAbsent(subnet.availabilityZone(), subnet.subnetId());
+                }
+            }
+            if (byZone.size() < 2) {
+                throw new IllegalStateException("default VPC " + vpcId + " has default subnets in "
+                        + byZone.keySet() + ", and an Application Load Balancer needs two availability zones");
+            }
+            return byZone.values().stream().limit(2).toList();
+        }
     }
 
     /**
@@ -414,7 +449,8 @@ public final class TestFixtures {
         }
     }
 
-    private static byte[] probeZip() {
+    /** A Node.js deployment package whose handler answers 200, for a function the test only has to create. */
+    static byte[] probeZip() {
         String code = "exports.handler = async () => ({ statusCode: 200 });";
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -547,6 +583,14 @@ public final class TestFixtures {
 
     public static ControlCatalogClient controlCatalogClient() {
         return ControlCatalogClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static ServiceQuotasClient serviceQuotasClient() {
+        return ServiceQuotasClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -921,8 +965,39 @@ public final class TestFixtures {
         }
     }
 
+    /**
+     * The stack's status once it is no longer {@code *_IN_PROGRESS}, or its last status at the timeout.
+     * It checks every 50 ms against Floci, where a stack usually finishes in milliseconds, as the
+     * integration tests' {@code CfnStackWaits} does, and every 500 ms against real AWS.
+     */
+    public static String awaitStackTerminal(CloudFormationClient cfn, String stackName, Duration timeout)
+            throws InterruptedException {
+        long pollMillis = isRealAws() ? 500 : 50;
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            String status = cfn.describeStacks(request -> request.stackName(stackName))
+                    .stacks().get(0).stackStatusAsString();
+            if (!status.endsWith("_IN_PROGRESS")) {
+                return status;
+            }
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0) {
+                return status;
+            }
+            Thread.sleep(Math.min(pollMillis, Math.max(1, Duration.ofNanos(remainingNanos).toMillis())));
+        }
+    }
+
     public static GlueClient glueClient() {
         return GlueClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static ResourceGroupsClient resourceGroupsClient() {
+        return ResourceGroupsClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -1212,6 +1287,14 @@ public final class TestFixtures {
         return hostedZoneId != null && hostedZoneId.startsWith(prefix)
                 ? hostedZoneId.substring(prefix.length())
                 : hostedZoneId;
+    }
+
+    public static DsqlClient dsqlClient() {
+        return DsqlClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
     }
 
     public static RdsClient rdsClient() {
@@ -1608,6 +1691,14 @@ public final class TestFixtures {
 
     public static S3TablesClient s3tablesClient() {
         return S3TablesClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static Route53ResolverClient route53ResolverClient() {
+        return Route53ResolverClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

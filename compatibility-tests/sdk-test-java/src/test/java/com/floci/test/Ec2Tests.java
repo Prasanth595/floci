@@ -861,6 +861,40 @@ class Ec2Tests {
     }
 
     @Test
+    @Order(52)
+    @DisplayName("DescribeTags - paginator pages with MaxResults and honours tag:<key>")
+    void describeTagsPaginatesAndFiltersByTagKey() {
+        String pagedVpcId = ec2.createVpc(CreateVpcRequest.builder().cidrBlock("10.98.0.0/16").build())
+                .vpc().vpcId();
+        try {
+            List<Tag> tags = new ArrayList<>();
+            for (int i = 1; i <= 12; i++) {
+                tags.add(Tag.builder().key(String.format("Page%02d", i)).value(i == 1 ? "TeamA" : "v").build());
+            }
+            ec2.createTags(CreateTagsRequest.builder().resources(pagedVpcId).tags(tags).build());
+            Filter byId = Filter.builder().name("resource-id").values(pagedVpcId).build();
+
+            List<DescribeTagsResponse> pages = ec2.describeTagsPaginator(DescribeTagsRequest.builder()
+                    .filters(byId).maxResults(5).build()).stream().toList();
+            assertThat(pages).extracting(page -> page.tags().size()).containsExactly(5, 5, 2);
+            assertThat(pages.get(2).nextToken()).isNull();
+            assertThat(pages.stream().flatMap(page -> page.tags().stream()).map(TagDescription::key).distinct())
+                    .hasSize(12);
+
+            assertThat(ec2.describeTags(DescribeTagsRequest.builder()
+                    .filters(byId, Filter.builder().name("tag:Page01").values("Team?").build())
+                    .build()).tags())
+                    .singleElement()
+                    .satisfies(tag -> {
+                        assertThat(tag.key()).isEqualTo("Page01");
+                        assertThat(tag.resourceType()).isEqualTo(ResourceType.VPC);
+                    });
+        } finally {
+            ec2.deleteVpc(DeleteVpcRequest.builder().vpcId(pagedVpcId).build());
+        }
+    }
+
+    @Test
     @Order(38)
     @DisplayName("DescribeInstances - tags reflected on instance")
     void describeInstancesTagsReflected() {

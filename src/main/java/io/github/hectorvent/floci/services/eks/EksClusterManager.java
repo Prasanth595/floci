@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -62,7 +63,6 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.File;
@@ -158,6 +158,7 @@ public class EksClusterManager
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
+    private final long archiveRetryBackoffMillis;
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
     private final DockerHostResolver dockerHostResolver;
@@ -424,6 +425,26 @@ public class EksClusterManager
                              FlociCertificateAuthority certificateAuthority,
                              ContainerLogStreamer logStreamer,
                              StorageBackend<String, Nodegroup> nodeGroupStorage) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer,
+                oidcService, certificateAuthority, logStreamer, nodeGroupStorage,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
+
+    EksClusterManager(ContainerBuilder containerBuilder,
+                      ContainerLifecycleManager lifecycleManager,
+                      ContainerDetector containerDetector,
+                      PortAllocator portAllocator,
+                      DockerHostResolver dockerHostResolver,
+                      EcrRegistryManager ecrRegistryManager,
+                      EmulatorConfig config,
+                      RegionResolver regionResolver,
+                      Ec2MetadataServer metadataServer,
+                      EksOidcService oidcService,
+                      FlociCertificateAuthority certificateAuthority,
+                      ContainerLogStreamer logStreamer,
+                      StorageBackend<String, Nodegroup> nodeGroupStorage,
+                      long archiveRetryBackoffMillis) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -437,6 +458,7 @@ public class EksClusterManager
         this.certificateAuthority = certificateAuthority;
         this.logStreamer = logStreamer;
         this.nodeGroupStorage = nodeGroupStorage;
+        this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
     }
 
     @Inject
@@ -754,10 +776,11 @@ public class EksClusterManager
      * Re-latches a persisted cluster onto its k3s container after a Floci restart. A surviving
      * container - running, or stopped by a Docker daemon reboot - is adopted (started if needed),
      * keeping its published API server port and data volume, so the cluster's workloads come back
-     * as they were. When the container is gone, the cluster is recreated via {@link #startCluster};
-     * the named k3s data volume is reused if it survived. Callers should put the cluster back into
-     * CREATING so the readiness poller re-verifies the API server and re-extracts the certificate
-     * authority before marking it ACTIVE again.
+     * as they were. A survivor whose node capacity changed, or that is not on the Docker network
+     * Floci now uses, is replaced on the same volume. When the container is gone, the cluster is
+     * recreated via {@link #startCluster}; the named k3s data volume is reused if it survived.
+     * Callers should put the cluster back into CREATING so the readiness poller re-verifies the API
+     * server and re-extracts the certificate authority before marking it ACTIVE again.
      */
     public void restoreCluster(Cluster cluster) {
         if (cluster.getDockerName() == null) {
@@ -795,9 +818,28 @@ public class EksClusterManager
             startCluster(cluster);
             return;
         }
-        if (capacityChanged) {
+        if (capacityChanged || onAnotherNetwork(existing.get())) {
             replaceClusterContainer(cluster, null);
         }
+    }
+
+    // Floci in a container reaches k3s over the Docker network; on the host it uses the published port.
+    private boolean onAnotherNetwork(Container survivor) {
+        if (!containerDetector.isRunningInContainer()) {
+            return false;
+        }
+        Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().eks().dockerNetwork());
+        if (network.isEmpty() || survivor.getNetworkSettings() == null
+                || survivor.getNetworkSettings().getNetworks() == null
+                || survivor.getNetworkSettings().getNetworks().isEmpty()) {
+            return false;
+        }
+        boolean moved = !survivor.getNetworkSettings().getNetworks().containsKey(network.get());
+        if (moved) {
+            LOG.infov("Surviving k3s container {0} is not on Docker network {1}; replacing it (its data volume is kept)",
+                    survivor.getId(), network.get());
+        }
+        return moved;
     }
 
     private boolean adoptSurvivingCluster(Cluster cluster, String containerId) {
@@ -807,7 +849,8 @@ public class EksClusterManager
 
         ContainerInfo info;
         try {
-            info = lifecycleManager.adopt(containerId, List.of(K3S_API_SERVER_PORT));
+            info = lifecycleManager.adopt(containerId, List.of(K3S_API_SERVER_PORT),
+                    containerBuilder.resolveDockerNetwork(config.services().eks().dockerNetwork()));
         } catch (Exception e) {
             LOG.warnv("Could not adopt surviving k3s container {0} for EKS cluster {1} ({2}); recreating it",
                     cluster.getDockerName(), cluster.getName(), e.getMessage());
@@ -863,9 +906,9 @@ public class EksClusterManager
             closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
             cluster.setContainerId(null);
             startCluster(cluster, oldPort);
-            LOG.infov("Replaced EKS cluster {0} to apply current node capacity limits", cluster.getName());
+            LOG.infov("Replaced the k3s container of EKS cluster {0}", cluster.getName());
         } catch (RuntimeException replacement) {
-            LOG.warnv("Could not replace EKS cluster {0} for node capacity: {1}; restoring surviving node",
+            LOG.warnv("Could not replace the k3s container of EKS cluster {0}: {1}; restoring surviving node",
                     cluster.getName(), replacement.getMessage());
             restorePreviousNodeType(cluster, previousType);
             if (!renamed) {
@@ -879,7 +922,7 @@ public class EksClusterManager
                 }
             } catch (RuntimeException rollback) {
                 throw new IllegalStateException("Could not restore EKS cluster " + cluster.getName()
-                        + " after node capacity replacement failed", rollback);
+                        + " after its k3s container replacement failed", rollback);
             }
             return false;
         }
@@ -1553,7 +1596,8 @@ public class EksClusterManager
     private void copyWebhookIntoContainer(String containerId, String localFile, String clusterName) {
         try {
             RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
-                    WEBHOOK_CONFIG_DIR, localFile);
+                    WEBHOOK_CONFIG_DIR, localFile,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
         } catch (Exception e) {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
@@ -1591,10 +1635,8 @@ public class EksClusterManager
         try {
             DockerClient dockerClient = lifecycleManager.getDockerClient();
             if (dockerClient != null) {
-                dockerClient.copyArchiveToContainerCmd(containerId)
-                        .withHostResource(localFile)
-                        .withRemotePath(AUDIT_POLICY_DIR)
-                        .exec();
+                RetryingTarCopier.copyHostResource(dockerClient, containerId, AUDIT_POLICY_DIR, localFile,
+                        RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
                 LOG.debugv("Injected audit policy file into k3s container {0} for cluster {1}",
                         containerId, clusterName);
             }
@@ -1918,16 +1960,12 @@ public class EksClusterManager
      */
     void copySigningKeysIntoContainer(String containerId, SigningKeyFiles keyFiles, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(keyFiles.signingKeyPath().toString())
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(keyFiles.publicKeyPath().toString())
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, keyFiles.signingKeyPath().toString(),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, keyFiles.publicKeyPath().toString(),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
             LOG.debugv("Injected IRSA OIDC signing keypair into k3s container {0} for cluster {1}",
                     containerId, clusterName);
         } catch (Exception e) {
@@ -1982,7 +2020,8 @@ public class EksClusterManager
                 "registries.yaml"), content, clusterName);
         try {
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
-                    REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644);
+                    REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
             LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}", endpoint, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no ECR registry mirror: could not copy registries.yaml "
@@ -2000,11 +2039,10 @@ public class EksClusterManager
      */
     void linkContainerdCertsDir(String containerId, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(buildContainerdCertsLinkTar()))
-                    .withRemotePath("/")
-                    .exec();
+            byte[] tar = buildContainerdCertsLinkTar();
+            RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, "/",
+                    "containerd-certs-link", out -> out.write(tar),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0}: could not link containerd certs.d directory: {1}",
                     clusterName, e.getMessage());
@@ -2070,12 +2108,10 @@ public class EksClusterManager
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "webhook", clusterName,
                 POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(
-                            tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest)))
-                    .withRemotePath(K3S_DATA_DIR)
-                    .exec();
+            byte[] tar = tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest);
+            RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
+                    POD_IDENTITY_MANIFEST_FILE, out -> out.write(tar),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
             LOG.infov("Registered the EKS Pod Identity mutating webhook ({0}) for cluster {1}", url, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no pod identity injection: could not copy {1} into the k3s "
@@ -2305,7 +2341,7 @@ public class EksClusterManager
             }
 
             if (metadataServer != null) {
-                metadataServer.reconcileContainerAddresses(containerIps.allIps(), nodeInstance);
+                metadataServer.reconcileClusterNodeAddresses(containerIps.allIps(), nodeInstance);
             }
 
             ContainerExec.Result install = execInContainerForResult(containerId,
@@ -2831,6 +2867,8 @@ public class EksClusterManager
         // node instance profile identity so /latest/meta-data/iam/info returns a valid profile ARN.
         String nodeProfileName = safeClusterName + "-node-profile";
         inst.setIamInstanceProfileArn(regionResolver.buildGlobalArn("iam", safeAccountId, "instance-profile/" + nodeProfileName));
+        // IAM holds no such profile, so the node carries its own stable id, shaped like IAM's.
+        inst.setIamInstanceProfileId("AIPA" + instanceId.substring(2).toUpperCase(Locale.ROOT));
 
         if (cluster.getResourcesVpcConfig() != null) {
             inst.setVpcId(cluster.getResourcesVpcConfig().getVpcId());

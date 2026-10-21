@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalanci
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Action;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.ActionTypeEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.AddTagsRequest;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.AvailabilityZone;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.CreateListenerRequest;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.CreateListenerResponse;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.CreateLoadBalancerRequest;
@@ -51,6 +52,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.model.IpAddressTyp
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Listener;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancer;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancerAttribute;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancerNotFoundException;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancerSchemeEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancerStateEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancerTypeEnum;
@@ -137,6 +139,7 @@ class ElbV2Test {
                 .type(LoadBalancerTypeEnum.APPLICATION)
                 .scheme(LoadBalancerSchemeEnum.INTERNET_FACING)
                 .ipAddressType(IpAddressType.IPV4)
+                .subnets(TestFixtures.defaultVpcSubnets())
                 .build());
 
         assertThat(resp.loadBalancers()).hasSize(1);
@@ -194,9 +197,13 @@ class ElbV2Test {
     @Order(4)
     @DisplayName("CreateLoadBalancer - duplicate name throws DuplicateLoadBalancerNameException")
     void createLoadBalancerDuplicateName() {
+        // A create that repeats the existing balancer's settings succeeds on AWS, so this one differs in
+        // its scheme; it names subnets so the taken name is the only thing wrong with it.
         assertThatThrownBy(() -> elb.createLoadBalancer(CreateLoadBalancerRequest.builder()
                 .name(LB_NAME)
                 .type(LoadBalancerTypeEnum.APPLICATION)
+                .scheme(LoadBalancerSchemeEnum.INTERNAL)
+                .subnets(TestFixtures.defaultVpcSubnets())
                 .build()))
                 .isInstanceOf(DuplicateLoadBalancerNameException.class);
     }
@@ -219,6 +226,62 @@ class ElbV2Test {
         boolean found = resp.attributes().stream()
                 .anyMatch(a -> "deletion_protection.enabled".equals(a.key()) && "true".equals(a.value()));
         assertThat(found).isTrue();
+    }
+
+    @Test
+    @Order(8)
+    @DisplayName("SetSubnets - neither Subnets nor SubnetMappings is a ValidationError")
+    void setSubnetsWithoutSubnets() {
+        List<String> subnets = TestFixtures.defaultVpcSubnets();
+        String arn = elb.createLoadBalancer(r -> r.name(TestFixtures.uniqueName("sdk-set-none"))
+                .type(LoadBalancerTypeEnum.NETWORK).subnets(subnets))
+                .loadBalancers().get(0).loadBalancerArn();
+        try {
+            assertThatThrownBy(() -> elb.setSubnets(r -> r.loadBalancerArn(arn)))
+                    .isInstanceOfSatisfying(ElasticLoadBalancingV2Exception.class, e -> {
+                        assertThat(e.statusCode()).isEqualTo(400);
+                        assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                        assertThat(e.awsErrorDetails().errorMessage()).isEqualTo("At least one subnet must be specified");
+                    });
+            assertThat(elb.describeLoadBalancers(r -> r.loadBalancerArns(arn)).loadBalancers().get(0).availabilityZones())
+                    .extracting(AvailabilityZone::subnetId)
+                    .containsExactlyInAnyOrderElementsOf(subnets);
+        } finally {
+            elb.deleteLoadBalancer(r -> r.loadBalancerArn(arn));
+        }
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("CreateLoadBalancer - neither Subnets nor SubnetMappings is a ValidationError")
+    void createLoadBalancerWithoutSubnets() {
+        String name = TestFixtures.uniqueName("sdk-no-subnets");
+        assertThatThrownBy(() -> elb.createLoadBalancer(r -> r.name(name).type(LoadBalancerTypeEnum.NETWORK)))
+                .isInstanceOfSatisfying(ElasticLoadBalancingV2Exception.class, e -> {
+                    assertThat(e.statusCode()).isEqualTo(400);
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                    assertThat(e.awsErrorDetails().errorMessage()).isEqualTo("At least one subnet must be specified");
+                });
+        assertThatThrownBy(() -> elb.describeLoadBalancers(r -> r.names(name)))
+                .isInstanceOf(LoadBalancerNotFoundException.class);
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("CreateLoadBalancer - an Application Load Balancer on one subnet is a ValidationError")
+    void createApplicationLoadBalancerOnOneSubnet() {
+        String name = TestFixtures.uniqueName("sdk-one-subnet");
+        String subnet = TestFixtures.defaultVpcSubnets().get(0);
+        assertThatThrownBy(() -> elb.createLoadBalancer(r -> r.name(name).type(LoadBalancerTypeEnum.APPLICATION)
+                        .subnets(subnet)))
+                .isInstanceOfSatisfying(ElasticLoadBalancingV2Exception.class, e -> {
+                    assertThat(e.statusCode()).isEqualTo(400);
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationError");
+                    assertThat(e.awsErrorDetails().errorMessage())
+                            .isEqualTo("At least two subnets in two different Availability Zones must be specified");
+                });
+        assertThatThrownBy(() -> elb.describeLoadBalancers(r -> r.names(name)))
+                .isInstanceOf(LoadBalancerNotFoundException.class);
     }
 
     // ─── Target Groups ───────────────────────────────────────────────────────
@@ -510,6 +573,7 @@ class ElbV2Test {
                 .type(LoadBalancerTypeEnum.APPLICATION)
                 .scheme(LoadBalancerSchemeEnum.INTERNAL)
                 .ipAddressType(IpAddressType.IPV4)
+                .subnets(TestFixtures.defaultVpcSubnets())
                 .build()).loadBalancers().get(0).loadBalancerArn();
         String otherListenerArn = null;
         String otherRuleArn = null;

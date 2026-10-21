@@ -13,7 +13,8 @@
 | `CreateBackupVault` | `PUT` | `/backup-vaults/{backupVaultName}` | Create a backup vault |
 | `DescribeBackupVault` | `GET` | `/backup-vaults/{backupVaultName}` | Describe a backup vault |
 | `DeleteBackupVault` | `DELETE` | `/backup-vaults/{backupVaultName}` | Delete an empty backup vault, locked or not |
-| `ListBackupVaults` | `GET` | `/backup-vaults/` | List all backup vaults |
+| `ListBackupVaults` | `GET` | `/backup-vaults/` | List all backup vaults; honours the `vaultType` filter |
+| `CreateLogicallyAirGappedBackupVault` | `PUT` | `/logically-air-gapped-backup-vaults/{backupVaultName}` | Create a logically air-gapped vault, `AVAILABLE` at once; `DescribeBackupVault` reports its `VaultType`, `VaultState`, retention and a compliance lock whose `LockDate` is the creation date |
 
 ### Backup Vault Access Policy
 
@@ -191,7 +192,8 @@ Actual backup is simulated — no data is read from or written to the referenced
 - The access policy and notification configuration are **not** returned by
   `DescribeBackupVault`, matching AWS: each is reachable only through its own `Get`
   operation. The lock fields (`Locked`, `LockDate`, `MinRetentionDays`,
-  `MaxRetentionDays`) are on the vault, also matching AWS.
+  `MaxRetentionDays`) are on the vault, also matching AWS. A standard vault reports
+  `VaultType` `BACKUP_VAULT` in `DescribeBackupVault` and `ListBackupVaults`.
 
 ## Configuration
 
@@ -202,11 +204,16 @@ Actual backup is simulated — no data is read from or written to the referenced
 
 ## Not Yet Supported
 
-- **Notification delivery.** `PutBackupVaultNotifications` stores the configuration and
-  `GetBackupVaultNotifications` reports it, but no vault event is ever published to the SNS
-  topic: a subscriber receives nothing when a backup job completes. The configuration is
-  modelled, the delivery is not, so a Terraform configuration that attaches notifications
-  applies and reads back correctly while a test asserting on a received message will fail.
+- **Notification delivery, beyond `BACKUP_JOB_COMPLETED`.** When a backup job completes in a
+  vault whose `BackupVaultEvents` include `BACKUP_JOB_COMPLETED`, Floci publishes one message to
+  the configured `SNSTopicArn` with AWS's documented subject (`Notification from AWS Backup`), body
+  (recovery point, resource and job ID) and message attributes (`EventType`, `State`, `AccountId`,
+  `Id`, `StartTime`), so subscription filter policies on those attributes match. That is the only
+  event delivered. Every other event --
+  including `BACKUP_JOB_STARTED`, `BACKUP_JOB_SUCCESSFUL`, `BACKUP_JOB_FAILED` and all
+  `RESTORE_JOB_*` and `COPY_JOB_*` events -- is stored and reported by
+  `GetBackupVaultNotifications` but never published. A failed publish (for example, a topic that does not
+  exist) is logged and dropped without affecting the job.
 - **Access policy enforcement.** `PutBackupVaultAccessPolicy` stores a resource policy and
   `GetBackupVaultAccessPolicy` reports it, but no authorization path consults it: a policy
   denying a vault operation does not prevent that operation, even with IAM enforcement

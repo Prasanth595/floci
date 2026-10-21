@@ -159,6 +159,12 @@ public class CloudFormationQueryHandler {
                         parameters, capabilities, tags, region)
                 : cfnService.createChangeSet(stackName, changeSetName,
                         "UPDATE", templateBody, templateUrl, parameters, capabilities, tags, region);
+        // An update that submits what the stack already has is refused, and leaves no change set
+        // behind, as UpdateStack does on AWS.
+        if (CloudFormationService.NO_CHANGES_REASON.equals(cs.getStatusReason())) {
+            cfnService.deleteChangeSet(stackName, cs.getChangeSetName(), region);
+            return xmlError("ValidationError", "No updates are to be performed.", 400);
+        }
         awaitExecution(cfnService.executeChangeSet(stackName, cs.getChangeSetName(), region));
 
         Stack stack = cfnService.describeStacks(stackName, region).get(0);
@@ -575,6 +581,11 @@ public class CloudFormationQueryHandler {
     // ── ValidateTemplate ──────────────────────────────────────────────────────
 
     private Response validateTemplate(MultivaluedMap<String, String> params) {
+        try {
+            cfnService.validateTemplate(params.getFirst("TemplateBody"), params.getFirst("TemplateURL"));
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
         String xml = new XmlBuilder()
                 .start("ValidateTemplateResponse", CF_NS)
                 .start("ValidateTemplateResult")

@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
@@ -57,10 +57,10 @@ public class ServiceLastAccessedService {
                                            List<String> serviceNamespaces,
                                            List<ServiceLastAccessedEntity> entities) {
         if (granularity != null && !GRANULARITIES.contains(granularity)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + granularity + "' at 'granularity' "
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + granularity + "' at 'granularity' "
                             + "failed to satisfy constraint: Member must satisfy enum value set: "
-                            + "[SERVICE_LEVEL, ACTION_LEVEL]", 400);
+                            + "[SERVICE_LEVEL, ACTION_LEVEL]");
         }
         Instant now = Instant.now();
         // jobIDType is min 36 / max 36, which is exactly a UUID string.

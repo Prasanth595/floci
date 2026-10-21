@@ -48,6 +48,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoUs
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoUserPoolUserToGroupAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ConfigCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CustomResourceCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.DsqlCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.DynamoDbCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2FlowLogCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2InstanceCfnProvisioner;
@@ -87,6 +88,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEve
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEventSourceMappingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaMicrovmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaWebCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsLogStreamCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsMetricFilterCfnProvisioner;
@@ -97,6 +99,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftC
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftServerlessCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.S3VectorsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
@@ -118,6 +121,7 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsS
 import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.configservice.AwsConfigService;
 import io.github.hectorvent.floci.services.docdb.DocDbService;
+import io.github.hectorvent.floci.services.dsql.DsqlService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.dynamodb.backend.NativeDynamoDbBackend;
@@ -142,6 +146,7 @@ import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
@@ -149,6 +154,7 @@ import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3vectors.S3VectorsService;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ses.SesIdentityService;
@@ -190,6 +196,7 @@ final class CfnProvisionerFixture {
     static final class Builder {
 
         private S3Service s3Service;
+        private S3VectorsService s3VectorsService;
         private SnsService snsService;
         private SesService sesService;
         private SesIdentityService sesIdentityService;
@@ -239,9 +246,11 @@ final class CfnProvisionerFixture {
         private IotDomainConfigurationService iotDomainConfigurationService;
         private IotService iotService;
         private LambdaMicrovmsService lambdaMicrovmsService;
+        private LambdaWebService lambdaWebService;
         private AwsConfigService awsConfigService;
         private OrganizationsService organizationsService;
         private SqsService sqsService;
+        private DsqlService dsqlService;
         private WafV2Service wafV2Service;
         private BackupService backupService;
         private ElastiCacheService elastiCacheService;
@@ -302,6 +311,9 @@ final class CfnProvisionerFixture {
             if (customResourceResponseStore != null) {
                 discovered.add(new CustomResourceCfnProvisioner(lambdaService, objectMapper,
                         customResourceResponseStore, reachableEndpoint));
+            }
+            if (s3VectorsService != null) {
+                discovered.add(new S3VectorsCfnProvisioner(s3VectorsService));
             }
             if (s3Service != null) {
                 discovered.add(new S3CfnProvisioner(s3Service));
@@ -423,11 +435,17 @@ final class CfnProvisionerFixture {
             if (lambdaMicrovmsService != null) {
                 discovered.add(new LambdaMicrovmsCfnProvisioner(lambdaMicrovmsService));
             }
+            if (lambdaWebService != null) {
+                discovered.add(new LambdaWebCfnProvisioner(lambdaWebService));
+            }
             if (awsConfigService != null) {
                 discovered.add(new ConfigCfnProvisioner(awsConfigService));
             }
             if (organizationsService != null) {
                 discovered.add(new OrganizationsCfnProvisioner(organizationsService));
+            }
+            if (dsqlService != null) {
+                discovered.add(new DsqlCfnProvisioner(dsqlService));
             }
             if (sqsService != null) {
                 discovered.add(new SqsCfnProvisioner(sqsService));
@@ -500,6 +518,11 @@ final class CfnProvisionerFixture {
                         bedrockAgentCoreMemoryService));
             }
             return discovered;
+        }
+
+        public Builder s3Vectors(S3VectorsService v) {
+            this.s3VectorsService = v;
+            return this;
         }
 
         public Builder s3(S3Service v) {
@@ -742,6 +765,11 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder lambdaWeb(LambdaWebService v) {
+            this.lambdaWebService = v;
+            return this;
+        }
+
         public Builder awsConfig(AwsConfigService v) {
             this.awsConfigService = v;
             return this;
@@ -749,6 +777,11 @@ final class CfnProvisionerFixture {
 
         public Builder organizations(OrganizationsService v) {
             this.organizationsService = v;
+            return this;
+        }
+
+        public Builder dsql(DsqlService v) {
+            this.dsqlService = v;
             return this;
         }
 

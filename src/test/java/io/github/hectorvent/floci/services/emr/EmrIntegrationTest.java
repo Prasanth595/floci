@@ -10,10 +10,12 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.EmrRequests.emr;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
 
@@ -26,9 +28,6 @@ import static org.hamcrest.Matchers.startsWith;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class EmrIntegrationTest {
 
-    private static final String CT = "application/x-amz-json-1.1";
-    private static final String PREFIX = "ElasticMapReduce.";
-
     private static String clusterId;
     private static String stepId;
 
@@ -40,16 +39,13 @@ class EmrIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    private static Response call(String action, String body) {
-        return given().contentType(CT).header("X-Amz-Target", PREFIX + action)
-                .body(body).when().post("/");
-    }
-
     @Test
     @Order(1)
     void runJobFlow() {
-        Response resp = call("RunJobFlow",
+        String roleArn = "arn:aws:iam::000000000000:role/emr-initial-step";
+        Response resp = emr("RunJobFlow",
                 "{\"Name\":\"floci-emr\",\"ReleaseLabel\":\"emr-7.5.0\","
+                        + "\"StepExecutionRoleArn\":\"" + roleArn + "\","
                         + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
                         + "\"InstanceGroups\":[{\"Name\":\"master\",\"InstanceRole\":\"MASTER\","
                         + "\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
@@ -61,12 +57,17 @@ class EmrIntegrationTest {
                 .body("JobFlowId", startsWith("j-"))
                 .body("ClusterArn", notNullValue());
         clusterId = resp.jsonPath().getString("JobFlowId");
+        String initialStepId = emr("ListSteps", "{\"ClusterId\":\"" + clusterId + "\"}")
+                .then().statusCode(200).extract().jsonPath().getString("Steps[0].Id");
+        emr("DescribeStep", "{\"ClusterId\":\"" + clusterId + "\",\"StepId\":\"" + initialStepId + "\"}")
+                .then().statusCode(200)
+                .body("Step.ExecutionRoleArn", equalTo(roleArn));
     }
 
     @Test
     @Order(2)
     void describeClusterIsWaiting() {
-        call("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
+        emr("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
                 .then().statusCode(200)
                 .body("Cluster.Id", equalTo(clusterId))
                 .body("Cluster.Status.State", equalTo("WAITING"))
@@ -79,7 +80,7 @@ class EmrIntegrationTest {
     @Test
     @Order(3)
     void listClustersFilteredByState() {
-        call("ListClusters", "{\"ClusterStates\":[\"WAITING\"]}")
+        emr("ListClusters", "{\"ClusterStates\":[\"WAITING\"]}")
                 .then().statusCode(200)
                 .body("Clusters.find { it.Id == '" + clusterId + "' }.Name", equalTo("floci-emr"));
     }
@@ -87,7 +88,7 @@ class EmrIntegrationTest {
     @Test
     @Order(4)
     void listInstanceGroups() {
-        call("ListInstanceGroups", "{\"ClusterId\":\"" + clusterId + "\"}")
+        emr("ListInstanceGroups", "{\"ClusterId\":\"" + clusterId + "\"}")
                 .then().statusCode(200)
                 .body("InstanceGroups", hasSize(2))
                 .body("InstanceGroups.find { it.InstanceGroupType == 'CORE' }.RunningInstanceCount", equalTo(2));
@@ -96,7 +97,7 @@ class EmrIntegrationTest {
     @Test
     @Order(5)
     void listInstancesSynthetic() {
-        call("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}")
+        emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}")
                 .then().statusCode(200)
                 .body("Instances", hasSize(3))  // 1 master + 2 core
                 .body("Instances[0].Status.State", equalTo("RUNNING"))
@@ -106,7 +107,7 @@ class EmrIntegrationTest {
     @Test
     @Order(6)
     void addStepWithLegacyActionAlias() {
-        stepId = call("AddJobFlowSteps",
+        stepId = emr("AddJobFlowSteps",
                 "{\"JobFlowId\":\"" + clusterId + "\",\"Steps\":[{\"Name\":\"added\","
                         + "\"ActionOnFailure\":\"TERMINATE_CLUSTER\","
                         + "\"HadoopJarStep\":{\"Jar\":\"command-runner.jar\",\"MainClass\":\"org.Main\","
@@ -119,7 +120,7 @@ class EmrIntegrationTest {
     @Test
     @Order(7)
     void describeStepCompleted() {
-        call("DescribeStep", "{\"ClusterId\":\"" + clusterId + "\",\"StepId\":\"" + stepId + "\"}")
+        emr("DescribeStep", "{\"ClusterId\":\"" + clusterId + "\",\"StepId\":\"" + stepId + "\"}")
                 .then().statusCode(200)
                 .body("Step.Id", equalTo(stepId))
                 .body("Step.Name", equalTo("added"))
@@ -131,7 +132,7 @@ class EmrIntegrationTest {
     @Test
     @Order(8)
     void listStepsNewestFirst() {
-        call("ListSteps", "{\"ClusterId\":\"" + clusterId + "\"}")
+        emr("ListSteps", "{\"ClusterId\":\"" + clusterId + "\"}")
                 .then().statusCode(200)
                 .body("Steps", hasSize(2))
                 .body("Steps[0].Name", equalTo("added"))  // newest first
@@ -140,62 +141,86 @@ class EmrIntegrationTest {
 
     @Test
     @Order(9)
+    void addStepsPreservesRequestLevelExecutionRole() {
+        String roleArn = "arn:aws:iam::000000000000:role/emr-step";
+        Response added = emr("AddJobFlowSteps",
+                "{\"JobFlowId\":\"" + clusterId + "\",\"ExecutionRoleArn\":\"" + roleArn + "\","
+                        + "\"Steps\":[{\"Name\":\"first-role-step\",\"HadoopJarStep\":{\"Jar\":\"command-runner.jar\"}},"
+                        + "{\"Name\":\"second-role-step\",\"HadoopJarStep\":{\"Jar\":\"command-runner.jar\"}}]}");
+        added.then().statusCode(200).body("StepIds", hasSize(2));
+        String firstId = added.jsonPath().getString("StepIds[0]");
+        String secondId = added.jsonPath().getString("StepIds[1]");
+
+        emr("DescribeStep", "{\"ClusterId\":\"" + clusterId + "\",\"StepId\":\"" + firstId + "\"}")
+                .then().statusCode(200)
+                .body("Step.ExecutionRoleArn", equalTo(roleArn));
+        emr("DescribeStep", "{\"ClusterId\":\"" + clusterId + "\",\"StepId\":\"" + secondId + "\"}")
+                .then().statusCode(200)
+                .body("Step.ExecutionRoleArn", equalTo(roleArn));
+        emr("ListSteps", "{\"ClusterId\":\"" + clusterId + "\"}")
+                .then().statusCode(200)
+                .body("Steps.find { it.Id == '" + firstId + "' }", not(hasKey("ExecutionRoleArn")))
+                .body("Steps.find { it.Id == '" + secondId + "' }", not(hasKey("ExecutionRoleArn")));
+    }
+
+    @Test
+    @Order(10)
     void modifyStepConcurrency() {
-        call("ModifyCluster", "{\"ClusterId\":\"" + clusterId + "\",\"StepConcurrencyLevel\":5}")
+        emr("ModifyCluster", "{\"ClusterId\":\"" + clusterId + "\",\"StepConcurrencyLevel\":5}")
                 .then().statusCode(200)
                 .body("StepConcurrencyLevel", equalTo(5));
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void securityConfigurationRoundTrip() {
-        call("CreateSecurityConfiguration",
+        emr("CreateSecurityConfiguration",
                 "{\"Name\":\"floci-emr-sec\",\"SecurityConfiguration\":\"{\\\"EncryptionConfiguration\\\":{}}\"}")
                 .then().statusCode(200)
                 .body("Name", equalTo("floci-emr-sec"))
                 .body("CreationDateTime", notNullValue());
 
-        call("DescribeSecurityConfiguration", "{\"Name\":\"floci-emr-sec\"}")
+        emr("DescribeSecurityConfiguration", "{\"Name\":\"floci-emr-sec\"}")
                 .then().statusCode(200)
                 .body("SecurityConfiguration", equalTo("{\"EncryptionConfiguration\":{}}"));
 
-        call("DeleteSecurityConfiguration", "{\"Name\":\"floci-emr-sec\"}").then().statusCode(200);
-    }
-
-    @Test
-    @Order(11)
-    void tagsRoundTrip() {
-        call("AddTags", "{\"ResourceId\":\"" + clusterId + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"test\"}]}")
-                .then().statusCode(200);
-        call("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
-                .then().statusCode(200)
-                .body("Cluster.Tags.find { it.Key == 'env' }.Value", equalTo("test"));
-        call("RemoveTags", "{\"ResourceId\":\"" + clusterId + "\",\"TagKeys\":[\"env\"]}")
-                .then().statusCode(200);
+        emr("DeleteSecurityConfiguration", "{\"Name\":\"floci-emr-sec\"}").then().statusCode(200);
     }
 
     @Test
     @Order(12)
+    void tagsRoundTrip() {
+        emr("AddTags", "{\"ResourceId\":\"" + clusterId + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"test\"}]}")
+                .then().statusCode(200);
+        emr("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
+                .then().statusCode(200)
+                .body("Cluster.Tags.find { it.Key == 'env' }.Value", equalTo("test"));
+        emr("RemoveTags", "{\"ResourceId\":\"" + clusterId + "\",\"TagKeys\":[\"env\"]}")
+                .then().statusCode(200);
+    }
+
+    @Test
+    @Order(13)
     void terminateCluster() {
-        call("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}").then().statusCode(200);
-        call("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}").then().statusCode(200);
+        emr("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
                 .then().statusCode(200)
                 .body("Cluster.Status.State", equalTo("TERMINATED"))
                 .body("Cluster.Status.StateChangeReason.Code", equalTo("USER_REQUEST"));
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void describeUnknownClusterIsInvalidRequest() {
-        call("DescribeCluster", "{\"ClusterId\":\"j-DOESNOTEXIST0\"}")
+        emr("DescribeCluster", "{\"ClusterId\":\"j-DOESNOTEXIST0\"}")
                 .then().statusCode(400)
                 .body("__type", equalTo("InvalidRequestException"));
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void runJobFlowWithoutNameIsValidationException() {
-        call("RunJobFlow", "{\"ReleaseLabel\":\"emr-7.5.0\",\"Instances\":{}}")
+        emr("RunJobFlow", "{\"ReleaseLabel\":\"emr-7.5.0\",\"Instances\":{}}")
                 .then().statusCode(400)
                 .body("__type", equalTo("ValidationException"))
                 .body("message", equalTo(
@@ -204,19 +229,19 @@ class EmrIntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(16)
     void runJobFlowWithEmptyNameIsAccepted() {
         // The Name member is REQUIRED but its model constraint is len=[0..256], so real EMR
         // accepts an explicit empty string; only a missing Name fails framework validation.
-        call("RunJobFlow", "{\"Name\":\"\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+        emr("RunJobFlow", "{\"Name\":\"\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
                 .then().statusCode(200)
                 .body("JobFlowId", startsWith("j-"));
     }
 
     @Test
-    @Order(16)
+    @Order(17)
     void addStepsToUnknownClusterIsInvalidRequest() {
-        call("AddJobFlowSteps",
+        emr("AddJobFlowSteps",
                 "{\"JobFlowId\":\"j-DOESNOTEXIST0\",\"Steps\":[{\"Name\":\"s\","
                         + "\"HadoopJarStep\":{\"Jar\":\"command-runner.jar\"}}]}")
                 .then().statusCode(400)
@@ -225,30 +250,30 @@ class EmrIntegrationTest {
     }
 
     @Test
-    @Order(17)
+    @Order(18)
     void terminationProtectionIsValidationExceptionAndUnprotectedStillTerminate() {
-        String protectedId = call("RunJobFlow",
+        String protectedId = emr("RunJobFlow",
                 "{\"Name\":\"protected\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
                 .jsonPath().getString("JobFlowId");
-        String unprotectedId = call("RunJobFlow",
+        String unprotectedId = emr("RunJobFlow",
                 "{\"Name\":\"unprotected\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
                 .jsonPath().getString("JobFlowId");
-        call("SetTerminationProtection",
+        emr("SetTerminationProtection",
                 "{\"JobFlowIds\":[\"" + protectedId + "\"],\"TerminationProtected\":true}")
                 .then().statusCode(200);
 
         // AWS terminates the unprotected clusters in the request and then fails it.
-        call("TerminateJobFlows",
+        emr("TerminateJobFlows",
                 "{\"JobFlowIds\":[\"" + unprotectedId + "\",\"" + protectedId + "\"]}")
                 .then().statusCode(400)
                 .body("__type", equalTo("ValidationException"))
                 .body("message", equalTo(
                         "Could not shut down one or more job flows since they are termination protected."));
 
-        call("DescribeCluster", "{\"ClusterId\":\"" + unprotectedId + "\"}")
+        emr("DescribeCluster", "{\"ClusterId\":\"" + unprotectedId + "\"}")
                 .then().statusCode(200)
                 .body("Cluster.Status.State", equalTo("TERMINATED"));
-        call("DescribeCluster", "{\"ClusterId\":\"" + protectedId + "\"}")
+        emr("DescribeCluster", "{\"ClusterId\":\"" + protectedId + "\"}")
                 .then().statusCode(200)
                 .body("Cluster.Status.State", equalTo("WAITING"));
     }
@@ -256,7 +281,7 @@ class EmrIntegrationTest {
     // Catches: a cluster stored before the DNS fix keeps reporting its old us-east-1 master name.
     @Test
     void storedClusterReportsTheRegionalMasterDnsName() {
-        String id = call("RunJobFlow",
+        String id = emr("RunJobFlow",
                 "{\"Name\":\"stale-dns\",\"ReleaseLabel\":\"emr-7.5.0\","
                         + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
                         + "\"InstanceGroups\":[{\"Name\":\"master\",\"InstanceRole\":\"MASTER\","
@@ -265,11 +290,11 @@ class EmrIntegrationTest {
                 .extract().path("JobFlowId");
         emrService.describeCluster(id).setMasterPublicDnsName("ip-10-0-0-1.us-east-1.compute.internal");
 
-        call("DescribeCluster", "{\"ClusterId\":\"" + id + "\"}")
+        emr("DescribeCluster", "{\"ClusterId\":\"" + id + "\"}")
                 .then().statusCode(200)
                 .body("Cluster.MasterPublicDnsName", equalTo("ip-10-0-0-1.ec2.internal"));
 
-        call("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}")
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}")
                 .then().statusCode(200);
     }
 }

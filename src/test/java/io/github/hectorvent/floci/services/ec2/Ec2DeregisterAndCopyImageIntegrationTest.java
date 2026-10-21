@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.Image;
@@ -224,6 +225,18 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
     }
 
     @Test
+    void aSnapshotDeletedWithItsImageTakesItsTags() {
+        Image image = service.registerImage(EAST, uniqueName("floci-tagged-snapshot"), null,
+                "x86_64", "/dev/xvda", List.of(mapping("/dev/xvda", "snap-" + hex())));
+        String snapshotId = snapshotIdOf(image);
+        service.createTags(EAST, List.of(snapshotId), List.of(new Tag("Team", "snapshots")));
+
+        service.deregisterImage(EAST, image.getImageId(), true);
+
+        assertTrue(service.describeTags(EAST, Map.of("resource-id", List.of(snapshotId))).isEmpty());
+    }
+
+    @Test
     void aSnapshotSharedWithAnotherAmiIsSkippedRatherThanDeleted() {
         // "if a snapshot is associated with multiple AMIs, it won't be deleted even if specified
         // for deletion, although the AMI will still be deregistered."
@@ -261,14 +274,18 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         assertNotEquals(sourceId, copyId);
         assertTrue(copyId.startsWith("ami-"));
 
+        // Compared by imageId rather than anywhere in the XML: the copy names its source in
+        // sourceImageId.
         String west = ec2(WEST_AUTH, "DescribeImages", "Owner.1", "self");
-        assertTrue(west.contains(copyId), "the copy must be visible in the destination region");
+        List<String> westIds = XmlParser.extractAll(west, "imageId");
+        assertTrue(westIds.contains(copyId), "the copy must be visible in the destination region");
         assertTrue(west.contains(copyName));
-        assertFalse(west.contains(sourceId), "the source AMI stays in its own region");
+        assertFalse(westIds.contains(sourceId), "the source AMI stays in its own region");
 
         String east = ec2(EAST_AUTH, "DescribeImages", "Owner.1", "self");
-        assertTrue(east.contains(sourceId));
-        assertFalse(east.contains(copyId), "the copy must not leak back into the source region");
+        List<String> eastIds = XmlParser.extractAll(east, "imageId");
+        assertTrue(eastIds.contains(sourceId));
+        assertFalse(eastIds.contains(copyId), "the copy must not leak back into the source region");
     }
 
     @Test

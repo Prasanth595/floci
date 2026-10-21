@@ -160,6 +160,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props, ProvisionContext ctx,
                                                        LambdaFunction existing) {
         CloudFormationTemplateEngine engine = ctx.engine();
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(engine);
         String stackName = ctx.stackName();
         String explicitName = ctx.resolveOptional(props, "FunctionName");
         boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
@@ -251,19 +252,21 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                 LAMBDA_DEFAULT_MEMORY_MB));
         configRequest.put("Description", ctx.resolveOptional(props, "Description"));
         configRequest.put("KMSKeyArn", ctx.resolveOptional(props, "KMSKeyArn"));
-        configRequest.put("Environment", Map.of("Variables", resolveLambdaEnvironment(props, engine)));
-        putStringListIfPresent(configRequest, props, "Architectures", "Architectures", engine);
-        configRequest.put("Layers", resolveStringListOrEmpty(props, "Layers", engine));
-        configRequest.put("EphemeralStorage", resolveMapOrDefault(props, "EphemeralStorage", engine,
+        configRequest.put("Environment", Map.of("Variables", resolveLambdaEnvironment(types, props)));
+        putStringListIfPresent(configRequest, types, props, "Architectures");
+        configRequest.put("Layers", resolveStringListOrEmpty(types, FUNCTION, props, "Layers"));
+        configRequest.put("EphemeralStorage", resolveMapOrDefault(types, props, "EphemeralStorage",
                 Map.of("Size", LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB)));
-        configRequest.put("TracingConfig", resolveMapOrDefault(props, "TracingConfig", engine,
+        configRequest.put("TracingConfig", resolveMapOrDefault(types, props, "TracingConfig",
                 Map.of("Mode", LAMBDA_DEFAULT_TRACING_MODE)));
-        configRequest.put("DeadLetterConfig", resolveMapOrDefault(props, "DeadLetterConfig", engine,
+        configRequest.put("DeadLetterConfig", resolveMapOrDefault(types, props, "DeadLetterConfig",
                 mapWithNullValue("TargetArn")));
-        configRequest.put("VpcConfig", resolveMapOrDefault(props, "VpcConfig", engine, Map.of()));
-        configRequest.put("FileSystemConfigs",
-                resolveObjectListOrEmpty(props, "FileSystemConfigs", engine));
-        putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
+        configRequest.put("VpcConfig", resolveMapOrDefault(types, props, "VpcConfig", Map.of()));
+        // Empty when the template has none, so that removing it puts the function back on its
+        // defaults (Text, or JSON for a durable function, and /aws/lambda/<name>), as on AWS.
+        configRequest.put("LoggingConfig", resolveMapOrDefault(types, props, "LoggingConfig", Map.of()));
+        configRequest.put("FileSystemConfigs", resolveObjectListOrEmpty(types, props, "FileSystemConfigs"));
+        putResolvedMapIfPresent(configRequest, types, props, "ImageConfig");
         if (durableConfig != null) {
             configRequest.put("DurableConfig", durableConfig);
         }
@@ -289,6 +292,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
+        types.finish();
         return new LambdaDesiredState(functionName, hasExplicitName, packageType, durableReplacement,
                 createRequest, code, configRequest, tags, props != null && props.has("ReservedConcurrentExecutions"),
                 reservedConcurrentExecutions);
@@ -573,6 +577,11 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                         return true;
                     }
                 }
+                case "LoggingConfig" -> {
+                    if (loggingConfigurationChanged(fn, desired)) {
+                        return true;
+                    }
+                }
                 case "FileSystemConfigs" -> {
                     if (!Objects.equals(normalizeForCompare(fileSystemConfigs(fn)),
                             normalizeForCompare(desired))) {
@@ -599,6 +608,12 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         return false;
+    }
+
+    /** Compares what Lambda would store for {@code desired} with what the function has. */
+    private static boolean loggingConfigurationChanged(LambdaFunction fn, Object desired) {
+        Map<?, ?> logging = desired instanceof Map<?, ?> map ? map : Map.of();
+        return !LambdaService.loggingSettings(fn).equals(LambdaService.loggingSettings(logging, fn.isDurable()));
     }
 
     private boolean imageConfigurationChanged(
@@ -759,59 +774,58 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         return jsonNodeToValue(value);
     }
 
-    private Map<String, String> resolveLambdaEnvironment(JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("Environment") || props.get("Environment").isNull()) {
-            return Map.of();
-        }
-        JsonNode envNode = engine.resolveNode(props.get("Environment"));
-        if (envNode == null || !envNode.has("Variables") || !envNode.get("Variables").isObject()) {
+    private Map<String, String> resolveLambdaEnvironment(CfnPropertyTypes.Reader types, JsonNode props) {
+        JsonNode envNode = readTyped(types, FUNCTION, props, "Environment");
+        JsonNode variables = envNode == null ? null : envNode.get("Variables");
+        if (variables == null) {
             return Map.of();
         }
         Map<String, String> vars = new HashMap<>();
-        envNode.get("Variables").fields()
-                .forEachRemaining(e -> vars.put(e.getKey(), e.getValue().asText()));
+        variables.fields().forEachRemaining(e -> vars.put(e.getKey(), e.getValue().asText()));
         return vars;
     }
 
-    private List<String> resolveStringListOrEmpty(JsonNode props, String source,
-                                                  CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return List.of();
-        }
-        JsonNode resolved = engine.resolveNode(props.get(source));
-        if (resolved == null || !resolved.isArray()) {
-            return List.of();
-        }
-        List<String> values = new ArrayList<>();
-        resolved.forEach(v -> values.add(v.asText()));
-        return values;
+    private static List<String> resolveStringListOrEmpty(CfnPropertyTypes.Reader types, String resourceType,
+                                                         JsonNode props, String source) {
+        JsonNode values = readTyped(types, resourceType, props, source);
+        return values == null ? List.of() : texts(values);
     }
 
-    private List<Object> resolveObjectListOrEmpty(JsonNode props, String source,
-                                                  CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return List.of();
-        }
-        JsonNode resolved = engine.resolveNode(props.get(source));
+    private static List<String> texts(JsonNode values) {
+        List<String> out = new ArrayList<>();
+        values.forEach(value -> out.add(value.asText()));
+        return out;
+    }
+
+    private List<Object> resolveObjectListOrEmpty(CfnPropertyTypes.Reader types, JsonNode props, String source) {
+        JsonNode resolved = readTyped(types, FUNCTION, props, source);
         if (resolved == null) {
             return List.of();
-        }
-        if (!resolved.isArray()) {
-            throw new AwsException("ValidationError", source + " must be a list", 400);
         }
         List<Object> values = new ArrayList<>();
         resolved.forEach(value -> values.add(jsonNodeToValue(value)));
         return values;
     }
 
-    private Map<String, Object> resolveMapOrDefault(JsonNode props, String source,
-                                                    CloudFormationTemplateEngine engine,
+    /** The object property {@code source}, or {@code defaultValue} when the template leaves it out. */
+    private Map<String, Object> resolveMapOrDefault(CfnPropertyTypes.Reader types, JsonNode props, String source,
                                                     Map<String, Object> defaultValue) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return defaultValue;
+        JsonNode resolved = readTyped(types, FUNCTION, props, source);
+        return resolved == null ? defaultValue : jsonObjectToMap(resolved);
+    }
+
+    /**
+     * The property {@code source} of {@code resourceType} read against the type its resource schema
+     * declares, or null when the template leaves it out, {@code Ref: AWS::NoValue} directly or
+     * through {@code Fn::If} included. A value of another type is refused before the function is
+     * touched; see {@link CfnPropertyTypes}.
+     */
+    private static JsonNode readTyped(CfnPropertyTypes.Reader types, String resourceType, JsonNode props,
+                                      String source) {
+        if (props == null || !props.has(source)) {
+            return null;
         }
-        JsonNode resolved = engine.resolveNode(props.get(source));
-        return resolved != null && resolved.isObject() ? jsonObjectToMap(resolved) : defaultValue;
+        return types.read(source, props.get(source), CfnPropertyTypes.propertyShape(resourceType, source));
     }
 
     private static Map<String, Object> mapWithNullValue(String key) {
@@ -820,27 +834,19 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         return map;
     }
 
-    private void putStringListIfPresent(Map<String, Object> request, JsonNode props, String source,
-                                        String target, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return;
-        }
-        JsonNode resolved = engine.resolveNode(props.get(source));
-        if (resolved != null && resolved.isArray()) {
-            List<String> values = new ArrayList<>();
-            resolved.forEach(v -> values.add(v.asText()));
-            request.put(target, values);
+    private void putStringListIfPresent(Map<String, Object> request, CfnPropertyTypes.Reader types,
+                                        JsonNode props, String source) {
+        JsonNode values = readTyped(types, FUNCTION, props, source);
+        if (values != null) {
+            request.put(source, texts(values));
         }
     }
 
-    private void putResolvedMapIfPresent(Map<String, Object> request, JsonNode props, String source,
-                                         String target, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has(source) || props.get(source).isNull()) {
-            return;
-        }
-        JsonNode resolved = engine.resolveNode(props.get(source));
-        if (resolved != null && resolved.isObject()) {
-            request.put(target, jsonObjectToMap(resolved));
+    private void putResolvedMapIfPresent(Map<String, Object> request, CfnPropertyTypes.Reader types,
+                                         JsonNode props, String source) {
+        JsonNode resolved = readTyped(types, FUNCTION, props, source);
+        if (resolved != null) {
+            request.put(source, jsonObjectToMap(resolved));
         }
     }
 
@@ -896,11 +902,13 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         if (licenseInfo != null) {
             request.put("LicenseInfo", licenseInfo);
         }
-        List<String> runtimes = resolveStringListOrEmpty(props, "CompatibleRuntimes", engine);
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(engine);
+        List<String> runtimes = resolveStringListOrEmpty(types, LAYER_VERSION, props, "CompatibleRuntimes");
         if (!runtimes.isEmpty()) {
             request.put("CompatibleRuntimes", runtimes);
         }
-        List<String> architectures = resolveStringListOrEmpty(props, "CompatibleArchitectures", engine);
+        List<String> architectures = resolveStringListOrEmpty(types, LAYER_VERSION, props, "CompatibleArchitectures");
+        types.finish();
         if (!architectures.isEmpty()) {
             request.put("CompatibleArchitectures", architectures);
         }

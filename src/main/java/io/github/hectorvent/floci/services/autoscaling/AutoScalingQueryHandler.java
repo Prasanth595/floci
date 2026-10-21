@@ -3,8 +3,11 @@ package io.github.hectorvent.floci.services.autoscaling;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.autoscaling.model.*;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -55,6 +58,7 @@ public class AutoScalingQueryHandler {
                 case "DescribeInstanceRefreshes"    -> handleDescribeInstanceRefreshes(p, region);
                 case "CreateOrUpdateTags"           -> handleCreateOrUpdateTags(p, region);
                 case "DeleteTags"                   -> handleDeleteTags(p, region);
+                case "DescribeTags"                 -> handleDescribeTags(p, region);
                 case "EnableMetricsCollection"      -> handleEnableMetricsCollection(p, region);
                 case "DisableMetricsCollection"     -> handleDisableMetricsCollection(p, region);
                 // Instances
@@ -121,13 +125,31 @@ public class AutoScalingQueryHandler {
                 p.getFirst("IamInstanceProfile"),
                 nullableBoolParam(p, "AssociatePublicIpAddress"),
                 nullableBoolParam(p, "InstanceMonitoring.Enabled"),
-                parseLaunchConfigurationBlockDeviceMappings(p));
+                parseLaunchConfigurationBlockDeviceMappings(p), parseMetadataOptions(p));
         String xml = new XmlBuilder()
                 .start("CreateLaunchConfigurationResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
                 .end("CreateLaunchConfigurationResponse")
                 .build();
         return ok(xml);
+    }
+
+    private static LaunchTemplateData.MetadataOptions parseMetadataOptions(MultivaluedMap<String, String> p) {
+        if (p.keySet().stream().noneMatch(name -> name.startsWith("MetadataOptions."))) {
+            return null;
+        }
+        LaunchTemplateData.MetadataOptions options = new LaunchTemplateData.MetadataOptions();
+        options.setHttpTokens(p.getFirst("MetadataOptions.HttpTokens"));
+        options.setHttpEndpoint(p.getFirst("MetadataOptions.HttpEndpoint"));
+        String hopLimit = p.getFirst("MetadataOptions.HttpPutResponseHopLimit");
+        if (hopLimit != null) {
+            try {
+                options.setHttpPutResponseHopLimit(Integer.valueOf(hopLimit));
+            } catch (NumberFormatException invalid) {
+                throw new AwsException("MalformedInput", "HttpPutResponseHopLimit must be an integer.", 400);
+            }
+        }
+        return options;
     }
 
     private Response handleDescribeLaunchConfigurations(MultivaluedMap<String, String> p, String region) {
@@ -161,6 +183,15 @@ public class AutoScalingQueryHandler {
                .elem("Enabled", String.valueOf(
                        lc.getInstanceMonitoringEnabled() != null ? lc.getInstanceMonitoringEnabled() : Boolean.TRUE))
                .end("InstanceMonitoring");
+            if (lc.getMetadataOptions() != null) {
+                LaunchTemplateData.MetadataOptions metadata = LaunchTemplateData.MetadataOptions.merge(
+                        LaunchTemplateData.MetadataOptions.launchDefaults(), lc.getMetadataOptions());
+                xml.start("MetadataOptions")
+                   .elem("HttpTokens", metadata.getHttpTokens())
+                   .elem("HttpEndpoint", metadata.getHttpEndpoint())
+                   .elem("HttpPutResponseHopLimit", String.valueOf(metadata.getHttpPutResponseHopLimit()))
+                   .end("MetadataOptions");
+            }
             writeLaunchConfigurationBlockDeviceMappings(xml, lc.getBlockDeviceMappings());
             xml.end("member");
         }
@@ -340,8 +371,14 @@ public class AutoScalingQueryHandler {
         xml.end("TerminationPolicies");
 
         xml.start("SuspendedProcesses");
-        for (String sp : asg.getSuspendedProcesses()) {
-            xml.start("member").elem("ProcessName", sp).end("member");
+        AutoScalingGroup.SuspensionState suspension = asg.suspensionState();
+        for (String sp : suspension.processes()) {
+            xml.start("member").elem("ProcessName", sp);
+            Instant suspendedAt = suspension.times().get(sp);
+            if (suspendedAt != null) {
+                xml.elem("SuspensionReason", "User suspended at " + suspendedAt);
+            }
+            xml.end("member");
         }
         xml.end("SuspendedProcesses");
 
@@ -489,6 +526,50 @@ public class AutoScalingQueryHandler {
                 .start("CreateOrUpdateTagsResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
                 .end("CreateOrUpdateTagsResponse").build());
+    }
+
+    private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
+        List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "Filters.member." + i;
+            String name = p.getFirst(prefix + ".Name");
+            boolean hasValues = p.containsKey(prefix + ".Values") || p.containsKey(prefix + ".Values.member.1");
+            if (name == null && !hasValues) { break; }
+            filters.add(new AbstractMap.SimpleImmutableEntry<>(name,
+                    hasValues ? memberList(p, prefix + ".Values") : null));
+        }
+        String maxRecords = p.getFirst("MaxRecords");
+        Integer limit = null;
+        if (maxRecords != null) {
+            try {
+                limit = Integer.parseInt(maxRecords);
+            } catch (NumberFormatException e) {
+                throw new AwsException("MalformedInput", "MaxRecords '" + maxRecords + "' is not a valid integer.", 400);
+            }
+        }
+        PaginatedResult<AutoScalingService.TagDescription> page = service.describeTags(region, filters,
+                limit, p.getFirst("NextToken"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTagsResponse", NS)
+                  .start("DescribeTagsResult")
+                    .start("Tags");
+        for (AutoScalingService.TagDescription tag : page.items()) {
+            xml.start("member")
+               .elem("ResourceId", tag.resourceId())
+               .elem("ResourceType", "auto-scaling-group")
+               .elem("Key", tag.key())
+               .elem("Value", tag.value())
+               .elem("PropagateAtLaunch", String.valueOf(tag.propagateAtLaunch()))
+               .end("member");
+        }
+        xml.end("Tags");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        xml.end("DescribeTagsResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeTagsResponse");
+        return ok(xml.build());
     }
 
     private Response handleEnableMetricsCollection(MultivaluedMap<String, String> p, String region) {
@@ -1911,9 +1992,9 @@ public class AutoScalingQueryHandler {
                 break;
             }
             if (deviceName == null || deviceName.isBlank()) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value null at '" + prefix
-                                + ".DeviceName' failed to satisfy constraint: Member must not be null", 400);
+                throw SmithyValidationErrors.validationError(
+                        "Value null at '" + prefix
+                                + ".DeviceName' failed to satisfy constraint: Member must not be null");
             }
             LaunchConfigurationBlockDeviceMapping mapping = new LaunchConfigurationBlockDeviceMapping();
             mapping.setDeviceName(deviceName);
@@ -1989,14 +2070,14 @@ public class AutoScalingQueryHandler {
     private boolean requiredBoolParam(MultivaluedMap<String, String> p, String key) {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at '" + key
-                            + "' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at '" + key
+                            + "' failed to satisfy constraint: Member must not be null");
         }
         if (!"true".equalsIgnoreCase(val) && !"false".equalsIgnoreCase(val)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + val + "' at '" + key
-                            + "' failed to satisfy constraint: Member must be a valid boolean", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + val + "' at '" + key
+                            + "' failed to satisfy constraint: Member must be a valid boolean");
         }
         return parseOptionalBoolean(val, key);
     }

@@ -4,9 +4,9 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.MutableClock;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.vertx.core.Vertx;
 
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -46,10 +46,7 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
 
     private void start(EmulatorConfig config, IamService iam, Instance registeredInstance,
                        Clock serverClock) throws Exception {
-        int port;
-        try (ServerSocket socket = new ServerSocket(0)) {
-            port = socket.getLocalPort();
-        }
+        int port = FreePorts.anyInterfacePort();
         when(config.services().ec2().imdsPort()).thenReturn(port);
         vertx = Vertx.vertx();
         server = new Ec2MetadataServer(vertx, config, iam, serverClock);
@@ -87,6 +84,11 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
         return instance;
     }
 
+    /** The server's base URL, for a client other than this fixture's own requests. */
+    String endpoint() {
+        return endpoint;
+    }
+
     static Instance instance(String instanceId) {
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);
@@ -101,6 +103,16 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
 
     HttpResponse<String> get(String path, String token) throws Exception {
         return get(path, token, HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** A request with any method and no body, with the token header when {@code token} is not null. */
+    HttpResponse<String> send(String method, String path, String token) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(endpoint + path))
+                .timeout(Duration.ofSeconds(5)).method(method, HttpRequest.BodyPublishers.noBody());
+        if (token != null) {
+            request.header(TOKEN_HEADER, token);
+        }
+        return client.send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     <T> HttpResponse<T> get(String path, String token, HttpResponse.BodyHandler<T> bodyHandler) throws Exception {

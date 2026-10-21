@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ses.address.SesAddressSyntax;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
@@ -1041,10 +1042,9 @@ public class SesQueryHandler {
         // here so an invalid enum value yields the v1 ValidationError AWS returns rather than the
         // shared service's v2-style BadRequestException. Message verified against real AWS.
         if (tlsPolicy != null && !"Require".equals(tlsPolicy) && !"Optional".equals(tlsPolicy)) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'deliveryOptions.tlsPolicy' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: [Optional, Require]",
-                    400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'deliveryOptions.tlsPolicy' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: [Optional, Require]");
         }
         // Mirror the V2 path: an all-null DeliveryOptions clears the block rather than
         // persisting an empty object. Normalize the value to the V2 canonical REQUIRE/OPTIONAL

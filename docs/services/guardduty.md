@@ -30,6 +30,11 @@ storage mode.
 | `UpdateMalwareProtectionPlan` | `PATCH /malware-protection-plan/{malwareProtectionPlanId}` | Update a plan's role, object prefixes, and tagging action |
 | `DeleteMalwareProtectionPlan` | `DELETE /malware-protection-plan/{malwareProtectionPlanId}` | Delete a plan |
 | `ListMalwareProtectionPlans` | `GET /malware-protection-plan` | List plan ids with pagination |
+| `CreatePublishingDestination` | `POST /detector/{detectorId}/publishingDestination` | Create an S3 findings export destination |
+| `DescribePublishingDestination` | `GET /detector/{detectorId}/publishingDestination/{destinationId}` | Return the destination's properties and status |
+| `UpdatePublishingDestination` | `POST /detector/{detectorId}/publishingDestination/{destinationId}` | Update the destination ARN or KMS key ARN |
+| `DeletePublishingDestination` | `DELETE /detector/{detectorId}/publishingDestination/{destinationId}` | Delete the destination |
+| `ListPublishingDestinations` | `GET /detector/{detectorId}/publishingDestination` | List destinations with pagination |
 | `TagResource` | `POST /tags/{resourceArn}` | Add tags to a detector or Malware Protection plan |
 | `UntagResource` | `DELETE /tags/{resourceArn}` | Remove tags from a detector or Malware Protection plan |
 | `ListTagsForResource` | `GET /tags/{resourceArn}` | List detector or Malware Protection plan tags |
@@ -60,6 +65,11 @@ routes accept a plan's ARN only when it matches the stored plan's exactly, accou
 included. The plan routes are served only to requests signed for `guardduty`, by the `Authorization`
 header or the `X-Amz-Credential` query parameter, so a path-style S3 request for a bucket named
 `malware-protection-plan` still reaches S3.
+
+## Publishing destinations
+
+Publishing destinations report `PUBLISHING` as soon as they are created: Floci does not
+verify the bucket or key, and no findings are exported to it.
 
 ## Configuration
 

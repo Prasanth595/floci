@@ -59,6 +59,20 @@ class ServiceEnablementIntegrationTest {
     }
 
     @Test
+    void legacySwfJsonRequestsAreRejectedWhenServiceDisabled() {
+        given()
+            .contentType("application/json; charset=UTF-8")
+            .header("X-Amz-Target", "com.amazonaws.swf.service.model.SimpleWorkflowService.ListDomains")
+            .body("{\"registrationStatus\":\"REGISTERED\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ServiceNotAvailableException"))
+            .body("message", equalTo("Service swf is not enabled."));
+    }
+
+    @Test
     void sqsQueueUrlJsonRequestsAreRejectedWhenServiceDisabled() {
         given()
             .contentType("application/x-amz-json-1.0")
@@ -88,6 +102,16 @@ class ServiceEnablementIntegrationTest {
             .contentType("application/xml")
             .body(containsString("<Code>ServiceNotAvailableException</Code>"))
             .body(containsString("<Message>Service sqs is not enabled.</Message>"));
+    }
+
+    @Test
+    void signedQueryGetIsRejectedWhenItsServiceIsDisabled() {
+        given().header("Authorization", authorization("sqs"))
+                .queryParam("Action", "ListQueues").queryParam("Version", "2012-11-05")
+                .get("/").then().statusCode(400)
+                .contentType("application/xml")
+                .body(containsString("<Code>ServiceNotAvailableException</Code>"))
+                .body(containsString("<Message>Service sqs is not enabled.</Message>"));
     }
 
     @Test
@@ -253,7 +277,8 @@ class ServiceEnablementIntegrationTest {
                     "floci.services.lambda.enabled", "false",
                     "floci.services.opensearch.enabled", "false",
                     "floci.services.rds-data.enabled", "false",
-                    "floci.services.sqs.enabled", "false"
+                    "floci.services.sqs.enabled", "false",
+                    "floci.services.swf.enabled", "false"
             );
         }
     }

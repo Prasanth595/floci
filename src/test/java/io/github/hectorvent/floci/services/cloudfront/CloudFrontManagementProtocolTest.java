@@ -240,7 +240,15 @@ class CloudFrontManagementProtocolTest {
             .statusCode(400)
             .body(hasXPath(
                     "//*[local-name()='Code']/text()",
-                    equalTo("InvalidArgument")));
+                    equalTo("MalformedXML")))
+            .body(hasXPath(
+                    "//*[local-name()='Message']/text()",
+                    equalTo("3 validation errors detected: Value null at"
+                            + " 'originAccessControlConfig.originAccessControlOriginType' failed to satisfy"
+                            + " constraint: Member must not be null; Value null at"
+                            + " 'originAccessControlConfig.signingProtocol' failed to satisfy constraint: Member"
+                            + " must not be null; Value null at 'originAccessControlConfig.signingBehavior' failed"
+                            + " to satisfy constraint: Member must not be null")));
     }
 
     @Test

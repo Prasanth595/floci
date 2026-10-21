@@ -14,6 +14,7 @@ import software.amazon.awssdk.services.rds.model.ConnectionPoolConfigurationInfo
 import software.amazon.awssdk.services.rds.model.CreateDbClusterEndpointResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbClusterResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse;
+import software.amazon.awssdk.services.rds.model.CreateDbProxyEndpointResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
@@ -25,6 +26,7 @@ import software.amazon.awssdk.services.rds.model.DBClusterSnapshot;
 import software.amazon.awssdk.services.rds.model.DBEngineVersion;
 import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.DBInstanceRole;
+import software.amazon.awssdk.services.rds.model.DBProxyEndpointTargetRole;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
 import software.amazon.awssdk.services.rds.model.DBSnapshot;
 import software.amazon.awssdk.services.rds.model.DbClusterEndpointAlreadyExistsException;
@@ -34,21 +36,28 @@ import software.amazon.awssdk.services.rds.model.DbClusterRoleNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbInstanceRoleAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbInstanceRoleNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbLogFileNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbProxyEndpointNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DescribeDBLogFilesDetails;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
+import software.amazon.awssdk.services.rds.model.DescribeDbProxyEndpointsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
+import software.amazon.awssdk.services.rds.model.DownloadDbLogFilePortionResponse;
 import software.amazon.awssdk.services.rds.model.EngineDefaults;
 import software.amazon.awssdk.services.rds.model.InvalidDbInstanceStateException;
+import software.amazon.awssdk.services.rds.model.InvalidDbProxyEndpointStateException;
 import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
 import software.amazon.awssdk.services.rds.model.InvalidRestoreException;
 import software.amazon.awssdk.services.rds.model.ListTagsForResourceResponse;
 import software.amazon.awssdk.services.rds.model.ModifyDbClusterEndpointResponse;
 import software.amazon.awssdk.services.rds.model.ModifyDbClusterResponse;
+import software.amazon.awssdk.services.rds.model.ModifyDbProxyEndpointResponse;
 import software.amazon.awssdk.services.rds.model.ModifyDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.ModifyDbProxyTargetGroupResponse;
 import software.amazon.awssdk.services.rds.model.ModifyOptionGroupResponse;
@@ -311,6 +320,56 @@ class RdsControlPlaneTest {
                     assertPoolConfiguration(targetGroup.connectionPoolConfig()));
         } finally {
             deleteProxy(rds, mutableProxyName);
+        }
+    }
+
+    @Test
+    void sdkRoundTripsDbProxyEndpoints() {
+        String proxyName = TestFixtures.uniqueName("rds-proxy-endpoints");
+        String endpointName = TestFixtures.uniqueName("reader");
+        String renamed = TestFixtures.uniqueName("analytics");
+        try {
+            CreateDbProxyResponse proxy = rds.createDBProxy(b -> b
+                    .dbProxyName(proxyName)
+                    .engineFamily("POSTGRESQL")
+                    .roleArn("arn:aws:iam::000000000000:role/rds-proxy")
+                    .vpcSubnetIds(subnetIds)
+                    .auth(a -> a.authScheme("SECRETS")
+                            .secretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf")));
+
+            CreateDbProxyEndpointResponse created = rds.createDBProxyEndpoint(b -> b
+                    .dbProxyName(proxyName)
+                    .dbProxyEndpointName(endpointName)
+                    .vpcSubnetIds(subnetIds)
+                    .vpcSecurityGroupIds("sg-endpoint")
+                    .targetRole(DBProxyEndpointTargetRole.READ_ONLY)
+                    .tags(t -> t.key("team").value("data")));
+            assertThat(created.dbProxyEndpoint().targetRole()).isEqualTo(DBProxyEndpointTargetRole.READ_ONLY);
+            assertThat(created.dbProxyEndpoint().isDefault()).isFalse();
+            assertThat(created.dbProxyEndpoint().endpoint()).isEqualTo(proxy.dbProxy().endpoint());
+            assertThat(created.dbProxyEndpoint().createdDate()).isNotNull();
+            assertThat(rds.listTagsForResource(b -> b.resourceName(created.dbProxyEndpoint().dbProxyEndpointArn()))
+                    .tagList()).extracting("key").containsExactly("team");
+
+            DescribeDbProxyEndpointsResponse described = rds.describeDBProxyEndpoints(b -> b.dbProxyName(proxyName));
+            assertThat(described.dbProxyEndpoints()).extracting("dbProxyEndpointName")
+                    .containsExactly("default", endpointName);
+            assertThat(described.dbProxyEndpoints().get(0).isDefault()).isTrue();
+
+            ModifyDbProxyEndpointResponse modified = rds.modifyDBProxyEndpoint(b -> b
+                    .dbProxyEndpointName(endpointName)
+                    .newDBProxyEndpointName(renamed)
+                    .vpcSecurityGroupIds("sg-other"));
+            assertThat(modified.dbProxyEndpoint().dbProxyEndpointName()).isEqualTo(renamed);
+            assertThat(modified.dbProxyEndpoint().vpcSecurityGroupIds()).containsExactly("sg-other");
+
+            assertThatThrownBy(() -> rds.deleteDBProxyEndpoint(b -> b.dbProxyEndpointName("default")))
+                    .isInstanceOf(InvalidDbProxyEndpointStateException.class);
+            rds.deleteDBProxyEndpoint(b -> b.dbProxyEndpointName(renamed));
+            assertThatThrownBy(() -> rds.describeDBProxyEndpoints(b -> b.dbProxyEndpointName(renamed)))
+                    .isInstanceOf(DbProxyEndpointNotFoundException.class);
+        } finally {
+            deleteProxy(rds, proxyName);
         }
     }
 
@@ -788,6 +847,33 @@ class RdsControlPlaneTest {
             } catch (Exception e) {
                 LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + clusterName, e);
             }
+        }
+    }
+
+    @Test
+    @DisplayName("Log files: list an instance's log files and download a block")
+    void sdkReadsInstanceLogFiles() {
+        String instanceName = TestFixtures.uniqueName("rds-log-files");
+        try {
+            createDbInstance(rds, instanceName, "log-files-secret");
+            List<DescribeDBLogFilesDetails> files =
+                    rds.describeDBLogFiles(b -> b.dbInstanceIdentifier(instanceName)).describeDBLogFiles();
+            assertThat(files).isNotEmpty();
+            assertThat(files).allSatisfy(f -> {
+                assertThat(f.logFileName()).startsWith("error/postgresql.log.");
+                assertThat(f.size()).isPositive();
+                assertThat(f.lastWritten()).isPositive();
+            });
+            String name = files.get(0).logFileName();
+            DownloadDbLogFilePortionResponse portion = rds.downloadDBLogFilePortion(b -> b
+                    .dbInstanceIdentifier(instanceName).logFileName(name).marker("0").numberOfLines(1));
+            assertThat(portion.logFileData()).isNotEmpty();
+            assertThat(portion.marker()).isEqualTo("1");
+            assertThatThrownBy(() -> rds.downloadDBLogFilePortion(b -> b
+                    .dbInstanceIdentifier(instanceName).logFileName("error/no-such.log")))
+                    .isInstanceOf(DbLogFileNotFoundException.class);
+        } finally {
+            deleteDbInstance(rds, instanceName);
         }
     }
 

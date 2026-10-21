@@ -101,6 +101,25 @@ public interface CfnResourceProvisioner {
     }
 
     /**
+     * Whether a resource of {@code resourceType} takes the physical id of the resource it depends
+     * on as its own, as a bucket policy takes its bucket's name. The stack then deletes one left
+     * behind before whatever else holds that id. The default is no.
+     */
+    default boolean takesParentPhysicalId(String resourceType) {
+        return false;
+    }
+
+    /**
+     * Whether a prefix of a {@code resourceType} physical id, up to a {@code /}, {@code :} or
+     * {@code |}, can be the physical id of the resource it belongs to, as {@code function|sid} is
+     * a Lambda permission's. The stack then deletes one left behind before that resource. The
+     * default is yes; a type whose id only joins parts of its own identity says no.
+     */
+    default boolean idPrefixCanNameParent(String resourceType) {
+        return true;
+    }
+
+    /**
      * Drops the bookkeeping the replacement cleanup kept on the resource, once the displaced entity
      * is gone or its deletion is given up on. The default has none to drop.
      */

@@ -17,9 +17,10 @@ import java.util.Map;
 
 /**
  * Shared by every integration test that runs a real sidecar container, started by its manager
- * exactly as in production: the AppSync GraphQL sidecar, the CodeArtifact Reposilite and Verdaccio
- * sidecars, the Verified Permissions Cedar sidecar, and the floci-duck sidecar behind the CUR
- * Parquet emitter. Quarkus builds the application once per distinct profile class, so these
+ * exactly as in production: the AppSync GraphQL sidecar, the CodeArtifact Reposilite, Verdaccio,
+ * BaGetter and pypiserver sidecars, the Verified Permissions Cedar sidecar, the floci-duck sidecar
+ * behind the CUR Parquet emitter and Redshift Spectrum, ECS task containers and ElastiCache
+ * serverless caches. Quarkus builds the application once per distinct profile class, so these
  * classes share one application rather than each paying for their own.
  *
  * <p>Namespaces the containers as {@code floci-aws-sidecar-test-<hostkey>-<pid>-<sidecar>}. Each
@@ -29,8 +30,9 @@ import java.util.Map;
  * other. The test JVM's process id keeps two runs on one machine apart, since two live processes
  * never share an id; the host key, a short hash of the host name and the process id namespace,
  * does the same for runs on other machines or in containers that share the Docker daemon, whose
- * process ids mean nothing here. A normal shutdown stops the sidecars; those of a run that was
- * killed are removed by the next run on the same host key, in {@link #removeAbandonedSidecars()}.
+ * process ids mean nothing here. A normal shutdown stops the sidecars; the containers and volumes
+ * of a run that was killed are removed by the next run on the same host key, in
+ * {@link #removeAbandonedSidecars()}.
  *
  * <p>Also sets the HTTP port, {@code floci.port} and {@code floci.base-url} together. The AppSync
  * resolver callback URL a launched container uses is built from {@code quarkus.http.port}, which in
@@ -117,19 +119,29 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
      * in CI a missing image is a failure, since a vanished tag must not pass silently.
      */
     public static void requireDockerAndImage(String imageProperty) {
-        Assumptions.assumeTrue(isDockerAvailable(), "Docker daemon must be available for sidecar integration tests");
-        removeAbandonedSidecars();
+        requireDocker();
         String image = ConfigProvider.getConfig().getValue(imageProperty, String.class);
         Assumptions.assumeTrue(imageUsable(image), "Sidecar image " + image + " is not present locally");
     }
 
     /**
-     * Removes the sidecars of earlier runs that were killed before they could stop them: containers
-     * in a {@code sidecar-test-<hostkey>-<pid>} namespace carrying this host key, whose process no
-     * longer exists. They would otherwise keep running and hold their published host ports, and no
-     * later run would ever share their names to replace them. Sidecars of this run and of any other
-     * live run are left alone, and so is every namespace with another host key, whose process id
-     * cannot be checked from here. Runs once per JVM, from the first class that needs Docker.
+     * Skips the calling class or test without Docker, for one whose manager pulls the image it
+     * needs itself, and removes what killed runs left behind, as {@link #requireDockerAndImage} does.
+     */
+    public static void requireDocker() {
+        Assumptions.assumeTrue(isDockerAvailable(), "Docker daemon must be available for sidecar integration tests");
+        removeAbandonedSidecars();
+    }
+
+    /**
+     * Removes the containers and volumes of earlier runs that were killed before they could remove
+     * them: those in a {@code sidecar-test-<hostkey>-<pid>} namespace carrying this host key, whose
+     * process no longer exists. The containers would otherwise keep running and hold their published
+     * host ports, and no later run would ever share their names or owner label to replace them or
+     * sweep their volumes, such as an ECS task's. The containers go first, since a volume still
+     * mounted cannot be removed. Those of this run and of any other live run are left alone, and so
+     * is every namespace with another host key, whose process id cannot be checked from here. Runs
+     * once per JVM, from the first class that needs Docker.
      */
     private static synchronized void removeAbandonedSidecars() {
         if (abandonedSidecarsRemoved) {
@@ -141,6 +153,13 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
             String[] idAndNamespace = line.split(" ", 2);
             if (idAndNamespace.length == 2 && isAbandoned(idAndNamespace[1])) {
                 run("docker", "rm", "-f", idAndNamespace[0]);
+            }
+        }
+        for (String line : output("docker", "volume", "ls", "--filter", "label=floci_namespace",
+                "--format", "{{.Name}} {{.Label \"floci_namespace\"}}")) {
+            String[] nameAndNamespace = line.split(" ", 2);
+            if (nameAndNamespace.length == 2 && isAbandoned(nameAndNamespace[1])) {
+                run("docker", "volume", "rm", nameAndNamespace[0]);
             }
         }
     }

@@ -6,6 +6,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,6 +16,7 @@ import java.util.regex.Pattern;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -318,16 +320,45 @@ class CloudFormationEc2InstanceIntegrationTest {
     }
 
     @Test
+    void createStackLaunchesTheInstanceAtItsDeclaredPrivateIpAddress() {
+        String stackName = "cfn-ec2-private-ip-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                {"Resources": {
+                  "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.194.0.0/16"}},
+                  "Subnet": {"Type": "AWS::EC2::Subnet", "Properties": {
+                    "VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.194.1.0/24"}},
+                  "Server": {"Type": "AWS::EC2::Instance", "Properties": {
+                    "ImageId": "ami-12345678", "InstanceType": "t3.micro",
+                    "SubnetId": {"Ref": "Subnet"}, "PrivateIpAddress": "10.194.1.50"}}
+                }, "Outputs": {
+                  "InstanceId": {"Value": {"Ref": "Server"}},
+                  "PrivateIp": {"Value": {"Fn::GetAtt": ["Server", "PrivateIp"]}}
+                }}
+                """;
+        cfn("CreateStack", stackName, template);
+        try {
+            String stack = describeStacks(stackName, "CREATE_COMPLETE");
+            assertEquals("10.194.1.50", output(stack, "PrivateIp"));
+            assertPrivateIpAddress(output(stack, "InstanceId"), "10.194.1.50");
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
     void changingPrivateIpAddressReplacesTheInstance() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-ec2-replace-" + suffix;
         String template = """
                 {
                   "Resources": {
+                    "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.195.0.0/16"}},
+                    "Subnet": {"Type": "AWS::EC2::Subnet", "Properties": {
+                      "VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.195.1.0/24"}},
                     "Server": {
                       "Type": "AWS::EC2::Instance",
                       "Properties": {"ImageId": "ami-12345678", "InstanceType": "t3.micro",
-                                     "PrivateIpAddress": "%s"}
+                                     "SubnetId": {"Ref": "Subnet"}, "PrivateIpAddress": "%s"}
                     }
                   },
                   "Outputs": {
@@ -336,23 +367,75 @@ class CloudFormationEc2InstanceIntegrationTest {
                 }
                 """;
 
-        cfn("CreateStack", stackName, template.formatted("10.0.0.5"));
+        cfn("CreateStack", stackName, template.formatted("10.195.1.50"));
         String firstId = instanceIdFrom(describeStacks(stackName, "CREATE_COMPLETE"));
 
         // PrivateIpAddress is createOnly, so changing it replaces the instance rather than reusing it.
-        cfn("UpdateStack", stackName, template.formatted("10.0.0.6"));
+        cfn("UpdateStack", stackName, template.formatted("10.195.1.60"));
         String secondId = instanceIdFrom(describeStacks(stackName, "UPDATE_COMPLETE"));
 
         assertNotEquals(firstId, secondId, "PrivateIpAddress changed, so the instance must be replaced");
 
-        // The replacement instance really exists in EC2.
-        given()
+        // The replacement instance really exists in EC2, at the new address.
+        assertPrivateIpAddress(secondId, "10.195.1.60");
+    }
+
+    @Test
+    void replacingAnInstanceThatKeepsItsPrivateIpAddressRollsTheUpdateBack() {
+        String stackName = "cfn-ec2-keep-ip-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                {"Resources": {
+                  "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.196.0.0/16"}},
+                  "Subnet": {"Type": "AWS::EC2::Subnet", "Properties": {
+                    "VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.196.1.0/24"}},
+                  "Server": {"Type": "AWS::EC2::Instance", "Properties": {
+                    "ImageId": "%s", "InstanceType": "t3.micro",
+                    "SubnetId": {"Ref": "Subnet"}, "PrivateIpAddress": "10.196.1.50"}}
+                }, "Outputs": {
+                  "InstanceId": {"Value": {"Ref": "Server"}}
+                }}
+                """;
+        cfn("CreateStack", stackName, template.formatted("ami-12345678"));
+        try {
+            String firstId = instanceIdFrom(describeStacks(stackName, "CREATE_COMPLETE"));
+
+            // A changed ImageId replaces the instance, and CloudFormation creates the replacement
+            // before it deletes the original, so the address is still in use, as on AWS.
+            cfn("UpdateStack", stackName, template.formatted("ami-87654321"));
+            String rolledBack = describeStacks(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+            assertEquals(firstId, instanceIdFrom(rolledBack));
+            assertPrivateIpAddress(firstId, "10.196.1.50");
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stackName)
+            .when().post("/").then().statusCode(200)
+                .body(containsString("Address 10.196.1.50 is in use."));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    /** Every address DescribeInstances reports for the instance and its interface is {@code expected}. */
+    private static void assertPrivateIpAddress(String instanceId, String expected) {
+        String describeInstances = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", EC2_AUTH)
             .formParam("Action", "DescribeInstances")
-            .formParam("InstanceId.1", secondId)
+            .formParam("InstanceId.1", instanceId)
         .when().post("/").then().statusCode(200)
-            .body(containsString(secondId));
+            .body(containsString(instanceId))
+            .extract().asString();
+        Matcher m = Pattern.compile("<privateIpAddress>([^<]*)</privateIpAddress>").matcher(describeInstances);
+        List<String> reported = new ArrayList<>();
+        while (m.find()) {
+            reported.add(m.group(1));
+        }
+        assertFalse(reported.isEmpty(), "expected a private address in " + describeInstances);
+        assertTrue(reported.stream().allMatch(expected::equals),
+                "expected every reported private address to be " + expected + ", got " + reported);
     }
 
     private static void cfn(String action, String stackName, String template) {
@@ -362,6 +445,15 @@ class CloudFormationEc2InstanceIntegrationTest {
             .formParam("Action", action)
             .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static void deleteStack(String stackName) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
         .when().post("/").then().statusCode(200);
     }
 

@@ -389,7 +389,7 @@ class IotCustomAuthorizerTest {
         headers.put("sec-websocket-protocol", "mqtt");
 
         List<String> policies = customAuthorizer.connectPolicies("a", "c", "c?" + NAME_PARAM + "a", "secret",
-                new WebSocketUpgrade(headers, "", "iot.example.com", null));
+                new WebSocketUpgrade(headers, "", "iot.example.com", null, -1));
 
         assertEquals(List.of(POLICY), policies);
         assertEquals("{\"protocolData\":{\"tls\":{\"serverName\":\"iot.example.com\"},\"mqtt\":{\"username\":"
@@ -401,7 +401,7 @@ class IotCustomAuthorizerTest {
 
     @Test
     void aConnectWithoutUsernamePasswordOrTlsLeavesThemOut() {
-        customAuthorizer.connectPolicies("a", "c", null, null, new WebSocketUpgrade(Map.of(), NAME_PARAM + "a", null, null));
+        customAuthorizer.connectPolicies("a", "c", null, null, new WebSocketUpgrade(Map.of(), NAME_PARAM + "a", null, null, -1));
 
         assertEquals("{\"protocolData\":{\"mqtt\":{\"clientId\":\"c\"},\"http\":{\"headers\":{},"
                 + "\"queryString\":\"x-amz-customauthorizer-name=a\"}},\"protocols\":[\"http\",\"mqtt\"],"
@@ -467,11 +467,11 @@ class IotCustomAuthorizerTest {
         String signature = sign(key1, "allow-me");
 
         customAuthorizer.connectPolicies("s", "c", "c", null, new WebSocketUpgrade(Map.of(),
-                NAME_PARAM + "s&" + SIGNATURE_PARAM + urlEncoded(signature) + "&tok=allow-me", null, null));
+                NAME_PARAM + "s&" + SIGNATURE_PARAM + urlEncoded(signature) + "&tok=allow-me", null, null, -1));
         assertEquals("allow-me", events.getLast().path("token").asText());
 
         customAuthorizer.connectPolicies("s", "c", "c", null, new WebSocketUpgrade(
-                Map.of("x-amz-customauthorizer-signature", signature, "tok", "allow-me"), "", null, null));
+                Map.of("x-amz-customauthorizer-signature", signature, "tok", "allow-me"), "", null, null, -1));
         assertEquals("allow-me", events.getLast().path("token").asText());
     }
 
@@ -489,9 +489,9 @@ class IotCustomAuthorizerTest {
     @Test
     void theAuthorizerNameComesFromTheUsernameTheWebSocketQueryOrTheUpgradeHeader() {
         assertEquals("u", IotCustomAuthorizer.authorizerName("c?" + NAME_PARAM + "u&tok=t", null));
-        assertEquals("q", IotCustomAuthorizer.authorizerName("c", new WebSocketUpgrade(Map.of(), NAME_PARAM + "q", null, null)));
+        assertEquals("q", IotCustomAuthorizer.authorizerName("c", new WebSocketUpgrade(Map.of(), NAME_PARAM + "q", null, null, -1)));
         assertEquals("h", IotCustomAuthorizer.authorizerName(null,
-                new WebSocketUpgrade(Map.of("x-amz-customauthorizer-name", "h"), "", null, null)));
+                new WebSocketUpgrade(Map.of("x-amz-customauthorizer-name", "h"), "", null, null, -1)));
     }
 
     @Test
@@ -499,7 +499,7 @@ class IotCustomAuthorizerTest {
         assertNull(IotCustomAuthorizer.authorizerName(null, null));
         assertNull(IotCustomAuthorizer.authorizerName("plain-user", null));
         assertNull(IotCustomAuthorizer.authorizerName("c?X-Amz-Algorithm=AWS4-HMAC-SHA256", new WebSocketUpgrade(
-                Map.of("sec-websocket-protocol", "mqtt"), "X-Amz-Signature=00", null, null)));
+                Map.of("sec-websocket-protocol", "mqtt"), "X-Amz-Signature=00", null, null, -1)));
         assertEquals("%zz", IotCustomAuthorizer.authorizerName("c?" + NAME_PARAM + "%zz", null),
                 "a malformed escape is kept as sent instead of failing the CONNECT");
     }

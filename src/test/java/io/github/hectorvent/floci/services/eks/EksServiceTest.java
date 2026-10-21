@@ -182,6 +182,7 @@ class EksServiceTest {
         when(ec2Config.services()).thenReturn(services);
         when(services.ec2()).thenReturn(ec2ServiceConfig);
         when(ec2ServiceConfig.mock()).thenReturn(true);
+        when(ec2ServiceConfig.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
 
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
@@ -985,23 +986,92 @@ class EksServiceTest {
 
     @Test
     void firstNodeGroupSelectsAndRestartsTheSharedNodeOnce() {
-        EksClusterManager clusterManager = mock(EksClusterManager.class);
-        when(clusterManager.tryStartCluster(any())).thenReturn(true);
-        when(clusterManager.selectNodeInstanceType("t3.medium")).thenReturn("t3.medium");
-        when(clusterManager.restartForNodeCapacity(any(), anyString())).thenReturn(true);
+        EksClusterManager clusterManager = capacitySwapManager(true);
         EksService service = newService(clusterManager, false);
-        CreateClusterRequest request = new CreateClusterRequest();
-        request.setName("capacity-cluster");
-        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
-        Cluster cluster = service.createCluster(request);
-        cluster.setContainerId("existing-container");
+        Cluster cluster = activeClusterWithRunningNode(service, "capacity-cluster");
 
         service.createNodeGroup("capacity-cluster", nodeGroupRequest("first"));
         assertEquals("t3.medium", cluster.getNodeInstanceType());
+        assertEquals(ClusterStatus.ACTIVE, cluster.getStatus());
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("capacity-cluster").getStatus());
         verify(clusterManager).restartForNodeCapacity(cluster, "m5.large");
 
         service.createNodeGroup("capacity-cluster", nodeGroupRequest("second"));
+        assertEquals(ClusterStatus.ACTIVE, cluster.getStatus());
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("capacity-cluster").getStatus());
         verify(clusterManager).restartForNodeCapacity(cluster, "m5.large");
+    }
+
+    @Test
+    void readinessPollerFinalizesTheReplacedNodeOfAnActiveCluster() {
+        EksClusterManager clusterManager = capacitySwapManager(true);
+        EksService service = newService(clusterManager, false);
+        Cluster cluster = activeClusterWithRunningNode(service, "replaced-node");
+
+        service.createNodeGroup("replaced-node", nodeGroupRequest("first"));
+        assertTrue(cluster.isFinalizePending());
+
+        service.pollClusterReadiness();
+        verify(clusterManager, never()).finalizeCluster(cluster);
+        assertTrue(cluster.isFinalizePending());
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("replaced-node").getStatus());
+
+        when(clusterManager.isReady(cluster)).thenReturn(true);
+        service.pollClusterReadiness();
+        verify(clusterManager).finalizeCluster(cluster);
+        assertFalse(cluster.isFinalizePending());
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("replaced-node").getStatus());
+
+        service.pollClusterReadiness();
+        verify(clusterManager).finalizeCluster(cluster);
+    }
+
+    @Test
+    void failedNodeReplacementStillHasThePreviousNodeVerified() {
+        EksClusterManager clusterManager = capacitySwapManager(false);
+        EksService service = newService(clusterManager, false);
+        Cluster cluster = activeClusterWithRunningNode(service, "restored-node");
+
+        Nodegroup nodeGroup = service.createNodeGroup("restored-node", nodeGroupRequest("first"));
+
+        assertEquals(NodegroupStatus.CREATE_FAILED, nodeGroup.getStatus());
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("restored-node").getStatus());
+        assertTrue(cluster.isFinalizePending());
+    }
+
+    @Test
+    void readinessPollerDoesNotWriteBackAClusterDeletedWhileItsNodeIsProbed() {
+        EksClusterManager clusterManager = capacitySwapManager(true);
+        EksService service = newService(clusterManager, false);
+        Cluster cluster = activeClusterWithRunningNode(service, "deleted-node");
+        service.createNodeGroup("deleted-node", nodeGroupRequest("first"));
+        when(clusterManager.isReady(cluster)).thenAnswer(invocation -> {
+            service.deleteCluster("deleted-node");
+            return true;
+        });
+
+        service.pollClusterReadiness();
+
+        assertEquals(ClusterStatus.DELETING, cluster.getStatus());
+        assertThrows(AwsException.class, () -> service.describeCluster("deleted-node"));
+    }
+
+    private static Cluster activeClusterWithRunningNode(EksService service, String name) {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName(name);
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        Cluster cluster = service.createCluster(request);
+        cluster.setContainerId("existing-container");
+        cluster.setStatus(ClusterStatus.ACTIVE);
+        return cluster;
+    }
+
+    private static EksClusterManager capacitySwapManager(boolean swapSucceeds) {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(true);
+        when(clusterManager.selectNodeInstanceType("t3.medium")).thenReturn("t3.medium");
+        when(clusterManager.restartForNodeCapacity(any(), anyString())).thenReturn(swapSucceeds);
+        return clusterManager;
     }
 
     @Test

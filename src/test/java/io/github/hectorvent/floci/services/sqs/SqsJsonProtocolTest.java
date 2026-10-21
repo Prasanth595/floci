@@ -993,4 +993,11 @@ class SqsJsonProtocolTest {
         }
         return "{\"QueueUrl\":\"" + url + "\",\"Entries\":[" + entries + "]}";
     }
+
+    @Test
+    void queueUrlsUseTheFlociFormByDefault() {
+        SqsQueueUrlRoundTrip.json(AUTH_SQS_EU_WEST_2, "eu-west-2", "json-floci-url-queue",
+                "http://localhost:4566/" + ACCOUNT_ID + "/json-floci-url-queue",
+                "https://sqs.eu-west-2.amazonaws.com/" + ACCOUNT_ID + "/json-floci-url-queue");
+    }
 }

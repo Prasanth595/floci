@@ -7,6 +7,8 @@ quarkus:
     host: 0.0.0.0
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
+      max-header-size: 256K
+      max-initial-line-length: 262144
   # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
   # Loaded parent-first they live in the shared system classloader, so they cannot pin a
   # per-profile application classloader across the many app restarts of a test run.
@@ -72,6 +74,9 @@ floci:
         flush-interval-ms: 60000
       codedeploy:
         flush-interval-ms: 60000
+      resource-groups:
+        mode: ${FLOCI_STORAGE_SERVICES_RESOURCE_GROUPS_MODE:}
+        flush-interval-ms: ${FLOCI_STORAGE_SERVICES_RESOURCE_GROUPS_FLUSH_INTERVAL_MS:5000}
       tagging:
         flush-interval-ms: 60000
       elasticbeanstalk:
@@ -108,6 +113,7 @@ floci:
     allow-private-jwt-targets: true
 
   init-hooks:
+    dir: /etc/floci/init
     shell-executable: /bin/sh
     timeout-seconds: 5
     shutdown-grace-period-seconds: 2
@@ -133,15 +139,19 @@ floci:
       enabled: true
       default-visibility-timeout: 30
       max-message-size: 1048576
+      endpoint-strategy: floci
     s3:
       enabled: true
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      lifecycle-sweep-enabled: false   # tests run the sweep themselves, so no bucket's rules apply behind another test's back
+      lifecycle-sweep-interval-seconds: 60
     dynamodb:
       enabled: true
       vector-index-allocation-seconds: 0
       vector-index-backfill-seconds: 0
+      latest-restorable-lag-seconds: 0
       backend: native
     sns:
       enabled: true
@@ -220,6 +230,8 @@ floci:
       enabled: true
       transaction-ttl-seconds: 180
       database-resuming-exception-enabled: false
+    dsql:
+      enabled: true
     redshift-data:
       enabled: true
       result-ttl-hours: 24
@@ -263,6 +275,7 @@ floci:
       enabled: true
     cognito:
       enabled: true
+      google-issuer: https://accounts.google.com
       enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
@@ -300,6 +313,8 @@ floci:
       proxy-base-port: 9400
       proxy-max-port: 9499
     ec2:
+      # Opt-in Standard On-Demand vCPU admission. FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS
+      enforce-vcpu-quotas: false
       # Optional complete catalog override for locally built guest images.
       image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
       enabled: true
@@ -314,6 +329,7 @@ floci:
       volume-block-devices: false
       volume-helper-image: alpine:3.21
       mock: true
+      mock-public-addresses: none
       instance-resource-limits: true
       aws-faithful-private-ip: false
       # container-ips-routable: true  # see src/main/resources/application.yml
@@ -522,6 +538,8 @@ floci:
       enabled: true
     lakeformation:
       enabled: true
+    resource-groups:
+      enabled: true
     tagging:
       enabled: true
     configservice:
@@ -538,6 +556,7 @@ floci:
       enabled: true
     servicequotas:
       enabled: true
+      standard-on-demand-vcpus: 5
     verifiedpermissions:
       enabled: true
     ram:

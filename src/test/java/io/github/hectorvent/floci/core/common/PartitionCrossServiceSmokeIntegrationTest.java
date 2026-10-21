@@ -41,11 +41,11 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "accessanalyzer", "acm", "amazonmq", "apigateway", "apigatewayv2", "applicationautoscaling", "appsync",
             "aps", "autoscaling", "backup", "batch", "bcmdataexports", "bedrock", "bedrockagentcorecontrol", "ce",
             "cloudfront", "cloudmap", "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito",
-            "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dynamodb", "ec2",
+            "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dsql", "dynamodb", "ec2",
             "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elbv2", "emr", "emrserverless",
             "eventbridge", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
-            "pipes", "ram", "rds", "redshift", "redshiftserverless", "resourceexplorer2", "route53resolver",
+            "pipes", "ram", "rds", "redshift", "redshiftserverless", "resourceexplorer2", "resourcegroups", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "sns", "sqs",
             "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2");
 
@@ -59,6 +59,22 @@ class PartitionCrossServiceSmokeIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void resourceGroupArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "resource-groups");
+        String name = unique("smoke-pool", partitionCase);
+        String body = "{\"Name\":\"" + name + "\",\"Configuration\":["
+                + "{\"Type\":\"AWS::EC2::CapacityReservationPool\"},"
+                + "{\"Type\":\"AWS::ResourceGroups::Generic\",\"Parameters\":["
+                + "{\"Name\":\"allowed-resource-types\",\"Values\":[\"AWS::EC2::CapacityReservation\"]}]}]}";
+        String arn = signed(region, "resource-groups").contentType(JSON).body(body)
+                .when().post("/groups").then().statusCode(200).extract().path("Group.GroupArn");
+        cleanup.register(() -> signed(region, "resource-groups").contentType(JSON)
+                .body("{\"Group\":\"" + arn + "\"}").when().post("/delete-group"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 
     @ParameterizedTest
@@ -498,6 +514,19 @@ class PartitionCrossServiceSmokeIntegrationTest {
         String issuer = signed(region, "eks").when().get("/clusters/" + name).then().statusCode(200)
             .extract().jsonPath().getString("cluster.identity.oidc.issuer");
         assertRegionalHostIn(partitionCase, URI.create(issuer).getHost());
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void dsqlClusterArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "dsql");
+        Response created = signed(region, "dsql")
+            .contentType(JSON)
+            .body("{\"deletionProtectionEnabled\":false}")
+        .when().post("/cluster").then().statusCode(200).extract().response();
+        String identifier = created.jsonPath().getString("identifier");
+        cleanup.register(() -> signed(region, "dsql").when().delete("/cluster/" + identifier));
+        PartitionMatrix.assertArnIn(partitionCase, created.jsonPath().getString("arn"));
     }
 
     @ParameterizedTest

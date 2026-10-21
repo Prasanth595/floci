@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
@@ -96,12 +97,11 @@ public class SesConfigurationSetService implements SesTaggable {
                             invalidSuppressionReasonMessage(null), 400);
                 }
                 if (!isValidSuppressionReason(reason)) {
-                    throw new AwsException("BadRequestException",
-                            "1 validation error detected: Value at "
+                    throw SmithyValidationErrors.badRequest(
+                            "Value at "
                                     + "'suppressionOptions.suppressedReasons' failed to satisfy "
                                     + "constraint: Member must satisfy constraint: "
-                                    + "[Member must satisfy enum value set: [BOUNCE, COMPLAINT]]",
-                            400);
+                                    + "[Member must satisfy enum value set: [BOUNCE, COMPLAINT]]");
                 }
             }
         }
@@ -230,9 +230,9 @@ public class SesConfigurationSetService implements SesTaggable {
                     "Domain <" + domain + "> is not verified under this account.", 400);
         }
         if (httpsPolicy != null && !HTTPS_POLICIES.contains(httpsPolicy)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'httpsPolicy' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE, REQUIRE_OPEN_ONLY]", 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'httpsPolicy' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE, REQUIRE_OPEN_ONLY]");
         }
     }
 
@@ -242,9 +242,9 @@ public class SesConfigurationSetService implements SesTaggable {
             return;
         }
         if (options.getTlsPolicy() != null && !TLS_POLICIES.contains(options.getTlsPolicy())) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'tlsPolicy' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE]", 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'tlsPolicy' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE]");
         }
         // AWS rejects a blank SendingPoolName outright, and a non-existent
         // dedicated IP pool (both verified against real AWS 2026-06-17). The
@@ -264,14 +264,14 @@ public class SesConfigurationSetService implements SesTaggable {
         if (options.getMaxDeliverySeconds() != null) {
             long maxDeliverySeconds = options.getMaxDeliverySeconds();
             if (maxDeliverySeconds < 300) {
-                throw new AwsException("BadRequestException",
-                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
-                                + "Member must have value greater than or equal to 300", 400);
+                throw SmithyValidationErrors.badRequest(
+                        "Value at 'maxDeliverySeconds' failed to satisfy constraint: "
+                                + "Member must have value greater than or equal to 300");
             }
             if (maxDeliverySeconds > 50400) {
-                throw new AwsException("BadRequestException",
-                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
-                                + "Member must have value less than or equal to 50400", 400);
+                throw SmithyValidationErrors.badRequest(
+                        "Value at 'maxDeliverySeconds' failed to satisfy constraint: "
+                                + "Member must have value less than or equal to 50400");
             }
         }
     }
@@ -279,9 +279,9 @@ public class SesConfigurationSetService implements SesTaggable {
     void requireVerifiedRedirectDomain(String domain, Predicate<String> verifiedDomainIdentity) {
         Objects.requireNonNull(verifiedDomainIdentity, "verifiedDomainIdentity probe is required");
         if (domain == null) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'trackingOptions' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'trackingOptions' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         if (domain.isBlank()) {
             throw new AwsException("InvalidTrackingOptions",
@@ -460,16 +460,16 @@ public class SesConfigurationSetService implements SesTaggable {
         if (options.getDashboardOptions() != null
                 && options.getDashboardOptions().getEngagementMetrics() != null
                 && !VDM_FEATURE_STATES.contains(options.getDashboardOptions().getEngagementMetrics())) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'vdmOptions.dashboardOptions.engagementMetrics' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]", 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'vdmOptions.dashboardOptions.engagementMetrics' "
+                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]");
         }
         if (options.getGuardianOptions() != null
                 && options.getGuardianOptions().getOptimizedSharedDelivery() != null
                 && !VDM_FEATURE_STATES.contains(options.getGuardianOptions().getOptimizedSharedDelivery())) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'vdmOptions.guardianOptions.optimizedSharedDelivery' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]", 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'vdmOptions.guardianOptions.optimizedSharedDelivery' "
+                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]");
         }
     }
 

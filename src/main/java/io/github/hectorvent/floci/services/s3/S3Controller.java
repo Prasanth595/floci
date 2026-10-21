@@ -64,6 +64,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -74,6 +75,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -107,11 +109,14 @@ public class S3Controller {
             "ObjectLockConfigurationNotFoundError", "OwnershipControlsNotFoundError",
             "ReplicationConfigurationNotFoundError");
 
+    /** The errors S3Service answers a read of an object that is not there with. */
+    private static final Set<String> MISSING_OBJECT_ERRORS = Set.of("NoSuchBucket", "NoSuchKey", "NoSuchVersion");
+
     private static final Logger LOG = Logger.getLogger(S3Controller.class);
     private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
             .withZone(ZoneId.of("UTC"));
-    private static final DateTimeFormatter RFC_822 = DateTimeFormatter
+    static final DateTimeFormatter RFC_822 = DateTimeFormatter
             .ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.US)
             .withZone(ZoneId.of("GMT"));
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -128,6 +133,7 @@ public class S3Controller {
     private final IamService iamService;
     private final IamEnforcementFilter iamEnforcementFilter;
     private final EmulatorConfig config;
+    private final Clock clock;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
@@ -140,7 +146,8 @@ public class S3Controller {
                         RequestContext requestContext,
                         IamService iamService,
                         IamEnforcementFilter iamEnforcementFilter,
-                        EmulatorConfig config) {
+                        EmulatorConfig config,
+                        Clock clock) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
@@ -153,6 +160,7 @@ public class S3Controller {
         this.iamService = iamService;
         this.iamEnforcementFilter = iamEnforcementFilter;
         this.config = config;
+        this.clock = clock;
     }
 
     private void emitCloudTrailEvent(String eventName, String bucket, String key,
@@ -451,7 +459,15 @@ public class S3Controller {
                         new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
             }
             String region = bucketRegionForCreate(locationConstraint, regionResolver.resolveRegion(httpHeaders));
-            s3Service.createBucket(bucket, region);
+            authorizeBucketCreationSettings(httpHeaders, uriInfo, bucket, region);
+            s3Service.createBucket(bucket, region,
+                    httpHeaders.getHeaderString("x-amz-object-ownership"),
+                    httpHeaders.getHeaderString("x-amz-acl"),
+                    httpHeaders.getHeaderString("x-amz-grant-read"),
+                    httpHeaders.getHeaderString("x-amz-grant-write"),
+                    httpHeaders.getHeaderString("x-amz-grant-full-control"),
+                    httpHeaders.getHeaderString("x-amz-grant-read-acp"),
+                    httpHeaders.getHeaderString("x-amz-grant-write-acp"));
             // CreateBucketConfiguration may carry a <Tags> array; AWS applies those tags to the
             // new bucket, so a follow-up GetBucketTagging / ListTagsForResource must return them.
             if (!creationTags.isEmpty()) {
@@ -809,26 +825,40 @@ public class S3Controller {
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
+            // The sub-resource actions are checked as IAM checks them: as their version counterpart
+            // when the request names a version, and offered the tags or Object Lock settings the
+            // body sets.
+            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
             if (hasQueryParam(uriInfo, "tagging")) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectTagging", authorization);
-                return handlePutObjectTagging(bucket, key, readWholeBody(body));
+                byte[] tags = readWholeBody(body);
+                s3Service.authorizeObjectWrite(bucket, key, versionId, "s3:PutObjectTagging", authorization,
+                        S3ObjectActions.taggingBodyConditions(new String(tags, StandardCharsets.UTF_8)));
+                return handlePutObjectTagging(bucket, key, versionId, tags);
             }
             if (hasQueryParam(uriInfo, "retention")) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectRetention", authorization);
-                if ("true".equalsIgnoreCase(httpHeaders.getHeaderString("x-amz-bypass-governance-retention"))) {
+                String retention = new String(readWholeBody(body), StandardCharsets.UTF_8);
+                s3Service.authorizeObjectWrite(bucket, key, null, "s3:PutObjectRetention", authorization,
+                        S3ObjectActions.retentionBodyConditions(retention, clock.instant()));
+                // The bypass is needed only for a change that shortens or removes a governance lock.
+                boolean bypass = "true".equalsIgnoreCase(
+                        httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+                boolean overrides = bypass && s3Service.retentionChangeOverridesGovernance(
+                        bucket, key, versionId, retentionRetainUntil(retention));
+                if (overrides && s3Service.isAuthEnforced()) {
                     s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
                 }
-                return handlePutObjectRetention(bucket, key,
-                        uriInfo.getQueryParameters().getFirst("versionId"), httpHeaders, readWholeBody(body));
+                return handlePutObjectRetention(bucket, key, versionId, retention, effectiveBypass(bypass, overrides));
             }
             if (hasQueryParam(uriInfo, "legal-hold")) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectLegalHold", authorization);
-                return handlePutObjectLegalHold(bucket, key,
-                        uriInfo.getQueryParameters().getFirst("versionId"), readWholeBody(body));
+                byte[] legalHold = readWholeBody(body);
+                s3Service.authorizeObjectWrite(bucket, key, null, "s3:PutObjectLegalHold", authorization,
+                        S3ObjectActions.legalHoldBodyConditions(
+                                new String(legalHold, StandardCharsets.UTF_8), clock.instant()));
+                return handlePutObjectLegalHold(bucket, key, versionId, legalHold);
             }
             if (hasQueryParam(uriInfo, "acl")) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectAcl", authorization);
-                s3Service.putObjectAcl(bucket, key, uriInfo.getQueryParameters().getFirst("versionId"),
+                s3Service.authorizeObjectWrite(bucket, key, versionId, "s3:PutObjectAcl", authorization, null);
+                s3Service.putObjectAcl(bucket, key, versionId,
                         new String(readWholeBody(body), StandardCharsets.UTF_8),
                         httpHeaders.getHeaderString("x-amz-acl"),
                         httpHeaders.getHeaderString("x-amz-grant-read"),
@@ -840,7 +870,7 @@ public class S3Controller {
             }
 
             if (hasQueryParam(uriInfo, "annotation")) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObjectAnnotation", authorization);
+                s3Service.authorizeObjectWrite(bucket, key, versionId, "s3:PutObjectAnnotation", authorization, null);
                 return handlePutObjectAnnotation(bucket, key, readWholeBody(body), uriInfo, httpHeaders);
             }
 
@@ -848,8 +878,8 @@ public class S3Controller {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 int parsedPartNumber = PartRange.parseUploadPartNumber(partNumber);
                 if (copySource != null && !copySource.isEmpty()) {
-                    return handleUploadPartCopy(
-                            copySource, bucket, key, uploadId, parsedPartNumber, httpHeaders, authorization);
+                    return handleUploadPartCopy(copySource, bucket, key, uploadId, parsedPartNumber,
+                            httpHeaders, uriInfo, authorization);
                 }
                 requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PART_SIZE);
                 Part part = s3Service.storePart(bucket, key, uploadId, parsedPartNumber,
@@ -871,20 +901,20 @@ public class S3Controller {
             }
 
             if (copySource != null && !copySource.isEmpty()) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
-                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, uriInfo, authorization);
+                ObjectLockHeaders lock = objectLockHeaders(httpHeaders);
+                authorizeObjectCreation(bucket, key, httpHeaders, uriInfo, true, authorization);
+                authorizeConditionalWriteRead(bucket, key, ifMatch, authorization);
+                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, uriInfo, authorization,
+                        lock);
             }
 
             rejectUnimplementedPutConditions(ifMatch, ifNoneMatch);
 
             Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
 
-            String lockMode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
-            String retainUntilStr = httpHeaders.getHeaderString("x-amz-object-lock-retain-until-date");
-            String legalHold = httpHeaders.getHeaderString("x-amz-object-lock-legal-hold");
-            Instant retainUntil = retainUntilStr != null ? Instant.parse(retainUntilStr) : null;
+            ObjectLockHeaders lock = objectLockHeaders(httpHeaders);
 
-            String checksumAlgorithm = getChecksumAlgorithm(httpHeaders, uriInfo);
+            String checksumAlgorithm = getChecksumAlgorithm(httpHeaders);
             String persistedEncoding = toPersistedContentEncoding(contentEncoding);
             String contentDisposition = httpHeaders.getHeaderString("Content-Disposition");
             String cacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -894,7 +924,8 @@ public class S3Controller {
             String sseCustomerKey = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key");
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
-            s3Service.authorizePutObject(bucket, key, authorization);
+            authorizeObjectCreation(bucket, key, httpHeaders, uriInfo, false, authorization);
+            authorizeConditionalWriteRead(bucket, key, ifMatch, authorization);
             requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PUT_OBJECT_SIZE);
             S3Object obj = s3Service.putObject(bucket, key,
                     decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
@@ -902,9 +933,9 @@ public class S3Controller {
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                             .withContentEncoding(persistedEncoding)
-                            .withObjectLockMode(lockMode)
-                            .withRetainUntilDate(retainUntil)
-                            .withLegalHoldStatus(legalHold)
+                            .withObjectLockMode(lock.mode())
+                            .withRetainUntilDate(lock.retainUntilDate())
+                            .withLegalHoldStatus(lock.legalHoldStatus())
                             .withContentDisposition(contentDisposition)
                             .withCacheControl(cacheControl)
                             .withServerSideEncryption(serverSideEncryption)
@@ -919,7 +950,7 @@ public class S3Controller {
                             .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
                             .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
                             .withChecksumAlgorithm(checksumAlgorithm)
-                            .withClientChecksum(extractChecksum(httpHeaders, uriInfo))
+                            .withClientChecksum(extractChecksum(httpHeaders))
                             .withIfMatch(ifMatch)
                             .withIfNoneMatch(ifNoneMatch)
                             .withTagging(inlineTags));
@@ -981,7 +1012,7 @@ public class S3Controller {
 
             if (hasQueryParam(uriInfo, "tagging")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectTagging", authorization);
-                return handleGetObjectTagging(bucket, key);
+                return handleGetObjectTagging(bucket, key, versionId);
             }
             if (hasQueryParam(uriInfo, "annotation")) {
                 String annotationNameParam = uriInfo.getQueryParameters().getFirst("annotationName");
@@ -1015,6 +1046,8 @@ public class S3Controller {
                 }
             }
             if (hasQueryParam(uriInfo, "attributes")) {
+                // GetObjectAttributes needs the read beside its own action, as IAM checks it.
+                s3Service.authorizeGetObject(bucket, key, versionId, authorization);
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAttributes", authorization);
                 // Merge all x-amz-object-attributes header values (SDK may send multiple lines)
                 List<String> attrHeaders = httpHeaders.getRequestHeader("x-amz-object-attributes");
@@ -1483,17 +1516,17 @@ public class S3Controller {
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
             if (hasQueryParam(uriInfo, "tagging")) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:DeleteObjectTagging", authorization);
-                s3Service.deleteObjectTagging(bucket, key);
-                return Response.noContent().build();
+                s3Service.authorizeObjectWrite(bucket, key, versionId, "s3:DeleteObjectTagging", authorization, null);
+                return withVersionId(Response.noContent(), s3Service.deleteObjectTagging(bucket, key, versionId))
+                        .build();
             }
             if (hasQueryParam(uriInfo, "annotation")) {
+                // The user guide: "The BypassGovernanceRetention permission does not apply to annotation
+                // operations", so the bypass header asks for no permission of its own here.
                 boolean bypass = "true".equalsIgnoreCase(
                         httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
-                s3Service.authorizeObjectWrite(bucket, key, "s3:DeleteObjectAnnotation", authorization);
-                if (bypass) {
-                    s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
-                }
+                s3Service.authorizeObjectWrite(bucket, key, versionId, "s3:DeleteObjectAnnotation", authorization,
+                        null);
                 return handleDeleteObjectAnnotation(bucket, key, uriInfo, httpHeaders, bypass);
             }
             if (uploadId != null) {
@@ -1506,10 +1539,13 @@ public class S3Controller {
             String ifMatch = httpHeaders.getHeaderString("If-Match");
             s3Service.authorizeDeleteObject(bucket, key, versionId, authorization);
             authorizeDeleteETagRead(bucket, key, ifMatch, authorization);
-            if (bypass) {
+            // The bypass is needed only for a delete that removes a version under a governance lock.
+            boolean overrides = bypass && s3Service.deleteOverridesGovernanceRetention(bucket, key, versionId);
+            if (overrides && s3Service.isAuthEnforced()) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
             }
-            S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass, ifMatch);
+            S3Object result = s3Service.deleteObject(bucket, key, versionId, effectiveBypass(bypass, overrides),
+                    ifMatch);
             var resp = Response.noContent();
             if (result != null) {
                 if (result.isDeleteMarker()) {
@@ -1583,21 +1619,35 @@ public class S3Controller {
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
             if (hasQueryParam(uriInfo, "uploads")) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                ObjectLockHeaders lock = objectLockHeaders(httpHeaders);
+                authorizeObjectCreation(bucket, key, httpHeaders, uriInfo, false, authorization);
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
                         extractUserMetadata(httpHeaders, uriInfo),
-                        httpHeaders.getHeaderString("x-amz-storage-class"),
-                        httpHeaders.getHeaderString("Content-Disposition"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption"),
-                        httpHeaders.getHeaderString("x-amz-acl"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
-                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
-                        getChecksumAlgorithm(httpHeaders, uriInfo),
-                        resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-type"),
-                        parseInlineTaggingHeader(
-                                resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo)));
+                        httpHeaders.getHeaderString("x-amz-checksum-type"),
+                        new PutObjectOptions()
+                                .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
+                                .withContentDisposition(httpHeaders.getHeaderString("Content-Disposition"))
+                                .withServerSideEncryption(httpHeaders.getHeaderString("x-amz-server-side-encryption"))
+                                .withSseKmsKeyId(httpHeaders.getHeaderString(
+                                        "x-amz-server-side-encryption-aws-kms-key-id"))
+                                .withSseCustomerAlgorithm(httpHeaders.getHeaderString(
+                                        "x-amz-server-side-encryption-customer-algorithm"))
+                                .withSseCustomerKey(httpHeaders.getHeaderString(
+                                        "x-amz-server-side-encryption-customer-key"))
+                                .withSseCustomerKeyMd5(httpHeaders.getHeaderString(
+                                        "x-amz-server-side-encryption-customer-key-MD5"))
+                                .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
+                                .withAcl(httpHeaders.getHeaderString("x-amz-acl"))
+                                .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
+                                .withGrantWrite(httpHeaders.getHeaderString("x-amz-grant-write"))
+                                .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
+                                .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
+                                .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
+                                .withObjectLockMode(lock.mode())
+                                .withRetainUntilDate(lock.retainUntilDate())
+                                .withLegalHoldStatus(lock.legalHoldStatus())
+                                .withTagging(parseInlineTaggingHeader(resolveInlineTaggingSource(
+                                        httpHeaders.getHeaderString("x-amz-tagging"), uriInfo))));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -1635,14 +1685,15 @@ public class S3Controller {
 
             if (uploadId != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                authorizeConditionalWriteRead(bucket, key, ifMatch, authorization);
                 List<CompletedPart> completedParts = parseCompleteMultipartBody(new String(body, StandardCharsets.UTF_8));
                 List<Integer> partNumbers = completedParts.stream().map(CompletedPart::partNumber).toList();
                 Response preconditionResponse = checkWritePreconditions(bucket, key, ifMatch, ifNoneMatch);
                 if (preconditionResponse != null) {
                     return preconditionResponse;
                 }
-                String checksumType = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-type");
-                S3Checksum expectedChecksum = extractChecksum(httpHeaders, uriInfo);
+                String checksumType = httpHeaders.getHeaderString("x-amz-checksum-type");
+                S3Checksum expectedChecksum = extractChecksum(httpHeaders);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
                         completedPartETags(completedParts), completedPartChecksums(completedParts), checksumType,
                         expectedChecksum, multipartObjectSize(httpHeaders, uriInfo));
@@ -1698,28 +1749,30 @@ public class S3Controller {
         S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                 s3Service.isAuthEnforced(), httpHeaders, uriInfo);
         s3Service.authorizeSignedRequest(authorization);
-        // A blank header counts as absent, as it does in IamEnforcementFilter.filter(), so a presigned
-        // request cannot shed its query credential, and with it every per-key check, by adding one.
-        String authorizationHeader = httpHeaders.getHeaderString("Authorization");
-        if (authorizationHeader != null && authorizationHeader.isBlank()) {
-            authorizationHeader = null;
-        }
-        String iamCredential = IamEnforcementFilter.requestAuthorization(
-                authorizationHeader, uriInfo.getQueryParameters());
+        String iamCredential = iamCredential(httpHeaders, uriInfo);
         List<XmlParser.KeyVersion> authorizedEntries = new ArrayList<>();
         List<S3Service.DeleteError> authorizationErrors = new ArrayList<>();
+        // With an access check on, an entry may bypass a lock only when the bypass was checked for it,
+        // so a lock set after the checks is refused rather than bypassed unchecked.
+        boolean checked = s3Service.isAuthEnforced()
+                || (config.services().iam().enforcementEnabled() && iamCredential != null);
+        Set<XmlParser.KeyVersion> bypassingEntries = new HashSet<>();
         for (XmlParser.KeyVersion entry : entries) {
             try {
                 authorizeDeleteEntryIdentity(iamCredential, bucket, entry);
                 s3Service.authorizeDeleteObject(bucket, entry.key(), entry.versionId(), authorization);
                 authorizeDeleteETagRead(bucket, entry.key(), entry.eTag(), authorization);
-                if (bypass && s3Service.isGovernanceRetentionActive(
-                        bucket, entry.key(), entry.versionId())) {
+                boolean overrides = bypass && s3Service.deleteOverridesGovernanceRetention(
+                        bucket, entry.key(), entry.versionId());
+                if (overrides) {
                     // The bypass is a permission of its own, so IAM evaluates it against the caller's
                     // policies as it does the delete, not only the bucket-policy check that follows.
                     authorizeEntryIdentity(iamCredential, "s3:BypassGovernanceRetention", bucket, entry.key());
                     s3Service.authorizeObjectWrite(bucket, entry.key(),
                             "s3:BypassGovernanceRetention", authorization);
+                }
+                if (checked ? overrides : bypass) {
+                    bypassingEntries.add(entry);
                 }
                 authorizedEntries.add(entry);
             } catch (AwsException e) {
@@ -1728,7 +1781,8 @@ public class S3Controller {
             }
         }
 
-        S3Service.DeleteObjectsResult result = s3Service.deleteObjects(bucket, authorizedEntries, bypass);
+        S3Service.DeleteObjectsResult result =
+                s3Service.deleteObjects(bucket, authorizedEntries, bypassingEntries::contains);
 
         XmlBuilder builder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -1768,6 +1822,57 @@ public class S3Controller {
         builder.elem("Code", error.code())
                .elem("Message", error.message())
                .end("Error");
+    }
+
+    /**
+     * Checks a PutObject, CopyObject or CreateMultipartUpload against the bucket policy as the
+     * enforcement filter checks it against identity policies: s3:PutObject, and the action each
+     * setting it applies to the new object needs besides it (see
+     * {@link S3ObjectActions#objectCreationActions}). Each is offered the condition keys the request
+     * sets, its tags and Object Lock settings. An anonymous creation that a public bucket ACL admits
+     * may apply its settings (see {@link S3Service#authorizeObjectCreationSetting}).
+     */
+    private void authorizeObjectCreation(String bucket, String key, HttpHeaders httpHeaders, UriInfo uriInfo,
+                                         boolean copy, S3Service.RequestAuthorization authorization) {
+        if (!s3Service.isAuthEnforced()) {
+            return;
+        }
+        String tagging = resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo);
+        Map<String, List<String>> conditions =
+                S3ObjectActions.objectCreationConditions(httpHeaders::getHeaderString, tagging, copy, clock.instant());
+        s3Service.authorizeObjectWrite(bucket, key, null, "s3:PutObject", authorization, conditions);
+        for (String action : S3ObjectActions.objectCreationActions(httpHeaders::getHeaderString, tagging, copy)) {
+            s3Service.authorizeObjectCreationSetting(bucket, key, action, authorization, conditions);
+        }
+    }
+
+    /**
+     * The bypass a DeleteObject or PutObjectRetention passes to S3Service. With no access check on, the
+     * header as sent. With one on, only for a request that {@code overrides} a governance lock and whose
+     * bypass permission was checked: S3's own check approves it in the handler, and IAM's in
+     * IamEnforcementFilter, which records its decision in RequestContext. A lock set after the checks is
+     * then refused, not bypassed without the permission.
+     */
+    private boolean effectiveBypass(boolean bypass, boolean overrides) {
+        return effectiveBypass(bypass, overrides, s3Service.isAuthEnforced(), requestContext.getIamGovernanceBypass());
+    }
+
+    // Package-private for unit testing.
+    static boolean effectiveBypass(boolean bypass, boolean overrides, boolean s3Checks, Boolean iamDecision) {
+        if (!s3Checks && iamDecision == null) {
+            return bypass;
+        }
+        return bypass && overrides && !Boolean.FALSE.equals(iamDecision);
+    }
+
+    // A PutObject, CopyObject or CompleteMultipartUpload carrying If-Match compares against the object
+    // it replaces, which IAM checks as s3:GetObject besides the write; the bucket policy is checked
+    // for it the same way.
+    private void authorizeConditionalWriteRead(String bucket, String key, String ifMatch,
+                                               S3Service.RequestAuthorization authorization) {
+        if (ifMatch != null) {
+            s3Service.authorizeGetObject(bucket, key, null, authorization);
+        }
     }
 
     // A conditional delete against an ETag reveals whether the object still has it, so S3 requires
@@ -1903,7 +2008,13 @@ public class S3Controller {
     private List<CompletedPart> parseCompleteMultipartBody(String xml) {
         List<Map<String, String>> parts = XmlParser.extractGroups(xml, "Part");
         if (parts.isEmpty()) {
-            throw malformedCompleteMultipartXml();
+            if (xml == null || xml.isEmpty()) {
+                throw emptyCompleteMultipartXml();
+            }
+            if (!"CompleteMultipartUpload".equals(XmlParser.rootElementName(xml))) {
+                throw malformedCompleteMultipartXml();
+            }
+            throw emptyCompleteMultipartXml();
         }
         List<CompletedPart> completedParts = new ArrayList<>();
         for (Map<String, String> part : parts) {
@@ -1925,6 +2036,10 @@ public class S3Controller {
 
     private static AwsException malformedCompleteMultipartXml() {
         return new AwsException("MalformedXML", "The XML you provided was not well-formed.", 400);
+    }
+
+    private static AwsException emptyCompleteMultipartXml() {
+        return new AwsException("InvalidRequest", "You must specify at least one part", 400);
     }
 
     private Map<Integer, S3Checksum> completedPartChecksums(List<CompletedPart> parts) {
@@ -2605,16 +2720,21 @@ public class S3Controller {
 
     // --- Object Tagging ---
 
-    private Response handlePutObjectTagging(String bucket, String key, byte[] body) {
+    private Response handlePutObjectTagging(String bucket, String key, String versionId, byte[] body) {
         String xml = new String(body, StandardCharsets.UTF_8);
         Map<String, String> tags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
-        s3Service.putObjectTagging(bucket, key, tags);
-        return Response.ok().build();
+        return withVersionId(Response.ok(), s3Service.putObjectTagging(bucket, key, versionId, tags)).build();
     }
 
-    private Response handleGetObjectTagging(String bucket, String key) {
-        Map<String, String> tags = s3Service.getObjectTagging(bucket, key);
-        return Response.ok(buildTaggingXml(tags)).type(MediaType.APPLICATION_XML).build();
+    private Response handleGetObjectTagging(String bucket, String key, String versionId) {
+        S3Service.ObjectTaggingResult tagging = s3Service.getObjectTaggingResult(bucket, key, versionId);
+        return withVersionId(Response.ok(buildTaggingXml(tagging.tags())), tagging.versionId())
+                .type(MediaType.APPLICATION_XML).build();
+    }
+
+    /** {@code resp} with the id of the version a request acted on, when that version has one. */
+    private static Response.ResponseBuilder withVersionId(Response.ResponseBuilder resp, String versionId) {
+        return versionId != null ? resp.header("x-amz-version-id", versionId) : resp;
     }
 
     private String buildTaggingXml(Map<String, String> tags) {
@@ -2645,7 +2765,7 @@ public class S3Controller {
                     httpHeaders.getHeaderString("x-amz-content-sha256"));
             String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
             String versionId = uriInfo.getQueryParameters().getFirst("versionId");
-            String algorithmHeader = getChecksumAlgorithm(httpHeaders, uriInfo);
+            String algorithmHeader = getChecksumAlgorithm(httpHeaders);
             ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(algorithmHeader);
             validateChecksumHeaders(httpHeaders, uriInfo, payload);
             ObjectAnnotation annotation = s3Service.putObjectAnnotation(bucket, key, annotationName,
@@ -2841,20 +2961,21 @@ public class S3Controller {
 
     // --- Object Retention ---
 
-    private Response handlePutObjectRetention(String bucket, String key, String versionId,
-                                               HttpHeaders httpHeaders, byte[] body) {
-        String xml = new String(body, StandardCharsets.UTF_8);
-        String mode = XmlParser.extractFirst(xml, "Mode", null);
+    // The RetainUntilDate of a <Retention> body, null when it has none, which removes the retention.
+    private static Instant retentionRetainUntil(String xml) {
         String dateStr = XmlParser.extractFirst(xml, "RetainUntilDate", null);
-        Instant retainUntil;
         try {
-            retainUntil = dateStr != null ? Instant.parse(dateStr) : null;
+            return dateStr != null ? Instant.parse(dateStr) : null;
         } catch (DateTimeParseException | IllegalArgumentException e) {
             throw new AwsException("MalformedXML",
                     "The XML you provided was not well-formed.", 400);
         }
-        boolean bypass = "true".equalsIgnoreCase(
-                httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+    }
+
+    private Response handlePutObjectRetention(String bucket, String key, String versionId, String xml,
+                                               boolean bypass) {
+        String mode = XmlParser.extractFirst(xml, "Mode", null);
+        Instant retainUntil = retentionRetainUntil(xml);
         s3Service.putObjectRetention(bucket, key, versionId, mode, retainUntil, bypass);
         return Response.ok().build();
     }
@@ -2887,11 +3008,10 @@ public class S3Controller {
 
     private Response handleGetObjectLegalHold(String bucket, String key, String versionId) {
         S3Object obj = s3Service.getObjectLegalHold(bucket, key, versionId);
-        String status = obj.getLegalHoldStatus() != null ? obj.getLegalHoldStatus() : "OFF";
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("LegalHold", AwsNamespaces.S3)
-                .elem("Status", status)
+                .elem("Status", obj.getLegalHoldStatus())
                 .end("LegalHold")
                 .build();
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
@@ -2939,6 +3059,7 @@ public class S3Controller {
         appendSseCustomerHeaders(resp, obj);
         appendChecksumHeaders(resp, obj.getChecksum());
         appendLockHeaders(resp, obj);
+        appendExpirationHeader(resp, obj);
     }
 
     // includeChecksum must be false for a range the stored checksum does not describe:
@@ -2983,6 +3104,14 @@ public class S3Controller {
             appendChecksumHeaders(resp, obj.getChecksum());
         }
         appendLockHeaders(resp, obj);
+        appendExpirationHeader(resp, obj);
+    }
+
+    private void appendExpirationHeader(Response.ResponseBuilder resp, S3Object obj) {
+        String expiration = s3Service.expirationHeader(obj);
+        if (expiration != null) {
+            resp.header("x-amz-expiration", expiration);
+        }
     }
 
     private void appendSseCustomerHeaders(Response.ResponseBuilder resp, S3Object obj) {
@@ -3022,10 +3151,12 @@ public class S3Controller {
     private Response handleCopyObject(String copySource, String destBucket, String destKey,
                                       String contentType, HttpHeaders httpHeaders,
                                       UriInfo uriInfo,
-                                      S3Service.RequestAuthorization authorization) {
+                                      S3Service.RequestAuthorization authorization,
+                                      ObjectLockHeaders lock) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
-        authorizeCopySourceRead(httpHeaders, sourceObject, authorization);
+        authorizeCopySourceRead(httpHeaders, uriInfo, sourceObject, authorization);
+        authorizeCopiedTags(httpHeaders, uriInfo, sourceObject, destBucket, destKey, authorization);
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -3033,7 +3164,7 @@ public class S3Controller {
         String copySseKmsKeyId = httpHeaders.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id");
         String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
         String taggingDirective = httpHeaders.getHeaderString("x-amz-tagging-directive");
-        String taggingHeader = httpHeaders.getHeaderString("x-amz-tagging");
+        String taggingHeader = resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo);
         Map<String, String> replacementTagging = "REPLACE".equalsIgnoreCase(taggingDirective)
                 ? (taggingHeader != null ? parseInlineTaggingHeader(taggingHeader) : Map.of())
                 : null;
@@ -3070,7 +3201,7 @@ public class S3Controller {
                         .withCopySourceSseCustomerAlgorithm(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-algorithm"))
                         .withCopySourceSseCustomerKey(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key"))
                         .withCopySourceSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
-                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders, uriInfo))
+                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
                         .withAnnotationDirective(annotationDirective)
                         .withAcl(cannedAcl)
                         .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
@@ -3078,6 +3209,9 @@ public class S3Controller {
                         .withGrantFullControl(httpHeaders.getHeaderString("x-amz-grant-full-control"))
                         .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
                         .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
+                        .withObjectLockMode(lock.mode())
+                        .withRetainUntilDate(lock.retainUntilDate())
+                        .withLegalHoldStatus(lock.legalHoldStatus())
                         .withIfMatch(httpHeaders.getHeaderString("If-Match"))
                         .withIfNoneMatch(httpHeaders.getHeaderString("If-None-Match"))
                         .withCopySourceConditions(copySourceConditions(httpHeaders)));
@@ -3109,10 +3243,10 @@ public class S3Controller {
 
     private Response handleUploadPartCopy(String copySource, String destBucket, String destKey,
                                           String uploadId, int partNumber, HttpHeaders httpHeaders,
-                                          S3Service.RequestAuthorization authorization) {
+                                          UriInfo uriInfo, S3Service.RequestAuthorization authorization) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
-        authorizeCopySourceRead(httpHeaders, sourceObject, authorization);
+        authorizeCopySourceRead(httpHeaders, uriInfo, sourceObject, authorization);
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
@@ -3328,12 +3462,13 @@ public class S3Controller {
         return null;
     }
 
-    private S3Checksum extractChecksum(HttpHeaders httpHeaders, UriInfo uriInfo) {
-        String crc32 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32");
-        String crc32c = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32c");
-        String crc64nvme = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc64nvme");
-        String sha1 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha1");
-        String sha256 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha256");
+    private S3Checksum extractChecksum(HttpHeaders httpHeaders) {
+        // AWS signs hoisted checksum query parameters but does not use them as integrity headers.
+        String crc32 = httpHeaders.getHeaderString("x-amz-checksum-crc32");
+        String crc32c = httpHeaders.getHeaderString("x-amz-checksum-crc32c");
+        String crc64nvme = httpHeaders.getHeaderString("x-amz-checksum-crc64nvme");
+        String sha1 = httpHeaders.getHeaderString("x-amz-checksum-sha1");
+        String sha256 = httpHeaders.getHeaderString("x-amz-checksum-sha256");
         if (crc32 == null && crc32c == null && crc64nvme == null && sha1 == null && sha256 == null) {
             return null;
         }
@@ -3347,10 +3482,10 @@ public class S3Controller {
         return checksum;
     }
 
-    private String getChecksumAlgorithm(HttpHeaders httpHeaders, UriInfo uriInfo) {
-        String algorithm = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-algorithm");
+    private String getChecksumAlgorithm(HttpHeaders httpHeaders) {
+        String algorithm = httpHeaders.getHeaderString("x-amz-checksum-algorithm");
         if (algorithm == null || algorithm.isBlank()) {
-            algorithm = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-sdk-checksum-algorithm");
+            algorithm = httpHeaders.getHeaderString("x-amz-sdk-checksum-algorithm");
         }
         return algorithm;
     }
@@ -3370,7 +3505,7 @@ public class S3Controller {
     private UploadChecksums uploadChecksums(HttpHeaders httpHeaders, UriInfo uriInfo) {
         Map<ChecksumAlgorithm, String> claimed = new EnumMap<>(ChecksumAlgorithm.class);
         for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
-            String value = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-" + algorithm.wireValue());
+            String value = httpHeaders.getHeaderString("x-amz-checksum-" + algorithm.wireValue());
             if (value != null) {
                 claimed.put(algorithm, value);
             }
@@ -3554,10 +3689,12 @@ public class S3Controller {
         }
         // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
         // surface which input was rejected, and EntityTooSmall and EntityTooLarge the proposed and
-        // allowed sizes. Multipart size errors also identify the rejected part.
+        // allowed sizes. Multipart size errors also identify the rejected part, and MethodNotAllowed
+        // the method and the kind of resource that refused it.
         // They travel through AwsException.extendedData.
         if (e.getExtendedData() != null) {
-            for (String field : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed", "PartNumber", "ETag")) {
+            for (String field : List.of("Method", "ResourceType", "ProposedSize", "MinSizeAllowed",
+                    "MaxSizeAllowed", "PartNumber", "ETag")) {
                 Object value = e.getExtendedData().get(field);
                 if (value != null) {
                     xmlBuilder.elem(field, value.toString());
@@ -3593,7 +3730,13 @@ public class S3Controller {
                 .elem("RequestId", UUID.randomUUID().toString())
                 .end("Error")
                 .build();
-        return Response.status(e.getHttpStatus()).entity(xml).type(MediaType.APPLICATION_XML).build();
+        Response.ResponseBuilder response = Response.status(e.getHttpStatus())
+                .entity(xml).type(MediaType.APPLICATION_XML);
+        // A request refused because it reached a delete marker says so in x-amz-delete-marker.
+        if (e.getExtendedData() != null && "DeleteMarker".equals(e.getExtendedData().get("ResourceType"))) {
+            response.header("x-amz-delete-marker", "true");
+        }
+        return response.build();
     }
 
     private Response checkPreconditions(S3Object obj, String ifMatch, String ifNoneMatch,
@@ -3775,15 +3918,15 @@ public class S3Controller {
          * filter stage. Evaluate the signing principal's IAM identity policy here whenever a
          * credential is present, independent of whether S3's own presigned-POST signature and
          * condition checks (s3.enforce-auth) are enabled, so an IAM deny is not bypassed by
-         * running S3 without its own presigned-POST enforcement. authorizeAdditionalResource
+         * running S3 without its own presigned-POST enforcement. authorizePostObject
          * itself no-ops when IAM enforcement is disabled.
          */
         String credential = lcFields.get("x-amz-credential");
         rejectUnknownPostRegion(credential);
         if (credential != null && !credential.isEmpty()) {
-            iamEnforcementFilter.authorizeAdditionalResource(
-                    AccountResolver.SIGV4_SCHEME + " Credential=" + credential, "s3:PutObject",
-                    S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
+            iamEnforcementFilter.authorizePostObject(AccountResolver.SIGV4_SCHEME + " Credential=" + credential,
+                    S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key),
+                    regionResolver.resolveRegionFromPresignedCredential(credential));
         }
 
         if (s3Service.isAuthEnforced() || (config.auth().validateSignatures() && isSignedPost(lcFields))) {
@@ -3845,13 +3988,16 @@ public class S3Controller {
      * {@code AuthorizationHeaderMalformed}.
      */
     private void rejectUnknownPostRegion(String credential) {
-        if (credential == null || credential.isEmpty() || config.partitions().allowUnknownRegions()) {
+        if (credential == null || credential.isEmpty()) {
             return;
         }
         String region = regionResolver.resolveRegionFromPresignedCredential(credential);
-        if (!RegionResolver.isKnownRegion(region)) {
-            throw new AwsException("AuthorizationHeaderMalformed", "The authorization header is malformed; "
-                    + "the region '" + region + "' is wrong; expecting a region AWS publishes.", 400);
+        boolean ambiguous = RegionResolver.containsArnDelimiter(region);
+        if (ambiguous || (!RegionResolver.isKnownRegion(region) && !config.partitions().allowUnknownRegions())) {
+            String message = ambiguous ? "The authorization header is malformed; the region '" + region
+                    + "' must not contain ':'." : "The authorization header is malformed; "
+                    + "the region '" + region + "' is wrong; expecting a region AWS publishes.";
+            throw new AwsException("AuthorizationHeaderMalformed", message, 400);
         }
     }
 
@@ -4059,9 +4205,49 @@ public class S3Controller {
     private static final int MAX_INLINE_TAGS = 10;
     private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;
 
+    /** The Object Lock settings a PutObject, CopyObject or CreateMultipartUpload asks for in its headers. */
+    private record ObjectLockHeaders(String mode, Instant retainUntilDate, String legalHoldStatus) {
+    }
+
     /**
-     * Resolves the inline {@code x-amz-tagging} value for PutObject and CreateMultipartUpload.
-     * The signed request header wins; otherwise the value comes from the {@code x-amz-tagging}
+     * Reads the Object Lock headers of a PutObject, CopyObject or CreateMultipartUpload, refusing
+     * them as S3 was recorded refusing them, with InvalidArgument naming the header: a mode and a
+     * retain-until date come together or not at all, checked first, and the mode is GOVERNANCE or
+     * COMPLIANCE. A date that is not an ISO 8601 timestamp is refused the same way; S3 was not
+     * recorded on that one, so its message is floci's.
+     */
+    private static ObjectLockHeaders objectLockHeaders(HttpHeaders httpHeaders) {
+        String mode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
+        String retainUntil = httpHeaders.getHeaderString("x-amz-object-lock-retain-until-date");
+        if ((mode == null) != (retainUntil == null)) {
+            throw new AwsException("InvalidArgument",
+                    "x-amz-object-lock-retain-until-date and x-amz-object-lock-mode must both be supplied", 400,
+                    Map.of("ArgumentName",
+                            mode == null ? "x-amz-object-lock-mode" : "x-amz-object-lock-retain-until-date"));
+        }
+        if (mode != null && !"GOVERNANCE".equals(mode) && !"COMPLIANCE".equals(mode)) {
+            throw new AwsException("InvalidArgument", "Unknown wormMode directive.", 400,
+                    Map.of("ArgumentName", "x-amz-object-lock-mode", "ArgumentValue", mode));
+        }
+        Instant retainUntilDate = null;
+        if (retainUntil != null) {
+            try {
+                retainUntilDate = Instant.parse(retainUntil);
+            } catch (DateTimeParseException e) {
+                throw new AwsException("InvalidArgument",
+                        "The x-amz-object-lock-retain-until-date header must be an ISO 8601 timestamp.", 400,
+                        Map.of("ArgumentName", "x-amz-object-lock-retain-until-date", "ArgumentValue", retainUntil));
+            }
+        }
+        return new ObjectLockHeaders(mode, retainUntilDate,
+                httpHeaders.getHeaderString("x-amz-object-lock-legal-hold"));
+    }
+
+    /**
+     * Resolves the inline {@code x-amz-tagging} value for PutObject, CreateMultipartUpload and
+     * a CopyObject that replaces its source's tags, and for the bucket-policy check of all three
+     * ({@link #authorizeObjectCreation}), so a policy sees the tags the object gets. The signed
+     * request header wins; otherwise the value comes from the {@code x-amz-tagging}
      * query parameter, where SDK presigners hoist the header while signing only {@code host}.
      * JAX-RS decodes the query value once, which yields the same URL-encoded {@code k=v&k=v}
      * string the header form carries, so both sources feed
@@ -4132,49 +4318,18 @@ public class S3Controller {
     private String extractObjectKey(UriInfo uriInfo, String bucket, String fallbackKey) {
         validateRawUri();
         String rawPath = currentVertxRequest.getCurrent().request().path();
-        String bucketPrefix = "/" + bucket + "/";
-        String rawKey;
-        if (isVirtualHostedRawPath(uriInfo, bucket, rawPath)) {
-            // Virtual-hosted style: S3VirtualHostFilter rewrote the JAX-RS URI to "/<bucket>" +
-            // path, but the RAW path is still the key alone. Searching it for "/<bucket>/" finds
-            // that string only when the KEY happens to contain the bucket's name as a segment,
-            // and everything up to that segment was then dropped from the key.
-            rawKey = rawPath.substring(1);
-        } else {
-            int prefixIndex = rawPath.indexOf(bucketPrefix);
-            if (prefixIndex < 0) {
-                // Should not happen on standard /{bucket}/{key:.+} routes, but can happen when
-                // requests are rerouted from a single-segment route (e.g. createBucket / handleBucketPost)
-                String pathKey = uriInfo.getPathParameters().getFirst("key");
-                String resolvedKey = pathKey != null ? pathKey : fallbackKey;
-                validateKeyNoTraversal(resolvedKey);
-                return resolvedKey;
-            }
-            rawKey = rawPath.substring(prefixIndex + bucketPrefix.length());
+        // A virtual-hosted raw path is the key alone (see S3ObjectKeys.isVirtualHostedRawPath):
+        // searching it for "/<bucket>/" finds that string only when the KEY happens to contain the
+        // bucket's name as a segment, and everything up to that segment was then dropped from the key.
+        String key = S3ObjectKeys.fromRawPath(rawPath, uriInfo.getRequestUri().getPath(), bucket);
+        if (key == null) {
+            // Should not happen on standard /{bucket}/{key:.+} routes, but can happen when
+            // requests are rerouted from a single-segment route (e.g. createBucket / handleBucketPost)
+            String pathKey = uriInfo.getPathParameters().getFirst("key");
+            key = pathKey != null ? pathKey : fallbackKey;
         }
-        String key = URLDecoder.decode(rawKey.replace("+", "%2B"), StandardCharsets.UTF_8);
         validateKeyNoTraversal(key);
         return key;
-    }
-
-    /**
-     * True when the raw request path carries no bucket prefix because the bucket came from the
-     * Host header: the rewritten request URI is then exactly "/" + bucket + rawPath, which is
-     * what {@link S3VirtualHostFilter} produces and what a path-style request never is. JAX-RS
-     * collapses consecutive slashes before the filter sees the path, so a leading-slash key
-     * ({@code //file.txt} on the wire) is rewritten to {@code /<bucket>/file.txt}; the collapsed
-     * form is compared as well so that key keeps its slash.
-     */
-    private static boolean isVirtualHostedRawPath(UriInfo uriInfo, String bucket, String rawPath) {
-        if (rawPath.isEmpty() || rawPath.charAt(0) != '/') {
-            return false;
-        }
-        String rewritten = uriInfo.getRequestUri().getRawPath();
-        if (rewritten == null || rewritten.equals(rawPath)) {
-            return false;
-        }
-        return rewritten.equals("/" + bucket + rawPath)
-                || rewritten.equals("/" + bucket + rawPath.replaceAll("/{2,}", "/"));
     }
 
     private void validateKeyNoTraversal(String key) {
@@ -4281,9 +4436,11 @@ public class S3Controller {
      * in the {@code x-amz-copy-source} header and is otherwise invisible to the request-level IAM filter
      * that authorizes the destination from the URL path. Real S3 requires both permissions: a caller
      * allowed to write to the destination bucket must not be able to exfiltrate an object it cannot read.
-     * A no-op when IAM enforcement is disabled, matching {@link IamEnforcementFilter}'s own bypass rules.
+     * IAM checks it against the request's credential, the header's or a presigned URL's, as the filter
+     * checks the destination. A no-op when IAM enforcement is disabled, matching
+     * {@link IamEnforcementFilter}'s own bypass rules.
      */
-    private void authorizeCopySourceRead(HttpHeaders httpHeaders, CopySourceRef source,
+    private void authorizeCopySourceRead(HttpHeaders httpHeaders, UriInfo uriInfo, CopySourceRef source,
                                          S3Service.RequestAuthorization authorization) {
         String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
         String resource = S3PublicAccessEvaluator.objectArn(
@@ -4291,11 +4448,85 @@ public class S3Controller {
         S3Service.SignedPrincipalResourcePolicyEvaluation resourcePolicyEvaluation =
                 s3Service.signedPrincipalResourcePolicyDecision(
                         source.bucket(), action, resource, authorization);
-        iamEnforcementFilter.authorizeAdditionalResource(
-                httpHeaders.getHeaderString("Authorization"), action, resource,
+        iamEnforcementFilter.authorizeAdditionalResource(iamCredential(httpHeaders, uriInfo), action, resource,
                 resourcePolicyEvaluation.decision(), resourcePolicyEvaluation.resourceOwnerAccountId());
         s3Service.authorizeGetObject(
                 source.bucket(), source.objectKey(), source.versionId(), authorization);
+    }
+
+    /**
+     * A copy under the default {@code COPY} tagging directive gives the new object the source's tags,
+     * and the permissions table makes a copy that puts the object with tags need s3:PutObjectTagging
+     * on the destination, as an object created with tags does. IamEnforcementFilter checks the tags a
+     * request sends; only the source tells whether a copy carries any, so this checks them here, once
+     * {@link #authorizeCopySourceRead} has allowed the source to be read, against IAM and against the
+     * bucket policy under {@code floci.services.s3.enforce-auth}. The source is read only when one of
+     * them applies: IAM enforcement is on and the request names a credential, the header's or a
+     * presigned URL's, or S3's own check is on.
+     */
+    private void authorizeCopiedTags(HttpHeaders httpHeaders, UriInfo uriInfo, CopySourceRef source,
+                                     String destBucket, String destKey, S3Service.RequestAuthorization authorization) {
+        String credential = iamCredential(httpHeaders, uriInfo);
+        boolean checksIdentity = config.services().iam().enforcementEnabled() && credential != null;
+        if ((!checksIdentity && !s3Service.isAuthEnforced())
+                || "REPLACE".equalsIgnoreCase(httpHeaders.getHeaderString("x-amz-tagging-directive"))) {
+            return;
+        }
+        Map<String, String> sourceTags;
+        try {
+            sourceTags = s3Service.getObjectTagging(source.bucket(), source.objectKey(), source.versionId());
+        } catch (AwsException e) {
+            if (!MISSING_OBJECT_ERRORS.contains(e.getErrorCode())) {
+                throw e;
+            }
+            // A missing source has no tags to copy, and the copy reports it missing.
+            return;
+        }
+        if (sourceTags.isEmpty()) {
+            return;
+        }
+        String action = "s3:PutObjectTagging";
+        if (checksIdentity) {
+            String resource = S3PublicAccessEvaluator.objectArn(
+                    s3Service.bucketPartition(destBucket), destBucket, destKey);
+            S3Service.SignedPrincipalResourcePolicyEvaluation resourcePolicyEvaluation =
+                    s3Service.signedPrincipalResourcePolicyDecision(destBucket, action, resource, authorization);
+            iamEnforcementFilter.authorizeAdditionalResource(credential, action, resource,
+                    resourcePolicyEvaluation.decision(), resourcePolicyEvaluation.resourceOwnerAccountId());
+        }
+        s3Service.authorizeObjectCreationSetting(destBucket, destKey, action, authorization, null);
+    }
+
+    /**
+     * Authorizes the actions a CreateBucket needs besides {@code s3:CreateBucket}
+     * (see {@link S3ObjectActions#bucketCreationActions}) on the new bucket. It runs before the bucket
+     * is created, so a denied request creates nothing.
+     */
+    private void authorizeBucketCreationSettings(HttpHeaders httpHeaders, UriInfo uriInfo, String bucket,
+                                                 String region) {
+        List<String> actions = S3ObjectActions.bucketCreationActions(httpHeaders::getHeaderString);
+        if (actions.isEmpty()) {
+            return;
+        }
+        String credential = iamCredential(httpHeaders, uriInfo);
+        String resource = S3PublicAccessEvaluator.bucketArn(AwsRegions.partitionFor(region), bucket);
+        for (String action : actions) {
+            iamEnforcementFilter.authorizeAdditionalResource(credential, action, resource);
+        }
+    }
+
+    /**
+     * The credential IAM evaluates a check S3Controller makes itself against: the Authorization header,
+     * or a presigned request's query credential. A blank header counts as absent, as it does in
+     * IamEnforcementFilter.filter(), so a presigned request cannot shed its query credential, and with
+     * it the check, by adding one.
+     */
+    private static String iamCredential(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        String authorizationHeader = httpHeaders.getHeaderString("Authorization");
+        if (authorizationHeader != null && authorizationHeader.isBlank()) {
+            authorizationHeader = null;
+        }
+        return IamEnforcementFilter.requestAuthorization(authorizationHeader, uriInfo.getQueryParameters());
     }
 
     /**

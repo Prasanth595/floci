@@ -22,8 +22,37 @@ By default, Docker containers launched for EC2 instances are bounded to the CPU 
 
 - **CPU limit**: Each vCPU corresponds to 1024 CPU units (Docker nanoCPUs = `vcpu * 1_000_000_000`). If the host machine has fewer physical cores than requested, Floci clamps execution to available host CPUs and warns (since Docker refuses a nanoCPUs value exceeding the host CPU count).
 - **Memory limit**: Container memory is bounded to the exact MiB value specified for the instance type in the catalog.
-- **Unknown instance types**: If an instance type is not present in the catalog, the container launches unbounded without CPU or memory restrictions, avoiding launch failures for custom or unmodeled instance types.
+- **Types outside the full catalog**: Docker CPU and memory limits are not applied when the full catalog lacks a type. When opted in, Standard On-Demand admission requires a known default vCPU count, as described below.
 - **Configuration knob**: To disable container resource limits (for example, running a large instance type on a developer machine with limited resources), set `floci.services.ec2.instance-resource-limits: false` (or environment variable `FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS=false`).
+
+## Standard On-Demand admission
+
+Quota admission is opt-in. Set `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS=true` to
+check `RunInstances` and `StartInstances` against the applied Standard On-Demand
+quota (`L-1216C47A`) for the caller's account and region. The flag defaults to
+`false`, including mock mode. Disabled admission does not refuse a type merely
+because its default vCPU count is absent from the snapshot.
+
+`FLOCI_SERVICES_SERVICEQUOTAS_STANDARD_ON_DEMAND_VCPUS` supplies the applied value
+(default `5`). Service Quotas reports this value independently of admission.
+With admission enabled, a launch batch can return fewer than `MaxCount` when at
+least `MinCount` fits, otherwise it returns `VcpuLimitExceeded`. A refused start
+leaves stopped instances unchanged. Types in the Standard bucket require a
+known default vCPU count; the separate CPU-only snapshot supplements the full
+instance metadata catalog without inventing memory sizes or regional availability.
+
+Only current `running` Standard On-Demand instances count. Pending, stopping,
+stopped, shutting-down and terminated instances do not reserve capacity. Spot
+and dedicated-host instances do not consume this bucket. RunInstances retains
+direct or inherited launch-template Spot selection; explicit request market
+options override the template. Requests for Spot through the other supported
+launch APIs retain that provenance too.
+
+These are checks of running usage at request admission, not a reservation ledger
+or an eventual running ceiling. Accepted pending operations can complete after
+other work consumes capacity, and changing a running instance's type is not
+covered by the Run/Start checks. Admission does not change guest cleanup,
+restart, user-data, public-address or CloudFormation lifecycle behavior.
 
 ## AMI to Docker Image Mapping
 
@@ -86,6 +115,8 @@ If `KeyName` is specified at launch, Floci looks up the stored key pair's public
 
 Key pairs created with `CreateKeyPair` return real RSA private key material, and the matching public key is injected at launch, so either a created or an imported key pair works for SSH.
 
+When the image lacks `sshd` or `scp`, Floci first installs OpenSSH with the image's package manager, from a shell that clears `LD_LIBRARY_PATH`, `PYTHONPATH` and `PYTHONHOME` as the IMDS proxy's helper shells do.
+
 ## Security Group Port Publishing
 
 With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, Floci prepares a separate Linux network namespace and an nftables default-deny policy before starting each Docker-backed instance. It checks new managed connections against both the sender's egress rules and the receiver's ingress rules, using emulated ENI addresses and security-group membership before translating to Docker addresses. Established replies use connection tracking. This filters packets but does not emulate VPC routing, NACLs, NAT gateways, or peering. Rootless Docker and Windows containers are unsupported.
@@ -114,9 +145,26 @@ EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_END
 
 CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and update, including parameter references. Omission, a selected `AWS::NoValue` branch, or `not-specified` uses the default `ipv4`; an explicitly empty value is rejected. Updates retain the existing replacement behavior; synthetic interfaces remain IPv4-only.
 
+CloudFormation `AWS::EC2::LaunchTemplate` stores `LaunchTemplateData.MetadataOptions`, and `AWS::EC2::Instance` launches with its own `MetadataOptions` over those of the launch template it names, as `RunInstances` merges them, so CDK's `requireImdsv2` sets `HttpTokens=required`. A block or member of the wrong type, such as `HttpTokens: [required]`, fails the resource with CloudFormation's type error, a member given as an empty or padded string fails an instance with `InvalidParameterValue` (a launch template stores it unchecked, as `CreateLaunchTemplate` does, and the instances launched from it fail), and `AWS::NoValue` leaves a member or the whole block out. A stack update checks the options before it changes anything, applies changed ones in place, returns options it no longer declares to their defaults, and puts them back if the stack update rolls back. An update that kept the instance and changed no EC2 setting, such as one that only declares the options the instance already has, rolls back in full. When the same update also changed the instance's type, security groups, user data, profile or tags, which have no in-place rollback, the options still go back but the stack ends `UPDATE_ROLLBACK_FAILED` for the instance ("Rollback is not implemented"). The options handling includes an update that changes or drops the instance's `LaunchTemplate` (another template or version, as `Fn::GetAtt LatestVersionNumber` gives after the template changes): AWS replaces the instance then, as `LaunchTemplate` is a replacement property, but Floci keeps it and applies what the new template declares, unless the `ImageId` or `KeyName` the template supplies changed, which replaces it. A change set still previews a literal `LaunchTemplate` change as a replacement.
+
 ## Instance Metadata Service (IMDS)
 
 Floci runs an IMDS-compatible HTTP server on port `9169` of the host. Each launched container receives the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` pointing to this server.
+
+Inside each launched container, the link-local address `169.254.169.254` is a proxy to this
+server. The helper shells that install and start the proxy clear `LD_LIBRARY_PATH`,
+`PYTHONPATH` and `PYTHONHOME` before running system tools, so an application's library search
+path and Python installation do not reach the package manager, `socat` and `curl`. The
+container's configured environment and the application's processes keep these variables. The
+proxy is ready once an IMDSv2 token request with a 60-second TTL succeeds and that token reads the
+instance ID. The check bypasses any HTTP proxy the image configures, a failed or empty token
+response does not fall back to a tokenless request, and the check passes on an instance that
+requires tokens.
+
+`iam/info` returns the ARN and ID that IAM holds for the attached profile, and 404 when that
+profile is missing, has no role or does not match the attached ARN. An EKS cluster node, whose
+profile Floci synthesizes, reports the synthesized ARN and a stable ID instead while IAM holds no
+such profile.
 
 Both IMDSv1 (no token) and IMDSv2 (token-based) flows are supported:
 
@@ -130,7 +178,7 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id
 ```
 
-As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header still uses IMDSv1; Floci does not enforce `HttpTokens=required`.
+As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header uses IMDSv1 unless the instance's `HttpTokens` is `required`; then, as on AWS, a `GET` or `HEAD` returns `401` and no metadata, for every path. `HttpTokens` comes from `RunInstances` (directly or through its launch template), from an EC2 Fleet's launch template, from Auto Scaling (a launch configuration's `MetadataOptions`, or a launch template given directly or through a mixed instances policy), or later from `ModifyInstanceMetadataOptions`. EKS cluster nodes always accept IMDSv1: `ModifyInstanceMetadataOptions` refuses them with `OperationNotPermitted`, as their stop, start, reboot and terminate actions are refused.
 
 User data is returned as the original base64-decoded bytes, without decompressing gzip content or converting binary data to text. Older records without the original encoding, or records with malformed saved encoding, use their saved UTF-8 text. The response uses `application/octet-stream`, matching the [AWS user-data retrieval contract](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html). Missing or empty data returns `404`; whitespace is preserved. Script execution retains its separate bounded gzip decoding.
 
@@ -180,7 +228,7 @@ When an EKS cluster is running, its synthesized node instance is registered and 
 
 - **Visibility**: Exposed via `DescribeInstances` and `DescribeInstanceStatus` with its synthesized instance ID (`i-...`), type (`m5.large`), running state, VPC, subnet, launch time, and cluster tags (`Name`, `kubernetes.io/cluster/<cluster-name>=owned`, `eks:cluster-name=<cluster-name>`). It can be queried by ID, filtered, or listed with other instances.
 - **Operations**: Supports volume attachments (`AttachVolume`, `DetachVolume`), instance attribute inspection and modification, and resource tagging (`CreateTags`, `DeleteTags`, `DescribeTags`).
-- **Lifecycle protection**: Lifecycle actions that would mutate or delete the node through EC2 (`TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`) are rejected with `OperationNotPermitted` (HTTP 400) as a Floci emulation limitation because the instance directly represents the underlying k3s cluster container. In real AWS, cluster node instances in an Auto Scaling group can be terminated or stopped and are subsequently replaced by the ASG. In Floci, the node instance lifecycle is managed solely through the EKS cluster lifecycle.
+- **Lifecycle protection**: Lifecycle actions that would mutate or delete the node through EC2 (`TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`), and `ModifyInstanceMetadataOptions`, which the node's IMDS would not see, are rejected with `OperationNotPermitted` (HTTP 400) as a Floci emulation limitation because the instance directly represents the underlying k3s cluster container. In real AWS, cluster node instances in an Auto Scaling group can be terminated or stopped and are subsequently replaced by the ASG. In Floci, the node instance lifecycle is managed solely through the EKS cluster lifecycle.
 
 ## Default Resources
 
@@ -214,7 +262,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. A named instance id reports the option the instance acquired at launch, either the explicit `CreditSpecification.CpuCredits` or the family default, `standard` for t2 and `unlimited` for t3, t3a and t4g. An id that is not a burstable performance instance reports `standard`, and only an unknown id is an error. Naming no id returns the instances on the unlimited option, including one that kept `unlimited` after a resize onto a non-burstable type. `Filter.N` supports the modeled `instance-id` and narrows whichever set the request selected. `MaxResults` accepts 5 through 1000 and cannot be combined with instance ids. `DryRun=true` returns `DryRunOperation`. |
 | DescribeInstanceAttribute | Returns a supported attribute for an instance. |
 | ModifyInstanceAttribute | Updates supported mutable attributes for an instance. `UserData.Value` (base64) needs the instance stopped, as on AWS, and answers `IncorrectInstanceState` otherwise. |
-| ModifyInstanceMetadataOptions | Updates an instance's IMDS options, changing only the fields the request names. |
+| ModifyInstanceMetadataOptions | Updates an instance's IMDS options, changing only the fields the request names. An EKS cluster node is refused with `OperationNotPermitted`. |
 
 ### VPCs
 
@@ -222,7 +270,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway, a transit gateway attachment, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
@@ -231,15 +279,12 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, sets or resets the endpoint policy, and updates stored `IpAddressType` metadata. Omitting the type preserves its current value; malformed types are rejected before changes are applied. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` is accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
-| DescribeEgressOnlyInternetGateways | Validates filters and pagination parameters and returns an empty set, including for explicit IDs, as AWS does. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
 
-The two describe-only network actions above provide discovery compatibility when no
-resources exist. Egress-only gateway discovery validates its pagination parameters before
-returning an empty page. Neither models virtual private gateway or egress-only internet
-gateway lifecycles.
+`DescribeVpnGateways` provides discovery compatibility when no resources exist; virtual
+private gateway lifecycles are not modelled.
 
 ### Subnets
 
@@ -247,7 +292,7 @@ gateway lifecycles.
 |--------|-------------|
 | CreateSubnet | Creates a subnet in a VPC. |
 | DescribeSubnets | Lists or returns stored subnets. |
-| DeleteSubnet | Deletes a subnet from the local EC2 store. Fails with `DependencyViolation` while the subnet still has a transit gateway attachment or anything holding a network interface in it: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
+| DeleteSubnet | Deletes a subnet from the local EC2 store. Fails with `DependencyViolation` while the subnet still has a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything holding a network interface in it: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifySubnetAttribute | Updates supported subnet attributes. |
 
 ### Security Groups
@@ -269,6 +314,17 @@ gateway lifecycles.
 
 ### Key Pairs
 
+`DescribeKeyPairs` omits the public key unless `IncludePublicKey=true`. When requested,
+it returns the OpenSSH public key with the key-pair name as its comment, including for
+imported keys, whatever comment they were imported with; a name holding a control character,
+such as a line break, is left off. It never returns private key material. `ImportKeyPair`
+stores the material as it was given, and a key pair whose material is not exactly one whole
+OpenSSH public key is described without one: PEM, DER or RFC 4716 text, material of more than
+one line, a line whose blob lacks a field its type requires (such as an `ssh-rsa` blob with no
+modulus), has bytes after its key or declares a different type than the line names, and a
+key of any type but `ssh-rsa`, `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`,
+`ecdsa-sha2-nistp521`, `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`.
+
 | Action | Description |
 |--------|-------------|
 | CreateKeyPair | Creates and stores a local key pair. |
@@ -283,6 +339,8 @@ gateway lifecycles.
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
+| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. |
+| DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account
 [STS](sts.md) reports for those credentials, and that account is what `ownerId` and the resource ARN
@@ -292,6 +350,16 @@ registered, and `--owners self` resolves to the same account. This is what lets 
 `000000000000`. The `amazon` and `aws-marketplace` aliases still resolve to the AWS-owned accounts
 that publish those images.
 
+`DescribeImages` reports where an AMI came from. An AMI made by `CreateImage` reports the instance
+it captured as `SourceInstanceId`, and the AMI that instance was launched from, with its region, as
+`SourceImageId` and `SourceImageRegion`. An AMI made by `CopyImage` reports the AMI it copied and
+that AMI's region, and no instance. Each names its immediate source by AMI ID, even when the
+instance was launched, or the copy requested, with a catalog alias such as `ami-amazonlinux2`, and
+keeps naming it after the source is deregistered. AMIs made by `RegisterImage`, catalog AMIs and
+AMIs saved by an earlier Floci version report none. The `source-image-id`, `source-image-region` and
+`source-instance-id` filters match these fields, and `source-image-id` also takes a catalog alias,
+as `image-id` does.
+
 ### Tags
 
 | Action | Description |
@@ -299,6 +367,36 @@ that publish those images.
 | CreateTags | Adds tags to supported EC2 resources. |
 | DeleteTags | Removes tags from supported EC2 resources. |
 | DescribeTags | Lists tags stored for EC2 resources. |
+
+Tags are regional, like the resources they label: `DescribeTags` lists only the tags of resources
+in the request's region, and a tag set in one region is not visible from another. Each result
+carries the resource's `resourceType` (`image`, `volume`, `snapshot`, `network-acl`,
+`vpc-peering-connection` and `spot-instances-request` included). Tags given when a volume or a
+VPC peering connection is created are listed like any other tag, and `DescribeVolumes`,
+`DescribeSnapshots` and `DescribeSpotInstanceRequests` show later `CreateTags` and `DeleteTags`
+changes. Each side of a VPC peering connection sees the tags set in its own account and region.
+A resource's tags go with it: deleting a volume, a snapshot or a peering connection, or the
+removal of a terminated instance, removes its tags. On upgrade, tags stored by an older Floci
+version are moved under their resource's region at startup. Tags on a catalog AMI move to the
+default region, and tags on an EKS node instance move to the node's region once the node is
+restored; any other tag whose resource no longer exists is dropped.
+
+`CreateTags` and `DeleteTags` require at least one resource id (`MissingParameter`) and reject an
+id that is not a known EC2 resource prefix followed by 8 or more hex digits or, for fleets, a UUID
+(`InvalidID`). `CreateTags` also
+checks each resource exists in the request's region and answers with that type's own error
+(`InvalidVpcID.NotFound`, `InvalidInstanceID.NotFound`, ...); a well-formed id of a type Floci does
+not model is tagged as given. A resource takes at most 50 user tags (`TagLimitExceeded`; tags with
+the `aws:` prefix do not count), keys up to 128 and values up to 256 Unicode characters
+(`InvalidParameterValue`). A request that fails changes no resource's tags.
+
+`DescribeTags` takes the `key`, `value`, `resource-id`, `resource-type` and `tag:<key>` filters.
+`tag:Owner` with the value `TeamA` is the same as a `key` filter of `Owner` and a `value` filter
+of `TeamA`, so it lists that one tag. Filter values take the `*` and `?` wildcards, the values of
+one filter are ORed, and separate filters, including two with the same name, are ANDed. An
+unknown filter name is ignored. `MaxResults` (5 to 1000, `InvalidMaxResults` otherwise) pages the
+result with `NextToken`, which is absent on the last page; the AWS SDK paginators work as is.
+Results are ordered by resource id, so pages stay stable while no tags change.
 
 Public tag mutations reject keys beginning with `aws:` regardless of ASCII case.
 An empty `DeleteTags` tag list removes user tags and preserves AWS-managed tags.
@@ -317,6 +415,9 @@ Nested launch-template tags follow AWS's case-sensitive check: `aws:` is rejecte
 | DeleteInternetGateway | Deletes an internet gateway. |
 | AttachInternetGateway | Attaches an internet gateway to a VPC. |
 | DetachInternetGateway | Detaches an internet gateway from a VPC. |
+| CreateEgressOnlyInternetGateway | Creates an egress-only internet gateway attached to an existing VPC (`InvalidVpcID.NotFound` otherwise). Tags are validated before the gateway is created, so a rejected tag leaves nothing behind. A retry with the same `ClientToken` returns the gateway the first call created, unchanged; the same token with a different `VpcId` or different `TagSpecification` tags fails with `IdempotentParameterMismatch`. |
+| DescribeEgressOnlyInternetGateways | Lists stored egress-only internet gateways, filtered by ID and by the `egress-only-internet-gateway-id`, `attachment.vpc-id`, `attachment.state` and tag filters. An unknown ID returns an empty set, as AWS does. `MaxResults` (5 to 255) pages the results, ordered by ID, with `NextToken`. |
+| DeleteEgressOnlyInternetGateway | Deletes an egress-only internet gateway; an unknown ID fails with `InvalidGatewayID.NotFound`. Routes that targeted it stay in their route tables with state `blackhole`. |
 
 ### Route Tables
 
@@ -608,20 +709,43 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 | DisassociateAddress | Removes an Elastic IP address association. |
 | ReleaseAddress | Releases an Elastic IP address record. |
 
+`AllocateAddress` and `DescribeAddresses` return `PublicIpv4Pool` and `NetworkBorderGroup`.
+Omitted values default to `amazon` and the request Region, including for older persisted
+allocations without these fields. Explicit values survive association, disassociation and
+restart. `DescribeAddresses` also supports the `network-border-group` filter. These values
+are stored as metadata; Floci does not allocate real BYOIP addresses or route by border group.
+See [AllocateAddress](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AllocateAddress.html)
+and [Elastic IP allocation](https://docs.aws.amazon.com/vpc/latest/userguide/WorkWithEIPs.html).
+
 `ReleaseAddress` automatically disassociates an instance's Elastic IP only in the default VPC.
 In a nondefault VPC it returns `InvalidIPAddress.InUse` without changing the association;
 call `DisassociateAddress` first, as specified by the
 [EC2 API reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ReleaseAddress.html).
+Associating an Elastic IP with an instance that already has one on the same private address
+disassociates the earlier address, which stays allocated, as the
+[AssociateAddress reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AssociateAddress.html)
+describes. That is the primary private address unless `PrivateIpAddress` names a secondary
+address of the instance's primary interface, so an address on a secondary private address
+leaves the primary one, and the instance's public address, in place. For an existing instance,
+any other `PrivateIpAddress` fails with `InvalidParameterValue` and changes no association. The
+exception is container mode without AWS-faithful private addresses: the instance reports its Docker
+bridge address there, so any value means its primary address.
 
 Deleting an interface, including deletion on instance termination, disassociates its
 Elastic IP without releasing the allocation. A retained interface keeps its association
 after termination; release still follows that interface's VPC rules.
 
-An allocated Elastic IP's `54.x.x.x` address is invented and routes nowhere, so associating
-it re-points it at the address the instance is actually reachable on — the same value
-DescribeInstances reports. This is a deliberate deviation from AWS, where an EIP's public IP
-is fixed from allocation: without it, `aws_eip.x.public_ip` hands every caller a dead address.
-The allocation ID, association ID and domain are unaffected, and disassociating restores the
+AllocateAddress draws Elastic IPs from `203.0.113.0/24`, a range reserved for documentation that
+no host answers on, in every mode, so a client never reaches someone else's host through one. An
+allocation never takes an address the account's other Elastic IPs or instances already hold; once
+all 254 are taken, AllocateAddress fails with `AddressLimitExceeded`. Elastic IPs allocated by an
+earlier Floci version keep their `54.x.x.x` address until released. Associating an Elastic IP with an
+instance that has a container re-points it at the address the instance is actually reachable on
+(the same value DescribeInstances reports), and so does associating one with a mock instance's
+primary private address under `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES=fixed`, where it becomes
+the configured address. This is a deliberate deviation from AWS, where an EIP's public IP is fixed
+from allocation: without it, `aws_eip.x.public_ip` hands every caller a dead address. The
+allocation ID, association ID and domain are unaffected, and disassociating restores the
 allocated address.
 
 ### Availability Zones & Regions
@@ -720,7 +844,15 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   requests and `CreateFleet` launches, so `aws_launch_template.iam_instance_profile.name` converges.
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
-  resolves its security groups from whichever of the two is populated.
+  resolves its security groups from whichever of the two is populated. `RunInstances` and
+  `CreateFleet` launches take their subnet and `AssociatePublicIpAddress` from the interface at
+  device index 0; when that interface names no subnet, `CreateFleet` still uses the first
+  interface that does. A `RunInstances` launch whose template interface at device index 0 names
+  an existing `NetworkInterfaceId` launches on that interface, in its subnet, as a request
+  naming it would. Auto Scaling launches take only its `AssociatePublicIpAddress`, since the
+  group's `VPCZoneIdentifier` places them. Network interfaces, on the `RunInstances` request or
+  in its launch template, cannot be combined with an instance-level `SubnetId`
+  (`InvalidParameterCombination`); place the subnet on the primary network interface instead.
 
 #### Launch template versions
 
@@ -754,6 +886,20 @@ prefix lists, `EnaSrdSpecification`, `PrimaryIpv6` and `EnaQueueCount` are likew
 | AssociateIamInstanceProfile | Attaches a profile, named by `IamInstanceProfile.Arn` or `IamInstanceProfile.Name`, to an instance that has none; a second association answers `IncorrectState`. |
 | ReplaceIamInstanceProfileAssociation | Swaps the profile behind an existing association id; an unknown id answers `InvalidAssociationID.NotFound`. |
 | DisassociateIamInstanceProfile | Detaches the profile behind an association id. |
+
+Launches and association changes resolve both names and ARNs against IAM in the
+caller's account. Unknown profiles and foreign-account ARNs fail with
+`InvalidParameterValue` before allocation or association changes. A RunInstances launch
+that names both a profile name and an ARN, directly or through its launch template, and a
+CreateFleet launch through such a template, fail with `InvalidParameterCombination`;
+association replacement uses the ARN when both are provided. Launch templates reject
+malformed profile ARNs at creation with `InvalidIamInstanceProfileArn.Malformed` but, as
+on AWS, store a name and ARN pair as given; the pair fails when something uses the
+template, and Auto Scaling refuses a group over it.
+EC2 stores and returns IAM's profile ID, including for launch-template, EC2 Fleet and
+Auto Scaling instances. Persisted instances from older versions omit the unknown ID until the
+profile is reassociated; looking up the ARN could misidentify a deleted and recreated
+profile.
 
 ### Network Interfaces
 
@@ -912,6 +1058,8 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_MAX_PUBLISHED_PORTS_PER_INSTANCE` | `20` | Max published ports per instance; also the widest single-rule span published |
 | `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
+| `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` | `none` | Automatic public IPv4 address of a mock instance: `none`, `documentation` (from `203.0.113.0/24`, which routes nowhere) or `fixed` (see below). Instances with containers always report their reachable address (see [Public IPv4 addresses](#public-ipv4-addresses)) |
+| `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS` | `127.0.0.1` | The address every mock instance due one gets when `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` is `fixed`, for example this host's own address; an Elastic IP associated with its primary private address shows it too |
 | `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
 | `FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE` | auto-detect | Whether an instance's container IP is reachable from the machines consuming Floci's API (Terraform, Terratest, your shell). When it is, DescribeInstances and DescribeAddresses report the container IP, so port 22 really is port 22; when it is not, they report `127.0.0.1` and reachability goes through the published high host ports. Detected by a throwaway TCP connect; set explicitly when Floci itself runs as a container |
 | `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, remove instance containers this Floci left on the daemon whose record did not survive the restart or came back terminated; stopped instances are never swept |
@@ -934,6 +1082,11 @@ network attachment. This keeps management calls responsive even when the Docker 
 For overlapping VPC CIDRs, the first VPC whose addresses are needed keeps the declared range;
 later VPCs use the fallback pool. Within one emulator run, allocated addresses remain on the
 same effective range.
+
+When Floci runs in Docker, deleting a VPC disconnects Floci's own container before removing
+the VPC network. Other endpoints are not forcibly disconnected: removal retries while they
+drain, up to five attempts two seconds apart. After successful removal, a new VPC can reuse
+the CIDR without colliding with a network left behind by that deletion.
 
 When EC2 is enabled, Floci initializes its service, restores persisted state, and seeds the
 configured region's default resources during startup. Other account and region scopes seed on
@@ -971,6 +1124,25 @@ Synthesised addresses come from the subnet's own CIDR block, skipping the first 
 and the last one as AWS reserves them, and skipping every address a persisted instance, network
 interface or NAT gateway in the subnet still holds, so a restart does not hand one out twice. A
 subnet with no free address left fails the request with `InsufficientFreeAddressesInSubnet`.
+
+`RunInstances` with `PrivateIpAddress`, or `NetworkInterface.1.PrivateIpAddress` (the shape
+Terraform's `aws_instance` sends for `private_ip` with a `subnet_id`), gives the instance and its
+primary network interface that address instead of the next free one. So does the
+`NetworkInterface.1.PrivateIpAddresses` entry marked `Primary`, the shape the AWS CLI sends for
+`--private-ip-address` together with `--associate-public-ip-address` or the secondary-address
+options, and the `PrivateIpAddress` of a launch template's primary interface. Secondary addresses,
+from `PrivateIpAddresses` entries not marked `Primary` or from `SecondaryPrivateIpAddressCount`, are
+not applied. An address outside the subnet's CIDR, or one of the five AWS reserves, fails with
+`InvalidParameterValue`, and one that an instance, network interface, NAT gateway or interface
+endpoint already holds fails with `InvalidIPAddress.InUse`. In a Docker-backed default subnet, whose
+network every account shares, that includes an address another account's instance, network interface
+or NAT gateway holds. As on AWS it applies only to a single instance that creates its own primary
+interface: with more than one instance, or with `NetworkInterface.1.NetworkInterfaceId`, the call
+fails with `InvalidParameterCombination`, and so does a top-level `PrivateIpAddress` sent with
+network interfaces, from the request or the launch template. In a Docker-backed subnet the container
+joins the VPC network at that address. In a subnet whose CIDR was substituted the address lies
+outside the network's range, so the container cannot hold it, and the instance reports its bridge
+address unless `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` is true, as for a synthesised address.
 
 `CreateSubnet` derives `AvailableIpAddressCount` from the IPv4 CIDR, excluding the
 five AWS-reserved addresses. `DescribeSubnets` subtracts addresses currently held
@@ -1078,3 +1250,49 @@ The file uses the same schema as `src/main/resources/ec2/image-catalog.yaml` and
 include every image that process should expose. Missing or invalid files fail on first
 catalog use; leaving the setting unset preserves the bundled catalog. Containerized
 Floci needs the file mounted at the configured container path.
+
+### Public IPv4 addresses
+
+Whether an instance has an automatic public IPv4 address is decided by the same rule with and
+without containers. Only the address itself depends on the mode. With a container, it is the
+container's reachable address: its own IP when Floci's clients can route to it, otherwise
+`127.0.0.1` with the DNS name `localhost`. In mock mode there is no container to reach, so
+`FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` chooses:
+
+- `none` (the default): no automatic address. DescribeInstances shows no `ipAddress` or `dnsName`
+  unless an Elastic IP is associated. The launch still records whether it asked for one, so
+  switching the setting takes effect at the instance's next start.
+- `documentation`: an address from `203.0.113.0/24`, a range reserved for documentation that no
+  host answers on, as Lightsail and EMR use. Instances get addresses distinct from each other and
+  from the account's Elastic IPs while any are free (none once all are taken), and a restart gets
+  a different one.
+- `fixed`: `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS` (default `127.0.0.1`, DNS name `localhost`)
+  for every instance, so a tool that connects to the public address reaches a host you choose. An
+  Elastic IP associated with the primary private address shows that address too.
+
+For an address that reaches the instance itself, run it with a container (`FLOCI_SERVICES_EC2_MOCK`
+`false`). Elastic IPs come from `203.0.113.0/24` in both modes (see [Elastic IPs](#elastic-ips)).
+
+- An instance applies `MapPublicIpOnLaunch` unless the primary launch interface explicitly sets
+  `AssociatePublicIpAddress`. Direct launches, EC2 Fleet launches and Auto Scaling launch
+  templates preserve both `true` and `false` overrides.
+- As the
+  [InstanceNetworkInterfaceSpecification reference](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_InstanceNetworkInterfaceSpecification.html)
+  specifies, only an interface the launch creates gets an automatic address. An instance launched
+  on an existing network interface has none.
+- The address appears when the instance reaches `running` and remains stable while it runs. A
+  stop or termination releases it, and a restart assigns a new one (the same one again under
+  `fixed`); the private address does not change. As the
+  [EC2 User Guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-instance-addressing.html#concepts-public-addresses)
+  describes, a released address is not replaced while a second network interface is attached.
+- An Elastic IP associated with the instance's primary private address takes the place of the
+  automatic address and is kept across a stop. Disassociating it from a running instance assigns
+  a new automatic address when the rule above allows one.
+- An Elastic IP that a retained interface carries becomes the public address of the next instance
+  launched on that interface, although DescribeAddresses does not report that instance as its
+  `InstanceId`.
+
+Under `none` the rule still runs, but a mock instance has only the Elastic IP, if any, to show.
+Otherwise a mock instance's address appears whether DescribeInstances or DescribeInstanceStatus
+observes the launch first. A terminated mock instance has no public address, and stopping it does not bring it
+back.

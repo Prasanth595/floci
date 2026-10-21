@@ -24,6 +24,9 @@
 | `DisassociateResolverRule` | Removes the association between a resolver rule and a VPC. |
 | `GetResolverRuleAssociation` | Returns a resolver rule association by id. |
 | `ListResolverRuleAssociations` | Lists all resolver rule associations. |
+| `TagResource` | Adds or overwrites tags on a resolver endpoint, resolver rule or custom firewall domain list, by ARN. |
+| `UntagResource` | Removes tag keys from a resolver endpoint, resolver rule or custom firewall domain list; absent keys are ignored. |
+| `ListTagsForResource` | Lists a resource's tags, paginated by `MaxResults` (default and maximum 100) and `NextToken`. |
 <!-- floci:actions:end -->
 
 ## Design notes
@@ -161,3 +164,14 @@ cluster DNS does, governed by `floci.services.eks.embedded-dns`.
   it through RAM; Floci reports every rule as `NOT_SHARED` and models no rule policy, so a rule and
   its associations always live in one account and resolution only ever consults that account's own.
 - **DNS Firewall rule groups, query logging and DNSSEC validation do not affect resolution.**
+
+Tags passed to `CreateResolverEndpoint`, `CreateResolverRule` and `CreateFirewallDomainList`
+are stored and read back through `ListTagsForResource`; they never appear on the resource
+shapes, which model no `Tags` member. Tagging is keyed by the full ARN: an ARN naming another
+account, region or partition is `ResourceNotFoundException` even when its id matches a local
+resource. Rule associations carry no ARN and the AWS-managed firewall domain lists are not
+stored, so neither is taggable here. A tag outside the modelled `Tag` shape (key 1-128
+characters, value 0-256) is `InvalidTagException` on `TagResource`, and the create
+operation's own parameter error on create. A request carrying more than the modelled 200
+tags or tag keys is `InvalidParameterException` (`ValidationException` on
+`CreateFirewallDomainList`). A per-resource total is not modelled, so none is enforced.

@@ -454,6 +454,20 @@ class ZipExtractorTest {
     }
 
     @Test
+    void extractsAnArchiveFileWithoutStagingACopy(@TempDir Path codeStore) throws IOException {
+        Path archive = codeStore.resolve("code.zip");
+        Files.write(archive, zipWith("index.js", "v1"));
+        Path target = codeStore.resolve("fn");
+
+        extractor.extractTo(archive, target, ZipExtractor.DEFAULT_MAX_ENTRIES);
+
+        assertEquals("v1", Files.readString(target.resolve("index.js")));
+        try (Stream<Path> entries = Files.list(codeStore)) {
+            assertEquals(List.of("code.zip", "fn"), entries.map(p -> p.getFileName().toString()).sorted().toList());
+        }
+    }
+
+    @Test
     void rejectsAnEntryWhoseCompressionMethodCannotBeRead(@TempDir Path target) throws IOException {
         // A package must never be half-deployed because an entry used a codec the reader does
         // not implement — writing it out empty would leave a function whose code silently

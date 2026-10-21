@@ -43,6 +43,14 @@ public final class CfnRollback {
     public static final String PIPE_UPDATE_SNAPSHOT_ATTR = "__FlociPipeUpdateSnapshot";
 
     /**
+     * Holds the subnets a kept ELBv2 load balancer had before the update in flight moved it,
+     * comma-joined, so a failed stack update can move it back. Written by
+     * {@code ElbV2CfnProvisioner} after its SetSubnets and spent by its {@code rollbackUpdate},
+     * retained across a failed move back.
+     */
+    public static final String LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR = "__FlociLoadBalancerSubnetsUpdateSnapshot";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
@@ -87,6 +95,7 @@ public final class CfnRollback {
      * {@code rollbackUpdate}.
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
+    public static final String S3_BUCKET_UPDATE_SNAPSHOT_ATTR = "__FlociS3BucketUpdateSnapshot";
 
     /**
      * Holds the description, event pattern and retention an EventBridge archive carried before an
@@ -111,6 +120,14 @@ public final class CfnRollback {
      * update call and spent by its {@code rollbackUpdate}.
      */
     public static final String REST_API_UPDATE_SNAPSHOT_ATTR = "__FlociRestApiUpdateSnapshot";
+
+    /**
+     * Holds the tags a web function or the mutable configuration a web function endpoint carried
+     * before the in-place update in flight changed it, so a failed stack update can put it back.
+     * Written by {@code LambdaWebCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR = "__FlociLambdaWebUpdateSnapshot";
 
     /**
      * Holds the function ARN, status, caching flag, token settings and tags an IoT authorizer
@@ -197,6 +214,16 @@ public final class CfnRollback {
     public static final String REPLACEMENT_CLEANUP_ATTR = "__FlociReplacementCleanup";
 
     /**
+     * Prefixes attributes that name, by physical id, a resource this one uses where none of its
+     * public attributes does, such as a NAT gateway's subnet and Elastic IP, or the resources a
+     * custom resource's or nested stack's definition named. {@code CloudFormationService} reads the
+     * attribute values of a resource the template no longer names to delete it before what it uses;
+     * these keep {@code Fn::GetAtt} to what AWS resolves, and count even for a custom resource or
+     * nested stack, whose other attributes are outputs.
+     */
+    public static final String USES_ATTR_PREFIX = "__FlociUses";
+
+    /**
      * Holds the tags, stream setting and time-to-live setting a DynamoDB table carried before an
      * in-place update changed them, with the account and region that address it, so a failed
      * stack update can put all three back. Written by {@code DynamoDbCfnProvisioner} before its
@@ -237,6 +264,12 @@ public final class CfnRollback {
      * so a failed stack update can restore it.
      */
     public static final String ASG_UPDATE_SNAPSHOT_ATTR = "__FlociAsgUpdateSnapshot";
+
+    /**
+     * Holds the settings an ECS cluster carried before an in-place update changed its
+     * {@code ClusterSettings}, so a failed stack update can restore them.
+     */
+    public static final String ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR = "__FlociEcsClusterSettingsSnapshot";
 
     /**
      * Holds the version a launch template created during an in-place update and the prior version,

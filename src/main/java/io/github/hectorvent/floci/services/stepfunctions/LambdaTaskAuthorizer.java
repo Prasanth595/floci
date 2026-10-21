@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccoun
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.SimulationDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider.ResourcePolicy;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
@@ -66,12 +67,17 @@ public class LambdaTaskAuthorizer {
      * @param functionArn the function, version or alias the task invokes, qualified as it names it
      */
     public Optional<String> refusal(String roleArn, String functionArn) {
-        AwsArnUtils.Arn function = AwsArnUtils.parse(functionArn);
+        return refusal(roleArn, INVOKE, functionArn);
+    }
+
+    /** Applies the task role's identity policies, boundary and SCPs to the requested action. */
+    public Optional<String> refusal(String roleArn, String action, String resourceArn) {
+        AwsArnUtils.Arn resource = AwsArnUtils.parse(resourceArn);
         Optional<IamRole> invokingRole = role(roleArn);
         if (invokingRole.isEmpty()) {
-            LOG.infov("Role {0} names no existing role, so it cannot invoke {1}", roleArn, functionArn);
-            return Optional.of(denied(roleArn, INVOKE, functionArn, "because no identity-based policy allows the "
-                    + INVOKE + " action"));
+            LOG.infov("Role {0} names no existing role, so it cannot invoke {1}", roleArn, resourceArn);
+            return Optional.of(denied(roleArn, action, resourceArn, "because no identity-based policy allows the "
+                    + action + " action"));
         }
         // The role is evaluated as itself, under the ARN IAM holds for it, whichever form names it.
         String invokingRoleArn = invokingRole.get().getArn();
@@ -79,26 +85,27 @@ public class LambdaTaskAuthorizer {
         AwsArnUtils.Arn roleId = AwsArnUtils.parse(invokingRoleArn);
         List<List<String>> scpLevels = scpLevels(roleId.accountId());
 
-        List<ResourcePolicy> policies = functionPolicies.getResourcePolicies("lambda", functionArn);
-        String ownerAccount = policies.isEmpty() ? function.accountId() : policies.getFirst().ownerAccountId();
+        List<ResourcePolicy> policies = "lambda".equals(resource.service())
+                ? functionPolicies.getResourcePolicies("lambda", resourceArn) : List.of();
+        String ownerAccount = policies.isEmpty() ? resource.accountId() : policies.getFirst().ownerAccountId();
         List<String> documents = policies.stream()
                 .map(ResourcePolicy::policyDocument)
                 .filter(document -> document != null && !document.isBlank())
                 .toList();
         Map<String, List<String>> context = IamConditionContextResolver.withGlobalContext(
-                Map.of("aws:PrincipalArn", List.of(invokingRoleArn)), functionArn, function.region(),
+                Map.of("aws:PrincipalArn", List.of(invokingRoleArn)), resourceArn, resource.region(),
                 roleId.accountId(), ownerAccount);
 
         RequestPrincipal session = RequestPrincipal.roleSession(sessionArn(invokingRoleArn), invokingRoleArn);
         ResourcePolicyDecision functionPolicy = evaluator.evaluateResourcePolicyFor(
-                documents.isEmpty() ? null : documents, session, INVOKE, functionArn, context);
+                documents.isEmpty() ? null : documents, session, action, resourceArn, context);
         ResourceAccountRelationship relationship = relationship(roleId.accountId(), ownerAccount);
         Decision decision = evaluator.evaluateResolvedResourcePolicy(
-                role.withScpLevels(scpLevels), functionPolicy, relationship, INVOKE, functionArn, context);
+                role.withScpLevels(scpLevels), functionPolicy, relationship, action, resourceArn, context);
         if (decision == Decision.ALLOW) {
             return Optional.empty();
         }
-        return Optional.of(denied(invokingRoleArn, INVOKE, functionArn, reason(role, scpLevels, INVOKE, functionArn,
+        return Optional.of(denied(invokingRoleArn, action, resourceArn, reason(role, scpLevels, action, resourceArn,
                 context, relationship, ResourceGrant.of(functionPolicy))));
     }
 
@@ -135,8 +142,14 @@ public class LambdaTaskAuthorizer {
                 Map.of("aws:PrincipalArn", List.of(callerRoleArn), "sts:ExternalId", List.of(stateMachineArn)),
                 targetRoleArn, AwsArnUtils.parse(stateMachineArn).region(), callerId.accountId(), roleAccount);
 
-        TrustDecision trust = trustEvaluator.decide(target.get().getAssumeRolePolicyDocument(),
-                sessionArn(callerRoleArn), callerRoleArn, callerId.accountId(), context);
+        // Step Functions assumes the execution role on the state machine's behalf, so the caller
+        // is a session of it and carries AssumedRole as its aws:PrincipalType. That path mints no
+        // session name, and a session's aws:userid is role-id:session-name, so it and aws:username
+        // stay absent, which is what makes a condition on either of them not match.
+        CallerArns trustCaller = new CallerArns(sessionArn(callerRoleArn), callerRoleArn,
+                CallerArns.TYPE_ASSUMED_ROLE, null, null);
+        TrustDecision trust = trustEvaluator.decide(target.get().getAssumeRolePolicyDocument(), trustCaller,
+                callerId.accountId(), context);
         ResourceAccountRelationship relationship = relationship(callerId.accountId(), roleAccount);
         // A grant to the execution role's account delegates to that account, so within it the
         // role's own policies have to allow the call too, as they do across accounts anyway.

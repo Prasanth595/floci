@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.auth.CredentialScope;
-import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
+import io.github.hectorvent.floci.core.common.auth.SessionTokenCheck;
 import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
+import io.github.hectorvent.floci.core.common.auth.SigV4SignedRequest;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
@@ -16,12 +18,7 @@ import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.util.Locale;
 
 /**
  * Verifies the SigV4 signature on an execute-api data-plane request, so a route or method whose
@@ -34,8 +31,8 @@ import java.util.Locale;
  * string, the headers named in {@code SignedHeaders}, and the SHA-256 of the body), and the derived
  * signature is compared in constant time.
  *
- * <p>A temporary credential must additionally present the session token it was issued with, which
- * is checked by {@link #checkSessionToken}.
+ * <p>A temporary credential must also present the session token it was issued with, and a long-term
+ * one must present none. {@link #checkSessionToken} checks this.
  *
  * <h2>Deliberate deviations from real AWS</h2>
  * <ul>
@@ -55,20 +52,7 @@ public class ExecuteApiSigV4Authorizer {
 
     private static final Logger LOG = Logger.getLogger(ExecuteApiSigV4Authorizer.class);
 
-    private static final String ALGORITHM = "AWS4-HMAC-SHA256";
     private static final String SIGNING_SERVICE = "execute-api";
-    private static final DateTimeFormatter AMZ_DATE =
-            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
-
-    /**
-     * Real API Gateway rejects a header-signed request whose {@code X-Amz-Date} is more than five
-     * minutes from the service's clock. Emulating it keeps a captured request from being replayed
-     * indefinitely against a route the caller is testing authorization on.
-     */
-    private static final long MAX_CLOCK_SKEW_SECONDS = 300;
-
-    /** Longest {@code X-Amz-Expires} AWS accepts on a presigned request (7 days). */
-    private static final long MAX_PRESIGNED_EXPIRY_SECONDS = 604800;
 
     /** Where a temporary credential's session token rides: a header, or a presigned query parameter. */
     private static final String SECURITY_TOKEN = "X-Amz-Security-Token";
@@ -93,6 +77,8 @@ public class ExecuteApiSigV4Authorizer {
         MALFORMED,
         /** The credential names an access key this emulator has never issued. */
         UNKNOWN_KEY,
+        /** A session token came that was not issued with the access key. */
+        INVALID_TOKEN,
         /** The signing timestamp is outside the accepted window, or a presigned URL has expired. */
         EXPIRED,
         /** The signature does not match the one derived from the caller's secret key. */
@@ -134,15 +120,15 @@ public class ExecuteApiSigV4Authorizer {
                           String signedRequestPath) throws Exception {
         MultivaluedMap<String, String> queryParameters = uriInfo.getQueryParameters();
         String authorization = headers == null ? null : headers.getHeaderString(HttpHeaders.AUTHORIZATION);
-        boolean presigned = ALGORITHM.equals(queryParameters.getFirst("X-Amz-Algorithm"));
+        boolean presigned = SigV4SignedRequest.ALGORITHM.equals(queryParameters.getFirst("X-Amz-Algorithm"));
 
         if (!presigned && (authorization == null || authorization.isBlank())) {
             return Result.rejected(Failure.MISSING, "request is not SigV4-signed");
         }
 
-        SignedRequest signed = presigned
-                ? presignedRequest(queryParameters)
-                : headerSignedRequest(authorization, headers);
+        SigV4SignedRequest signed = presigned
+                ? SigV4SignedRequest.fromQuery(queryParameters::getFirst)
+                : SigV4SignedRequest.fromHeader(authorization, amzDate(headers));
         if (signed == null) {
             return Result.rejected(Failure.MALFORMED, "SigV4 credentials are incomplete");
         }
@@ -168,8 +154,7 @@ public class ExecuteApiSigV4Authorizer {
             return Result.rejected(Failure.MALFORMED, "SignedHeaders does not cover host");
         }
 
-        Instant signedAt = Instant.from(AMZ_DATE.parse(signed.amzDate()));
-        Result expiry = checkExpiry(signedAt, signed.expiresSeconds(), presigned);
+        Result expiry = checkExpiry(signed);
         if (expiry != null) {
             return expiry;
         }
@@ -181,7 +166,9 @@ public class ExecuteApiSigV4Authorizer {
             return Result.rejected(Failure.UNKNOWN_KEY, "access key is not registered");
         }
 
-        Result sessionToken = checkSessionToken(scope.accessKeyId(), headers, queryParameters);
+        Result sessionToken = checkSessionToken(scope.accessKeyId(), presigned
+                ? queryParameters.getFirst(SECURITY_TOKEN)
+                : headers == null ? null : headers.getHeaderString(SECURITY_TOKEN));
         if (sessionToken != null) {
             return sessionToken;
         }
@@ -207,26 +194,23 @@ public class ExecuteApiSigV4Authorizer {
         return Result.rejected(Failure.MISMATCH, "signature does not match");
     }
 
-    private Result checkExpiry(Instant signedAt, Long expiresSeconds, boolean presigned) {
-        Instant now = Instant.now();
-        if (presigned) {
-            if (expiresSeconds == null || expiresSeconds < 1 || expiresSeconds > MAX_PRESIGNED_EXPIRY_SECONDS) {
-                return Result.rejected(Failure.MALFORMED, "X-Amz-Expires is missing or out of range");
-            }
-            if (now.isAfter(signedAt.plusSeconds(expiresSeconds))) {
-                return Result.rejected(Failure.EXPIRED, "presigned request expired");
-            }
+    /**
+     * Real API Gateway rejects a header-signed request whose {@code X-Amz-Date} is more than five
+     * minutes from the service's clock. Emulating it keeps a captured request from being replayed
+     * indefinitely against a route the caller is testing authorization on.
+     */
+    private static Result checkExpiry(SigV4SignedRequest signed) {
+        return switch (signed.freshness(Instant.now())) {
+            case FRESH -> null;
+            case MALFORMED_DATE -> Result.rejected(Failure.MALFORMED, "signature could not be verified");
+            case BAD_EXPIRES -> Result.rejected(Failure.MALFORMED, "X-Amz-Expires is missing or out of range");
+            case EXPIRED -> Result.rejected(Failure.EXPIRED, signed.presigned() ? "presigned request expired"
+                    : "signature date " + signed.amzDate() + " is outside the accepted window");
             // A presigned URL signed in the future is still a forgery attempt, not a slow clock.
-            if (signedAt.isAfter(now.plusSeconds(MAX_CLOCK_SKEW_SECONDS))) {
-                return Result.rejected(Failure.EXPIRED, "presigned request is not yet valid");
-            }
-            return null;
-        }
-        if (Math.abs(now.getEpochSecond() - signedAt.getEpochSecond()) > MAX_CLOCK_SKEW_SECONDS) {
-            return Result.rejected(Failure.EXPIRED,
-                    "signature date " + AMZ_DATE.format(signedAt) + " is outside the accepted window");
-        }
-        return null;
+            case NOT_YET_VALID -> Result.rejected(Failure.EXPIRED, signed.presigned()
+                    ? "presigned request is not yet valid"
+                    : "signature date " + signed.amzDate() + " is outside the accepted window");
+        };
     }
 
     /**
@@ -249,63 +233,32 @@ public class ExecuteApiSigV4Authorizer {
         if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return LEGACY_SECRET_KEY;
         }
-        String secretKey = iamService.findSecretKey(accessKeyId).orElse(null);
-        if (secretKey == null) {
-            return null;
-        }
-        if (iamService.resolveAccountId(accessKeyId).isEmpty()) {
+        String callerAccount = iamService.resolveAccountId(accessKeyId).orElse(null);
+        if (callerAccount == null) {
             LOG.debugv("execute-api request uses an expired or inactive credential: accessKey={0}",
                     SigV4RequestValidator.sanitizeForLog(accessKeyId));
             return null;
         }
-        return secretKey;
+        // Dispatch reads integrations in the API owner's account. Credentials remain owned by
+        // the caller, who may belong to another account; only this lookup adopts that account.
+        return RequestScopes.callAs(callerAccount,
+                () -> iamService.findSecretKey(accessKeyId).orElse(null));
     }
 
     /**
-     * Rejects a temporary credential that does not present the session token Floci issued with it,
-     * returning {@code null} when there is nothing to object to.
-     *
-     * <p>The secret alone is not the whole credential. AWS requires the session token on every
-     * request made with temporary credentials precisely because it is what confirms the credential
-     * is live and genuinely STS-issued, so accepting an {@code ASIA...} key on its secret alone
-     * lets an incomplete credential through a route that is supposed to demand a complete one.
-     *
-     * <p>The token is compared against the value recorded at mint time rather than merely required
-     * to be present, so a fabricated token fails as well as a missing one. Presence is all that can
-     * be demanded of a session stored before Floci recorded tokens: {@code findSessionToken} is
-     * empty there, and rejecting it would lock out a credential that is otherwise perfectly valid.
-     * {@code findSecretKey(accessKeyId, sessionToken)} is the stricter one-step alternative, which
-     * this deliberately does not use because it cannot tell that case apart from a real mismatch.
-     *
-     * <p>Folding the token into the canonical request is deliberately not required. Whether a
-     * service covers it by {@code SignedHeaders} or appends it after signing is service-specific in
-     * SigV4, and comparing against the issued value binds the token regardless of where it rode.
+     * Rejects a session token that does not fit the access key, returning {@code null} when there
+     * is nothing to object to. AWS reads the token from where the signature is, the header or the
+     * presigned query, and ignores it in the other place.
      */
-    private Result checkSessionToken(String accessKeyId, HttpHeaders headers,
-                                     MultivaluedMap<String, String> queryParameters) {
-        if (!IamService.isTemporaryAccessKey(accessKeyId)) {
+    private Result checkSessionToken(String accessKeyId, String presented) {
+        if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return null;
         }
-        String presented = queryParameters.getFirst(SECURITY_TOKEN);
-        if (isBlank(presented) && headers != null) {
-            presented = headers.getHeaderString(SECURITY_TOKEN);
-        }
-        if (isBlank(presented)) {
-            LOG.debugv("execute-api request uses temporary credential accessKey={0} with no {1}",
-                    SigV4RequestValidator.sanitizeForLog(accessKeyId), SECURITY_TOKEN);
-            return Result.rejected(Failure.UNKNOWN_KEY, "temporary credential presents no session token");
-        }
-        String issued = iamService.findSessionToken(accessKeyId).orElse(null);
-        if (issued == null) {
-            return null;
-        }
-        if (!MessageDigest.isEqual(issued.getBytes(StandardCharsets.UTF_8),
-                presented.getBytes(StandardCharsets.UTF_8))) {
-            LOG.debugv("execute-api request presents a session token that does not match the one"
-                    + " issued for accessKey={0}", SigV4RequestValidator.sanitizeForLog(accessKeyId));
-            return Result.rejected(Failure.UNKNOWN_KEY, "session token does not match the issued credential");
-        }
-        return null;
+        return switch (SessionTokenCheck.of(iamService, accessKeyId, presented)) {
+            case VALID -> null;
+            case MISSING -> Result.rejected(Failure.UNKNOWN_KEY, "session token is missing or empty");
+            case INVALID -> Result.rejected(Failure.INVALID_TOKEN, "session token was not issued with the access key");
+        };
     }
 
     /**
@@ -316,57 +269,22 @@ public class ExecuteApiSigV4Authorizer {
     private CallerIdentity resolveIdentity(String accessKeyId) {
         String accountId = iamService.resolveAccountId(accessKeyId)
                 .orElseGet(regionResolver::getAccountId);
-        String userArn = iamService.resolveCallerArn(accessKeyId)
-                .orElseGet(() -> regionResolver.buildGlobalArn("iam", accountId, "root"));
-        String userId = iamService.findAccessKey(accessKeyId)
-                .map(AccessKey::getUserName)
-                .flatMap(iamService::findUser)
-                .map(IamUser::getUserId)
-                .orElse(accessKeyId);
-        return new CallerIdentity(accessKeyId, accountId, userArn, userId);
+        return RequestScopes.callAs(accountId, () -> {
+            String userArn = iamService.resolveCallerArn(accessKeyId)
+                    .orElseGet(() -> regionResolver.buildGlobalArn("iam", accountId, "root"));
+            String userId = iamService.findAccessKey(accessKeyId)
+                    .map(AccessKey::getUserName)
+                    .flatMap(iamService::findUser)
+                    .map(IamUser::getUserId)
+                    .orElse(accessKeyId);
+            return new CallerIdentity(accessKeyId, accountId, userArn, userId);
+        });
     }
 
-    // ──────────────────────────── Signed-request parsing ────────────────────────────
-
-    private record SignedRequest(String credential, String signedHeaders, String signature,
-                                 String amzDate, Long expiresSeconds) {}
-
-    private static SignedRequest headerSignedRequest(String authorization, HttpHeaders headers) {
-        SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization);
-        if (parsed == null) {
-            return null;
-        }
+    /** The signing time of a header signature: {@code X-Amz-Date}, or {@code Date} when it is absent. */
+    private static String amzDate(HttpHeaders headers) {
         String amzDate = headers.getHeaderString("X-Amz-Date");
-        if (amzDate == null || amzDate.isBlank()) {
-            amzDate = headers.getHeaderString("Date");
-        }
-        if (isBlank(parsed.credential()) || isBlank(parsed.signedHeaders())
-                || isBlank(parsed.signature()) || isBlank(amzDate)) {
-            return null;
-        }
-        return new SignedRequest(parsed.credential(), parsed.signedHeaders().toLowerCase(Locale.ROOT),
-                parsed.signature(), amzDate, null);
-    }
-
-    private static SignedRequest presignedRequest(MultivaluedMap<String, String> queryParameters) {
-        String credential = queryParameters.getFirst("X-Amz-Credential");
-        String signedHeaders = queryParameters.getFirst("X-Amz-SignedHeaders");
-        String signature = queryParameters.getFirst("X-Amz-Signature");
-        String amzDate = queryParameters.getFirst("X-Amz-Date");
-        String expires = queryParameters.getFirst("X-Amz-Expires");
-        if (isBlank(credential) || isBlank(signedHeaders) || isBlank(signature) || isBlank(amzDate)) {
-            return null;
-        }
-        Long expiresSeconds;
-        try {
-            expiresSeconds = expires == null ? null : Long.valueOf(expires.trim());
-        } catch (NumberFormatException e) {
-            LOG.debugv("execute-api presigned request carries a non-numeric X-Amz-Expires: {0}",
-                    SigV4RequestValidator.sanitizeForLog(expires));
-            expiresSeconds = null;
-        }
-        return new SignedRequest(credential, signedHeaders.toLowerCase(Locale.ROOT), signature,
-                amzDate, expiresSeconds);
+        return isBlank(amzDate) ? headers.getHeaderString("Date") : amzDate;
     }
 
     // ──────────────────────────── Canonical request ────────────────────────────

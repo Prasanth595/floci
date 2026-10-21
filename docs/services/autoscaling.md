@@ -10,13 +10,13 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 - `arn:aws:autoscaling:<region>:<account>:launchConfiguration:<uuid>:launchConfigurationName/<name>`
 - `arn:aws:autoscaling:<region>:<account>:scalingPolicy:<uuid>:autoScalingGroupName/<group>/policyName/<name>`
 
-## Supported Operations (47 total)
+## Supported Operations (53 total)
 
 ### Launch Configurations
 
 | Operation | Notes |
 |---|---|
-| `CreateLaunchConfiguration` | Stores template: `ImageId`, `InstanceType`, `KeyName`, `SecurityGroups`, `UserData`, `IamInstanceProfile`, `InstanceMonitoring`, `BlockDeviceMappings` |
+| `CreateLaunchConfiguration` | Stores template: `ImageId`, `InstanceType`, `KeyName`, `SecurityGroups`, `UserData`, `IamInstanceProfile`, `InstanceMonitoring`, `BlockDeviceMappings`, `MetadataOptions` |
 | `DescribeLaunchConfigurations` | Filtered by name list; returns all if no filter |
 | `DeleteLaunchConfiguration` | Removes the named launch configuration |
 
@@ -28,6 +28,9 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 | `DescribeAutoScalingGroups` | Filtered by name list; returns all if no filter; includes current instance list with lifecycle state and mixed instances policy shape when configured |
 | `UpdateAutoScalingGroup` | Updates capacity bounds, cooldown, launch source, AZs |
 | `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion |
+| `DescribeTags` | Group tags; filters `auto-scaling-group`, `key`, `value`, `propagate-at-launch` (values ORed, filters ANDed); `MaxRecords`/`NextToken` paging |
+| `CreateOrUpdateTags` | Creates or updates group tags and their propagate-at-launch setting |
+| `DeleteTags` | Removes named group tags |
 | `EnableMetricsCollection` | Records the named group metrics, or all 20 when none are named, as `EnabledMetrics` on `DescribeAutoScalingGroups`. `Granularity` is required and must be `1Minute`; an unknown metric name raises `ValidationError`. No metrics are published to CloudWatch |
 | `DisableMetricsCollection` | Removes the named metrics from `EnabledMetrics`, or all of them when none are named |
 
@@ -66,12 +69,21 @@ EC2 instance can use a default subnet in a different zone.
 | Operation | Notes |
 |---|---|
 | `DescribeAutoScalingInstances` | Returns all ASG-tracked instances with lifecycle state and health status |
+| `SetInstanceHealth` | Updates an instance's health status immediately; accepts but does not enforce the grace-period flag |
+| `SetInstanceProtection` | Enables or disables scale-in protection for named instances in a group |
 | `SetDesiredCapacity` | Updates desired count; reconciler handles scale-out / scale-in within 10 s |
 | `AttachInstances` | Attaches existing EC2 instances to a group; sets lifecycle state to `InService` |
 | `DetachInstances` | Detaches instances from a group; optionally decrements desired capacity |
 | `TerminateInstanceInAutoScalingGroup` | Terminates a specific instance; optionally decrements desired capacity |
 | `SuspendProcesses` | Records suspended scaling processes (empty list suspends all); reported back by `DescribeAutoScalingGroups` |
 | `ResumeProcesses` | Clears suspended processes (empty list resumes all) |
+
+### Instance Refresh
+
+| Operation | Notes |
+|---|---|
+| `StartInstanceRefresh` | Starts replacement of group instances and returns a refresh ID |
+| `DescribeInstanceRefreshes` | Returns refresh status and progress, with `MaxRecords`/`NextToken` paging |
 
 ### Instance Refresh Recovery
 
@@ -163,6 +175,19 @@ imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 | `DescribeAdjustmentTypes` | Returns the four standard adjustment types |
 | `DescribeMetricCollectionTypes` | Returns standard metric and granularity names |
 | `DescribeAutoScalingNotificationTypes` | Returns all notification type names |
+
+## Suspended Process Reasons
+
+`SuspendProcesses` records when each newly suspended process entered that state.
+`DescribeAutoScalingGroups` returns `SuspensionReason` in the form
+`User suspended at 2026-10-18T16:00:00Z`. Repeating a suspension preserves its
+original time. Resuming a process removes its recorded time; suspending it again
+starts a new interval.
+
+Saved groups without a recorded suspension time still report the process name
+and omit the optional reason. Floci does not invent a date for those existing
+suspensions. A repeated suspension leaves an unknown time unknown until the
+process is resumed and suspended again.
 
 ## Capacity Reconciler (Phase 2)
 
@@ -295,3 +320,7 @@ aws autoscaling set-desired-capacity \
   --auto-scaling-group-name my-asg \
   --desired-capacity 3
 ```
+
+Launch configurations accept an IAM instance profile name or ARN. Unknown and foreign profiles fail creation with `ValidationError`. At launch, the reconciler resolves a stored name to its ARN in the owning account. `CreateAutoScalingGroup` and `UpdateAutoScalingGroup` refuse, with `ValidationError`, a launch template that names both an instance profile name and an ARN, directly or through the mixed instances policy.
+
+Launch-configuration metadata options (`HttpTokens`, `HttpEndpoint`, and `HttpPutResponseHopLimit`) round-trip through Query and CloudFormation and reach EC2 launches. CloudFormation resolves intrinsics inside the block, so `Fn::If` and `AWS::NoValue` can select or omit the block or any of its members. When the structure is omitted it stays absent from `DescribeLaunchConfigurations`; a supplied partial structure reports defaults for unspecified fields. Launch templates, mixed-instance templates and EC2 Fleet launches likewise forward their existing metadata options.

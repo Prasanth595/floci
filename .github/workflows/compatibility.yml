@@ -11,7 +11,6 @@ on:
       - 'docker/Dockerfile.native-package'
       - 'docker/Dockerfile.compat'
       - 'docker/entrypoint.sh'
-      - 'docker/localstack-parity.sh'
       - 'docker/healthcheck.sh'
       - 'docker/run-docker-tests.sh'
       - 'docker/test-run-docker-tests.sh'
@@ -448,6 +447,7 @@ jobs:
 
       - name: Upload test results
         if: always() && steps.tests.outcome != 'skipped'
+        timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: compat-results-${{ matrix.arch }}-${{ matrix.test }}

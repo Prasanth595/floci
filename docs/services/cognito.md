@@ -47,9 +47,9 @@ format. Validation runs before pool or client lookup.
 | ListUserPools | Lists local user pools visible in the request region. |
 | UpdateUserPool | Updates mutable user pool settings and persisted user-pool tags. |
 | DeleteUserPool | Deletes a local user pool and everything it owns: users, groups, app clients, resource servers, identity providers, revoked tokens and verification codes. Refused with `InvalidParameterException` while `DeletionProtection` is `ACTIVE` (switch it to `INACTIVE` with `UpdateUserPool` first, as on AWS) or while a domain is still configured. |
-| GetUserPoolMfaConfig | Returns the pool's MFA mode and, once configured, its software-token and passkey (`WebAuthnConfiguration`) settings. |
+| GetUserPoolMfaConfig | Returns the pool's MFA mode and, once configured, its software-token, SMS and email MFA, and passkey (`WebAuthnConfiguration`) settings. |
 | AddCustomAttributes | Adds 1 to 25 attributes to a user pool's schema, prefixing each name with `custom:`, or `dev:` for a `DeveloperOnlyAttribute`, and rejecting a name the schema already has. |
-| SetUserPoolMfaConfig | Sets `MfaConfiguration` (`OFF`/`ON`/`OPTIONAL`) and `SoftwareTokenMfaConfiguration`. An absent `MfaConfiguration` means `OFF`, and turning MFA off drops the factor configuration with it. Validation follows the live service: `OFF` alongside a software-token, email or SMS factor is rejected, and `ON`/`OPTIONAL` with none of those three is rejected, in both cases on the member being present, not on its `Enabled` value. `WebAuthnConfiguration` sits outside both rules, as it does in AWS, and is stored: see [Passkeys](#passkeys). A request without it keeps the stored one. SMS and email configurations are validated and not stored: Floci cannot deliver those factors, so keeping the config would imply a capability it does not have. |
+| SetUserPoolMfaConfig | Sets `MfaConfiguration` (`OFF`/`ON`/`OPTIONAL`) and `SoftwareTokenMfaConfiguration`. An absent `MfaConfiguration` means `OFF`, and turning MFA off drops the factor configuration with it. Validation follows the live service: `OFF` alongside a software-token, email or SMS factor is rejected, and `ON`/`OPTIONAL` with none of those three is rejected, in both cases on the member being present, not on its `Enabled` value. `WebAuthnConfiguration` sits outside both rules, as it does in AWS, and is stored: see [Passkeys](#passkeys). A request without it keeps the stored one. `SmsMfaConfiguration` and `EmailMfaConfiguration` are stored and offer SMS and email MFA (see [SMS and email MFA](#sms-and-email-mfa)); `SmsMfaConfiguration` also sets the pool's `SmsAuthenticationMessage` and `SmsConfiguration`. |
 
 Email that Cognito sends to users, such as verification codes, goes through Floci's SES (readable
 at `/_aws/ses`) from the sender the pool's `EmailConfiguration` names:
@@ -118,17 +118,42 @@ pool's Region rather than the `SourceArn` Region, and does not apply `ReplyToEma
 | UpdateIdentityProvider | Updates a provider's details, attribute mapping or identifiers. |
 | DeleteIdentityProvider | Deletes an identity provider from a user pool. |
 
-Providers can be used for generic OIDC authorization-code sign-in. Floci routes the
+Providers can be used for generic OIDC and Google authorization-code sign-in. Floci routes the
 AWS-shaped `/oauth2/authorize` and `/oauth2/idpresponse` endpoints to the configured local
 OIDC provider, exchanges the returned code, provisions or reconciles the federated user,
 and issues a Cognito authorization code for the registered callback.
 
-Only `ProviderType=OIDC` is supported by this flow. Floci does not implement social providers
-such as Google, Facebook, Login with Amazon or SignInWithApple. The pool's own users sign in
+This flow supports `ProviderType=OIDC` and `ProviderType=Google`. Facebook, Login with Amazon
+and SignInWithApple are not implemented. The pool's own users sign in
 through managed login instead (see [Managed login](#managed-login)).
 
-Two deliberate divergences from AWS, both consequences of not calling out to a third
-party:
+#### Google sign-in
+
+Register a Google provider with `client_id`, `client_secret`, and `authorize_scopes` in
+`ProviderDetails`, for example `openid email profile`. Enable `Google` in the app client's
+`SupportedIdentityProviders`, then pass `identity_provider=Google` to `/oauth2/authorize`.
+Floci uses Google's authorization endpoint at `https://accounts.google.com/o/oauth2/v2/auth`,
+token endpoint at `https://oauth2.googleapis.com/token`, and OIDC userinfo endpoint at
+`https://openidconnect.googleapis.com/v1/userinfo`.
+
+The redirect URI to register with Google is `<base-url>/cognito-idp/oauth2/idpresponse`
+(or `https://<domain>/oauth2/idpresponse` on a custom user pool domain). Google accepts
+plain HTTP redirect URIs only for `localhost`.
+
+Google users receive usernames of the form `Google_<sub>`. Repeated sign-ins reconcile the same
+user. `AttributeMapping` maps userinfo claims such as `email`, `email_verified`, `name`,
+`given_name`, `family_name`, `picture`, and `sub` to user pool attributes. The `identities`
+attribute records `providerName` and `providerType` as `Google`.
+
+For an offline test provider, set `floci.services.cognito.google-issuer` or
+`FLOCI_SERVICES_COGNITO_GOOGLE_ISSUER` to its issuer URL. The default is
+`https://accounts.google.com`. When overridden, Floci resolves the authorization, token, and
+userinfo endpoints from `<issuer>/.well-known/openid-configuration` during sign-in. The discovery
+document must return the configured `issuer` and all three endpoints. Local test issuers may
+use HTTP. Google endpoint overrides in `ProviderDetails` are not used: endpoint selection is
+controlled by the server configuration.
+
+Two deliberate divergences from AWS in identity provider registration:
 
 - **No create-time validation of `ProviderDetails`.** AWS resolves an OIDC provider's
   `oidc_issuer` discovery document while handling `CreateIdentityProvider`, and rejects
@@ -136,7 +161,8 @@ party:
   outbound request, so it also does not enforce the per-provider-type required keys.
 - **No injected provider defaults.** AWS adds keys such as
   `attributes_url_add_attributes` to an OIDC provider's stored details; Floci returns
-  only what was supplied.
+  only what was supplied, including for Google. Effective Google endpoints are resolved
+  during sign-in and are not added to the stored `ProviderDetails`.
 
 `AttributeMapping` and `IdpIdentifiers` follow AWS's update semantics: a member the
 request omits is left unchanged, and an explicitly empty map or list is what clears it.
@@ -239,7 +265,7 @@ further divergences, both deliberate:
 | AdminDisableUser | Disables a user, whose sign-in then fails with `NotAuthorizedException` (`User is disabled.`). Tokens already issued keep working, where AWS revokes the user's access tokens. |
 | AdminEnableUser | Re-enables a disabled user. |
 | AdminResetUserPassword | Clears a user's password and sets the status to `RESET_REQUIRED`, so sign-in fails with `PasswordResetRequiredException`. Floci sends no reset code: finish with `ForgotPassword` and `ConfirmForgotPassword`, or `AdminSetUserPassword`. Refused when the pool's account recovery is `admin_only`. |
-| AdminSetUserMFAPreference | Sets a user's email and software-token MFA preferences from `EmailMfaSettings` and `SoftwareTokenMfaSettings`, and passkey MFA from `WebAuthnMfaSettings` (see [Passkeys](#passkeys)). SMS settings are accepted but not stored. See [MFA preferences](#mfa-preferences). |
+| AdminSetUserMFAPreference | Sets a user's SMS, email and software-token MFA preferences from `SMSMfaSettings`, `EmailMfaSettings` and `SoftwareTokenMfaSettings`, and passkey MFA from `WebAuthnMfaSettings` (see [Passkeys](#passkeys)). See [MFA preferences](#mfa-preferences). |
 | AdminUserGlobalSignOut | Revokes the access, ID and refresh tokens issued to a user. |
 | AdminLinkProviderForUser | Links an external IdP identity to an existing user's `identities` attribute. |
 
@@ -288,14 +314,14 @@ passwordless pool generates a password. `TemporaryPasswordValidityDays` is not e
 | ConfirmSignUp | Confirms a pending self-service signup. |
 | ResendConfirmationCode | Issues a new sign-up confirmation code to an unconfirmed user, replacing the previous one, and returns where it was sent. |
 | GetUser | Returns attributes for the authenticated access-token user, and the MFA settings (`UserMFASettingList`, `PreferredMfaSetting`) once any is turned on. |
-| GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, `WEB_AUTHN` once the user has registered a passkey, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the email and software-token MFA preferences set with `SetUserMFAPreference`. SMS MFA settings are not reported. |
+| GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, `WEB_AUTHN` once the user has registered a passkey, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the SMS, email and software-token MFA preferences set with `SetUserMFAPreference`. |
 | GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. |
 | VerifyUserAttribute | Verifies an email or phone_number attribute with its issued verification code. |
 | UpdateUserAttributes | Updates attributes for the authenticated access-token user. |
 | DeleteUserAttributes | Deletes the named attributes from the authenticated access-token user. |
 | DeleteUser | Deletes the authenticated access-token user and removes them from their groups. An API Gateway Cognito authorizer rejects the user's existing tokens afterwards. |
 | ChangePassword | Changes the authenticated user's password. |
-| SetUserMFAPreference | Sets the authenticated access-token user's email and software-token MFA preferences from `EmailMfaSettings` and `SoftwareTokenMfaSettings`, and passkey MFA from `WebAuthnMfaSettings` (see [Passkeys](#passkeys)). SMS settings are accepted but not stored. See [MFA preferences](#mfa-preferences). |
+| SetUserMFAPreference | Sets the authenticated access-token user's SMS, email and software-token MFA preferences from `SMSMfaSettings`, `EmailMfaSettings` and `SoftwareTokenMfaSettings`, and passkey MFA from `WebAuthnMfaSettings` (see [Passkeys](#passkeys)). See [MFA preferences](#mfa-preferences). |
 | GlobalSignOut | Revokes the access, ID and refresh tokens issued to the authenticated access-token user. |
 | StartWebAuthnRegistration | Returns the `CredentialCreationOptions` to register a passkey for the authenticated access-token user. See [Passkeys](#passkeys). |
 | CompleteWebAuthnRegistration | Verifies the `RegistrationResponseJSON` in `Credential` and registers the passkey. |
@@ -334,9 +360,13 @@ first factor returns `MFA_SETUP` instead of tokens for a user without a verified
 Call `AssociateSoftwareToken` with that session, then `VerifySoftwareToken` with the
 returned session and a six-digit TOTP code. Finish with `RespondToAuthChallenge`
 (`MFA_SETUP`) to receive tokens. Later sign-ins return `SOFTWARE_TOKEN_MFA`, which
-requires a fresh code in `SOFTWARE_TOKEN_MFA_CODE`. Both token-management actions
-also accept an access token for an already authenticated user. Sessions expire with
-the app client's `AuthSessionValidity` and cannot be replayed after completion.
+requires a fresh code in `SOFTWARE_TOKEN_MFA_CODE`. Its `ChallengeParameters` carry
+`USER_ID_FOR_SRP`, the user's actual username rather than an alias (the `sub` in a pool
+with `UsernameAttributes`), to send back as `USERNAME` and to compute `SECRET_HASH` from,
+plus `FRIENDLY_DEVICE_NAME` when `VerifySoftwareToken` was given a `FriendlyDeviceName`.
+Both token-management actions also accept an access token for an already authenticated
+user. Sessions expire with the app client's `AuthSessionValidity` and cannot be replayed
+after completion.
 
 Completing `MFA_SETUP` turns software-token MFA on for the user and, when no other factor is
 preferred, makes it the preferred one, so `GetUser` and `AdminGetUser` report it.
@@ -353,21 +383,53 @@ then on a successful password or SRP first factor, through `USER_PASSWORD_AUTH`,
 challenge follows the user's registered authenticator even when the pool later stops offering
 software-token MFA, which is what AWS documents.
 
-- Turning software-token MFA on for a user without a verified authenticator fails with
-  `InvalidParameterException` (`User does not have delivery config set to turn on
-  SOFTWARE_TOKEN_MFA`). Turning a factor off is always accepted and drops its preference.
-- Only one factor is preferred: preferring one clears the preference of the other, and preferring
-  both in one request, or preferring a factor that is off, fails with `InvalidParameterException`.
-- `UserMFASettingList` lists the factors turned on (`EMAIL_OTP`, `SOFTWARE_TOKEN_MFA`), and
+- Turning a factor on for a user it cannot reach fails with `InvalidParameterException`
+  (`User does not have delivery config set to turn on <factor>`): SMS MFA without a
+  `phone_number`, email MFA without an `email`, software-token MFA without a verified
+  authenticator. Turning a factor off is always accepted and drops its preference.
+- Only one factor is preferred: preferring one clears the preference of the others, and preferring
+  two in one request, or preferring a factor that is off, fails with `InvalidParameterException`.
+- `UserMFASettingList` lists the factors turned on (`SMS_MFA`, `EMAIL_OTP`, `SOFTWARE_TOKEN_MFA`), and
   `PreferredMfaSetting` the preferred one. Both are omitted when empty. In a pool that requires
   software-token MFA, a registered authenticator is listed whether or not it was turned on, since
   every sign-in asks for it.
-- In `USER_AUTH`, a user with software-token MFA turned on in an optional-MFA pool is offered only
-  `PASSWORD` and `PASSWORD_SRP`, as AWS documents for users with MFA, so the second factor still
-  follows. Email MFA does not restrict the choice, because Floci does not send an email MFA code
-  after a password. A user who also turned passkey MFA on keeps `WEB_AUTHN` (see [Passkeys](#passkeys)).
+- In `USER_AUTH`, a user with an MFA factor the pool can ask for, turned on in an optional-MFA pool,
+  is offered only `PASSWORD` and `PASSWORD_SRP`, as AWS documents for users with MFA, so the second
+  factor still follows. A user who also turned passkey MFA on keeps `WEB_AUTHN` (see [Passkeys](#passkeys)).
 
-SMS and email MFA challenges, and managed-login MFA, are not emulated.
+#### SMS and email MFA
+
+A pool offers SMS MFA once `SetUserPoolMfaConfig` has set `SmsMfaConfiguration`, or once it has an
+`SmsConfiguration` from `CreateUserPool` or `UpdateUserPool`, since AWS makes SMS an MFA factor for any
+pool with an SMS configuration and `CreateUserPool` sets up MFA only that way. It offers email MFA once
+`SetUserPoolMfaConfig` has set `EmailMfaConfiguration`. After a successful password or SRP first
+factor:
+
+- With `MfaConfiguration=OPTIONAL`, the factors that count are the ones the user turned on. With
+  `ON`, every factor the pool offers and the user can receive counts (a phone number for SMS, an
+  email address for email, a registered authenticator for software tokens), since AWS lets users
+  of such a pool choose only the preferred one. A user with no such factor gets `MFA_SETUP` when
+  the pool offers software-token MFA.
+- The preferred factor's challenge follows; with one factor, that one's; with several and no
+  preference, `SELECT_MFA_TYPE`, whose `MFAS_CAN_CHOOSE` lists them (for example
+  `["SMS_MFA","SOFTWARE_TOKEN_MFA","EMAIL_OTP"]`). Answer it with `ANSWER` set to one of them.
+- `SMS_MFA` sends a code through SNS (inspect it at `/_aws/sns`) with the pool's
+  `SmsAuthenticationMessage`, and is answered with `SMS_MFA_CODE`. Email MFA is the `EMAIL_OTP`
+  challenge: a code through SES (`/_aws/ses`) with `EmailMfaConfiguration`'s `Subject` and
+  `Message`, answered with `EMAIL_OTP_CODE`. Both carry `CODE_DELIVERY_DELIVERY_MEDIUM` and the
+  masked `CODE_DELIVERY_DESTINATION`, and fire the CustomMessage trigger with
+  `CustomMessage_Authentication`. Once set, `EmailMfaConfiguration`'s `Subject` and `Message` also
+  carry the `USER_AUTH` `EMAIL_OTP` sign-in code, as `SmsAuthenticationMessage` does for `SMS_OTP`.
+  That email sign-in code has eight digits, as on AWS; MFA, sign-up, forgotten-password and
+  attribute verification codes have six.
+- A wrong code fails with `CodeMismatchException` and leaves the session for another try. After a
+  right one, the phone number or email address the code went to is marked verified, as on AWS.
+- Signing in again while the last code is still unused and under 30 seconds old answers the new
+  challenge with that code instead of sending another.
+
+Not emulated: the rule that an attribute used for account recovery cannot also receive MFA codes,
+`MFA_SETUP` for SMS or email in a pool that requires MFA without offering software tokens (the
+user signs in without a challenge there), and managed-login MFA.
 
 ### Passkeys
 
@@ -461,6 +523,44 @@ empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`
 `ALLOW_CUSTOM_AUTH`, the default AWS documents for such a client: only the enforcement uses that default, not
 the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
 `USER_AUTH` must list the matching `ALLOW_` value.
+
+## Custom Email Sender Trigger
+
+A pool whose `LambdaConfig` names a `CustomEmailSender` function (`{"LambdaArn": ..., "LambdaVersion": "V1_0"}`)
+and a `KMSKeyID` hands its email codes to that function instead of sending them through SES, as AWS
+does. Floci invokes the function asynchronously (`InvocationType=Event`), as Cognito invokes custom
+sender triggers, with the documented event: the common trigger parameters and a `request` with
+`type` `customEmailSenderRequestV1`, `code`, `clientMetadata` and `userAttributes`. The CustomMessage
+trigger does not fire for these messages, since Cognito sends no message for it to shape.
+
+`code` is encrypted the way Cognito encrypts it: a base64 AWS Encryption SDK message (algorithm suite
+`0x0378`, signed with ECDSA P-384) whose data key comes from Floci KMS `GenerateDataKey` under the
+pool's `KMSKeyID`, with the encryption context `userpool-id` set to the pool ID. A function decrypts
+it with the AWS Encryption SDK and a KMS keyring pointed at Floci (`AWS_ENDPOINT_URL` reaches it from a
+Floci Lambda container), with a commitment policy that allows decrypting it, `REQUIRE_ENCRYPT_ALLOW_DECRYPT`,
+as in the [AWS example](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-custom-email-sender.html#custom-email-sender-code-examples).
+
+| Trigger source | Sent by |
+|---|---|
+| `CustomEmailSender_SignUp` | `SignUp` |
+| `CustomEmailSender_ResendCode` | `ResendConfirmationCode` |
+| `CustomEmailSender_ForgotPassword` | `ForgotPassword` |
+| `CustomEmailSender_UpdateUserAttribute` | `UpdateUserAttributes` changing `email` |
+| `CustomEmailSender_VerifyUserAttribute` | `GetUserAttributeVerificationCode` for `email` |
+| `CustomEmailSender_Authentication` | the `EMAIL_OTP` sign-in code of `USER_AUTH` and managed login |
+
+`userAttributes` includes `cognito:user_status`, and `clientMetadata` is the request's
+`ClientMetadata`, or `null` when it carries none. A sign-in code's event carries none even when the
+`InitiateAuth` does, as in the events Cognito sends.
+`CreateUserPool` and `UpdateUserPool` refuse a custom sender trigger without a `KMSKeyID`, and
+`CreateUserPool` a key that does not exist. A key that cannot encrypt fails the request, a sign-in
+included, with `CodeDeliveryFailureException` ("Caller needs to enable the configured KMS Key" for a
+disabled key, "Unable to encrypt CustomEmailSender/CustomSMSSender code using the configured KMS
+Key" otherwise) and keeps a sign-up's user; a function that cannot be invoked fails it with
+`UnexpectedLambdaException`. What the function does once invoked does not reach the caller.
+`CustomEmailSender_AdminCreateUser` and `CustomEmailSender_AccountTakeOverNotification` are not
+emulated, since Floci sends no invitations and has no threat protection, and neither is the
+`CustomSMSSender` trigger: SMS codes still go through SNS.
 
 ## User Attribute Update Verification
 
@@ -617,7 +717,8 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 
 1. `GET /cognito-idp/oauth2/authorize` redirects to `/cognito-idp/login` with the request's
    parameters, `login_hint` included. If the browser already has a managed login session in the
-   pool, it skips the form and redirects straight to the callback with a code, as AWS does. A
+   pool, it skips the form and redirects straight to the callback with a code, as AWS does; the
+   code's tokens carry the `auth_time` of the session's sign-in, not of this request. A
    `scope` the client's `AllowedOAuthScopes` does not include is refused first, as on AWS, with a
    redirect to the callback carrying `error=invalid_request`, `error_description=invalid_scope`
    and the `state`.
@@ -782,9 +883,16 @@ Floci mirrors AWS's access-token / ID-token split:
 - **ID token:** `sub`, `cognito:username`, `aud`, and readable user attributes (`email`,
   `email_verified`, `phone_number`, `custom:*`, ...). Attribute claims are filtered by the app client's
   `ReadAttributes` (an unset/empty list means all attributes are readable).
+- **Both tokens:** `auth_time` is when the user signed in, as on AWS. Tokens from an authorization
+  code carry the time the user signed in at the login page or the identity provider, also when a
+  managed login session skipped the form, and tokens from `REFRESH_TOKEN_AUTH`,
+  `GetTokensFromRefreshToken` or the token endpoint's `refresh_token` grant keep the `auth_time` of
+  the sign-in that issued the refresh token. A
+  refresh token issued by an older Floci does not carry its sign-in time, so its tokens get the time
+  it was issued.
 
-As on AWS, a pre token generation trigger cannot suppress or override `sub`, the access token's
-`username` or the ID token's `cognito:username`; Floci ignores those entries in its response.
+As on AWS, a pre token generation trigger cannot suppress or override `sub`, `auth_time`, the access
+token's `username` or the ID token's `cognito:username`; Floci ignores those entries in its response.
 
 Not-found errors (`ResourceNotFoundException`, `UserNotFoundException`) return HTTP `400`, matching the
 Cognito JSON protocol.

@@ -20,6 +20,7 @@ import jakarta.inject.Inject;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -247,6 +248,30 @@ public class CodeBuildService {
 
     public List<String> listProjects(String region) {
         return new ArrayList<>(projectsFor(region).keySet());
+    }
+
+    public List<String> listProjects(String region, String sortBy, String sortOrder) {
+        if (sortBy == null && sortOrder == null) {
+            return listProjects(region);
+        }
+        Comparator<Project> comparator = switch (sortBy == null ? "NAME" : sortBy) {
+            case "NAME" -> Comparator.comparing(Project::getName);
+            case "CREATED_TIME" -> Comparator.comparing(Project::getCreated,
+                    Comparator.nullsFirst(Comparator.naturalOrder()));
+            case "LAST_MODIFIED_TIME" -> Comparator.comparing(Project::getLastModified,
+                    Comparator.nullsFirst(Comparator.naturalOrder()));
+            default -> throw new AwsException("InvalidInputException", "Invalid sortBy: " + sortBy, 400);
+        };
+        if (sortOrder != null && !"ASCENDING".equals(sortOrder) && !"DESCENDING".equals(sortOrder)) {
+            throw new AwsException("InvalidInputException", "Invalid sortOrder: " + sortOrder, 400);
+        }
+        if ("DESCENDING".equals(sortOrder)) {
+            comparator = comparator.reversed();
+        }
+        return projectsFor(region).values().stream()
+                .sorted(comparator.thenComparing(Project::getName))
+                .map(Project::getName)
+                .toList();
     }
 
     // ---- Report Groups ----

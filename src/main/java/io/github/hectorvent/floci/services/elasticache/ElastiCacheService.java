@@ -198,7 +198,8 @@ public class ElastiCacheService implements ResourceProvider {
             Integer port,
             ReplicationGroupSettings settings,
             Map<String, String> tags,
-            List<String> userGroupIds) {
+            List<String> userGroupIds,
+            List<String> securityGroupIds) {
     }
 
     public ReplicationGroup createReplicationGroup(String groupId, String description,
@@ -213,7 +214,7 @@ public class ElastiCacheService implements ResourceProvider {
                                                    Map<String, String> tags) {
         return createReplicationGroup(new CreateReplicationGroupRequest(groupId, description,
                 authMode, authToken, region, null, null, null, null, null, null,
-                null, null, null, null, null, null, settings, tags, null));
+                null, null, null, null, null, null, settings, tags, null, null));
     }
 
     public ReplicationGroup createReplicationGroup(CreateReplicationGroupRequest request) {
@@ -500,6 +501,7 @@ public class ElastiCacheService implements ResourceProvider {
                 : "cache.t4g.micro");
         group.setCacheParameterGroupName(request.cacheParameterGroupName());
         group.setCacheSubnetGroupName(request.cacheSubnetGroupName());
+        group.setSecurityGroupIds(request.securityGroupIds());
         group.setAutomaticFailoverEnabled(Boolean.TRUE.equals(request.automaticFailoverEnabled()));
         group.setMultiAzEnabled(Boolean.TRUE.equals(request.multiAzEnabled()));
         group.setSnapshotWindow(ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);

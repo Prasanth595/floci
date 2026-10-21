@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
@@ -93,8 +94,8 @@ class BackupVaultCfnIntegrationTest {
         cloudFormation("DeleteStack", Map.of());
         CfnStackWaits.awaitStackDeleted(STACK);
 
-        describeVault(NAMED).statusCode(404);
-        describeVault(unnamed).statusCode(404);
+        describeVault(NAMED).statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+        describeVault(unnamed).statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     private static void cloudFormation(String action, Map<String, String> parameters) {

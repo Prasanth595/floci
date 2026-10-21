@@ -18,6 +18,8 @@ import java.util.Set;
 @ApplicationScoped
 public class CloudFormationResourceRegistry {
 
+    private static final String CUSTOM_RESOURCE_TYPE = "AWS::CloudFormation::CustomResource";
+
     private final Map<String, CfnResourceProvisioner> byType = new HashMap<>();
 
     @Inject
@@ -47,9 +49,20 @@ public class CloudFormationResourceRegistry {
             // Custom::* is a dynamic, unenumerable prefix, so it cannot be a registered key. An
             // exact entry still wins (Custom::DynamoDBReplica is registered to DynamoDbCfnProvisioner
             // above); only otherwise-unmatched Custom:: types fall through to the generic handler.
-            provisioner = byType.get("AWS::CloudFormation::CustomResource");
+            provisioner = byType.get(CUSTOM_RESOURCE_TYPE);
         }
         return Optional.ofNullable(provisioner);
+    }
+
+    /**
+     * Whether {@code resourceType} is served by the generic custom-resource handler, whose
+     * attributes are the handler's response Data: {@code AWS::CloudFormation::CustomResource} and
+     * every {@code Custom::} type without an exact entry. {@code Custom::DynamoDBReplica} has its
+     * own provisioner and is not.
+     */
+    public boolean isCustomResourceType(String resourceType) {
+        CfnResourceProvisioner generic = byType.get(CUSTOM_RESOURCE_TYPE);
+        return generic != null && forType(resourceType).orElse(null) == generic;
     }
 
     /**

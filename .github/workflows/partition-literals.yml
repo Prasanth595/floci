@@ -113,6 +113,11 @@ jobs:
       - name: Check the vendored map of operations to their IAM actions is well-formed
         run: make iam-authorized-actions-check
 
+      # And for the CloudFormation property types, which come from AWS's live resource schema
+      # archive: shape here, the online comparison in cfn-schema-drift.yml.
+      - name: Check the vendored CloudFormation property types are well-formed
+        run: make cfn-property-types-check
+
       # Also offline: the service-linked role table is checked against the vendored managed
       # policy documents in the repository, never against AWS. The half that comes from a
       # recorded create cannot be re-derived without the snapshot, which is why every row in

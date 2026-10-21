@@ -36,6 +36,12 @@ mark those members `failed` until a successful retry.
 
 Floci manages real PostgreSQL, MySQL, MariaDB, and SQL Server Docker containers and proxies TCP connections to them, including IAM authentication support where the protocol supports it. SQL Server uses a transparent TCP relay for its native TDS protocol.
 
+MySQL and MariaDB master-grant script uploads, and PostgreSQL snapshot restore archive uploads,
+retry transient Docker connection failures up to six attempts with exponential backoff starting
+at 500 ms. Every attempt sends a fresh archive. Containers start, or snapshot restore commands
+run, only after the upload succeeds. A permanent Docker error or exhausted retries follows the
+existing failure path. The PostgreSQL restore SQL readiness retry policy is unchanged.
+
 RDS Data API (`rds-data`) is documented separately because it uses REST JSON routes instead of the RDS Query protocol. See [RDS Data API](rds-data.md).
 
 ## Supported Management Actions
@@ -73,6 +79,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBClusterEndpoint` | Delete a custom endpoint |
 | `EnableHttpEndpoint` | Turn on an Aurora cluster's Data API endpoint by ARN; see [Data API endpoint](#data-api-endpoint) |
 | `DisableHttpEndpoint` | Turn off a cluster's Data API endpoint by ARN |
+| `DescribeDBLogFiles` | List an instance's log files, read from its database container; see [Log files](#log-files) |
+| `DownloadDBLogFilePortion` | Read a block of a log file, from the start or the most recent lines |
 | `AddRoleToDBCluster` | Associate an IAM role with a cluster, optionally for a feature; see [IAM role associations](#iam-role-associations) |
 | `RemoveRoleFromDBCluster` | Remove a role from a cluster |
 | `AddRoleToDBInstance` | Associate an IAM role with an instance for a feature |
@@ -118,7 +126,11 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
 | `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
-| `DeleteDBProxy` | Delete a DB proxy |
+| `DeleteDBProxy` | Delete a DB proxy and its endpoints |
+| `CreateDBProxyEndpoint` | Add a read/write or read-only endpoint to a DB proxy; see the proxy note below |
+| `DescribeDBProxyEndpoints` | List proxy endpoints, each proxy's default endpoint first, filtered by `DBProxyName` and `DBProxyEndpointName` |
+| `ModifyDBProxyEndpoint` | Rename a proxy endpoint or replace its security groups |
+| `DeleteDBProxyEndpoint` | Delete a proxy endpoint |
 | `RegisterDBProxyTargets` | Register a cluster or instance as a proxy target |
 | `DeregisterDBProxyTargets` | Remove a cluster or instance from a proxy target group |
 | `DescribeDBProxyTargetGroups` | List a proxy's target groups |
@@ -132,6 +144,9 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `RestoreDBClusterToPointInTime` | Create a cluster from a source cluster at a time in its restorable window; see [Point in time restore](#point-in-time-restore) |
 | `DescribeDBClusterSnapshotAttributes` | Return the `restore` attribute of a cluster snapshot |
 | `ModifyDBClusterSnapshotAttribute` | Add or remove `restore` values (account ids or `all`) on a cluster snapshot |
+| `StartExportTask` | Start an export task for a DB snapshot or DB cluster snapshot; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
+| `DescribeExportTasks` | List export tasks, by `ExportTaskIdentifier`, `SourceArn`, `SourceType` and the `export-task-identifier`, `s3-bucket`, `source-arn` and `status` filters |
+| `CancelExportTask` | Cancel a running export task; what it already wrote stays in the bucket |
 | `DescribeGlobalClusters` | List the account's global clusters with their primary and secondary members; see [Global clusters](#global-clusters) |
 | `CreateGlobalCluster` | Create an Aurora global database, empty or with an existing Aurora cluster as its primary |
 | `ModifyGlobalCluster` | Rename a global cluster, set deletion protection, or upgrade its engine version (members follow) |
@@ -335,6 +350,15 @@ services:
     is rejected with `InvalidParameterValue` unless the proxy's VPC and every subnet in
     `VpcSubnetIds` already carry an associated IPv6 CIDR block, matching AWS's own network
     prerequisites for RDS Proxy.
+    Proxy endpoints report the proxy's own host, so a client connects through one as through the
+    proxy, and an IAM token signed for that host verifies there. The host is read from the proxy
+    for each response, so when a restore gives the proxy a new host every endpoint reports it. `TargetRole` is recorded: Floci
+    proxies have one target, so a `READ_ONLY` endpoint reaches the same target as the proxy rather
+    than an Aurora reader. Each proxy's default endpoint (`default`, `IsDefault` true, `READ_WRITE`)
+    is built from the proxy, has no ARN, and cannot be modified or deleted
+    (`InvalidDBProxyEndpointStateFault`). Endpoint names are unique per account and Region, a proxy
+    holds at most 20 endpoints (`DBProxyEndpointQuotaExceededFault`), and an endpoint with no
+    `VpcSecurityGroupIds` gets its VPC's default security group.
 
 ## Aurora Serverless v2 scaling
 
@@ -433,8 +457,47 @@ Two deviations are worth knowing:
   and reported on read, but the container started at create time keeps running the image it was
   started with. This is control-plane compatibility, like Aurora Serverless v2 scaling above.
 
-`StorageType`, `MultiAZ` and `Iops` are not read on a modify yet. Floci reports every instance as
-`gp2`.
+For standalone, non-Aurora instances with instance-owned storage, `CreateDBInstance` and
+`ModifyDBInstance` retain the `StorageType` values `gp2`, `gp3`, `io1` and `io2`. A modify
+that omits the member leaves it unchanged; a request naming another type is
+refused with `StorageTypeNotSupported` before the instance is created or changed. Describe and
+modification responses report the stored value, and valid-modification discovery lists these four
+supported types. Aurora and cluster-member instance overrides remain ignored because their
+storage belongs to the cluster. Explicit type overrides also work on snapshot restores, point-in-time copies
+and read replicas. Snapshots and their copies retain the type; Floci carries it into snapshot
+restores, point-in-time copies and read replicas. It also survives persistent, hybrid and WAL storage
+reloads. Legacy records without the member retain the existing `gp2` fallback.
+
+Storage type changes apply immediately to control-plane metadata; the backing container volume's
+performance is unchanged. `Iops`, `StorageThroughput` and `MultiAZ` changes remain unimplemented.
+Omitted create requests retain Floci's existing `gp2` default, which differs from the current
+[AWS create default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html).
+Floci's snapshot and point-in-time copies inherit the source type when the request omits it, rather
+than applying the [AWS restore default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceFromDBSnapshot.html).
+Floci does not enforce every engine-specific storage allocation, IOPS restriction or regional
+storage-type availability. Magnetic `standard` storage is refused.
+
+### Storage autoscaling threshold changes
+
+For standalone instances with instance-owned storage, `ModifyDBInstance` checks an explicit
+`MaxAllocatedStorage` against the current allocation. The threshold must be at least 10% higher,
+except that a value equal to the current allocation retains the existing disable handling.
+For example, with 20 GiB allocated, maxima of 19 or 21 GiB are refused and 22 GiB meets this
+minimum. Explicit zero and negative maxima are also refused. Rejection occurs before any settings
+in the request change, including backup retention and allocation. An omitted maximum retains its
+stored value without rechecking historical state.
+
+The check uses the current allocation even when the request also changes storage. AWS applies
+threshold changes immediately while storage changes can wait for maintenance. Floci's existing
+immediate storage-change behavior remains; this is not a live AWS combined-growth capture or a
+complete check of all combined-update constraints.
+
+Aurora/cluster members and RDS Custom remain outside this check. Engine/class upper limits,
+IOPS ratios and create/restore/replica constraints remain separate. The chosen HTTP 400
+`InvalidParameterCombination` follows the adjacent allocated-storage refusal precedent. The
+message follows the guide's example, `Invalid max storage size for {engine_name}`; neither is
+claimed as an independently captured, universal live AWS maximum-error response.
+
 
 ## Examples
 
@@ -631,6 +694,26 @@ it off is always accepted. An ARN that names no cluster in the caller's account 
 `ResourceNotFoundFault`, and a cluster that is not available is `InvalidResourceStateFault`. The flag
 is recorded and reported only: the Data API (`rds-data`) does not refuse a cluster with it off.
 
+## Log files
+
+`DescribeDBLogFiles` and `DownloadDBLogFilePortion` read an instance's log from its database
+container (`docker logs`, the most recent 100,000 lines), cut into files the way RDS names them: PostgreSQL rotates hourly into
+`error/postgresql.log.YYYY-MM-DD-HH` (UTC), MySQL and MariaDB keep `error/mysql-error.log`, and SQL
+Server keeps `log/ERROR`. An Aurora member reads its cluster's container. `LastWritten` is the time
+Docker recorded for the file's last line, and `Size` the bytes of its lines.
+
+`DescribeDBLogFiles` takes `FilenameContains`, `FileLastWritten` (files written at or after it) and
+`FileSize` (files larger than it), and pages by `MaxRecords` / `Marker`. `DownloadDBLogFilePortion`
+follows the API reference: without a `Marker` it returns the most recent `NumberOfLines` lines (the
+whole file, up to 10000 lines, without either), `Marker` `0` starts at the first line, and the
+returned `Marker` continues until `AdditionalDataPending` is false. A block stops at 1 MB, and a
+single line longer than that is cut at 1 MB, as the API reference says the block is truncated.
+Control characters XML cannot carry (a terminal colour code) come back as U+FFFD.
+
+An instance that is not available, or whose database container cannot be found or started, is
+`DBInstanceNotReady`, and an unknown file name `DBLogFileNotFoundFault`. Negative `FileSize`,
+`FileLastWritten` or `Marker` values are `InvalidParameterValue`. In mock RDS mode there is no container, so an instance has no log files.
+
 ## IAM role associations
 
 `AddRoleToDBCluster` and `AddRoleToDBInstance` associate an IAM role with an available cluster or
@@ -699,6 +782,40 @@ replicas use, so the restored data is the source's latest state whatever time in
 asked for; this is also why `LatestRestorableTime` is always the current time. As with
 `CreateDBSnapshot`, only PostgreSQL sources are accepted.
 
+## Exporting snapshots to Amazon S3
+
+`StartExportTask`, `DescribeExportTasks` and `CancelExportTask` manage RDS snapshot export tasks.
+`ExportTaskIdentifier`, `SourceArn`, `S3BucketName`, `IamRoleArn` and `KmsKeyId` are required,
+`S3Prefix` and `ExportOnly` are optional.
+
+A task reports `STARTING`, then `IN_PROGRESS` with a `PercentProgress` while its tables are written,
+then `COMPLETE` or `FAILED` with a `FailureCause`. `CancelExportTask` moves a running task to
+`CANCELING`; it stops before its next table and becomes `CANCELED`, and the data it already wrote
+stays in the bucket, as on RDS. A table the export skips is named in `WarningMessage`. A task still
+running when Floci stops is `FAILED` as soon as Floci starts again, or `CANCELED` if it was being
+canceled. A `StartExportTask` that arrives while Floci is resetting waits for the reset to finish,
+and is refused with `Throttling` if it lasts more than 30 seconds.
+
+Floci does not write snapshot data to S3 yet. In [mock mode](#mock-mode-ci-tests) a task completes
+without writing anything, unless its bucket is in another region (see below). Outside mock mode a task is accepted and then ends `FAILED` with the
+`FailureCause` `Floci does not write snapshot data to S3 yet: export tasks complete only in mock
+mode (FLOCI_SERVICES_RDS_MOCK=true)`.
+
+`ExportOnly` takes `database`, `database.schema` or `database.schema.table` entries made of
+letters, digits, `$` and `_`, and refuses anything else with `InvalidExportOnly`, since RDS supports
+a partial export only for such names.
+
+What differs from RDS:
+
+- The IAM role is not assumed and the KMS key encrypts nothing: both are recorded and reported back
+  as given. The bucket must exist, or the request fails with `InvalidS3BucketFault`. A bucket in
+  another region than the snapshot's is accepted and the task then ends `FAILED`, as on RDS.
+- Only PostgreSQL snapshots can be exported, since Floci's snapshots hold PostgreSQL data only.
+  Any other source is refused with `InvalidExportSourceState`, and so is a snapshot that is not
+  `available`.
+- `SourceArn` must name a snapshot: exporting a live DB cluster (`SourceType` `CLUSTER`) is not
+  supported.
+
 ## Global clusters
 
 `CreateGlobalCluster` creates an Aurora global database (`aurora-mysql` or `aurora-postgresql`),
@@ -762,7 +879,12 @@ FLOCI_STORAGE_HOST_PERSISTENT_PATH=/absolute/host/path/data
 
 ## Authentication
 
-The RDS auth proxy validates the master username and password at the proxy layer. All other database users are passed through directly to the backend engine — create them with standard SQL (`CREATE USER`) and connect as normal.
+The RDS auth proxy checks the master username and password at the proxy layer. Other database users authenticate against the backend engine. For PostgreSQL instances with IAM database authentication enabled, the database role's `rds_iam` membership also determines which authentication method it can use.
+
+PostgreSQL authentication responses are buffered before they are flushed to the client,
+so the password challenge is not emitted as separate header and payload writes.
+This supports PgBouncer logins over plaintext and TLS while keeping the same
+password, IAM and database-role checks.
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
@@ -800,7 +922,32 @@ arn:aws:rds-db:<region>:<account-id>:dbuser:<DbiResourceId>/<db-user-name>
 
 Aurora cluster endpoints and their member instance endpoints use the cluster's `DbClusterResourceId`, including after member reboot or runtime recovery, and connections through an RDS Proxy use the proxy's `prx-…` resource id. A token that fails any of these checks is refused with the engine's ordinary authentication failure; the reason is written to Floci's log.
 
-On PostgreSQL, the token names a database role (`DBUser`) and the session runs as that role: `current_user` and `session_user` both report it, objects it creates are owned by it, and a token naming a role the database does not have is refused with `FATAL: role "..." does not exist`. Create the role first with `CREATE ROLE <name> WITH LOGIN` as the master user, and grant it whatever the application needs.
+On native PostgreSQL instance and cluster endpoints, the token names a database
+role (`DBUser`). The role must have its own `LOGIN` attribute and a direct or indirect grant of `rds_iam`, including when
+logging in as the master user. Standard RDS Proxy client IAM connections do not
+require that database IAM grant: the backend role still needs `LOGIN`, and the
+session remains bound to that role's identity. End-to-end DB Proxy IAM is not
+supported by the real database mode. Create an application role for a native
+database endpoint as the master user:
+
+```sql
+CREATE ROLE app_user LOGIN;
+GRANT rds_iam TO app_user;
+```
+
+On native database endpoints with IAM authentication enabled, membership in
+`rds_iam` makes IAM take
+precedence over the role's password. Roles without that membership continue to use
+passwords. These database-role checks apply independently of Floci's IAM policy
+enforcement setting. Disabling IAM database authentication restores ordinary
+password authentication for new connections. Password attempts refused because of that membership report
+`PAM authentication failed` with SQLSTATE `28000`.
+
+The IAM session runs as the token's role: `current_user` and `session_user` both
+report it, and objects it creates belong to it. A missing role or a role without
+`LOGIN` is refused with an authentication failure. Native database endpoints also
+require `rds_iam` membership. Grant the application any additional database
+privileges it needs.
 
 Underneath, the proxy reaches the container as the master user and hands the session over to the token's role, so an IAM session that talks its way back to the master role, via `RESET SESSION AUTHORIZATION` and its variants, is terminated with `FATAL: permission denied to set session authorization` rather than being allowed to regain superuser. `SET ROLE` is untouched: PostgreSQL still permission-checks it against the token's role, exactly as on RDS. One difference from RDS: the proxy learns of the switch from PostgreSQL's own report, so when several statements are batched into a single query after the switch, their results are returned before the session is closed.
 
@@ -823,31 +970,45 @@ password in cleartext, MySQL sends a scramble, so the proxy would have to drive 
 
 ## TLS / SSL
 
-The RDS auth proxy terminates TLS itself (the backend container stays plaintext) using a
-self-signed CA whose Subject Alternative Names cover every advertised host Floci has handed
-out for a DB instance, cluster, or RDS Proxy — the Docker bridge IP, `host.docker.internal`,
-`localhost`, or whatever `rds.endpointHost` resolves to. The CA is persisted at
-`{storage.persistent-path}/tls/rds-ca.crt` and grows its SAN list as new hosts appear, so the
-same root survives restarts and works for every local database, not just the one that
-generated it.
+The RDS auth proxy terminates TLS itself (the backend container stays plaintext). It presents
+a non-CA server certificate followed by Floci's shared root CA, so strict TLS
+clients can validate an end-entity certificate rather than being asked to accept a CA as a server.
+The server certificate's Subject Alternative Names cover every advertised DB instance, cluster,
+or RDS Proxy host: the Docker bridge IP, `host.docker.internal`, `localhost`, or whatever
+`rds.endpointHost` resolves to.
 
-Floci logs the certificate path (and the `PGSSLROOTCERT` hint) the first time it generates or
-loads it:
+The shared CA is the same one used by ACM, IoT, and EKS. It is persisted at
+`{storage.persistent-path}/tls/floci-root-ca.crt`, with its owner-only private key in
+`floci-root-ca.key`. The server certificate is issued in memory on startup and when a new host
+appears, and renewed before expiry during TLS use; its SAN list is recorded in `rds-ca.metadata.json`.
+Renewal preserves the CA and SANs. If the CA itself expires, the proxy refuses new TLS use
+rather than silently changing client trust; restart to regenerate the unusable CA and trust its replacement.
+The shared CA certificate and key do not change during SAN growth or restarts. Missing or
+corrupt SAN metadata is rebuilt without replacing a valid
+CA. An invalid or unusable CA/key pair is replaced with a warning; only then must clients trust
+the replacement CA again.
+
+The proxy also writes the shared root certificate to `tls/rds-ca.crt`, preserving existing
+`PGSSLROOTCERT` and MySQL `--ssl-ca` paths. This compatibility copy is refreshed when the proxy
+initializes, even if the old RDS certificate is expired or corrupt. The unused `rds-ca.key`
+is removed; the shared CA key and existing `rds-ca.metadata.json` SAN list are retained.
+The shared certificate is also available from `GET /_floci/ca.pem`.
+
+The proxy logs the shared certificate path when it first issues a server certificate:
 
 ```
-RDS proxy TLS: CA cert at ./data/tls/rds-ca.crt
-RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/rds-ca.crt
+RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/floci-root-ca.crt
 ```
 
 Because the SAN matches the address you actually connect to, `verify-full` (the same level
-Aurora enforces in AWS) works locally too — no need to fall back to `sslmode=disable` just to
+Aurora enforces in AWS) works locally too, without falling back to `sslmode=disable` just to
 exercise the same connection-string settings you use in production:
 
 ```bash
 # PostgreSQL
-PGSSLROOTCERT=./data/tls/rds-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
+PGSSLROOTCERT=./data/tls/floci-root-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
 
 # MySQL / MariaDB
 mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
-  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/rds-ca.crt
+  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/floci-root-ca.crt
 ```

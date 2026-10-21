@@ -2,9 +2,9 @@ package io.github.hectorvent.floci.services.rds.container;
 
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -20,8 +20,16 @@ import static io.restassured.http.ContentType.URLENC;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 
+/**
+ * Every Data API operation sent to a paused Aurora Serverless cluster is refused with
+ * DatabaseResumingException while the cluster resumes, and the retry runs once it has.
+ *
+ * <p>The resuming error and the five-second resume delay come from
+ * {@link IndependentServiceSettingsProfile}, which this class shares with other classes that each
+ * call a different service.
+ */
 @QuarkusTest
-@TestProfile(RdsDataResumingIntegrationTest.ResumingProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 @Tag("docker")
 class RdsDataResumingIntegrationTest {
 
@@ -90,13 +98,5 @@ class RdsDataResumingIntegrationTest {
     private static RequestSpecification rds(String action) {
         return given().header("Authorization", RDS_AUTH).contentType(URLENC)
                 .formParam("Action", action).formParam("Version", "2014-10-31");
-    }
-
-    public static class ResumingProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.rds-data.database-resuming-exception-enabled", "true",
-                    "floci.services.rds.aurora-resume-delay-millis", "5000");
-        }
     }
 }

@@ -56,9 +56,6 @@ class ContainerLifecycleManagerVolumeTest {
     private ContainerDetector containerDetector;
 
     @Mock
-    private PortAllocator portAllocator;
-
-    @Mock
     private EmulatorConfig config;
 
     private ContainerLifecycleManager manager;
@@ -66,7 +63,7 @@ class ContainerLifecycleManagerVolumeTest {
     @BeforeEach
     void setUp() {
         manager = new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, portAllocator, config);
+                dockerClient, imageCacheService, containerDetector, config);
     }
 
     @Test

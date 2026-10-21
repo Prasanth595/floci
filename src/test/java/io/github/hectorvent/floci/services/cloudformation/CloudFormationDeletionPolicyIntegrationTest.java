@@ -730,8 +730,8 @@ class CloudFormationDeletionPolicyIntegrationTest {
      * Reproduces the failure-propagation bug: a nested stack whose own resource loop fails rolls
      * back internally to a clean slate ({@code ROLLBACK_COMPLETE}), but {@code executeNestedStack}
      * used to detect that only by checking for the literal strings {@code CREATE_FAILED} /
-     * {@code UPDATE_FAILED}, status values that {@code rollbackFailedExecution} always overwrites
-     * with a {@code ROLLBACK_*} status before returning. So the check could never match, and the
+     * {@code UPDATE_FAILED}, status values a stack that {@code rollbackFailedExecution} rolled back
+     * never ends in: it settles in a {@code ROLLBACK_*} status. So the check could never match, and the
      * nested stack's own resource in the parent was reported as {@code CREATE_COMPLETE} regardless.
      *
      * <p>With the child silently "succeeding", the parent went on to provision a downstream
@@ -905,8 +905,8 @@ class CloudFormationDeletionPolicyIntegrationTest {
             assertThat(events, containsString("<LogicalResourceId>ChildStack</LogicalResourceId>"));
             assertThat(events, containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"));
             assertThat(events, containsString("<ResourceStatusReason>Nested stack " + stackName
-                    + "-ChildStack failed: The specified log group already exists: " + logGroupName
-                    + "</ResourceStatusReason>"));
+                    + "-ChildStack failed: The following resource(s) failed to create: [MyLogGroup]."
+                    + " Rollback requested by user.</ResourceStatusReason>"));
         } finally {
             deleteStack(stackName);
         }

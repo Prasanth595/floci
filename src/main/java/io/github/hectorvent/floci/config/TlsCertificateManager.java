@@ -206,7 +206,7 @@ public class TlsCertificateManager implements Resettable {
         CertificateGenerator.GeneratedCertificate issued = ca.issueServerCertificate("localhost", sans, keyAlgorithm, keyPair);
 
         Path dir = tlsDir();
-        CertificateMetadata metadata = CertificateMetadata.create(configuredHostnames, resolveFlociVersion());
+        CertificateMetadata metadata = CertificateMetadata.create(configuredHostnames, FlociVersion.current());
         metadata.setLearnedHostnames(new ArrayList<>(learned));
         writeAtomically(dir.resolve(CERT_NAME), issued.certificatePem());
         writeAtomically(dir.resolve(METADATA_NAME), OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(metadata));
@@ -250,7 +250,7 @@ public class TlsCertificateManager implements Resettable {
         } catch (RuntimeException e) {
             LOG.debugv("TLS: floci.base-url {0} has no usable host: {1}", config.baseUrl(), e.getMessage());
         }
-        config.dns().extraSuffixes().ifPresent(list -> list.forEach(s -> suffixes.add(s.toLowerCase(Locale.ROOT))));
+        LocalStackParity.withDnsSuffixes(config.dns().extraSuffixes()).ifPresent(list -> list.forEach(s -> suffixes.add(s.toLowerCase(Locale.ROOT))));
         String bare = name.startsWith("*.") ? name.substring(2) : name;
         for (String suffix : suffixes) {
             if (DomainNames.isWithin(bare, suffix)) {
@@ -301,10 +301,5 @@ public class TlsCertificateManager implements Resettable {
         } finally {
             Files.deleteIfExists(tmp);
         }
-    }
-
-    private static String resolveFlociVersion() {
-        String env = System.getenv("FLOCI_VERSION");
-        return env == null || env.isBlank() ? "dev" : env;
     }
 }

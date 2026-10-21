@@ -205,19 +205,30 @@ public class DmsService implements Resettable {
         putText(attributes, request, "KmsKeyId");
         putText(attributes, request, "DnsNameServers");
 
+        applyInstanceMembers(attributes, request);
+        // Resolved only once every other check has passed: resolving "default" reads the region's
+        // subnets, which seeds its default VPC, and a rejected request must not leave that behind.
+        return create(instances, region, identifier, attributes, request,
+                () -> attributes.putObject("ReplicationSubnetGroup")
+                        .put("ReplicationSubnetGroupIdentifier", resolveInstanceSubnetGroup(request, region)));
+    }
+
+    private String resolveInstanceSubnetGroup(JsonNode request, String region) {
         String subnetGroup = text(request, "ReplicationSubnetGroupIdentifier");
         if (subnetGroup == null) {
             // DMS falls back to the account's "default" group, which is why that name is reserved.
-            subnetGroup = "default";
-        } else {
-            subnetGroup = subnetGroup.toLowerCase(Locale.ROOT);
-            if (subnetGroups.get(storageKey(region, subnetGroup)).isEmpty()) {
-                throw notFound(subnetGroup);
-            }
+            return "default";
         }
-        attributes.putObject("ReplicationSubnetGroup").put("ReplicationSubnetGroupIdentifier", subnetGroup);
-        applyInstanceMembers(attributes, request);
-        return create(instances, region, identifier, attributes, request);
+        subnetGroup = subnetGroup.toLowerCase(Locale.ROOT);
+        // Naming "default" explicitly is how it comes into existence: AWS creates it from the
+        // default-VPC subnets on first use, so it is not stored and is not yet listed here.
+        boolean exists = "default".equals(subnetGroup)
+                ? defaultSubnetGroup(region, subnetGroup).isPresent()
+                : subnetGroups.get(storageKey(region, subnetGroup)).isPresent();
+        if (!exists) {
+            throw notFound(subnetGroup);
+        }
+        return subnetGroup;
     }
 
     public PaginatedResult<DmsResource> describeReplicationInstances(JsonNode request, String region) {
@@ -249,12 +260,22 @@ public class DmsService implements Resettable {
 
     /**
      * "default" cannot be created, so it is never stored: it resolves to the region's default-VPC
-     * subnets at read time, which is the group an instance created without one lands in.
+     * subnets at read time, which is the group an instance created without one lands in. AWS only
+     * creates that group the first time an instance needs it, so it exists here only while a
+     * replication instance in the region uses it. That check comes first, so a region with no such
+     * instance never reaches EC2 and never seeds its default VPC.
      */
     public Optional<ReplicationSubnetGroup> findReplicationSubnetGroup(String region, String identifier) {
         if (!"default".equals(identifier)) {
             return subnetGroups.get(storageKey(region, identifier));
         }
+        if (!subnetGroupInUse(region, identifier)) {
+            return Optional.empty();
+        }
+        return defaultSubnetGroup(region, identifier);
+    }
+
+    private Optional<ReplicationSubnetGroup> defaultSubnetGroup(String region, String identifier) {
         List<String> defaultSubnets = ec2Service.describeSubnets(region, List.of(), Map.of()).stream()
                 .filter(Subnet::isDefaultForAz)
                 .map(Subnet::getSubnetId)
@@ -363,7 +384,9 @@ public class DmsService implements Resettable {
      * Pages by identifier through the shared opaque-cursor helper, so {@code Marker} stays
      * resumable when a group is created or deleted between requests. DMS documents a default
      * {@code MaxRecords} of 100 and a valid range of 20 to 100, and rejects a value outside that
-     * range rather than clamping it.
+     * range rather than clamping it. The synthetic {@code default} group is listed and filterable
+     * like a stored one whenever {@link #findReplicationSubnetGroup} resolves it, which is only once
+     * a replication instance in the region uses it.
      */
     public PaginatedResult<ReplicationSubnetGroup> describeReplicationSubnetGroups(JsonNode request, String region) {
         Integer maxRecords = maxRecords(request);
@@ -372,15 +395,16 @@ public class DmsService implements Resettable {
         List<ReplicationSubnetGroup> matching;
         if (!requestedIdentifiers.isEmpty()) {
             matching = requestedIdentifiers.stream()
-                    .map(identifier -> subnetGroups.get(storageKey(region, identifier))
+                    .map(identifier -> findReplicationSubnetGroup(region, identifier)
                             .orElseThrow(() -> notFound(identifier)))
                     .toList();
         } else {
-            matching = subnetGroups.scan(key -> key.startsWith(region + "::"));
+            matching = new ArrayList<>(subnetGroups.scan(key -> key.startsWith(region + "::")));
+            findReplicationSubnetGroup(region, "default").ifPresent(matching::add);
         }
         return Pagination.paginate(matching, ReplicationSubnetGroup::getReplicationSubnetGroupIdentifier,
                 maxRecords, marker, DEFAULT_MAX_RECORDS, MAXIMUM_MAX_RECORDS,
-                "InvalidParameterValueException");
+                "InvalidParameterValueException", "Marker");
     }
 
     public synchronized void deleteReplicationSubnetGroup(JsonNode request, String region) {
@@ -389,14 +413,17 @@ public class DmsService implements Resettable {
         if (subnetGroups.get(key).isEmpty()) {
             throw notFound(identifier);
         }
-        boolean inUse = regionScan(instances, region).stream()
-                .anyMatch(instance -> identifier.equals(instance.getAttributes()
-                        .path("ReplicationSubnetGroup").path("ReplicationSubnetGroupIdentifier").asText(null)));
-        if (inUse) {
+        if (subnetGroupInUse(region, identifier)) {
             throw invalidState("Replication subnet group " + identifier
                     + " is in use by a replication instance and cannot be deleted.");
         }
         subnetGroups.delete(key);
+    }
+
+    private boolean subnetGroupInUse(String region, String identifier) {
+        return regionScan(instances, region).stream()
+                .anyMatch(instance -> identifier.equals(instance.getAttributes()
+                        .path("ReplicationSubnetGroup").path("ReplicationSubnetGroupIdentifier").asText(null)));
     }
 
     public List<ResourceTag> listTagsForResource(JsonNode request, String region) {
@@ -447,6 +474,12 @@ public class DmsService implements Resettable {
 
     private DmsResource create(Kind kind, String region, String identifier, ObjectNode attributes,
                                JsonNode request) {
+        return create(kind, region, identifier, attributes, request, () -> { });
+    }
+
+    /** {@code beforeStore} runs after every create-time check, so its side effects never follow a rejection. */
+    private DmsResource create(Kind kind, String region, String identifier, ObjectNode attributes,
+                               JsonNode request, Runnable beforeStore) {
         if (findByIdentifier(kind, region, identifier).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsFault",
                     kind.label() + " " + identifier + " already exists.", 400);
@@ -464,11 +497,13 @@ public class DmsService implements Resettable {
             throw new AwsException("ResourceAlreadyExistsFault",
                     "ResourceIdentifier " + resourceId + " is already in use.", 400);
         }
+        Map<String, String> tags = readTags(request.get("Tags"));
+        beforeStore.run();
         attributes.put(kind.idMember(), identifier);
         attributes.put(kind.arnMember(), regionResolver.buildArn("dms", region, kind.arnType() + ":" + resourceId));
         DmsResource resource = new DmsResource();
         resource.setAttributes(attributes);
-        resource.setTags(readTags(request.get("Tags")));
+        resource.setTags(tags);
         kind.store().put(key, resource);
         return resource;
     }
@@ -495,7 +530,8 @@ public class DmsService implements Resettable {
                     "No " + kind.label() + " found matching provided filters.", 400);
         }
         return Pagination.paginate(matching, resource -> member(resource, kind.idMember()),
-                maxRecords, marker, DEFAULT_MAX_RECORDS, MAXIMUM_MAX_RECORDS, "InvalidParameterValueException");
+                maxRecords, marker, DEFAULT_MAX_RECORDS, MAXIMUM_MAX_RECORDS, "InvalidParameterValueException",
+                "Marker");
     }
 
     private void rename(Kind kind, String region, Found found, ObjectNode attributes, JsonNode request) {

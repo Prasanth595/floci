@@ -45,6 +45,14 @@ CATALOG_SOURCE = "src/main/java/io/github/hectorvent/floci/core/common/ResolvedS
 MATRIX_DOC = "docs/services/index.md"
 REGISTRY = "tools/docs/service_matrix.yaml"
 
+# These grouped rows already have one dispatcher each; removing a registry entry
+# must not silently turn off their count check.
+REQUIRED_ACTION_COUNT_SOURCES = frozenset({
+    "autoscaling", "cloudmap", "codebuild", "codedeploy", "cognito", "config",
+    "ec2", "ecs", "elastic-beanstalk", "elb", "elb-classic", "glue", "iam",
+    "resource-groups-tagging",
+})
+
 MATRIX_HEADING = "## Service Matrix"
 MATRIX_END_HEADING = "## Common Setup"
 
@@ -183,14 +191,13 @@ def count_generated_actions(md_source: str) -> int | None:
     return count
 
 
-def extract_action_counts(repo_root: Path) -> dict[str, int]:
+def extract_action_counts(repo_root: Path, required_sources: frozenset[str] = frozenset()) -> dict[str, int]:
     """Extract mechanically verifiable action counts.
     Generated service documents are counted from their generated action-table
-    markers. IAM is a deferred non-tabular document, so its Query switch is
-    parsed directly using the same action parser as regen_action_docs.py.
-    Other services without generated action-table markers are intentionally
-    skipped here because their handlers use non-tabular or mixed dispatch
-    patterns that cannot be counted safely by the generic registry parser.
+    markers. Explicitly mapped non-tabular Query/JSON dispatchers are counted
+    from source with the same action parser as regen_action_docs.py. Mixed and
+    anchored rows remain outside this check until their operations can be
+    attributed to a single matrix row.
     """
     md_source = (repo_root / MATRIX_DOC).read_text(encoding="utf-8")
     matrix_counts = extract_matrix_action_counts(md_source)
@@ -198,7 +205,7 @@ def extract_action_counts(repo_root: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
 
     # Generated service documents.
-    for slug in matrix_counts:
+    for slug in sorted(extract_matrix_slugs(md_source)):
         doc_path = repo_root / SERVICES_DIR / f"{slug}.md"
 
         if not doc_path.exists():
@@ -208,19 +215,32 @@ def extract_action_counts(repo_root: Path) -> dict[str, int]:
         generated_count = count_generated_actions(doc_source)
 
         if generated_count is not None:
+            if slug not in matrix_counts:
+                raise ValueError(
+                    f"{MATRIX_DOC}: '{slug}' needs a numeric matrix row for its generated action table"
+                )
             counts[slug] = generated_count
 
-    # IAM is intentionally non-tabular, so validate it from its handler.
-    iam_source = (
-        repo_root
-        / "src/main/java/io/github/hectorvent/floci/services/iam/IamQueryHandler.java"
-    )
-
-    counts["iam"] = len(
-        regen_action_docs.extract_switch_actions(
-            iam_source.read_text(encoding="utf-8")
+    registry = yaml.safe_load((repo_root / REGISTRY).read_text(encoding="utf-8")) or {}
+    sources = registry.get("action_count_sources")
+    if not isinstance(sources, dict) or not sources:
+        raise ValueError(f"{REGISTRY}: action_count_sources must be a non-empty mapping")
+    missing = required_sources - sources.keys()
+    if missing:
+        raise ValueError(f"{REGISTRY}: required action count source(s) missing: {', '.join(sorted(missing))}")
+    for slug, relative_path in sources.items():
+        if slug not in matrix_counts:
+            raise ValueError(f"{REGISTRY}: action count source '{slug}' has no numeric matrix row")
+        if slug in counts:
+            raise ValueError(f"{REGISTRY}: '{slug}' already has a generated action table")
+        if not isinstance(relative_path, str):
+            raise ValueError(f"{REGISTRY}: action count source '{slug}' needs a source path")
+        actions = regen_action_docs.extract_switch_actions(
+            (repo_root / relative_path).read_text(encoding="utf-8")
         )
-    )
+        if not actions:
+            raise ValueError(f"{REGISTRY}: action count source '{slug}' has no actions")
+        counts[slug] = len(set(actions))
 
     return counts
 
@@ -343,8 +363,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         matrix_action_counts = extract_matrix_action_counts(md_source)
-        source_action_counts = extract_action_counts(repo_root)
-    except (ValueError, OSError) as exc:
+        source_action_counts = extract_action_counts(repo_root, REQUIRED_ACTION_COUNT_SOURCES)
+    except (ValueError, OSError, yaml.YAMLError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

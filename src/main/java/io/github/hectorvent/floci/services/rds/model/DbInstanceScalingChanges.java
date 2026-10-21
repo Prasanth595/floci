@@ -75,7 +75,7 @@ public record DbInstanceScalingChanges(String dbInstanceClass,
         if (allocatedStorage < current) {
             throw new AwsException("InvalidParameterCombination",
                     "Invalid storage size for engine name " + instance.getEngineIdentifier()
-                            + " and storage type " + DbInstance.DEFAULT_STORAGE_TYPE + ": "
+                            + " and storage type " + instance.getStorageType() + ": "
                             + allocatedStorage, 400);
         }
         if (!TEN_PERCENT_MINIMUM_INCREASE.contains(instance.getEngine())) {

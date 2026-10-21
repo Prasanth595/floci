@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.LocalStackParity;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RequestHost;
@@ -59,6 +60,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
     private static final Set<String> NON_S3_SERVICE_LABELS = Set.of(
             "execute-api",      // ApiGatewayExecuteApiHostFilter: <api-id>.execute-api[.<region>].<host>
             "lambda-url",       // LambdaUrlRoutingFilter: <url-id>.lambda-url.<region>.<host>
+            "lambda-web",       // LambdaWebDataPlane: <id>.<shard>.lambda-web.<region>.<host>, <id>.lambda-web.global.<host>
             "emr-serverless",   // EmrServerlessRouteFilter: emr-serverless.<host>
             "cloudfront");      // CloudFrontDistributionFilter: <dist-id>.cloudfront.net
 
@@ -75,7 +77,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
                 .orElseGet(() -> containerDetector.isRunningInContainer()
                         ? EmbeddedDnsServer.DEFAULT_SUFFIX
                         : extractHostnameFromUrl(config.baseUrl()));
-        this.serviceHostSuffixes = buildServiceHostSuffixes(config.hostname(), config.dns().extraSuffixes());
+        this.serviceHostSuffixes = buildServiceHostSuffixes(config.hostname(), LocalStackParity.withDnsSuffixes(config.dns().extraSuffixes()));
         this.s3ServiceInstance = s3ServiceInstance;
     }
 
@@ -173,8 +175,10 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // Rewrite path from /key to /bucket/key
         String newPath = "/" + bucket + (path.startsWith("/") ? "" : "/") + path;
 
+        // RESTEasy keeps the decoded path of the URI it is given and decodes it again to route,
+        // so escape it once more to leave the raw path in place, as a path-style request has it.
         URI newUri = UriBuilder.fromUri(uri)
-                .replacePath(newPath)
+                .replacePath(newPath.replace("%", "%25"))
                 .build();
 
         requestContext.setProperty(ORIGINAL_REQUEST_URI_PROPERTY, uri);

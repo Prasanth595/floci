@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
 import io.github.hectorvent.floci.services.acm.model.CertificateOptions;
 import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
@@ -102,9 +103,9 @@ public class AcmJsonHandler {
         }
         JsonNode sanNode = request.path("SubjectAlternativeNames");
         if (sanNode.isArray() && sanNode.isEmpty()) {
-            throw new AwsException("ValidationException",
-                "1 validation error detected: Value '[]' at 'subjectAlternativeNames' failed to satisfy "
-                    + "constraint: Member must have length greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException(
+                "Value '[]' at 'subjectAlternativeNames' failed to satisfy "
+                    + "constraint: Member must have length greater than or equal to 1");
         }
         List<String> sans = parseStringList(sanNode);
         ValidationMethod validationMethod = parseValidationMethod(request.path("ValidationMethod").asText(null));
@@ -160,10 +161,11 @@ public class AcmJsonHandler {
 
         ListResult result = service.listCertificates(statuses, keyTypes, region, maxItems, nextToken);
 
+        Map<String, List<String>> consumers = service.certificateInUseBy(result.certificates());
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaryList = objectMapper.createArrayNode();
         for (Certificate cert : result.certificates()) {
-            summaryList.add(buildCertificateSummary(cert));
+            summaryList.add(buildCertificateSummary(cert, consumers.get(cert.getArn())));
         }
         response.set("CertificateSummaryList", summaryList);
         if (result.nextToken() != null) {
@@ -399,9 +401,7 @@ public class AcmJsonHandler {
         }
 
         ArrayNode inUseBy = objectMapper.createArrayNode();
-        if (cert.getInUseBy() != null) {
-            cert.getInUseBy().forEach(inUseBy::add);
-        }
+        service.certificateInUseBy(cert).forEach(inUseBy::add);
         node.set("InUseBy", inUseBy);
 
         if (cert.getDomainValidationOptions() != null && !cert.getDomainValidationOptions().isEmpty()) {
@@ -462,7 +462,7 @@ public class AcmJsonHandler {
         return node;
     }
 
-    private ObjectNode buildCertificateSummary(Certificate cert) {
+    private ObjectNode buildCertificateSummary(Certificate cert, List<String> consumers) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("CertificateArn", cert.getArn());
         node.put("DomainName", cert.getDomainName());
@@ -508,7 +508,7 @@ public class AcmJsonHandler {
         }
 
         node.put("RenewalEligibility", "INELIGIBLE");
-        node.put("InUse", cert.getInUseBy() != null && !cert.getInUseBy().isEmpty());
+        node.put("InUse", !consumers.isEmpty());
 
         return node;
     }
