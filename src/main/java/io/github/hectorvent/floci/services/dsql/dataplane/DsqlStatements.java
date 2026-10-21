@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dsql.dataplane;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * The statements of a query as Aurora DSQL reads them. DSQL's own syntax ({@code AWS IAM GRANT}
@@ -14,6 +15,8 @@ import java.util.Locale;
 public final class DsqlStatements {
 
     private static final String RESERVED_PREFIX = "dsql.";
+    private static final Set<String> ROLE_SPECIFIERS = Set.of("CURRENT_ROLE", "CURRENT_USER", "SESSION_USER", "PUBLIC",
+            "NONE");
 
     private DsqlStatements() {
     }
@@ -85,6 +88,12 @@ public final class DsqlStatements {
                 return iam;
             }
         }
+        if ("DROP".equals(first) && ("ROLE".equals(second) || "USER".equals(second) || "GROUP".equals(second))) {
+            Statement drop = dropRoles(tokens);
+            if (drop != null) {
+                return drop;
+            }
+        }
         Statement setting = setting(tokens, first);
         if (setting != null) {
             return setting;
@@ -137,7 +146,9 @@ public final class DsqlStatements {
                     return reservedPrefix(name);
                 }
             }
-            if ("SET_CONFIG".equals(word) && i + 2 < tokens.size() && "(".equals(tokens.get(i + 1).text())
+            boolean setConfig = "SET_CONFIG".equals(word) || tokens.get(i).type() == Type.QUOTED_IDENTIFIER
+                    && "set_config".equals(tokens.get(i).value());
+            if (setConfig && i + 2 < tokens.size() && "(".equals(tokens.get(i + 1).text())
                     && tokens.get(i + 2).type() == Type.STRING) {
                 String name = tokens.get(i + 2).value();
                 if (name.startsWith(RESERVED_PREFIX)) {
@@ -149,6 +160,37 @@ public final class DsqlStatements {
             }
         }
         return null;
+    }
+
+    /**
+     * {@code DROP ROLE|USER|GROUP [IF EXISTS] name, ...}: the call that refuses a role an IAM role or
+     * user is mapped to, as DSQL does (measured), and otherwise drops them as the caller.
+     */
+    private static Statement dropRoles(List<Token> tokens) {
+        int at = 2;
+        boolean ifExists = "IF".equals(word(tokens, at)) && "EXISTS".equals(word(tokens, at + 1));
+        if (ifExists) {
+            at += 2;
+        }
+        List<String> names = new ArrayList<>();
+        for (int i = at; i < tokens.size(); i += 2) {
+            Token name = tokens.get(i);
+            // A role specifier PostgreSQL refuses here is left for PostgreSQL to refuse.
+            boolean specifier = name.type() == Type.WORD && ROLE_SPECIFIERS.contains(name.upper());
+            if (specifier || name.type() != Type.WORD && name.type() != Type.QUOTED_IDENTIFIER) {
+                return null;
+            }
+            names.add(literal(identifier(name)));
+            if (i + 1 < tokens.size() && !",".equals(tokens.get(i + 1).text())) {
+                return null;
+            }
+        }
+        // Names and commas alternate, so a list that ends in a comma is left for PostgreSQL to refuse.
+        if (names.isEmpty() || (tokens.size() - at) % 2 == 0) {
+            return null;
+        }
+        return new Statement("CALL sys.drop_roles(ARRAY[" + String.join(", ", names) + "]::text[], " + ifExists + ")",
+                "DROP ROLE");
     }
 
     private static Statement reservedPrefix(String name) {

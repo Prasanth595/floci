@@ -37,6 +37,7 @@ class DsqlStatementsTest {
         "ALTER ROLE admin IN DATABASE postgres RESET dsql.x|dsql.x",
         "CREATE FUNCTION f() RETURNS int LANGUAGE sql SET dsql.x = 1 AS 'SELECT 1'|dsql.x",
         "SET \"dsql\".x = 1|dsql.x",
+        "SELECT \"set_config\"('dsql.x', '1', false)|dsql.x",
     })
     void theDsqlPrefixIsReservedOnEveryChannel(String sql, String name) {
         assertEquals(DsqlStatements.reject("42602", "invalid configuration parameter name \"" + name + "\"",
@@ -58,9 +59,23 @@ class DsqlStatementsTest {
                 DsqlStatements.rewrite("SELECT set_config('search_path', 'public', false)").get(0).sql());
     }
 
+    @Test
+    void dropRoleBecomesTheCallThatRefusesAMappedRole() {
+        assertEquals("CALL sys.drop_roles(ARRAY['app_role', 'Mixed']::text[], false)",
+                DsqlStatements.rewrite("DROP ROLE App_Role, \"Mixed\"").get(0).sql());
+        DsqlStatements.Statement user = DsqlStatements.rewrite("drop user if exists u").get(0);
+        assertEquals("CALL sys.drop_roles(ARRAY['u']::text[], true)", user.sql());
+        assertEquals("DROP ROLE", user.commandTag());
+        assertEquals("DROP ROLE", DsqlStatements.rewrite("DROP GROUP g").get(0).commandTag());
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
         "SET search_path TO probe",
+        "DROP ROLE CURRENT_USER",
+        "DROP ROLE IF EXISTS",
+        "DROP ROLE a b",
+        "DROP ROLE a,",
         "SELECT 'AWS IAM GRANT a TO b' AS text",
         "CREATE INDEX ON t (n)",
         "TRUNCATE t",

@@ -247,8 +247,17 @@ public class DsqlEndpoint {
         if (principal == null) {
             return Admission.refused(null);
         }
-        if (!ADMIN.equals(user) && !mapped(route.backend(), principal, user)) {
-            return Admission.unauthorized();
+        if (!ADMIN.equals(user)) {
+            try {
+                if (!mapped(route.backend(), principal, user)) {
+                    return Admission.unauthorized();
+                }
+            } catch (SQLException e) {
+                // A database that cannot be asked says nothing about the role: the connection fails
+                // as one the cluster cannot serve, not as a role refused.
+                LOG.warn("Could not read the IAM role mappings of a DSQL cluster", e);
+                return Admission.refused(null);
+            }
         }
         return new Admission(true, null, null, route, principal);
     }
@@ -303,7 +312,7 @@ public class DsqlEndpoint {
      * Whether {@code AWS IAM GRANT} mapped the IAM role {@code principal} to {@code role}. A
      * superuser is never one, as DSQL never lets {@code dbowner} in.
      */
-    private static boolean mapped(DsqlDatabases.Backend backend, String principal, String role) {
+    private static boolean mapped(DsqlDatabases.Backend backend, String principal, String role) throws SQLException {
         try (Connection connection = DsqlDatabases.superuser(backend);
              PreparedStatement query = connection.prepareStatement("SELECT 1 FROM sys.iam_pg_role_mappings m"
                      + " JOIN pg_roles r ON r.oid = m.pg_role_oid WHERE m.arn = ? AND m.pg_role_name = ?"
@@ -313,8 +322,30 @@ public class DsqlEndpoint {
             try (ResultSet rows = query.executeQuery()) {
                 return rows.next();
             }
+        }
+    }
+
+    /**
+     * Records who the session on backend process {@code pid} is, for {@code sys.iam_session_user()}
+     * and {@code sys.current_session_id()}. The superuser writes it into a table no role of the
+     * cluster can write, so nothing the session runs can change it, and drops the rows of sessions
+     * that have ended. False, with the cause logged, when the database could not be written.
+     */
+    boolean recordSession(DsqlDatabases.Backend backend, int pid, String principal, String sessionId) {
+        try (Connection connection = DsqlDatabases.superuser(backend);
+             PreparedStatement purge = connection.prepareStatement("DELETE FROM sys.session_identity"
+                     + " WHERE pid NOT IN (SELECT pid FROM pg_stat_activity WHERE pid IS NOT NULL)");
+             PreparedStatement record = connection.prepareStatement("INSERT INTO sys.session_identity"
+                     + " (pid, iam_session_user, session_id) VALUES (?, ?, ?) ON CONFLICT (pid) DO UPDATE"
+                     + " SET iam_session_user = EXCLUDED.iam_session_user, session_id = EXCLUDED.session_id")) {
+            purge.executeUpdate();
+            record.setInt(1, pid);
+            record.setString(2, principal);
+            record.setString(3, sessionId);
+            record.executeUpdate();
+            return true;
         } catch (SQLException e) {
-            LOG.warnv("Could not read the IAM role mappings of a DSQL cluster: {0}", e.getMessage());
+            LOG.warn("Could not record the identity of a DSQL session", e);
             return false;
         }
     }

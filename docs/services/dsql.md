@@ -67,10 +67,10 @@ When Floci runs in Docker, publish `5432` alongside `4566`.
   wrong action is refused with the hint `Wrong user to action mapping. user: <user>, action: <action>`.
 - A token is accepted up to 5 seconds past its expiry, as DSQL accepts it; after that the hint is
   `Signature expired: ...`.
-- A role other than `admin` signs in only for the IAM role that `AWS IAM GRANT` mapped to it. The
-  token's principal is the role behind its credentials (a Lambda function's execution role, an ECS
-  task's role with `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED`, an `AssumeRole` session),
-  its ARN with its path.
+- A role other than `admin` signs in only for an IAM role or user that `AWS IAM GRANT` mapped to
+  it. The token's principal is the identity behind its credentials (a Lambda function's execution
+  role, an ECS task's role with `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED`, an `AssumeRole`
+  session, an IAM user's key), its ARN with its path.
 - The signature is verified like any other Floci IAM token: the `test` key, or a key or session
   Floci issued. With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`, the principal also needs
   `dsql:DbConnectAdmin` or `dsql:DbConnect` on the cluster ARN.
@@ -86,9 +86,10 @@ The database is PostgreSQL 16 at `REPEATABLE READ`, as DSQL's is, with the role 
 the `public` schema and can create roles and databases. A connection closes after an hour, as DSQL
 closes it.
 
-- `AWS IAM GRANT <role> TO '<role arn>'` and `AWS IAM REVOKE <role> FROM '<role arn>'`, with
-  `sys.iam_pg_role_mappings`. A superuser role cannot be mapped, and only a role holding the
-  `ADMIN` option on a role can map it: `admin` maps the roles it created.
+- `AWS IAM GRANT <role> TO '<arn>'` and `AWS IAM REVOKE <role> FROM '<arn>'`, for an IAM role or
+  user, with `sys.iam_pg_role_mappings`. A superuser role cannot be mapped, only a role holding the
+  `ADMIN` option on a role can map it (`admin` maps the roles it created), and a mapped role cannot
+  be dropped until its mappings are revoked.
 - `sys.iam_session_user()` answers the connection's IAM principal and `sys.current_session_id()`
   its session id, as on DSQL.
 - `dsql` is a reserved prefix, as on DSQL: `SET`, `RESET`, `set_config`, `ALTER ROLE ... SET` and a
@@ -104,10 +105,12 @@ closes it.
   as PostgreSQL refuses them, what DSQL refuses works, and DSQL's transaction limits (one DDL
   statement, 3,000 rows, 300 seconds) do not apply.
 - `sys` also holds the tables behind Floci's IAM mappings.
-- A `dsql.` parameter whose name a statement builds at run time, as in `set_config(chr(100) ||
-  'sql.x', ...)`, is set where DSQL refuses it, since only a PostgreSQL extension written in C can
-  reserve a prefix; it changes at most what `sys.iam_session_user()` and `sys.current_session_id()`
-  report to that session.
+- Floci checks the statements a client sends, not what a `DO` block or a function body runs. In
+  one, `SET`, `RESET` and `set_config` of a `dsql.` parameter set it where DSQL refuses it, since
+  only a PostgreSQL extension written in C can reserve a prefix, and so does `set_config` of a name
+  built at run time, as in `set_config(chr(100) || 'sql.x', ...)`. Nothing Floci reads lives in such
+  a parameter. Likewise a `DROP ROLE` in one drops a mapped role: `sys.iam_pg_role_mappings` no
+  longer lists its mappings, and the next `AWS IAM GRANT` or `REVOKE` removes them.
 - DSQL is optimistic: conflicting transactions both run and the second to commit fails with
   `40001`. Floci's database is PostgreSQL, so a write that conflicts waits for the other
   transaction, then fails with PostgreSQL's `40001`.

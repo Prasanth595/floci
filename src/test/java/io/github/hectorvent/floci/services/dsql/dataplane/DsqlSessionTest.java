@@ -72,6 +72,28 @@ class DsqlSessionTest {
     }
 
     @Test
+    void whatASysFunctionRanLeavesTheContextWithIt() {
+        byte[] postgres = error(Map.of('C', "42704", 'M', "role \"nosuch\" does not exist",
+                'W', "SQL statement \"DROP ROLE nosuch\"\nPL/pgSQL function sys.drop_roles(text[],boolean) line 13"
+                        + " at EXECUTE"));
+
+        Map<Character, String> fields = PostgresWire.parseFields(DsqlSession.inDsqlWords((byte) 'E', postgres), 0);
+
+        assertFalse(fields.containsKey('W'));
+    }
+
+    @Test
+    void theClientsOwnFramesAroundASysCallStay() {
+        byte[] postgres = error(Map.of('C', "22012", 'M', "division by zero",
+                'W', "SQL statement \"SELECT\n    1 / 0\"\nPL/pgSQL function sys.probe() line 3 at PERFORM\n"
+                        + "SQL function \"f\" statement 1"));
+
+        Map<Character, String> fields = PostgresWire.parseFields(DsqlSession.inDsqlWords((byte) 'E', postgres), 0);
+
+        assertEquals("SQL function \"f\" statement 1", fields.get('W'));
+    }
+
+    @Test
     void anErrorFromTheClientsOwnSqlIsLeftAlone() {
         byte[] postgres = error(Map.of('C', "23505", 'M', "duplicate key value violates unique constraint \"t_u\"",
                 'W', "SQL function \"f\" statement 1"));
