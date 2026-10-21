@@ -83,11 +83,13 @@ public class LambdaWebService implements Resettable {
             "AWS_LAMBDA_HTTP_ENDPOINT", "AWS_LAMBDA_RUNTIME_API", "AWS_LAMBDA_INITIALIZATION_TYPE",
             "AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "AWS_LAMBDA_METADATA_API", "AWS_LAMBDA_METADATA_TOKEN");
     /** A wildcard principal pinned by one of these condition keys does not make a policy public. */
-    static final Set<String> TRUSTED_CONDITION_KEYS = with(PublicAccessConditions.TRUSTED_KEYS, "lambda:SourceFunctionArn");
+    static final Set<String> TRUSTED_CONDITION_KEYS =
+            PublicAccessConditions.with(PublicAccessConditions.TRUSTED_KEYS, "lambda:SourceFunctionArn");
     /** The operators whose match pins the caller. Negated and IfExists forms do not. */
     private static final Set<String> PINNING_OPERATORS = Set.of(
             "StringEquals", "StringEqualsIgnoreCase", "StringLike", "ArnEquals", "ArnLike", "Bool");
-    private static final Set<String> ARN_CONDITION_KEYS = with(PublicAccessConditions.ARN_KEYS, "lambda:SourceFunctionArn");
+    private static final Set<String> ARN_CONDITION_KEYS =
+            PublicAccessConditions.with(PublicAccessConditions.ARN_KEYS, "lambda:SourceFunctionArn");
     private static final Set<String> STATEMENT_KEYS = Set.of(
             "Sid", "Effect", "Principal", "NotPrincipal", "Action", "NotAction", "Resource", "NotResource", "Condition");
     private static final Set<String> PRINCIPAL_KEYS = Set.of("AWS", "Service", "Federated", "CanonicalUser");
@@ -1336,12 +1338,6 @@ public class LambdaWebService implements Resettable {
             }
         }
         return !each.isEmpty();
-    }
-
-    private static Set<String> with(Set<String> keys, String key) {
-        Set<String> all = new LinkedHashSet<>(keys);
-        all.add(key);
-        return Set.copyOf(all);
     }
 
     private static AwsException policySyntax() {

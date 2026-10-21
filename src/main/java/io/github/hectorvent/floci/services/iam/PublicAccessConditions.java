@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import org.jboss.logging.Logger;
 
+import java.util.HashSet;
 import java.util.Set;
 
 /**
@@ -31,6 +32,13 @@ public final class PublicAccessConditions {
     public static final Set<String> ARN_KEYS = Set.of("aws:PrincipalArn", "aws:SourceArn", "aws:SourceVpcArn");
 
     private PublicAccessConditions() {
+    }
+
+    /** {@code keys} and one more, for a service that accepts a key of its own on top of the shared ones. */
+    public static Set<String> with(Set<String> keys, String key) {
+        Set<String> all = new HashSet<>(keys);
+        all.add(key);
+        return Set.copyOf(all);
     }
 
     /** A value that names one thing: not empty, and with no wildcard or policy variable in it. */

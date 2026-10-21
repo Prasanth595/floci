@@ -66,7 +66,8 @@ final class DsqlClusterPolicies {
      * accept too, {@code aws:SourceIp}, {@code aws:SourceVpcArn} and the three {@code aws:Vpce*}:
      * the keys Lambda shares, and {@code aws:SourceIp}. Keys are matched in any case (measured).
      */
-    private static final Set<String> RESTRICTING_KEYS = lowercase(with(PublicAccessConditions.TRUSTED_KEYS, "aws:SourceIp"));
+    private static final Set<String> RESTRICTING_KEYS =
+            lowercase(PublicAccessConditions.with(PublicAccessConditions.TRUSTED_KEYS, "aws:SourceIp"));
     private static final Set<String> ARN_KEYS = lowercase(PublicAccessConditions.ARN_KEYS);
 
     private DsqlClusterPolicies() {
@@ -327,12 +328,6 @@ final class DsqlClusterPolicies {
         Set<String> names = new HashSet<>();
         node.fieldNames().forEachRemaining(names::add);
         return names;
-    }
-
-    private static Set<String> with(Set<String> keys, String key) {
-        Set<String> all = new HashSet<>(keys);
-        all.add(key);
-        return all;
     }
 
     private static Set<String> lowercase(Set<String> keys) {
