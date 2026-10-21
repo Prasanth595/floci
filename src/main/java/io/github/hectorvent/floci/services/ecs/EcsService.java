@@ -81,6 +81,7 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -128,6 +129,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // what every such caller already expects.
     private final EcsServiceDiscoveryRegistrar discoveryRegistrar;
     private final CloudWatchMetricsService cloudWatchMetricsService;
+    private final Clock clock;
     private final boolean dockerMode;
     private final boolean sweepLeftoverContainers;
     private final String baseUrl;
@@ -253,6 +255,17 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                       EcsExecSessionRegistry execSessions,
                       EcsServiceDiscoveryRegistrar discoveryRegistrar,
                       CloudWatchMetricsService cloudWatchMetricsService) {
+        this(regionResolver, containerManager, config, lbRegistrar, storageFactory, eventPublisher,
+                execSessions, discoveryRegistrar, cloudWatchMetricsService, Clock.systemUTC());
+    }
+
+    /** With the clock that dates Container Insights samples, which a test pins. */
+    EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
+               EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
+               StorageFactory storageFactory, EcsEventPublisher eventPublisher,
+               EcsExecSessionRegistry execSessions,
+               EcsServiceDiscoveryRegistrar discoveryRegistrar,
+               CloudWatchMetricsService cloudWatchMetricsService, Clock clock) {
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
@@ -265,6 +278,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         this.execSessions = execSessions;
         this.discoveryRegistrar = discoveryRegistrar;
         this.cloudWatchMetricsService = cloudWatchMetricsService;
+        this.clock = clock;
     }
 
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
@@ -5268,7 +5282,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (running < 1) {
             return;
         }
-        long minute = Instant.now().truncatedTo(ChronoUnit.MINUTES).getEpochSecond();
+        long minute = clock.instant().truncatedTo(ChronoUnit.MINUTES).getEpochSecond();
         Map<String, Integer> counts = Map.of("RunningTaskCount", running,
                 "PendingTaskCount", Collections.frequency(statuses, TaskStatus.PENDING.name()),
                 "DesiredTaskCount", svc.getDesiredCount());

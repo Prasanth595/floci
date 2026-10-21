@@ -19,8 +19,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Clock;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,7 +29,6 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -51,6 +51,7 @@ class EcsServiceContainerInsightsTest {
 
     private static final String REGION = "us-east-1";
     private static final String NAMESPACE = "ECS/ContainerInsights";
+    private static final Instant MINUTE = Instant.parse("2026-10-20T12:00:00Z");
 
     private CloudWatchMetricsService metrics;
     private EcsService service;
@@ -64,7 +65,8 @@ class EcsServiceContainerInsightsTest {
         when(config.services().ecs().mock()).thenReturn(true);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         service = new EcsService(regionResolver, mock(EcsContainerManager.class), config,
-                mock(EcsLoadBalancerRegistrar.class), storage, null, new EcsExecSessionRegistry(), null, metrics);
+                mock(EcsLoadBalancerRegistrar.class), storage, null, new EcsExecSessionRegistry(), null, metrics,
+                Clock.fixed(MINUTE.plusSeconds(42), ZoneOffset.UTC));
         service.initializeStorage();
         ContainerDefinition cd = new ContainerDefinition();
         cd.setName("app");
@@ -80,6 +82,7 @@ class EcsServiceContainerInsightsTest {
         service.reconcile();
 
         Datapoint running = only("RunningTaskCount");
+        assertEquals(MINUTE, running.timestamp());
         assertEquals(1.0, running.maximum());
         assertEquals("Count", running.unit());
         assertEquals(0.0, only("PendingTaskCount").maximum());
@@ -101,12 +104,10 @@ class EcsServiceContainerInsightsTest {
     @Test
     void anUnchangedSampleIsNotWrittenAgainWithinTheMinute() {
         startService(List.of(new ClusterSetting("containerInsights", "enabled")), 1);
-        Instant minute = Instant.now().truncatedTo(ChronoUnit.MINUTES);
 
         service.reconcile();
         service.reconcile();
 
-        assumeTrue(minute.equals(Instant.now().truncatedTo(ChronoUnit.MINUTES)), "the minute rolled over between the ticks");
         verify(metrics, times(3)).publishMetricForAccount(anyString(), eq(NAMESPACE), any(), eq(REGION), anyString());
     }
 
@@ -171,10 +172,9 @@ class EcsServiceContainerInsightsTest {
     }
 
     private List<Datapoint> statistics(String metricName) {
-        Instant now = Instant.now();
         return metrics.getMetricStatistics(NAMESPACE, metricName,
                 List.of(new Dimension("ServiceName", "web"), new Dimension("ClusterName", "insights")),
-                now.minusSeconds(600), now.plusSeconds(600), 60, List.of("Maximum"), null, REGION);
+                MINUTE.minusSeconds(600), MINUTE.plusSeconds(600), 60, List.of("Maximum"), null, REGION);
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {
