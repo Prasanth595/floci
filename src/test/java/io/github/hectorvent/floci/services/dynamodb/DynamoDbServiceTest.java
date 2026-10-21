@@ -4739,6 +4739,28 @@ class DynamoDbServiceTest {
         assertEquals(earliest, restarted.describeContinuousBackups("Users", region).window().earliest());
     }
 
+    @Test
+    void theTtlSweepDeletesAnExpiredSystemBackup() {
+        String region = "us-east-1";
+        StorageBackend<String, TableBackup> backups = new InMemoryStorage<>();
+        DynamoDbService swept = new DynamoDbService(new InMemoryStorage<>(), new InMemoryStorage<>(), null, null,
+                backups, new InMemoryStorage<>(), new RegionResolver(region, "000000000000"),
+                null, null, null, mapper, 0, 0, 0);
+        for (String table : List.of("Expired", "Kept")) {
+            swept.createTable(table, List.of(new KeySchemaElement("userId", "HASH")),
+                    List.of(new AttributeDefinition("userId", "S")), 5L, 5L, region);
+            swept.updateContinuousBackups(table, true, null, region);
+            swept.deleteTable(table, region);
+        }
+        TableBackup expired = backups.scan(key -> key.contains("/Expired/")).getFirst();
+        expired.setExpiryDateTime(Instant.now().minusSeconds(1));
+        backups.put(expired.getBackupArn(), expired);
+
+        swept.deleteExpiredItems();
+
+        assertEquals(List.of("Kept"), backups.scan(key -> true).stream().map(b -> b.getTable().getTableName()).toList());
+    }
+
     private static Instant pause() throws InterruptedException {
         Thread.sleep(5);
         Instant now = Instant.now();

@@ -2890,8 +2890,10 @@ public class DynamoDbService {
                              TableDefinition table, List<String> itemKeys,
                              ConcurrentSkipListMap<String, JsonNode> items) {}
 
+    /** The TTL sweep also removes the system backups past their expiry. */
     void deleteExpiredItems() {
         deleteScannedItems(scanExpiredItems());
+        deleteExpiredBackups();
     }
 
     List<ExpiredTableScan> scanExpiredItems() {
@@ -5123,6 +5125,17 @@ public class DynamoDbService {
         persistItems(storageKey);
         activateTable(tableName, region);
         LOG.infov("Restored {0} items into table {1}", items.size(), tableName);
+    }
+
+    private void deleteExpiredBackups() {
+        if (backupStore instanceof AccountAwareStorageBackend<TableBackup> aware) {
+            aware.deleteAllAccountsMatching(backup -> !isUnexpired(backup));
+            return;
+        }
+        for (String backupArn : new ArrayList<>(backupStore.keys())) {
+            backupStore.get(backupArn).filter(backup -> !isUnexpired(backup))
+                    .ifPresent(backup -> backupStore.delete(backupArn));
+        }
     }
 
     private static boolean isUnexpired(TableBackup backup) {
