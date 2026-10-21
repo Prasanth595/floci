@@ -643,8 +643,9 @@ class ElbV2CfnProvisionerTest {
     void anUpdateWithABlankSubnetIdIsRefusedByTheMoveAndKeepsNoSnapshot() {
         when(elb.createLoadBalancer(eq(REGION), eq("web"), isNull(), eq("network"), isNull(), anyList(), anyList(),
                 any())).thenThrow(new AwsException("DuplicateLoadBalancerName", "exists", 400));
-        when(elb.describeLoadBalancers(REGION, null, List.of("web"), null, null))
-                .thenReturn(List.of(loadBalancerOn("web", "subnet-1", "subnet-2")));
+        LoadBalancer kept = loadBalancerOn("web", "subnet-1", "subnet-2");
+        kept.setType("network");
+        when(elb.describeLoadBalancers(REGION, null, List.of("web"), null, null)).thenReturn(List.of(kept));
         doThrow(new AwsException("SubnetNotFound", "The subnet ID ' ' does not exist", 400))
                 .when(elb).setSubnets(REGION, LB_ARN, List.of(" "));
         ObjectNode props = mapper.createObjectNode().put("Name", "web").put("Type", "network");
