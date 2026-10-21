@@ -401,7 +401,7 @@ public class CloudFormationService implements ResourceProvider {
                                       Map<String, String> tags, String region, String accountId,
                                       boolean attachToReviewInProgressStack, boolean fromPreviousTemplate) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
-        requireNoNullValues(resolvedTemplate);
+        requireValidTemplate(resolvedTemplate);
         boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
         // An update names its stack by name or stack ID; the map is keyed by name. One that names no
         // live stack is keyed as given, so it lands in the missing-stack branch below.
@@ -1567,13 +1567,7 @@ public class CloudFormationService implements ResourceProvider {
                         "One of StackName, TemplateBody or TemplateURL must be specified.", 400);
             }
         }
-        JsonNode template;
-        try {
-            template = parseTemplate(resolvedBody);
-        } catch (Exception e) {
-            throw new AwsException("ValidationError", "Template format error: " + e.getMessage(), 400);
-        }
-        return buildTemplateSummary(template);
+        return buildTemplateSummary(readTemplate(resolvedBody));
     }
 
     /** Each parameter the template declares, with its {@link #parameterType}. */
@@ -3939,13 +3933,27 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private JsonNode parseTemplate(String templateBody) throws Exception {
-        String trimmed = templateBody != null ? templateBody.trim() : "{}";
-        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-            return objectMapper.readTree(trimmed);
+    private JsonNode parseTemplate(String templateBody) throws CloudFormationTemplateParser.TemplateFormatException {
+        return new CloudFormationTemplateParser(objectMapper).parse(templateBody);
+    }
+
+    /**
+     * {@code templateBody} parsed, refused as CloudFormation refuses a body that is no template
+     * (measured, eu-west-1, 2026-10-21, for ValidateTemplate, CreateStack and GetTemplateSummary):
+     * one that reads as neither JSON nor YAML, with the parser's position, and one that reads as a
+     * scalar or a list. A null template passes, for the checks that answer it.
+     */
+    private JsonNode readTemplate(String templateBody) {
+        JsonNode parsed;
+        try {
+            parsed = parseTemplate(templateBody);
+        } catch (CloudFormationTemplateParser.TemplateFormatException e) {
+            throw new AwsException("ValidationError", "Template format error: " + e.getMessage(), 400);
         }
-        // YAML template — use CF-aware parser to handle !Sub, !Ref, !GetAtt etc.
-        return new CloudFormationYamlParser(objectMapper).parse(trimmed);
+        if (parsed != null && !parsed.isNull() && !parsed.isObject()) {
+            throw new AwsException("ValidationError", "Template format error: unsupported structure.", 400);
+        }
+        return parsed;
     }
 
     private String resolveTemplate(String templateBody, String templateUrl) {
@@ -4493,12 +4501,37 @@ public class CloudFormationService implements ResourceProvider {
         return value;
     }
 
-    /** ValidateTemplate's check of a template: the null values AWS refuses there. */
+    /** ValidateTemplate's check of a template: one that is no template, and the null values AWS refuses there. */
     public void validateTemplate(String templateBody, String templateUrl) {
         String resolvedBody = resolveTemplateBody(templateBody, templateUrl);
         if (resolvedBody != null) {
-            requireNoNullValues(resolvedBody);
+            requireValidTemplate(resolvedBody);
         }
+    }
+
+    /**
+     * The checks ValidateTemplate, CreateStack, UpdateStack and CreateChangeSet make of a template
+     * before anything is created: a body that is no template ({@link #readTemplate}), then its null
+     * values ({@link #requireNoNullValues}).
+     */
+    private void requireValidTemplate(String templateBody) {
+        requireNoNullValues(readTemplate(templateBody));
+    }
+
+    /**
+     * {@link #requireNoNullValues(JsonNode)} for a stack set's template, as CreateStackSet and
+     * UpdateStackSet refuse it. They were not measured with a body that does not parse, so such a
+     * body fails where the template is processed, with the parser's error.
+     */
+    void requireNoNullValues(String templateBody) {
+        JsonNode parsed;
+        try {
+            parsed = parseTemplate(templateBody);
+        } catch (CloudFormationTemplateParser.TemplateFormatException e) {
+            LOG.debugv("Skipping null value validation; template did not parse: {0}", e.getMessage());
+            return;
+        }
+        requireNoNullValues(parsed);
     }
 
     /**
@@ -4508,16 +4541,7 @@ public class CloudFormationService implements ResourceProvider {
      * templates", naming the first null in document order. Below a resource's Properties the path
      * says Type where Properties would be, as AWS's does; a null Properties is named as it is.
      */
-    void requireNoNullValues(String templateBody) {
-        JsonNode parsed;
-        try {
-            parsed = parseTemplate(templateBody);
-        } catch (Exception e) {
-            // As validateResourceDependencies: a template that does not parse fails where it is
-            // processed, with the parser's error.
-            LOG.debugv("Skipping null value validation; template did not parse: {0}", e.getMessage());
-            return;
-        }
+    private static void requireNoNullValues(JsonNode parsed) {
         if (parsed == null || parsed.isNull()) {
             // Measured: a template that is null as a whole ("null", "~") lacks its resources first.
             throw new AwsException("ValidationError",

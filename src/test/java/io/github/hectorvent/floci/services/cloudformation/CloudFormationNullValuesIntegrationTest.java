@@ -22,11 +22,11 @@ import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * A template holding a null value is refused when the operation is requested, before anything is
- * created. Measured on CloudFormation (eu-west-1, 2026-10-20): ValidateTemplate, CreateStack,
- * UpdateStack and CreateChangeSet answer 400 ValidationError "[path] 'null' values are not allowed
- * in templates", the path naming the first null in document order, with Type where a resource's
- * Properties would be.
+ * A template holding a null value, or a body that is no template, is refused when the operation is
+ * requested, before anything is created. Measured on CloudFormation (eu-west-1, 2026-10-20):
+ * ValidateTemplate, CreateStack, UpdateStack and CreateChangeSet answer 400 ValidationError "[path]
+ * 'null' values are not allowed in templates", the path naming the first null in document order,
+ * with Type where a resource's Properties would be.
  */
 @QuarkusTest
 class CloudFormationNullValuesIntegrationTest {
@@ -73,6 +73,7 @@ class CloudFormationNullValuesIntegrationTest {
                         + "      QueueName:\n      DelaySeconds: ~\n", "/Resources/Q/Type/QueueName"));
     }
 
+    /** Measured for a null value (2026-10-20) and for a body that is no template (2026-10-21). */
     @Test
     void anUpdateAndAChangeSetAreRefusedToo() {
         String name = "cfn-null-update-" + System.nanoTime();
@@ -89,6 +90,11 @@ class CloudFormationNullValuesIntegrationTest {
                 .formParam("Action", "CreateChangeSet").formParam("StackName", name)
                 .formParam("ChangeSetName", "with-null").formParam("TemplateBody", template)
                 .when().post("/"), message);
+        assertRefused(request("UpdateStack", name, "[1, 2]"), "Template format error: unsupported structure.");
+        assertRefused(given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
+                .formParam("Action", "CreateChangeSet").formParam("StackName", name)
+                .formParam("ChangeSetName", "not-a-template").formParam("TemplateBody", "Resources:\n  A: [unclosed\n")
+                .when().post("/"), "Template format error: YAML not well-formed. (line 3, column 1)");
 
         given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
                 .formParam("Action", "DeleteStack").formParam("StackName", name)
@@ -104,6 +110,43 @@ class CloudFormationNullValuesIntegrationTest {
 
         assertRefused(request("ValidateTemplate", null, template), message);
         assertRefused(request("CreateStack", "cfn-null-whole-" + System.nanoTime(), template), message);
+    }
+
+    /**
+     * Measured (eu-west-1, 2026-10-21): a body that reads as neither JSON nor YAML, or as a scalar or
+     * a list, is no template, alike for the three calls that read one, and no stack is created.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("notTemplates")
+    void aBodyThatIsNoTemplateIsRefused(String body, String message) {
+        String name = "cfn-format-" + System.nanoTime();
+
+        for (String action : List.of("ValidateTemplate", "CreateStack", "GetTemplateSummary")) {
+            assertRefused(request(action, "CreateStack".equals(action) ? name : null, body),
+                    "Template format error: " + message);
+        }
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
+                .formParam("Action", "DescribeStacks").formParam("StackName", name)
+                .when().post("/").then().statusCode(400);
+    }
+
+    static Stream<Arguments> notTemplates() {
+        return Stream.of(
+                Arguments.of("{\"Resources\": {\"A\": {\"Type\": \"AWS::SNS::Topic\"}}",
+                        "JSON not well-formed. (line 1, column 49)"),
+                Arguments.of("Resources:\n  A: [unclosed\n", "YAML not well-formed. (line 3, column 1)"),
+                Arguments.of("Resources:\n  A:\n    Type: AWS::SNS::Topic\n    Properties: !Bogus x\n",
+                        "YAML not well-formed. (line 4, column 17)"),
+                Arguments.of("just a string", "unsupported structure."),
+                Arguments.of("[1, 2]", "unsupported structure."));
+    }
+
+    /** Measured: CloudFormation reads a body as YAML, so JSON with a trailing comma is still a template. */
+    @Test
+    void aBodyThatIsNotStrictJsonStillReadsAsYaml() {
+        request("ValidateTemplate", null,
+                "{\"Resources\": {\"H\": {\"Type\": \"AWS::CloudFormation::WaitConditionHandle\",}}}")
+                .then().statusCode(200);
     }
 
     /**

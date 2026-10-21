@@ -24,7 +24,7 @@
 | `ListStackResources` | List resource summaries |
 | `GetTemplate` | Retrieve the template body |
 | `GetTemplateSummary` | Summarize a template's Parameters, Resources and Transform sections, by StackName, TemplateBody or TemplateURL |
-| `ValidateTemplate` | Refuses a template holding a `null` value (see [Null values](#null-values)); otherwise returns success without validating further |
+| `ValidateTemplate` | Refuses a body that is no template (see [Template format](#template-format)) and a template holding a `null` value (see [Null values](#null-values)); otherwise returns success without validating further |
 | `ListStacks` | List stacks by status |
 | `ListExports` | - |
 | `SetStackPolicy` | Accepted; no-op (stub — stack policies are not enforced) |
@@ -630,6 +630,16 @@ intrinsic's reference page:
   Output O is malformed.  The Name field of Export must not depend on any resources, imported values,
   or Fn::GetAZs.` In a nested stack's template the same rules fail the child's resource with the
   same message when the child is created, and the parent rolls back.
+
+## Template format
+
+As on AWS, a body is read as YAML, of which JSON is a subset, so JSON with a trailing comma or
+unquoted keys is still a template. A body that reads as neither is refused by `ValidateTemplate`,
+`CreateStack`, `UpdateStack`, `CreateChangeSet` and `GetTemplateSummary`, before anything is
+created, with `ValidationError` `Template format error: JSON not well-formed. (line L, column C)`
+when it starts with `{` and ends with `}`, and `Template format error: YAML not well-formed. (line
+L, column C)` otherwise, at the position where the parser stopped. A body that reads as a scalar or
+a list is `Template format error: unsupported structure.`
 
 ## Null values
 
