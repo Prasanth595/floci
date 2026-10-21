@@ -60,6 +60,8 @@ class RdsDataResourceResolverTest {
                 .resolve("arn:aws:rds:us-east-1:000000000000:cluster:cluster1");
 
         assertEquals(DatabaseEngine.MYSQL, target.engine());
+        assertEquals(cluster.getDbClusterArn(), target.arn());
+        assertEquals(cluster.getDbClusterArn(), target.runtimeId());
         assertEquals("127.0.0.1", target.host());
         assertEquals(3306, target.port());
         assertEquals("app", target.databaseName());
@@ -103,10 +105,12 @@ class RdsDataResourceResolverTest {
         started.setContainerPort(5432);
         when(rdsService.getDbInstance("probe-db", "us-east-1")).thenReturn(daemonlessInstance());
         when(rdsService.ensureInstanceBackend("probe-db", "us-east-1")).thenReturn(started);
+        when(rdsService.instanceBackendRuntimeId(started)).thenReturn(started.getDbInstanceArn());
 
         RdsDataResourceResolver.DatabaseTarget target = new RdsDataResourceResolver(rdsService)
                 .resolve("arn:aws:rds:us-east-1:000000000000:db:probe-db");
 
+        assertEquals(started.getDbInstanceArn(), target.runtimeId());
         assertEquals("127.0.0.1", target.host());
         assertEquals(5432, target.port());
     }
@@ -130,8 +134,27 @@ class RdsDataResourceResolverTest {
         RdsDataResourceResolver.DatabaseTarget target = new RdsDataResourceResolver(rdsService)
                 .resolve("arn:aws:rds:us-east-1:000000000000:cluster:cluster1");
 
+        assertEquals(started.getDbClusterArn(), target.runtimeId());
         assertEquals("127.0.0.1", target.host());
         assertEquals(5432, target.port());
+    }
+
+    @Test
+    void resolvesClusterMemberToItsSharedClusterRuntime() {
+        RdsService rdsService = mock(RdsService.class);
+        DbInstance member = clusterMember("member1", 7002, DbInstanceStatus.AVAILABLE);
+        member.setContainerHost("127.0.0.1");
+        member.setContainerPort(5432);
+        String clusterArn = "arn:aws:rds:us-west-2:000000000000:cluster:cluster1";
+        when(rdsService.getDbInstance("member1", "us-west-2")).thenReturn(member);
+        when(rdsService.instanceBackendRuntimeId(member)).thenReturn(clusterArn);
+
+        RdsDataResourceResolver.DatabaseTarget target = new RdsDataResourceResolver(rdsService)
+                .resolve(member.getDbInstanceArn(), "us-west-2");
+
+        assertEquals(member.getDbInstanceArn(), target.arn());
+        assertEquals(clusterArn, target.runtimeId());
+        verify(rdsService, never()).ensureInstanceBackend(anyString(), anyString());
     }
 
     @Test

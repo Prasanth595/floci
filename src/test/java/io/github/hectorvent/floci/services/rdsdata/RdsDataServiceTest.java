@@ -947,7 +947,7 @@ class RdsDataServiceTest {
 
         harness.service.executeStatement(harness.request("select 1"), REGION);
 
-        assertEquals(List.of("127.0.0.1:3306"), harness.gate.entered);
+        assertEquals(List.of(RESOURCE_ARN), harness.gate.entered);
         assertEquals(0, harness.gate.held.get());
     }
 
@@ -1107,7 +1107,7 @@ class RdsDataServiceTest {
     }
 
     private static RdsDataResourceResolver.DatabaseTarget target(String resourceArn, DatabaseEngine engine) {
-        return new RdsDataResourceResolver.DatabaseTarget(resourceArn, engine,
+        return new RdsDataResourceResolver.DatabaseTarget(resourceArn, resourceArn, engine,
                 "127.0.0.1", 3306, "sa", "", "app");
     }
 
@@ -1206,19 +1206,19 @@ class RdsDataServiceTest {
         private boolean resuming;
 
         @Override
-        public Lease enter(String host, int port, boolean waitForResume) {
-            if (!waitForResume && resuming) {
-                throw new ResumingException();
-            }
-            return enter(host, port);
+        public Lease enter(String host, int port) {
+            throw new AssertionError("RDS Data API must enter backends by runtime identity");
         }
 
         @Override
-        public Lease enter(String host, int port) {
+        public Lease enterRuntime(String runtimeId, boolean waitForResume) {
+            if (!waitForResume && resuming) {
+                throw new ResumingException();
+            }
             if (failure != null) {
                 throw failure;
             }
-            entered.add(host + ":" + port);
+            entered.add(runtimeId);
             held.incrementAndGet();
             AtomicBoolean closed = new AtomicBoolean();
             return () -> {

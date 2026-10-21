@@ -516,8 +516,13 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
 
     @Override
     public Lease enterRuntime(String runtimeId) throws InterruptedException {
+        return enterRuntime(runtimeId, true);
+    }
+
+    @Override
+    public Lease enterRuntime(String runtimeId, boolean waitForResume) throws InterruptedException {
         AutoPauseController controller = runtimeId != null ? autoPauses.get(runtimeId) : null;
-        return controller != null ? controller.acquire() : Lease.NONE;
+        return controller != null ? controller.acquire(waitForResume) : Lease.NONE;
     }
 
     @Override

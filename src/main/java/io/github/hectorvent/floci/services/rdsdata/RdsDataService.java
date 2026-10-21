@@ -317,7 +317,7 @@ public class RdsDataService implements Resettable {
      */
     private RdsBackendGate.Lease enterBackend(RdsDataResourceResolver.DatabaseTarget target) {
         try {
-            return backendGate.enter(target.host(), target.port(), !databaseResumingExceptionEnabled);
+            return backendGate.enterRuntime(target.runtimeId(), !databaseResumingExceptionEnabled);
         } catch (RdsBackendGate.ResumingException e) {
             throw new AwsException("DatabaseResumingException",
                     "The Aurora Serverless v2 DB instance is resuming. Wait a few seconds and try again.", 400);

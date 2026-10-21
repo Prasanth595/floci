@@ -63,7 +63,7 @@ class RdsDataTransactionConcurrencyTest {
     private RdsDataService createService(Duration ttl) throws SQLException {
         RdsDataResourceResolver resolver = mock(RdsDataResourceResolver.class);
         when(resolver.resolve(RESOURCE_ARN, REGION)).thenReturn(new RdsDataResourceResolver.DatabaseTarget(
-                RESOURCE_ARN, DatabaseEngine.POSTGRES, "127.0.0.1", 5432, "sa", "", "app"));
+                RESOURCE_ARN, RESOURCE_ARN, DatabaseEngine.POSTGRES, "127.0.0.1", 5432, "sa", "", "app"));
         SecretsManagerService secrets = mock(SecretsManagerService.class);
         SecretVersion version = new SecretVersion();
         version.setSecretString("{\"username\":\"sa\",\"password\":\"\"}");

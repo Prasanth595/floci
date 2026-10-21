@@ -36,6 +36,14 @@ public interface RdsBackendGate {
         return Lease.NONE;
     }
 
+    /**
+     * Like {@link #enterRuntime(String)}, but with {@code waitForResume=false} starts resume in the
+     * background and throws {@link ResumingException} if the runtime is not yet ready.
+     */
+    default Lease enterRuntime(String runtimeId, boolean waitForResume) throws InterruptedException {
+        return enterRuntime(runtimeId);
+    }
+
     /** The backend is being resumed; no lease was acquired and the caller must retry. */
     class ResumingException extends RuntimeException {
     }

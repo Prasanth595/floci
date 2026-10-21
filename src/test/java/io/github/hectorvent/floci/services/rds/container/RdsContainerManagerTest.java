@@ -1337,7 +1337,8 @@ class RdsContainerManagerTest {
         assertTrue(manager.pauseIfIdle(runtimeId));
         verify(pause).exec();
 
-        assertThrows(RdsBackendGate.ResumingException.class, () -> manager.enter("db1", 3306, false));
+        assertThrows(RdsBackendGate.ResumingException.class,
+                () -> manager.enterRuntime(runtimeId, false));
         manager.enterRuntime(runtimeId).close();
         verify(unpause).exec();
 
