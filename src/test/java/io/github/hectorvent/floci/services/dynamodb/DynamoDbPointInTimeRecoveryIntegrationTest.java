@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -13,6 +11,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.CONTENT_TYPE;
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.ddb;
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.decimalAt;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -20,9 +21,6 @@ import static org.junit.jupiter.api.Assertions.*;
 @QuarkusTest
 class DynamoDbPointInTimeRecoveryIntegrationTest {
 
-    private static final String DYNAMODB_CONTENT_TYPE = "application/x-amz-json-1.0";
-    // JsonPath reads numbers as float, which drops whole seconds at epoch magnitude.
-    private static final ObjectMapper EXACT = new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
     private static final String TABLE_ARN_PREFIX = "arn:aws:dynamodb:us-east-1:000000000000:table/";
     private static final String PITR = "ContinuousBackupsDescription.PointInTimeRecoveryDescription";
     private static final String OTHER_REGION_AUTH =
@@ -287,14 +285,14 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
         given()
                 .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
                 .header("Authorization", OTHER_REGION_AUTH)
-                .contentType(DYNAMODB_CONTENT_TYPE)
+                .contentType(CONTENT_TYPE)
                 .body(createTableBody(table))
                 .when().post("/")
                 .then().statusCode(200);
         given()
                 .header("X-Amz-Target", "DynamoDB_20120810.UpdateContinuousBackups")
                 .header("Authorization", OTHER_REGION_AUTH)
-                .contentType(DYNAMODB_CONTENT_TYPE)
+                .contentType(CONTENT_TYPE)
                 .body("{\"TableName\": \"" + table + "\", \"PointInTimeRecoverySpecification\": "
                         + "{\"PointInTimeRecoveryEnabled\": true}}")
                 .when().post("/")
@@ -302,7 +300,7 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
         given()
                 .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
                 .header("Authorization", OTHER_REGION_AUTH)
-                .contentType(DYNAMODB_CONTENT_TYPE)
+                .contentType(CONTENT_TYPE)
                 .body("{\"TableName\": \"" + table + "\", \"Item\": {\"pk\": {\"S\": \"k1\"}, \"v\": {\"S\": \"v1\"}}}")
                 .when().post("/")
                 .then().statusCode(200);
@@ -431,18 +429,5 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
         response.statusCode(400)
                 .body("__type", containsString(type))
                 .body("message", equalTo(message));
-    }
-
-    private static BigDecimal decimalAt(ValidatableResponse response, String pointer) throws Exception {
-        return EXACT.readTree(response.extract().asString()).at(pointer).decimalValue();
-    }
-
-    private ValidatableResponse ddb(String action, String body) {
-        return given()
-                .header("X-Amz-Target", "DynamoDB_20120810." + action)
-                .contentType(DYNAMODB_CONTENT_TYPE)
-                .body(body)
-                .when().post("/")
-                .then();
     }
 }

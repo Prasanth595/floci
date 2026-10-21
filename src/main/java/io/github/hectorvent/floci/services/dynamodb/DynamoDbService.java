@@ -76,7 +76,6 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
@@ -2839,7 +2838,8 @@ public class DynamoDbService {
             throw invalidParameter("sourceTableArn is not a valid ARN");
         }
         String tableName = arn.resource().substring("table/".length());
-        if (tableName.length() < 3 || 255 < tableName.length() || !SOURCE_TABLE_NAME.matcher(tableName).matches()) {
+        if (tableName.length() < 3 || 255 < tableName.length()
+                || !DynamoDbTableNames.TABLE_NAME_CHARS.matcher(tableName).matches()) {
             throw new AwsException("ValidationException", "Invalid Request: Invalid TableArn: Invalid Table ARN", 400);
         }
         if (!arn.accountId().equals(regionResolver.getAccountId())) {
@@ -4996,7 +4996,6 @@ public class DynamoDbService {
     private static final ObjectMapper SNAPSHOT_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
 
     private static final int DEFAULT_RECOVERY_PERIOD_DAYS = 35;
-    private static final Pattern SOURCE_TABLE_NAME = Pattern.compile("[a-zA-Z0-9_.\\-]+");
     private static final int SYSTEM_BACKUP_RETENTION_DAYS = 35;
 
     private static final Comparator<TableBackup> BACKUP_ORDER = Comparator

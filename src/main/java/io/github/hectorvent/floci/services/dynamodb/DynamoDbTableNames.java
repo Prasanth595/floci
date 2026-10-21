@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
  */
 public final class DynamoDbTableNames {
 
-    private static final Pattern TABLE_NAME_CHARS = Pattern.compile("[a-zA-Z0-9_.\\-]+");
+    static final Pattern TABLE_NAME_CHARS = Pattern.compile("[a-zA-Z0-9_.\\-]+");
     private static final Pattern ACCOUNT_PATTERN = Pattern.compile("\\d{12}");
 
     private DynamoDbTableNames() {}
