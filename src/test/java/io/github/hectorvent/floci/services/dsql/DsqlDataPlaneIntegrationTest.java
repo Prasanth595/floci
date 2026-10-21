@@ -1,15 +1,12 @@
 package io.github.hectorvent.floci.services.dsql;
 
 import com.github.dockerjava.api.DockerClient;
-import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.dsql.dataplane.DsqlEndpoint;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
-import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.AfterAll;
@@ -18,38 +15,30 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import org.postgresql.ssl.NonValidatingFactory;
 import org.postgresql.util.PSQLException;
 import org.postgresql.util.PSQLWarning;
 
-import java.io.BufferedInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.Socket;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
+import static io.github.hectorvent.floci.services.dsql.DsqlWireClient.bind;
+import static io.github.hectorvent.floci.services.dsql.DsqlWireClient.close;
+import static io.github.hectorvent.floci.services.dsql.DsqlWireClient.execute;
+import static io.github.hectorvent.floci.services.dsql.DsqlWireClient.parse;
+import static io.github.hectorvent.floci.services.dsql.DsqlWireClient.query;
+import static io.github.hectorvent.floci.services.dsql.DsqlWireClient.sync;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Aurora DSQL's data plane against a real PostgreSQL container: a client connects to the cluster
@@ -61,11 +50,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @Tag("docker")
 class DsqlDataPlaneIntegrationTest {
 
-    private static final String ACCOUNT = "111122223333";
-    private static final String REGION = "eu-west-1";
+    private static final String ACCOUNT = DsqlClusterFixture.ACCOUNT;
     private static final String ROLE_ARN = "arn:aws:iam::" + ACCOUNT + ":role/service/app-role";
-    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=" + ACCOUNT
-            + "/20261016/" + REGION + "/dsql/aws4_request, SignedHeaders=host, Signature=abc";
 
     @Inject
     DockerClient dockerClient;
@@ -82,35 +68,22 @@ class DsqlDataPlaneIntegrationTest {
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
-    private String identifier;
-    private String host;
+    private DsqlClusterFixture cluster;
 
     @BeforeAll
     void createCluster() {
-        try {
-            dockerClient.pingCmd().exec();
-        } catch (Exception e) {
-            assumeTrue(false, "Docker is not available: " + e.getMessage());
-        }
-        identifier = dsql().body(Map.of("deletionProtectionEnabled", false))
-                .post("/cluster").then().statusCode(200).extract().path("identifier");
-        host = identifier + ".dsql." + REGION + ".localhost.floci.io";
-        await().atMost(Duration.ofMinutes(3)).pollInterval(Duration.ofMillis(500)).until(() ->
-                "ACTIVE".equals(dsql().get("/cluster/" + identifier).then().extract().path("status")));
+        cluster = new DsqlClusterFixture(httpPort, endpoint);
+        cluster.create(dockerClient);
     }
 
     @AfterAll
     void deleteCluster() {
-        if (identifier != null) {
-            dsql().delete("/cluster/" + identifier);
-            await().atMost(Duration.ofMinutes(1)).until(() ->
-                    dsql().get("/cluster/" + identifier).then().extract().statusCode() == 404);
-        }
+        cluster.delete();
     }
 
     @Test
     void adminConnectsWithAnAdminTokenToDsqlsDatabase() throws Exception {
-        try (Connection connection = connect("admin", adminToken());
+        try (Connection connection = admin();
              Statement statement = connection.createStatement();
              ResultSet row = statement.executeQuery("SELECT current_user, current_setting('transaction_isolation'),"
                      + " (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'public'),"
@@ -127,9 +100,9 @@ class DsqlDataPlaneIntegrationTest {
     @Test
     void aConnectionIsRefusedAsDsqlRefusesIt() throws Exception {
         PSQLException plain = assertThrows(PSQLException.class, () -> {
-            Properties properties = properties("admin", adminToken());
+            Properties properties = cluster.properties("admin", cluster.adminToken());
             properties.setProperty("sslmode", "disable");
-            DriverManager.getConnection(url(), properties).close();
+            DriverManager.getConnection(cluster.url(), properties).close();
         });
         assertEquals("unable to accept connection, SSL is mandatory. AWS Authentication is required.",
                 plain.getServerErrorMessage().getMessage());
@@ -137,24 +110,25 @@ class DsqlDataPlaneIntegrationTest {
         assertTrue(plain.getServerErrorMessage().getDetail().startsWith("Session Id: "));
 
         PSQLException wrongAction = assertThrows(PSQLException.class, () ->
-                connect("admin", token("DbConnect", "test", "test", Instant.now(), 900, null)).close());
+                cluster.connect("admin", cluster.token("DbConnect", "test", "test", Instant.now(), 900, null)).close());
         assertEquals("unable to accept connection, access denied", wrongAction.getServerErrorMessage().getMessage());
         assertEquals("08006", wrongAction.getSQLState());
         assertTrue(wrongAction.getServerErrorMessage().getDetail().startsWith("Session Id: "));
         assertEquals("Wrong user to action mapping. user: admin, action: DbConnect",
                 wrongAction.getServerErrorMessage().getHint());
 
-        PSQLException expired = assertThrows(PSQLException.class, () -> connect("admin",
-                token("DbConnectAdmin", "test", "test", Instant.now().minusSeconds(120), 60, null)).close());
+        PSQLException expired = assertThrows(PSQLException.class, () -> cluster.connect("admin",
+                cluster.token("DbConnectAdmin", "test", "test", Instant.now().minusSeconds(120), 60, null)).close());
         assertTrue(expired.getServerErrorMessage().getHint().startsWith("Signature expired: "),
                 expired.getServerErrorMessage().getHint());
 
-        PSQLException garbage = assertThrows(PSQLException.class, () -> connect("admin", "not-a-token").close());
+        PSQLException garbage = assertThrows(PSQLException.class, () ->
+                cluster.connect("admin", "not-a-token").close());
         assertEquals("unable to accept connection, access denied", garbage.getServerErrorMessage().getMessage());
         assertEquals(null, garbage.getServerErrorMessage().getHint());
 
         PSQLException otherDatabase = assertThrows(PSQLException.class, () -> {
-            Properties properties = properties("admin", adminToken());
+            Properties properties = cluster.properties("admin", cluster.adminToken());
             DriverManager.getConnection("jdbc:postgresql://127.0.0.1:" + endpoint.port() + "/other", properties)
                     .close();
         });
@@ -169,19 +143,19 @@ class DsqlDataPlaneIntegrationTest {
         String secret = "app+session/secret=key";
         String sessionToken = "IQoJb3JpZ2luX2VjEJr+app/role+session==";
         iamService.registerLambdaExecutionRoleSession(ACCOUNT, accessKeyId, secret, sessionToken, ROLE_ARN);
-        try (Connection admin = connect("admin", adminToken()); Statement statement = admin.createStatement()) {
+        try (Connection admin = admin(); Statement statement = admin.createStatement()) {
             statement.execute("CREATE ROLE app_role WITH LOGIN");
 
-            PSQLException unmapped = assertThrows(PSQLException.class, () -> connect("app_role",
-                    token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
+            PSQLException unmapped = assertThrows(PSQLException.class, () -> cluster.connect("app_role",
+                    cluster.token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
             assertEquals("unable to accept connection, access denied", unmapped.getServerErrorMessage().getMessage());
             assertEquals("28000", unmapped.getSQLState());
 
             statement.execute("AWS IAM GRANT app_role TO '" + ROLE_ARN + "'");
             statement.execute("CREATE TABLE owned_by_admin (id int PRIMARY KEY, n int)");
             statement.executeQuery("CREATE INDEX ASYNC owned_by_admin_n ON owned_by_admin (n)").close();
-            try (Connection app = connect("app_role", token("DbConnect", accessKeyId, secret, Instant.now(), 900,
-                         sessionToken));
+            try (Connection app = cluster.connect("app_role",
+                         cluster.token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken));
                  Statement query = app.createStatement()) {
                 try (ResultSet row = query.executeQuery("SELECT current_user, sys.iam_session_user()")) {
                     assertTrue(row.next());
@@ -204,8 +178,8 @@ class DsqlDataPlaneIntegrationTest {
                     mapped.getServerErrorMessage().getDetail());
             assertNull(mapped.getServerErrorMessage().getWhere());
 
-            PSQLException adminAction = assertThrows(PSQLException.class, () -> connect("app_role",
-                    token("DbConnectAdmin", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
+            PSQLException adminAction = assertThrows(PSQLException.class, () -> cluster.connect("app_role",
+                    cluster.token("DbConnectAdmin", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
             assertEquals("Wrong user to action mapping. user: app_role, action: DbConnectAdmin",
                     adminAction.getServerErrorMessage().getHint());
 
@@ -218,12 +192,12 @@ class DsqlDataPlaneIntegrationTest {
             assertEquals("42501", itself.getSQLState());
             assertEquals("Only roles with the ADMIN option on role \"admin\" may grant IAM trust to this role.",
                     itself.getServerErrorMessage().getDetail());
-            assertThrows(PSQLException.class, () -> connect("dbowner",
-                    token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
+            assertThrows(PSQLException.class, () -> cluster.connect("dbowner",
+                    cluster.token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
 
             statement.execute("AWS IAM REVOKE app_role FROM '" + ROLE_ARN + "'");
-            assertThrows(PSQLException.class, () -> connect("app_role",
-                    token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
+            assertThrows(PSQLException.class, () -> cluster.connect("app_role",
+                    cluster.token("DbConnect", accessKeyId, secret, Instant.now(), 900, sessionToken)).close());
             statement.execute("DROP ROLE app_role");
         } finally {
             iamService.unregisterSession(ACCOUNT, accessKeyId);
@@ -236,11 +210,11 @@ class DsqlDataPlaneIntegrationTest {
         EnforcementFixtures.UserCredentials user = EnforcementFixtures.createUser(cleanup, httpPort,
                 EnforcementFixtures.auth(ACCOUNT, "iam"), userName);
         String userArn = "arn:aws:iam::" + ACCOUNT + ":user/" + userName;
-        try (Connection admin = connect("admin", adminToken()); Statement statement = admin.createStatement()) {
+        try (Connection admin = admin(); Statement statement = admin.createStatement()) {
             statement.execute("CREATE ROLE user_role WITH LOGIN");
             statement.execute("AWS IAM GRANT user_role TO '" + userArn + "'");
-            try (Connection app = connect("user_role", token("DbConnect", user.accessKeyId(), user.secretAccessKey(),
-                         Instant.now(), 900, null));
+            try (Connection app = cluster.connect("user_role", cluster.token("DbConnect", user.accessKeyId(),
+                         user.secretAccessKey(), Instant.now(), 900, null));
                  Statement query = app.createStatement();
                  ResultSet row = query.executeQuery("SELECT current_user, sys.iam_session_user()")) {
                 assertTrue(row.next());
@@ -258,7 +232,7 @@ class DsqlDataPlaneIntegrationTest {
 
     @Test
     void nothingASessionRunsChangesWhoItIs() throws Exception {
-        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+        try (Connection connection = admin(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE FUNCTION spoof() RETURNS text LANGUAGE sql AS"
                     + " $$ SELECT set_config('dsql.iam_session_user', 'spoofed', false) $$");
             statement.execute("SELECT spoof()");
@@ -275,7 +249,7 @@ class DsqlDataPlaneIntegrationTest {
 
     @Test
     void aRoleDroppedInsideAFunctionTakesItsMappingsWithIt() throws Exception {
-        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+        try (Connection connection = admin(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE ROLE dropped_role");
             statement.execute("AWS IAM GRANT dropped_role TO '" + ROLE_ARN + "'");
             statement.execute("CREATE FUNCTION drop_it() RETURNS void LANGUAGE sql AS 'DROP ROLE dropped_role'");
@@ -308,12 +282,12 @@ class DsqlDataPlaneIntegrationTest {
      */
     @Test
     void pipelinedStatementsShowTheirOwnCommandTags() throws Exception {
-        try (Connection admin = connect("admin", adminToken()); Statement statement = admin.createStatement()) {
+        try (Connection admin = admin(); Statement statement = admin.createStatement()) {
             statement.execute("CREATE ROLE pipelined_role");
         }
         String grant = "AWS IAM GRANT pipelined_role TO '" + ROLE_ARN + "'";
         String revoke = "AWS IAM REVOKE pipelined_role FROM '" + ROLE_ARN + "'";
-        try (WireClient client = new WireClient("admin", adminToken())) {
+        try (DsqlWireClient client = cluster.wireClient("admin", cluster.adminToken())) {
             client.send(query("SELECT 1"), query(grant), query(revoke + "; SELECT 2"));
             assertEquals(List.of("SELECT 1"), client.untilReady());
             assertEquals(List.of("AWS IAM GRANT"), client.untilReady());
@@ -332,14 +306,34 @@ class DsqlDataPlaneIntegrationTest {
             assertEquals(List.of("AWS IAM REVOKE"), client.untilReady());
             assertEquals(List.of("SELECT 1"), client.untilReady());
         }
-        try (Connection admin = connect("admin", adminToken()); Statement statement = admin.createStatement()) {
+        try (Connection admin = admin(); Statement statement = admin.createStatement()) {
             statement.execute("DROP ROLE pipelined_role");
+        }
+    }
+
+    /** Floci's own index function runs one index statement and nothing else, whoever calls it. */
+    @Test
+    void theAsyncIndexFunctionRunsNothingButAnIndex() throws Exception {
+        try (Connection connection = admin(); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE direct_call (id int PRIMARY KEY)");
+            statement.execute("INSERT INTO direct_call VALUES (1)");
+            for (String sql : List.of("TRUNCATE direct_call",
+                    "CREATE INDEX x ON direct_call (id); TRUNCATE direct_call")) {
+                PSQLException refused = assertThrows(PSQLException.class, () -> statement.execute(
+                        "SELECT * FROM sys.create_index_async('" + sql + "', 'x', 'direct_call')"), sql);
+                assertEquals("42883", refused.getSQLState(), sql);
+            }
+            try (ResultSet row = statement.executeQuery("SELECT count(*) FROM direct_call")) {
+                assertTrue(row.next());
+                assertEquals(1, row.getInt(1));
+            }
+            statement.execute("DROP TABLE direct_call");
         }
     }
 
     @Test
     void dsqlsParametersAreReservedAsDsqlReservesThem() throws Exception {
-        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+        try (Connection connection = admin(); Statement statement = connection.createStatement()) {
             for (String sql : List.of("SET dsql.x = 1", "RESET dsql.x", "SELECT set_config('dsql.x', '1', false)",
                     "ALTER ROLE admin SET dsql.x = 1",
                     "CREATE FUNCTION reserved() RETURNS int LANGUAGE sql SET dsql.x = 1 AS 'SELECT 1'")) {
@@ -366,30 +360,30 @@ class DsqlDataPlaneIntegrationTest {
     @Test
     void aStartupSettingIsReadAsDsqlReadsIt() throws Exception {
         for (String name : List.of("dsql.iam_session_user", "myapp.foo")) {
-            Properties custom = properties("admin", adminToken());
+            Properties custom = cluster.properties("admin", cluster.adminToken());
             custom.setProperty("options", "-c " + name + "=x");
             PSQLException refused = assertThrows(PSQLException.class, () ->
-                    DriverManager.getConnection(url(), custom).close());
+                    DriverManager.getConnection(cluster.url(), custom).close());
             assertEquals("42704", refused.getSQLState());
             assertEquals("unrecognized configuration parameter \"" + name + "\"",
                     refused.getServerErrorMessage().getMessage());
             assertTrue(refused.getServerErrorMessage().getDetail().startsWith("Session Id: "));
         }
 
-        Properties unknown = properties("admin", adminToken());
+        Properties unknown = cluster.properties("admin", cluster.adminToken());
         unknown.setProperty("options", "-c nosuch_parameter=1");
         PSQLException fromTheDatabase = assertThrows(PSQLException.class, () ->
-                DriverManager.getConnection(url(), unknown).close());
+                DriverManager.getConnection(cluster.url(), unknown).close());
         assertEquals("42704", fromTheDatabase.getSQLState());
         assertEquals("unrecognized configuration parameter \"nosuch_parameter\"",
                 fromTheDatabase.getServerErrorMessage().getMessage());
         assertTrue(fromTheDatabase.getServerErrorMessage().getDetail().startsWith("Session Id: "));
         assertEquals(null, fromTheDatabase.getServerErrorMessage().getFile());
 
-        Properties ignored = properties("admin", adminToken());
+        Properties ignored = cluster.properties("admin", cluster.adminToken());
         ignored.setProperty("options", "--dsql.iam_session_user=spoofed --search_path=elsewhere"
                 + " -c search_path=first -c search_path=second");
-        try (Connection connection = DriverManager.getConnection(url(), ignored);
+        try (Connection connection = DriverManager.getConnection(cluster.url(), ignored);
              Statement statement = connection.createStatement();
              ResultSet row = statement.executeQuery("SELECT current_setting('search_path'), sys.iam_session_user()")) {
             assertTrue(row.next());
@@ -400,7 +394,7 @@ class DsqlDataPlaneIntegrationTest {
 
     @Test
     void theDatabaseSpeaksDsqlsDialect() throws Exception {
-        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+        try (Connection connection = admin(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE SCHEMA dialect");
             statement.execute("CREATE TABLE dialect.t (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), n int)");
 
@@ -445,12 +439,55 @@ class DsqlDataPlaneIntegrationTest {
     }
 
     /**
+     * Measured on DSQL (2026-10-21): table copies refused, every key's type checked, role statements
+     * counted as DDL.
+     */
+    @Test
+    void tableCopiesKeysAndRolesAreReadAsDsqlReadsThem() throws Exception {
+        try (Connection connection = admin(); Statement statement = connection.createStatement()) {
+            for (String sql : List.of("CREATE TABLE copied AS SELECT 1 AS n", "SELECT 1 AS n INTO copied",
+                    "CREATE MATERIALIZED VIEW copied AS SELECT 1 AS n")) {
+                PSQLException refused = assertThrows(PSQLException.class, () -> statement.execute(sql), sql);
+                assertEquals("unsupported statement: CreateTableAs", refused.getServerErrorMessage().getMessage(), sql);
+            }
+            statement.execute("CREATE TABLE keyed (id int PRIMARY KEY, j jsonb)");
+            PSQLException expression = assertThrows(PSQLException.class, () ->
+                    statement.executeQuery("CREATE INDEX ASYNC keyed_j ON keyed ((j -> 'a'))"));
+            assertEquals("datatype jsonb is not supported in a key", expression.getServerErrorMessage().getMessage());
+            statement.execute("CREATE DOMAIN jdomain AS jsonb");
+            PSQLException domain = assertThrows(PSQLException.class, () ->
+                    statement.execute("CREATE TABLE domain_keyed (k jdomain PRIMARY KEY)"));
+            assertEquals("datatype jdomain is not supported in a key", domain.getServerErrorMessage().getMessage());
+
+            statement.execute("CREATE ROLE ddl_role");
+            connection.setAutoCommit(false);
+            statement.execute("ALTER ROLE ddl_role WITH LOGIN");
+            PSQLException withDml = assertThrows(PSQLException.class, () ->
+                    statement.execute("INSERT INTO keyed (id) VALUES (1)"));
+            assertEquals("ddl and dml are not supported in the same transaction",
+                    withDml.getServerErrorMessage().getMessage());
+            assertEquals("ddl count: 1, dml count: 1", withDml.getServerErrorMessage().getDetail());
+            connection.rollback();
+            statement.execute("GRANT ddl_role TO admin");
+            PSQLException twoDdl = assertThrows(PSQLException.class, () ->
+                    statement.execute("CREATE TABLE keyed_too (id int PRIMARY KEY)"));
+            assertEquals("multiple ddl statements not supported in a transaction",
+                    twoDdl.getServerErrorMessage().getMessage());
+            connection.rollback();
+            connection.setAutoCommit(true);
+            statement.execute("DROP ROLE ddl_role");
+            statement.execute("DROP TABLE keyed");
+            statement.execute("DROP DOMAIN jdomain");
+        }
+    }
+
+    /**
      * The limits hold whatever a client does to its own table or to its session's settings: DSQL
      * has neither the triggers nor the settings Floci keeps them with.
      */
     @Test
     void theLimitsHoldWhateverTheClientChanges() throws Exception {
-        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+        try (Connection connection = admin(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE guarded (id int PRIMARY KEY)");
             statement.execute("ALTER TABLE guarded DISABLE TRIGGER USER");
             statement.execute("ALTER TABLE guarded DISABLE TRIGGER ALL");
@@ -483,7 +520,7 @@ class DsqlDataPlaneIntegrationTest {
 
     @Test
     void anUnnamedUniqueIndexOverDuplicatesFailsItsJob() throws Exception {
-        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+        try (Connection connection = admin(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE dupes (id int PRIMARY KEY, n int)");
             statement.execute("INSERT INTO dupes VALUES (1, 7), (2, 7)");
             String jobId;
@@ -509,7 +546,7 @@ class DsqlDataPlaneIntegrationTest {
 
     @Test
     void aForeignKeyIsEnforcedAndItsCascadeCountsTowardTheRowLimit() throws Exception {
-        try (Connection connection = connect("admin", adminToken()); Statement statement = connection.createStatement()) {
+        try (Connection connection = admin(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE fk_parent (id int PRIMARY KEY)");
             statement.execute("CREATE TABLE fk_child (id int PRIMARY KEY,"
                     + " parent_id int REFERENCES fk_parent (id) ON DELETE CASCADE)");
@@ -534,11 +571,11 @@ class DsqlDataPlaneIntegrationTest {
 
     @Test
     void aWriteConflictIsDsqlsOc000() throws Exception {
-        try (Connection setup = connect("admin", adminToken()); Statement statement = setup.createStatement()) {
+        try (Connection setup = admin(); Statement statement = setup.createStatement()) {
             statement.execute("CREATE TABLE conflict (id int PRIMARY KEY, n int)");
             statement.execute("INSERT INTO conflict VALUES (1, 0)");
         }
-        try (Connection first = connect("admin", adminToken()); Connection second = connect("admin", adminToken())) {
+        try (Connection first = admin(); Connection second = admin()) {
             first.setAutoCommit(false);
             second.setAutoCommit(false);
             try (Statement firstStatement = first.createStatement(); Statement secondStatement = second.createStatement()) {
@@ -571,133 +608,23 @@ class DsqlDataPlaneIntegrationTest {
         EnforcementFixtures.UserCredentials own = accessKey(ACCOUNT);
         EnforcementFixtures.UserCredentials other = accessKey("000000000000");
 
-        connect("admin", token("DbConnectAdmin", own.accessKeyId(), own.secretAccessKey(), Instant.now(), 900,
-                null)).close();
-        PSQLException foreign = assertThrows(PSQLException.class, () -> connect("admin", token("DbConnectAdmin",
-                other.accessKeyId(), other.secretAccessKey(), Instant.now(), 900, null)).close());
+        cluster.connect("admin", cluster.token("DbConnectAdmin", own.accessKeyId(), own.secretAccessKey(),
+                Instant.now(), 900, null)).close();
+        PSQLException foreign = assertThrows(PSQLException.class, () -> cluster.connect("admin",
+                cluster.token("DbConnectAdmin", other.accessKeyId(), other.secretAccessKey(), Instant.now(), 900,
+                        null)).close());
         assertEquals("08006", foreign.getSQLState());
         assertEquals("unable to accept connection, access denied", foreign.getServerErrorMessage().getMessage());
     }
 
-    /** A client that writes the wire protocol itself, to send what JDBC sends one message at a time. */
-    private final class WireClient implements AutoCloseable {
-
-        private final Socket socket;
-        private final InputStream in;
-        private final OutputStream out;
-
-        WireClient(String user, String password) throws Exception {
-            Socket plain = new Socket("127.0.0.1", endpoint.port());
-            plain.getOutputStream().write(PostgresWire.int32(8));
-            plain.getOutputStream().write(PostgresWire.int32(PostgresWire.SSL_REQUEST));
-            assertEquals('S', plain.getInputStream().read());
-            socket = new NonValidatingFactory(null).createSocket(plain, host, endpoint.port(), true);
-            in = new BufferedInputStream(socket.getInputStream());
-            out = socket.getOutputStream();
-            Map<String, String> startup = new LinkedHashMap<>();
-            startup.put("user", user);
-            startup.put("database", "postgres");
-            out.write(PostgresWire.startupMessage(startup));
-            assertEquals('R', PostgresWire.read(in, Integer.MAX_VALUE, "message").type());
-            send(message('p', PostgresWire.cStringBytes(password)));
-            untilReady();
-        }
-
-        void send(byte[]... messages) throws IOException {
-            for (byte[] message : messages) {
-                out.write(message);
-            }
-            out.flush();
-        }
-
-        /** The command tags, and the SQLSTATE of an error, up to the next ReadyForQuery. */
-        List<String> untilReady() throws IOException {
-            List<String> answers = new ArrayList<>();
-            while (true) {
-                PostgresWire.Message message = PostgresWire.read(in, Integer.MAX_VALUE, "message");
-                switch (message.type()) {
-                    case 'C' -> answers.add(PostgresWire.cString(message.body(), 0).value());
-                    case 'E' -> answers.add("ERROR " + PostgresWire.parseFields(message.body(), 0).get('C'));
-                    case 'Z' -> {
-                        return answers;
-                    }
-                    default -> {
-                    }
-                }
-            }
-        }
-
-        @Override
-        public void close() throws IOException {
-            socket.close();
-        }
-    }
-
-    private static byte[] query(String sql) throws IOException {
-        return message('Q', PostgresWire.cStringBytes(sql));
-    }
-
-    private static byte[] parse(String statement, String sql) throws IOException {
-        return message('P', PostgresWire.cStringBytes(statement), PostgresWire.cStringBytes(sql), new byte[2]);
-    }
-
-    /** The unnamed portal for {@code statement}, with no parameters and text results. */
-    private static byte[] bind(String statement) throws IOException {
-        return message('B', PostgresWire.cStringBytes(""), PostgresWire.cStringBytes(statement), new byte[6]);
-    }
-
-    private static byte[] execute() throws IOException {
-        return message('E', PostgresWire.cStringBytes(""), PostgresWire.int32(0));
-    }
-
-    private static byte[] close(String statement) throws IOException {
-        return message('C', new byte[] {'S'}, PostgresWire.cStringBytes(statement));
-    }
-
-    private static byte[] sync() throws IOException {
-        return message('S');
-    }
-
-    private static byte[] message(int type, byte[]... parts) throws IOException {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        PostgresWire.write(bytes, type, parts);
-        return bytes.toByteArray();
+    /** A connection signed in as {@code admin}. */
+    private Connection admin() throws Exception {
+        return cluster.connect("admin", cluster.adminToken());
     }
 
     /** A new IAM user's access key in {@code account}, removed with the user after the test. */
     private EnforcementFixtures.UserCredentials accessKey(String account) {
         return EnforcementFixtures.createUser(cleanup, httpPort, EnforcementFixtures.auth(account, "iam"),
                 "dsql-" + System.nanoTime());
-    }
-
-    private Connection connect(String user, String password) throws SQLException {
-        return DriverManager.getConnection(url(), properties(user, password));
-    }
-
-    private String url() {
-        return "jdbc:postgresql://127.0.0.1:" + endpoint.port() + "/postgres";
-    }
-
-    private static Properties properties(String user, String password) {
-        Properties properties = new Properties();
-        properties.setProperty("user", user);
-        properties.setProperty("password", password);
-        properties.setProperty("sslmode", "require");
-        properties.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory");
-        return properties;
-    }
-
-    private String adminToken() throws Exception {
-        return token("DbConnectAdmin", "test", "test", Instant.now(), 900, null);
-    }
-
-    private String token(String action, String accessKeyId, String secret, Instant at, int expires,
-                         String sessionToken) throws Exception {
-        return SigV4TokenTestHelper.createDsqlToken(host, REGION, action, accessKeyId, secret, at, expires,
-                sessionToken);
-    }
-
-    private RequestSpecification dsql() {
-        return given().port(httpPort).header("Authorization", AUTH).contentType("application/json");
     }
 }

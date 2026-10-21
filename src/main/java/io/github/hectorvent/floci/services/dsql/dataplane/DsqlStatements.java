@@ -4,8 +4,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * The statements of a query as Aurora DSQL reads them. DSQL's own syntax ({@code CREATE INDEX
@@ -29,9 +27,10 @@ public final class DsqlStatements {
     private static final Set<String> TABLE_CONSTRAINTS = Set.of(
             "CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "EXCLUDE");
     private static final String RESERVED_PREFIX = "dsql.";
+    private static final Set<String> ISOLATION_PARAMETERS = Set.of("default_transaction_isolation", "transaction_isolation");
+    private static final Set<String> ROLE_KINDS = Set.of("ROLE", "USER", "GROUP");
     private static final Set<String> ROLE_SPECIFIERS = Set.of("CURRENT_ROLE", "CURRENT_USER", "SESSION_USER", "PUBLIC",
             "NONE");
-    private static final Pattern CACHE = Pattern.compile("(?i)\\bCACHE\\s+(-?\\d+)");
 
     private DsqlStatements() {
     }
@@ -128,7 +127,7 @@ public final class DsqlStatements {
             }
             int sequence = indexOfWord(tokens, "SEQUENCE");
             if (sequence > 0 && sequence <= 3 && onlyWords(tokens, 1, sequence, Set.of("TEMP", "TEMPORARY", "UNLOGGED"))) {
-                Statement refused = sequenceCache(text);
+                Statement refused = sequenceCache(tokens);
                 if (refused != null) {
                     return refused;
                 }
@@ -158,6 +157,10 @@ public final class DsqlStatements {
                 return rejected("0A000", "unsupported object type in " + first);
             }
         }
+        if ("ALTER".equals(first) && "DATABASE".equals(second)
+                && (indexOfWord(tokens, "SET") > 0 || indexOfWord(tokens, "RESET") > 0)) {
+            return rejected("0A000", "unsupported statement: AlterDatabaseSet");
+        }
         if ("ALTER".equals(first) && "TABLE".equals(second)) {
             Statement refused = alterTableAdd(tokens);
             if (refused != null) {
@@ -172,15 +175,19 @@ public final class DsqlStatements {
         if (isolation != null) {
             return isolation;
         }
+        Statement role = roleDdl(text, tokens, first, second);
+        if (role != null) {
+            return role;
+        }
         Statement locking = lockingClause(tokens);
         if (locking != null) {
             return locking;
         }
         for (int i = 0; i + 1 < tokens.size(); i++) {
             Token token = tokens.get(i);
-            if (token.type() == Type.WORD && ADVISORY_LOCKS.contains(token.lower())
-                    && "(".equals(tokens.get(i + 1).text())) {
-                return rejected("0A000", "function " + token.lower() + " not supported");
+            boolean name = token.type() == Type.WORD || token.type() == Type.QUOTED_IDENTIFIER;
+            if (name && ADVISORY_LOCKS.contains(identifier(token)) && "(".equals(tokens.get(i + 1).text())) {
+                return rejected("0A000", "function " + identifier(token) + " not supported");
             }
         }
         return new Statement(text, null);
@@ -246,17 +253,27 @@ public final class DsqlStatements {
         return new Statement(call, null);
     }
 
-    private static Statement sequenceCache(String text) {
-        Matcher cache = CACHE.matcher(text);
-        if (!cache.find()) {
+    /** The sequence's {@code CACHE}, read from the statement's tokens so comments and names do not count. */
+    private static Statement sequenceCache(List<Token> tokens) {
+        String cache = null;
+        for (int i = 0; i + 1 < tokens.size() && cache == null; i++) {
+            if ("CACHE".equals(word(tokens, i))) {
+                boolean negative = "-".equals(tokens.get(i + 1).text());
+                int at = negative ? i + 2 : i + 1;
+                if (at < tokens.size() && tokens.get(at).type() == Type.NUMBER) {
+                    cache = (negative ? "-" : "") + tokens.get(at).text();
+                }
+            }
+        }
+        if (cache == null) {
             return rejected("0A000", "CREATE SEQUENCE is not supported without an explicit cache size. please"
                     + " define CACHE greater than or equal to 65536 or equal to 1");
         }
         long size;
         try {
-            size = Long.parseLong(cache.group(1));
+            size = Long.parseLong(cache);
         } catch (NumberFormatException e) {
-            // Past a bigint: the database's own 22003 is what DSQL answers too (measured).
+            // Past a bigint, or not an integer: the database's own error is what DSQL answers too (measured).
             return null;
         }
         if (size != 1 && size < 65536) {
@@ -321,6 +338,9 @@ public final class DsqlStatements {
                 if (name.startsWith(RESERVED_PREFIX)) {
                     return reservedPrefix(name);
                 }
+                if ("SET".equals(word) && ISOLATION_PARAMETERS.contains(name)) {
+                    return notSupported(name);
+                }
             }
             boolean setConfig = "SET_CONFIG".equals(word) || tokens.get(i).type() == Type.QUOTED_IDENTIFIER
                     && "set_config".equals(tokens.get(i).value());
@@ -330,8 +350,8 @@ public final class DsqlStatements {
                 if (name.startsWith(RESERVED_PREFIX)) {
                     return reservedPrefix(name);
                 }
-                if (name.contains(".")) {
-                    return rejected("0A000", "setting configuration parameter \"" + name + "\" not supported");
+                if (name.contains(".") || ISOLATION_PARAMETERS.contains(name)) {
+                    return notSupported(name);
                 }
             }
         }
@@ -367,6 +387,26 @@ public final class DsqlStatements {
         }
         return new Statement("CALL sys.drop_roles(ARRAY[" + String.join(", ", names) + "]::text[], " + ifExists + ")",
                 "DROP ROLE");
+    }
+
+    private static Statement notSupported(String parameter) {
+        return rejected("0A000", "setting configuration parameter \"" + parameter + "\" not supported");
+    }
+
+    /**
+     * A statement on roles, which DSQL counts as DDL (measured) though PostgreSQL fires no event
+     * trigger for one: {@code CREATE} or {@code ALTER ROLE|USER|GROUP}, and {@code GRANT} or
+     * {@code REVOKE} of a role, which names no object with {@code ON}. {@code sys.run_role_ddl}
+     * counts it, then runs it as the caller, under PostgreSQL's command tag.
+     */
+    private static Statement roleDdl(String text, List<Token> tokens, String first, String second) {
+        boolean createOrAlter = ("CREATE".equals(first) || "ALTER".equals(first)) && ROLE_KINDS.contains(second)
+                && !"MAPPING".equals(word(tokens, 2));
+        boolean grantOrRevoke = ("GRANT".equals(first) || "REVOKE".equals(first)) && indexOfWord(tokens, "ON") < 0;
+        if (!createOrAlter && !grantOrRevoke) {
+            return null;
+        }
+        return new Statement("CALL sys.run_role_ddl(" + dollarQuoted(text) + ")", first + " ROLE");
     }
 
     private static Statement reservedPrefix(String name) {
@@ -410,13 +450,6 @@ public final class DsqlStatements {
                 if (name != null) {
                     return rejected("0A000", "Unsupported isolation level: " + name);
                 }
-            }
-        }
-        if ("SET".equals(first)) {
-            int at = "SESSION".equals(second) || "LOCAL".equals(second) ? 2 : 1;
-            String parameter = tokens.size() > at ? tokens.get(at).lower() : "";
-            if ("default_transaction_isolation".equals(parameter) || "transaction_isolation".equals(parameter)) {
-                return rejected("0A000", "setting configuration parameter \"" + parameter + "\" not supported");
             }
         }
         return null;
@@ -463,7 +496,8 @@ public final class DsqlStatements {
             if (Character.isWhitespace(c)) {
                 i++;
             } else if (c == '-' && i + 1 < n && sql.charAt(i + 1) == '-') {
-                while (i < n && sql.charAt(i) != '\n') {
+                // PostgreSQL ends the comment at either line break.
+                while (i < n && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') {
                     i++;
                 }
             } else if (c == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {

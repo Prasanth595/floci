@@ -92,19 +92,24 @@ the `public` schema and can create roles and databases, and DSQL's dialect insta
   user, with `sys.iam_pg_role_mappings`. A superuser role cannot be mapped, only a role holding the
   `ADMIN` option on a role can map it (`admin` maps the roles it created), and a mapped role cannot
   be dropped until its mappings are revoked.
-- One DDL statement per transaction, no DDL with DML, and at most 3,000 modified rows per
+- One DDL statement per transaction, statements on roles (`CREATE`, `ALTER` and `DROP ROLE`, and
+  `GRANT` or `REVOKE` of a role) included, no DDL with DML, and at most 3,000 modified rows per
   transaction.
 - A transaction lives 300 seconds, as on DSQL. A client message after that, a `ROLLBACK` included,
   ends it with `54000` `transaction age limit of 300s exceeded` and closes the connection with
   `08P01`. An idle transaction is ended the same way, unasked, 15 seconds after its limit. A
-  statement still running at the limit completes, then fails with the same `54000` and returns no
-  rows, and the connection stays. A failed transaction left idle as long is closed with `25P03`.
-  A connection closes after an hour.
-- Refused with DSQL's SQLSTATE and message: temporary and partitioned tables, triggers, `CREATE
-  TYPE`, PL/pgSQL functions and `DO`, extensions, array columns, `jsonb` and `bytea` keys,
-  `TRUNCATE`, `LISTEN`/`NOTIFY`, `VACUUM`, sequences without a `CACHE` of 1 or at least 65536,
-  `ALTER TABLE ... ADD COLUMN` with a constraint or default, `ADD CONSTRAINT`, `FOR SHARE` and `FOR
-  NO KEY UPDATE`, advisory locks, and isolation levels other than repeatable read.
+  statement still running at the limit fails with the same `54000`: nothing its transaction wrote
+  is kept, the rest of its query, a `COMMIT` included, does not run, and the connection stays, in
+  the failed transaction. The limit holds for a statement outside a transaction block too. A failed
+  transaction left idle as long is closed with `25P03`. A connection closes after an hour.
+- Refused with DSQL's SQLSTATE and message: temporary and partitioned tables, `CREATE TABLE AS`,
+  `SELECT INTO` and materialized views, triggers, `CREATE TYPE`, PL/pgSQL functions and `DO`,
+  extensions, array columns, `jsonb` and `bytea` keys (an expression's, or a domain's over either,
+  included), `TRUNCATE`, `LISTEN`/`NOTIFY`, `VACUUM`, sequences without a `CACHE` of 1 or at least
+  65536, `ALTER TABLE ... ADD COLUMN` with a constraint or default, `ADD CONSTRAINT`, `ALTER DATABASE
+  ... SET`, `FOR SHARE` and `FOR NO KEY UPDATE`, advisory locks, and isolation levels other than
+  repeatable read, whether chosen for a transaction, set for the session, set with `set_config` or
+  set for a role.
 - Foreign keys work as on DSQL: declared in `CREATE TABLE`, enforced, with their `ON DELETE` and
   `ON UPDATE` actions and `DEFERRABLE`; rows a cascade changes count toward the 3,000-row limit.
   Adding one with `ALTER TABLE` is refused, as DSQL refuses it.
@@ -136,6 +141,10 @@ the `public` schema and can create roles and databases, and DSQL's dialect insta
 - DSQL's primary key covers every column of its table, and its definition reads `PRIMARY KEY (id)
   INCLUDE (...)`; Floci's reads `PRIMARY KEY (id)`.
 - A statement Floci refuses carries no position (`LINE 1: ...` in psql), where DSQL gives one.
+- DSQL lets a statement running at the age limit finish, and fails it then; Floci stops it at the
+  limit. The error, and what is kept, are the same.
+- Floci's `sys.create_index_async`, behind `CREATE INDEX ASYNC`, creates the one index it is
+  handed when a client calls it itself; DSQL has no such function.
 - DSQL accepts connections while a cluster is still `CREATING`; Floci's cluster is `CREATING` only
   while its database starts, and serves once its database answers.
 

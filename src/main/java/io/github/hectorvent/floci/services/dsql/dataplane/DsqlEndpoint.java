@@ -29,6 +29,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -38,6 +39,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The address every DSQL cluster is reached at: one port, as on AWS, where the server name a client
@@ -70,8 +76,14 @@ public class DsqlEndpoint {
     private final Map<Long, DsqlDatabases.Backend> cancelKeys = new ConcurrentHashMap<>();
     private final Map<String, Set<Socket>> connections = new ConcurrentHashMap<>();
     private volatile ServerSocket server;
-    private volatile Duration transactionAgeLimit = Duration.ofSeconds(300);
-    private volatile Duration transactionIdleGrace = Duration.ofSeconds(15);
+    private final Clock clock;
+    // The sessions' age checks, each due by the clock, on one thread for the whole endpoint.
+    private final ScheduledExecutorService ageChecks = Executors.newSingleThreadScheduledExecutor(
+            Thread.ofVirtual().name("dsql-age-checks").factory());
+    private final Set<ScheduledCheck> pendingChecks = ConcurrentHashMap.newKeySet();
+    // DSQL's (measured): a transaction lives 300 seconds, and one idle past that is ended 15 later.
+    private static final Duration TRANSACTION_AGE_LIMIT = Duration.ofSeconds(300);
+    private static final Duration TRANSACTION_IDLE_GRACE = Duration.ofSeconds(15);
 
     /** A cluster being served, and where its database answers. */
     record Route(String host, String arn, String region, String accountId, DsqlDatabases.Backend backend) {
@@ -94,7 +106,8 @@ public class DsqlEndpoint {
 
     @Inject
     public DsqlEndpoint(DsqlTlsCertificates certificates, IamService iamService, IamPolicyEvaluator policyEvaluator,
-                        Instance<ScpProvider> scpProvider, EmulatorConfig config) {
+                        Instance<ScpProvider> scpProvider, EmulatorConfig config, Clock clock) {
+        this.clock = clock;
         this.certificates = certificates;
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
@@ -129,6 +142,8 @@ public class DsqlEndpoint {
 
     @PreDestroy
     public synchronized void stop() {
+        ageChecks.shutdownNow();
+        pendingChecks.clear();
         ServerSocket listening = server;
         server = null;
         if (listening != null) {
@@ -180,19 +195,76 @@ public class DsqlEndpoint {
         return HANDSHAKE_TIMEOUT_MILLIS;
     }
 
-    /** How long a transaction may live, 300 seconds as on DSQL; tests shorten it. */
+    /** The time every transaction's age is read by. */
+    Clock clock() {
+        return clock;
+    }
+
+    /** A check that runs once, when the clock reaches its time, unless it is cancelled first. */
+    final class ScheduledCheck {
+
+        private final Instant due;
+        private final Runnable check;
+        private final AtomicBoolean done = new AtomicBoolean();
+        private volatile ScheduledFuture<?> future;
+
+        private ScheduledCheck(Instant due, Runnable check) {
+            this.due = due;
+            this.check = check;
+        }
+
+        void cancel() {
+            if (done.compareAndSet(false, true)) {
+                pendingChecks.remove(this);
+                future.cancel(false);
+            }
+        }
+
+        private void run() {
+            if (done.compareAndSet(false, true)) {
+                pendingChecks.remove(this);
+                check.run();
+            }
+        }
+    }
+
+    /** Runs {@code check} when the clock reaches {@code due}. */
+    ScheduledCheck schedule(Instant due, Runnable check) {
+        ScheduledCheck scheduled = new ScheduledCheck(due, check);
+        pendingChecks.add(scheduled);
+        // toMillis drops what is below a millisecond, which would run the check just before it is due.
+        long delay = Math.max(0, Duration.between(clock.instant(), due).toMillis() + 1);
+        scheduled.future = ageChecks.schedule(scheduled::run, delay, TimeUnit.MILLISECONDS);
+        return scheduled;
+    }
+
+    /**
+     * Runs every check the clock has reached, and those they schedule that it has reached too: the
+     * checks a clock moved forward has made due before their delay ran out.
+     */
+    void runDueChecks() {
+        boolean ran = true;
+        while (ran) {
+            ran = false;
+            Instant now = clock.instant();
+            for (ScheduledCheck scheduled : List.copyOf(pendingChecks)) {
+                if (!scheduled.due.isAfter(now)) {
+                    scheduled.future.cancel(false);
+                    scheduled.run();
+                    ran = true;
+                }
+            }
+        }
+    }
+
+    /** How long a transaction may live. */
     Duration transactionAgeLimit() {
-        return transactionAgeLimit;
+        return TRANSACTION_AGE_LIMIT;
     }
 
-    /** How long past its age limit an idle transaction is let be, 15 seconds as on DSQL (measured). */
+    /** How long past its age limit an idle transaction is let be. */
     Duration transactionIdleGrace() {
-        return transactionIdleGrace;
-    }
-
-    void transactionAgeLimit(Duration limit, Duration idleGrace) {
-        this.transactionAgeLimit = limit;
-        this.transactionIdleGrace = idleGrace;
+        return TRANSACTION_IDLE_GRACE;
     }
 
     /**

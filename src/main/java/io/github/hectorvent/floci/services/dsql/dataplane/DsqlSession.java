@@ -47,6 +47,7 @@ final class DsqlSession {
     private static final int MAX_STARTUP = 10_000;
     private static final int MAX_MESSAGE = 64 * 1024 * 1024;
     private static final String SERIALIZATION_FAILURE = "40001";
+    private static final String QUERY_CANCELED = "57014";
     private static final String ACCESS_DENIED = "unable to accept connection, access denied";
 
     private final Socket socket;
@@ -73,14 +74,28 @@ final class DsqlSession {
     private volatile OutputStream databaseOut;
     private volatile Socket clientSocket;
     private volatile Socket databaseSocket;
-    private volatile Instant lastClientMessage = Instant.now();
+    private volatile Instant lastClientMessage;
     private volatile Instant transactionStart;
+    // The session's one age check pending, by the endpoint's clock: replaced by the next, and
+    // cancelled when the transaction or the connection ends.
+    private DsqlEndpoint.ScheduledCheck ageCheck;
+    // When the database last answered a batch: a statement it runs next starts no earlier.
+    private volatile Instant lastReady;
+    // The startup's BackendKeyData, to cancel the session's statement with; and whether the
+    // statement being cancelled was cancelled for its transaction's age.
+    private volatile byte[] cancelKeyData;
+    private volatile boolean cancelledForAge;
     private volatile char transactionStatus = 'I';
-    private volatile boolean statementOutlived;
 
     DsqlSession(Socket socket, DsqlEndpoint endpoint) {
         this.socket = socket;
         this.endpoint = endpoint;
+        this.lastClientMessage = now();
+        this.lastReady = now();
+    }
+
+    private Instant now() {
+        return endpoint.clock().instant();
     }
 
     void serve() throws IOException {
@@ -198,6 +213,7 @@ final class DsqlSession {
             try {
                 relayToBackend(in, backendOut);
             } finally {
+                cancelAgeCheck();
                 lifetime.interrupt();
                 closeQuietly(backend);
                 toClient.interrupt();
@@ -214,7 +230,7 @@ final class DsqlSession {
         while (true) {
             PostgresWire.Message message = PostgresWire.read(in, MAX_MESSAGE, "message");
             if (message.type() != 'X') {
-                lastClientMessage = Instant.now();
+                lastClientMessage = now();
                 if (transactionStatus == 'T' && pastAgeLimit()) {
                     // DSQL ends a transaction past its age at the client's next message, a ROLLBACK
                     // included, and the connection with it (measured).
@@ -295,68 +311,146 @@ final class DsqlSession {
         return false;
     }
 
-    private boolean pastAgeLimit() {
-        Instant start = transactionStart;
-        return start != null && Duration.between(start, Instant.now()).compareTo(endpoint.transactionAgeLimit()) > 0;
+    /** When {@code batch} could first run: once sent, and once the database had answered the batch before it. */
+    private Instant couldRun(Batch batch) {
+        Instant answeredBefore = lastReady;
+        return batch.sent.isAfter(answeredBefore) ? batch.sent : answeredBefore;
     }
 
-    private long transactionAge() {
+    /** When the transaction the database is running started: the open one, or the batch's own. */
+    private Instant runningTransactionStart() {
+        Instant start = transactionStatus == 'T' ? transactionStart : null;
+        if (start == null) {
+            synchronized (batches) {
+                Batch answering = batches.peekFirst();
+                start = answering == null ? null : couldRun(answering);
+            }
+        }
+        return start;
+    }
+
+    private Duration ageOfRunning() {
+        Instant start = runningTransactionStart();
+        return start == null ? Duration.ZERO : Duration.between(start, now());
+    }
+
+    /** DSQL's age error for a transaction {@code age} old. */
+    private byte[] ageError(Duration age) {
+        long limit = endpoint.transactionAgeLimit().toSeconds();
+        return error("ERROR", "54000", "transaction age limit of " + limit + "s exceeded",
+                "Current transaction age " + age.toSeconds() + "s exceeds " + limit + "s", null);
+    }
+
+    private boolean pastAgeLimit() {
         Instant start = transactionStart;
-        return start == null ? 0 : Duration.between(start, Instant.now()).toSeconds();
+        return start != null && Duration.between(start, now()).compareTo(endpoint.transactionAgeLimit()) > 0;
+    }
+
+    private Duration transactionAge() {
+        Instant start = transactionStart;
+        return start == null ? Duration.ZERO : Duration.between(start, now());
     }
 
     /**
-     * Follows the transaction the database reports. One that opens is ended as DSQL ends it once it
-     * idles past its age limit and grace (measured: 315 s after BEGIN, whatever it last ran); one
-     * that fails stays until it idles as long, as DSQL's idle-in-transaction timeout lets it.
+     * Follows the transaction the database reports. One that opens started when its batch could
+     * first run: once sent, and once the database had answered the batch before it, so a BEGIN
+     * queued behind a long statement does not count that wait. At its age limit a statement still
+     * running is stopped with the age error, which fails the transaction; idle past the limit and
+     * its grace the transaction is ended as DSQL ends it (measured: 315 s after BEGIN, whatever it
+     * last ran). One that fails stays until it idles as long, as DSQL's idle-in-transaction
+     * timeout lets it.
      */
-    private void transactionStatus(char status) {
-        char previous = transactionStatus;
+    private void transactionStatus(char status, Instant batchCouldRun) {
         transactionStatus = status;
-        Duration idle = endpoint.transactionAgeLimit().plus(endpoint.transactionIdleGrace());
         if (status == 'I') {
             transactionStart = null;
+            cancelAgeCheck();
         } else if (status == 'T' && transactionStart == null) {
-            Instant start = lastClientMessage;
+            Instant start = batchCouldRun;
             transactionStart = start;
-            after(start.plus(idle), () -> {
-                if (start.equals(transactionStart) && transactionStatus == 'T' && awaitingReady.get() == 0) {
-                    terminate();
+            schedule(start.plus(endpoint.transactionAgeLimit()), () -> {
+                if (start.equals(transactionStart) && transactionStatus == 'T') {
+                    cancelForAge();
+                    schedule(start.plus(endpoint.transactionAgeLimit()).plus(endpoint.transactionIdleGrace()), () -> {
+                        if (start.equals(transactionStart) && transactionStatus == 'T' && awaitingReady.get() == 0) {
+                            terminate();
+                        }
+                    });
                 }
             });
-        } else if (status == 'E' && previous != 'E') {
-            Instant failed = Instant.now();
-            Instant start = transactionStart;
-            after(failed.plus(idle), () -> {
-                if (start == transactionStart && transactionStatus == 'E' && awaitingReady.get() == 0
-                        && !lastClientMessage.isAfter(failed)) {
-                    close("FATAL", "25P03", "terminating connection due to idle-in-transaction timeout", null);
-                }
-            });
+        } else if (status == 'E') {
+            closeWhenIdle(now());
         }
     }
 
-    private void after(Instant when, Runnable check) {
-        Thread.ofVirtual().name("dsql-age-" + sessionId).start(() -> {
-            try {
-                // toMillis drops what is below a millisecond, which would wake the check before when
-                // and report an age a second short.
-                Thread.sleep(Math.max(0, Duration.between(Instant.now(), when).toMillis() + 1));
-            } catch (InterruptedException ignored) {
-                // The connection ended first.
+    /**
+     * Outside a transaction block, the batch the database runs next is a transaction of its own,
+     * under the same limit (measured): one still running at the limit is stopped with the age error.
+     */
+    private void watchImplicitTransaction(Batch running, Instant couldRun) {
+        schedule(couldRun.plus(endpoint.transactionAgeLimit()), () -> {
+            boolean stillRunning;
+            synchronized (batches) {
+                stillRunning = batches.peekFirst() == running;
+            }
+            if (stillRunning && transactionStatus == 'I') {
+                cancelForAge();
+            }
+        });
+    }
+
+    /**
+     * Stops the statement running at the transaction's age limit, with the cancel request a client
+     * would send; its {@code 57014} reaches the client as DSQL's age error. DSQL lets the statement
+     * finish and fails it then (measured); stopping it at the limit ends the same way, the error
+     * and nothing kept, the rest of its query, a COMMIT included, never run.
+     */
+    private void cancelForAge() {
+        byte[] keyData = cancelKeyData;
+        if (awaitingReady.get() > 0 && keyData != null) {
+            cancelledForAge = true;
+            endpoint.forwardCancel(keyData);
+        }
+    }
+
+    /**
+     * Closes a failed transaction's connection once the client has sent nothing for its idle time
+     * since {@code since}; a message in between moves the wait to start from it.
+     */
+    private void closeWhenIdle(Instant since) {
+        schedule(since.plus(endpoint.transactionAgeLimit()).plus(endpoint.transactionIdleGrace()), () -> {
+            Instant last = lastClientMessage;
+            if (transactionStatus != 'E' || awaitingReady.get() > 0) {
                 return;
             }
-            check.run();
+            if (last.isAfter(since)) {
+                closeWhenIdle(last);
+                return;
+            }
+            close("FATAL", "25P03", "terminating connection due to idle-in-transaction timeout", null);
         });
+    }
+
+    /** Puts {@code check}, due at {@code when}, in place of the age check pending. */
+    private synchronized void schedule(Instant when, Runnable check) {
+        if (ageCheck != null) {
+            ageCheck.cancel();
+        }
+        ageCheck = endpoint.schedule(when, check);
+    }
+
+    private synchronized void cancelAgeCheck() {
+        if (ageCheck != null) {
+            ageCheck.cancel();
+            ageCheck = null;
+        }
     }
 
     /** DSQL's end of a transaction past its age: the age error, then the connection's (measured). */
     private void terminate() {
-        long limit = endpoint.transactionAgeLimit().toSeconds();
         try {
             synchronized (clientWrites) {
-                PostgresWire.write(clientOut, 'E', error("ERROR", "54000", "transaction age limit of " + limit
-                        + "s exceeded", "Current transaction age " + transactionAge() + "s exceeds " + limit + "s", null));
+                PostgresWire.write(clientOut, 'E', ageError(transactionAge()));
             }
         } catch (IOException ignored) {
             // The client left first; the connection is closed below either way.
@@ -375,24 +469,6 @@ final class DsqlSession {
         }
         closeQuietly(clientSocket);
         closeQuietly(databaseSocket);
-    }
-
-    /**
-     * A statement that ran past the transaction's age ends, as DSQL ends it, in the age error, which
-     * fails the transaction: the database raises it, so its state is DSQL's.
-     */
-    private void failOutlivedStatement() throws IOException {
-        long limit = endpoint.transactionAgeLimit().toSeconds();
-        awaitingReady.incrementAndGet();
-        synchronized (databaseWrites) {
-            synchronized (batches) {
-                endBatch();
-            }
-            PostgresWire.write(databaseOut, 'Q', PostgresWire.cStringBytes(DsqlStatements.reject("54000",
-                    "transaction age limit of " + limit + "s exceeded",
-                    "Current transaction age " + transactionAge() + "s exceeds " + limit + "s")));
-            databaseOut.flush();
-        }
     }
 
     /**
@@ -421,8 +497,11 @@ final class DsqlSession {
     /** The batch the extended-protocol messages since the last Sync belong to. Called holding {@code batches}. */
     private Batch extendedBatch() {
         if (openBatch == null) {
-            openBatch = new Batch();
+            openBatch = new Batch(now());
             batches.addLast(openBatch);
+            if (batches.size() == 1 && transactionStatus == 'I') {
+                watchImplicitTransaction(openBatch, couldRun(openBatch));
+            }
         }
         return openBatch;
     }
@@ -434,10 +513,15 @@ final class DsqlSession {
      * query statement's tag.
      */
     private static final class Batch {
+        final Instant sent;
         final Deque<Named> parses = new ArrayDeque<>();
         final Deque<Named> binds = new ArrayDeque<>();
         final Deque<Named> closes = new ArrayDeque<>();
         final Deque<Named> results = new ArrayDeque<>();
+
+        Batch(Instant sent) {
+            this.sent = sent;
+        }
     }
 
     /** A statement or portal name, and what goes with it; a simple query's result has no name. */
@@ -519,6 +603,7 @@ final class DsqlSession {
                         case 'K' -> {
                             cancelKey = endpoint.registerCancelKey(message.body(), route.backend());
                             backendPid = PostgresWire.int32(message.body(), 0);
+                            cancelKeyData = message.body();
                             startup.add(message);
                             continue;
                         }
@@ -529,19 +614,8 @@ final class DsqlSession {
                     }
                 }
                 switch (message.type()) {
-                    case 'D' -> {
-                        if (transactionStatus == 'T' && pastAgeLimit()) {
-                            // DSQL answers a statement that outlived the transaction's age with no rows.
-                            statementOutlived = true;
-                            continue;
-                        }
-                    }
                     case 'C' -> {
                         Named result = settle(batch -> batch.results);
-                        if (transactionStatus == 'T' && pastAgeLimit()) {
-                            statementOutlived = true;
-                            continue;
-                        }
                         String override = result == null ? null : result.name() == null ? result.value()
                                 : statementTags.get(portalStatements.get(result.name()));
                         if (override != null) {
@@ -569,26 +643,41 @@ final class DsqlSession {
                             (closed.value().equals("S") ? statementTags : portalStatements).remove(closed.name());
                         }
                     }
-                    case 'E', 'N' -> message = new PostgresWire.Message(message.type(),
-                            inDsqlWords(message.type(), message.body()));
+                    case 'E', 'N' -> {
+                        if (message.type() == 'E') {
+                            String state = PostgresWire.parseFields(message.body(), 0).get('C');
+                            if (cancelledForAge && QUERY_CANCELED.equals(state)) {
+                                cancelledForAge = false;
+                                message = new PostgresWire.Message(message.type(), ageError(ageOfRunning()));
+                                break;
+                            }
+                        }
+                        message = new PostgresWire.Message(message.type(), inDsqlWords(message.type(), message.body()));
+                    }
                     case 'Z' -> {
                         awaitingReady.updateAndGet(n -> Math.max(0, n - 1));
+                        // A cancel that reached no statement leaves nothing for a later one to inherit.
+                        cancelledForAge = false;
+                        Batch answered;
                         synchronized (batches) {
-                            batches.pollFirst();
+                            answered = batches.pollFirst();
                         }
+                        Instant couldRun = answered != null ? couldRun(answered) : lastReady;
+                        lastReady = now();
                         if (message.body()[0] == 'I') {
                             // Outside a transaction no portal outlives its Sync.
                             portalStatements.clear();
                         }
                         char status = (char) message.body()[0];
-                        if (statementOutlived && status == 'T') {
-                            statementOutlived = false;
-                            failOutlivedStatement();
-                            continue;
-                        }
-                        statementOutlived = false;
                         if (started) {
-                            transactionStatus(status);
+                            transactionStatus(status, couldRun);
+                            Batch next;
+                            synchronized (batches) {
+                                next = batches.peekFirst();
+                            }
+                            if (status == 'I' && next != null) {
+                                watchImplicitTransaction(next, couldRun(next));
+                            }
                         }
                     }
                     default -> {

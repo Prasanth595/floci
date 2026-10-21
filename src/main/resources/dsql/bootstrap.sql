@@ -236,6 +236,9 @@ BEGIN
     IF tg_tag = 'CREATE INDEX' AND NOT sys._issued_by('create_index_async\(text,text,text\)') THEN
         RAISE EXCEPTION USING ERRCODE = '0A000', MESSAGE = 'unsupported mode. please use CREATE INDEX ASYNC.';
     END IF;
+    IF tg_tag IN ('CREATE TABLE AS', 'SELECT INTO', 'CREATE MATERIALIZED VIEW') THEN
+        RAISE EXCEPTION USING ERRCODE = '0A000', MESSAGE = 'unsupported statement: CreateTableAs';
+    END IF;
     IF tg_tag = 'CREATE TRIGGER' THEN
         RAISE EXCEPTION USING ERRCODE = '0A000', MESSAGE = 'CREATE TRIGGER not supported';
     END IF;
@@ -247,6 +250,18 @@ BEGIN
     END IF;
     PERFORM sys._count_ddl();
 END
+$$;
+
+-- The type a domain stands for, through every domain it is built on; any other type itself.
+CREATE OR REPLACE FUNCTION sys._base_type(type_oid oid) RETURNS oid
+LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+    WITH RECURSIVE chain AS (
+        SELECT t.oid, t.typtype, t.typbasetype FROM pg_type t WHERE t.oid = type_oid
+        UNION ALL
+        SELECT t.oid, t.typtype, t.typbasetype FROM pg_type t JOIN chain c ON t.oid = c.typbasetype
+        WHERE c.typtype = 'd'
+    )
+    SELECT oid FROM chain WHERE typtype <> 'd'
 $$;
 
 CREATE OR REPLACE FUNCTION sys._on_ddl_end() RETURNS event_trigger
@@ -279,18 +294,20 @@ BEGIN
                     RAISE EXCEPTION USING ERRCODE = '0A000', MESSAGE = format('datatype %s not supported', key_type);
                 END IF;
             END IF;
-            -- A key may not hold jsonb or bytea: the table's own unique keys, or the index created.
+            -- A key may not hold jsonb or bytea: the table's own unique keys, or the index created. The
+            -- index's own columns say, expressions included, named as declared, a domain checked
+            -- through to its base type (measured).
             SELECT format_type(a.atttypid, a.atttypmod) INTO key_type
             FROM pg_index i
-            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+            JOIN pg_attribute a ON a.attrelid = i.indexrelid AND a.attnum BETWEEN 1 AND i.indnkeyatts
             WHERE (i.indrelid = command.objid OR i.indexrelid = command.objid)
-              AND a.atttypid IN ('jsonb'::regtype, 'bytea'::regtype)
+              AND sys._base_type(a.atttypid) IN ('jsonb'::regtype, 'bytea'::regtype)
             LIMIT 1;
             IF key_type IS NOT NULL THEN
                 RAISE EXCEPTION USING ERRCODE = '0A000', MESSAGE = format('datatype %s is not supported in a key', key_type);
             END IF;
             IF command.object_type = 'table' AND relation.relkind = 'r'
-               AND command.command_tag IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO', 'ALTER TABLE') THEN
+               AND command.command_tag IN ('CREATE TABLE', 'ALTER TABLE') THEN
                 PERFORM sys._watch_table(command.objid::regclass);
             END IF;
         ELSIF command.object_type IN ('function', 'procedure') THEN
@@ -391,6 +408,13 @@ DECLARE
     schema_name text;
     index_oid oid;
 BEGIN
+    -- Floci's rewrite of CREATE INDEX ASYNC hands one index statement here; anything else, a
+    -- client calling this function itself included, is not one, and EXECUTE would run every
+    -- statement a ; separates.
+    IF statement !~* '^\s*CREATE\s+(UNIQUE\s+)?INDEX\s' OR position(';' IN statement) > 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '42883',
+            MESSAGE = 'function sys.create_index_async(text, text, text) does not exist';
+    END IF;
     SELECT n.nspname INTO schema_name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.oid = target;
     BEGIN
@@ -558,14 +582,29 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
     WHERE r.rolname = role_name
 $$;
 
+-- A statement on roles, which DSQL counts as DDL (measured) though PostgreSQL fires no event trigger
+-- for one: CREATE or ALTER ROLE, USER or GROUP, and GRANT or REVOKE of a role, which Floci's
+-- endpoint hands here, counted, then run as the caller. Anything else is not one of them.
+CREATE OR REPLACE PROCEDURE sys.run_role_ddl(statement text)
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF statement !~* '^\s*((CREATE|ALTER)\s+(ROLE|USER|GROUP)|GRANT|REVOKE)\s' OR position(';' IN statement) > 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '42883', MESSAGE = 'procedure sys.run_role_ddl(text) does not exist';
+    END IF;
+    PERFORM sys._count_ddl();
+    EXECUTE statement;
+END
+$$;
+
 -- DROP ROLE, USER or GROUP, which Floci's endpoint hands here: refused for a mapped role, otherwise
--- run as the caller.
+-- counted as DDL and run as the caller.
 CREATE OR REPLACE PROCEDURE sys.drop_roles(role_names text[], missing_ok boolean)
 LANGUAGE plpgsql AS $$
 DECLARE
     role_name text;
     trust text;
 BEGIN
+    PERFORM sys._count_ddl();
     FOREACH role_name IN ARRAY role_names LOOP
         trust := sys._trust_relationships(role_name);
         IF trust IS NOT NULL THEN
@@ -582,4 +621,17 @@ $$;
 REVOKE ALL ON sys.iam_identity, sys.iam_auth_member FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION sys._trusted_role(text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON PROCEDURE sys._forget_dropped_roles() FROM PUBLIC;
+
+-- A table created before these triggers existed counts its writes from now on too.
+DO $$
+DECLARE
+    relation regclass;
+BEGIN
+    FOR relation IN SELECT c.oid::regclass FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'sys')
+                      AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%' LOOP
+        PERFORM sys._watch_table(relation);
+    END LOOP;
+END
+$$;
 RESET session_replication_role;

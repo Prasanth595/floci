@@ -57,6 +57,18 @@ class DsqlStatementsTest {
         "SELECT * FROM t FOR NO KEY UPDATE|0A000|locking clauses other than FOR UPDATE/FOR KEY SHARE are not supported",
         "SELECT pg_advisory_lock(1)|0A000|function pg_advisory_lock not supported",
         "SELECT pg_try_advisory_xact_lock(1)|0A000|function pg_try_advisory_xact_lock not supported",
+        "SELECT \"pg_advisory_lock\"(1)|0A000|function pg_advisory_lock not supported",
+        "CREATE SEQUENCE s9 /* CACHE 65536 */ CACHE 2|22023|CACHE (2) must be greater than or equal to 65536 or equal to 1",
+        "SET \"default_transaction_isolation\" TO 'read committed'|0A000|setting configuration parameter"
+                + " \"default_transaction_isolation\" not supported",
+        "SELECT set_config('default_transaction_isolation', 'read committed', false)|0A000|setting configuration"
+                + " parameter \"default_transaction_isolation\" not supported",
+        "SELECT set_config('transaction_isolation', 'read committed', false)|0A000|setting configuration parameter"
+                + " \"transaction_isolation\" not supported",
+        "ALTER ROLE admin SET default_transaction_isolation = 'read committed'|0A000|setting configuration parameter"
+                + " \"default_transaction_isolation\" not supported",
+        "ALTER DATABASE postgres SET search_path = public|0A000|unsupported statement: AlterDatabaseSet",
+        "ALTER DATABASE postgres RESET ALL|0A000|unsupported statement: AlterDatabaseSet",
         "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE|0A000|Unsupported isolation level: SERIALIZABLE",
         "BEGIN ISOLATION LEVEL READ COMMITTED|0A000|Unsupported isolation level: READ COMMITTED",
         "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE|0A000|Unsupported isolation level: SERIALIZABLE",
@@ -135,9 +147,42 @@ class DsqlStatementsTest {
         "SELECT 'TRUNCATE t; FOR SHARE' AS text",
         "INSERT INTO t (note) VALUES ($x$ pg_advisory_lock( $x$)",
         "CREATE INDEX ON t (n)",
+        "CREATE SEQUENCE \"cache 2\" CACHE 65536",
     })
     void whatDsqlAcceptsPassesUnchanged(String sql) {
         assertEquals(sql, DsqlStatements.rewrite(sql).get(0).sql());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "CREATE ROLE r1|CREATE ROLE",
+        "create user u1 WITH LOGIN|CREATE ROLE",
+        "ALTER ROLE r1 SET search_path = public|ALTER ROLE",
+        "ALTER GROUP g ADD USER u1|ALTER ROLE",
+        "GRANT r1 TO u1|GRANT ROLE",
+        "REVOKE r1 FROM u1|REVOKE ROLE",
+    })
+    void aStatementOnRolesIsCountedAsDdlUnderPostgresqlsTag(String sql, String tag) {
+        DsqlStatements.Statement statement = DsqlStatements.rewrite(sql).get(0);
+
+        assertEquals("CALL sys.run_role_ddl($dsql$" + sql + "$dsql$)", statement.sql());
+        assertEquals(tag, statement.commandTag());
+    }
+
+    @Test
+    void aGrantOnAnObjectOrAUserMappingIsNoRoleStatement() {
+        for (String sql : List.of("GRANT SELECT ON t TO r1", "REVOKE ALL ON t FROM r1",
+                "CREATE USER MAPPING FOR r1 SERVER s")) {
+            assertEquals(sql, DsqlStatements.rewrite(sql).get(0).sql(), sql);
+        }
+    }
+
+    @Test
+    void aLineCommentEndsAtACarriageReturnAsInPostgresql() {
+        List<DsqlStatements.Statement> statements = DsqlStatements.rewrite("SELECT 1 --\r; TRUNCATE t");
+
+        assertEquals(2, statements.size());
+        assertEquals(DsqlStatements.reject("0A000", "unsupported statement: Truncate", null), statements.get(1).sql());
     }
 
     @Test
