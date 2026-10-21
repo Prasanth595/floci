@@ -3,10 +3,10 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.zip.DeploymentPackage;
@@ -16,14 +16,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -57,10 +51,8 @@ public class LambdaLayerService {
     private static final int MAX_LAYER_VERSION_ARN_LENGTH = 140;
     private static final int MAX_ITEMS_LIMIT = 50;
 
-    private static final char MARKER_SEPARATOR = '.';
-
-    /** Signing key for pagination markers, per process; see {@link #encodeMarker}. */
-    private static final byte[] MARKER_KEY = newMarkerKey();
+    /** Signs pagination markers; see {@link #decodeMarker}. */
+    private final SignedMarkers markers = new SignedMarkers();
 
     private static final List<String> COMPATIBLE_ARCHITECTURES = List.of("x86_64", "arm64");
 
@@ -285,7 +277,7 @@ public class LambdaLayerService {
         return true;
     }
 
-    private static <T> PaginatedResult<T> page(List<T> items, Function<T, String> cursorOf,
+    private <T> PaginatedResult<T> page(List<T> items, Function<T, String> cursorOf,
                                                Integer maxItems, String marker) {
         String after = decodeMarker(marker);
         List<T> remaining = after == null ? items
@@ -294,7 +286,7 @@ public class LambdaLayerService {
                 .limit(maxItems != null ? maxItems : MAX_ITEMS_LIMIT)
                 .toList();
         String nextMarker = pageItems.size() < remaining.size()
-                ? encodeMarker(cursorOf.apply(pageItems.get(pageItems.size() - 1)))
+                ? markers.issue(cursorOf.apply(pageItems.get(pageItems.size() - 1)))
                 : null;
         return new PaginatedResult<>(pageItems, nextMarker);
     }
@@ -358,47 +350,15 @@ public class LambdaLayerService {
      * silently skipped or empty page. A marker from an earlier run is stale for the same
      * reason, matching a client that replays an expired token against AWS.
      */
-    private static String encodeMarker(String cursor) {
-        String signed = cursor + MARKER_SEPARATOR + sign(cursor);
-        return Base64Url.encode(signed);
-    }
-
-    private static String decodeMarker(String marker) {
+    private String decodeMarker(String marker) {
         if (marker == null) {
             return null;
         }
-        String decoded;
-        try {
-            decoded = new String(Base64.getUrlDecoder().decode(marker), StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            throw invalidPaginationKey();
-        }
-        int separator = decoded.lastIndexOf(MARKER_SEPARATOR);
-        if (separator < 0) {
-            throw invalidPaginationKey();
-        }
-        String cursor = decoded.substring(0, separator);
-        byte[] presented = decoded.substring(separator + 1).getBytes(StandardCharsets.UTF_8);
-        if (!MessageDigest.isEqual(presented, sign(cursor).getBytes(StandardCharsets.UTF_8))) {
+        String cursor = markers.cursorOf(marker);
+        if (cursor == null) {
             throw invalidPaginationKey();
         }
         return cursor;
-    }
-
-    private static String sign(String cursor) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(MARKER_KEY, "HmacSHA256"));
-            return Base64Url.encode(mac.doFinal(cursor.getBytes(StandardCharsets.UTF_8)));
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("HmacSHA256 is required to paginate layers", e);
-        }
-    }
-
-    private static byte[] newMarkerKey() {
-        byte[] key = new byte[32];
-        new SecureRandom().nextBytes(key);
-        return key;
     }
 
     private static AwsException invalidPaginationKey() {

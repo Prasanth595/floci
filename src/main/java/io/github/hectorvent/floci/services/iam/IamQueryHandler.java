@@ -34,12 +34,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
-import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -68,9 +63,6 @@ public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
 
-    private static final String MARKER_PREFIX = "after:";
-    private static final char MARKER_SEPARATOR = '.';
-
     /** {@code MaxItems} on the readers that page through {@link #paginate}: "defaults to 100", range 1 to 1000. */
     private static final int DEFAULT_MAX_ITEMS = 100;
     private static final int MAX_MAX_ITEMS = 1000;
@@ -95,8 +87,8 @@ public class IamQueryHandler {
     private final DelegationRequestService delegationRequestService;
     private final RegionResolver regionResolver;
     private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
-    /** Signs the markers this handler issues, per process; see {@link #issueMarker}. */
-    private final byte[] markerKey = newMarkerKey();
+    /** Signs each page's Marker, so only a marker this handler issued names an item. */
+    private final SignedMarkers markers = new SignedMarkers();
 
     @Inject
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
@@ -2840,17 +2832,7 @@ public class IamQueryHandler {
         int to = from + Math.min(limit, items.size() - from);
         boolean truncated = to < items.size();
         return new Page<>(List.copyOf(items.subList(from, to)), truncated,
-                truncated ? issueMarker(keyOf.apply(items.get(to - 1))) : null);
-    }
-
-    /**
-     * Signed with a key generated at startup, as Lambda's layer markers are, so a marker naming an
-     * item is honoured only when this handler issued it: a fabricated one is read as an unissued
-     * marker and refused, and one from an earlier run is stale, as an expired AWS marker would be.
-     */
-    private String issueMarker(String key) {
-        String cursor = MARKER_PREFIX + key;
-        return Base64Url.encode(cursor + MARKER_SEPARATOR + sign(cursor));
+                truncated ? markers.issue(keyOf.apply(items.get(to - 1))) : null);
     }
 
     /**
@@ -2863,7 +2845,7 @@ public class IamQueryHandler {
         if (marker == null || marker.isBlank()) {
             return 0;
         }
-        String anchor = issuedMarkerKey(marker.trim());
+        String anchor = markers.cursorOf(marker.trim());
         if (anchor == null) {
             return markerIndex(marker);
         }
@@ -2878,44 +2860,6 @@ public class IamQueryHandler {
             }
         }
         return items.size();
-    }
-
-    /** The key an issued marker names, or null for a marker this handler did not issue. */
-    private String issuedMarkerKey(String marker) {
-        String decoded;
-        try {
-            decoded = new String(Base64.getUrlDecoder().decode(marker), StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException notIssued) {
-            // Not base64url, so not a marker this handler issued; the caller reads it as an index.
-            return null;
-        }
-        int separator = decoded.lastIndexOf(MARKER_SEPARATOR);
-        if (separator < 0) {
-            return null;
-        }
-        String cursor = decoded.substring(0, separator);
-        byte[] presented = decoded.substring(separator + 1).getBytes(StandardCharsets.UTF_8);
-        if (!cursor.startsWith(MARKER_PREFIX)
-                || !MessageDigest.isEqual(presented, sign(cursor).getBytes(StandardCharsets.UTF_8))) {
-            return null;
-        }
-        return cursor.substring(MARKER_PREFIX.length());
-    }
-
-    private String sign(String cursor) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(markerKey, "HmacSHA256"));
-            return Base64Url.encode(mac.doFinal(cursor.getBytes(StandardCharsets.UTF_8)));
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("HmacSHA256 is required to sign IAM markers", e);
-        }
-    }
-
-    private static byte[] newMarkerKey() {
-        byte[] key = new byte[32];
-        new SecureRandom().nextBytes(key);
-        return key;
     }
 
     /**
