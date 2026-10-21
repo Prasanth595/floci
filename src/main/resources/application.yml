@@ -786,6 +786,7 @@ floci:
     codepipeline:
       enabled: true
       source-poll-interval-ms: 500
+      worker-poll-interval-ms: ${FLOCI_SERVICES_CODEPIPELINE_WORKER_POLL_INTERVAL_MS:100}
     autoscaling:
       enabled: true
     applicationautoscaling:

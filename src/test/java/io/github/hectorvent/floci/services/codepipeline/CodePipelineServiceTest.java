@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.codepipeline;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -17,12 +18,13 @@ import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeli
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
@@ -62,65 +64,56 @@ class CodePipelineServiceTest {
             mock(CodeBuildService.class),
             mock(CodeDeployService.class),
             mock(LambdaService.class),
-            mock(S3Service.class), 5L);
+            mock(S3Service.class), configWithPollInterval(500L));
 
     @Test
-    void existingConstructorsKeepWorkerPollDefaultIndependentOfSourcePolling() throws Exception {
-        CodeBuildService codeBuild = mock(CodeBuildService.class);
-        CodeDeployService codeDeploy = mock(CodeDeployService.class);
-        LambdaService lambda = mock(LambdaService.class);
-        S3Service s3 = mock(S3Service.class);
-        CodePipelineEventPublisher publisher = mock(CodePipelineEventPublisher.class);
-        CodePipelineService[] defaults = {
-                new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild, codeDeploy, lambda, s3),
-                new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild, codeDeploy, lambda, s3,
-                        configWithPollInterval(731L)),
-                new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild, codeDeploy, lambda, s3,
-                        configWithPollInterval(947L), publisher),
-                new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild, codeDeploy, lambda, s3,
-                        publisher, 613L, TimeUnit.SECONDS.toNanos(5), () -> { })
-        };
-        long[] sourceIntervals = {500L, 731L, 947L, 613L};
-        try {
-            for (int i = 0; i < defaults.length; i++) {
-                assertEquals(100L, longField(defaults[i], "workerPollIntervalMs"));
-                assertEquals(sourceIntervals[i], longField(defaults[i], "sourcePollIntervalMs"));
-                assertEquals(TimeUnit.SECONDS.toNanos(5), longField(defaults[i], "runFinishWaitNanos"));
-            }
-        } finally {
-            for (CodePipelineService pipelineService : defaults) {
-                pipelineService.shutdown();
-            }
-        }
+    void pollingConfigDefaultsKeepWorkerAndSourceIntervalsIndependent() {
+        EmulatorConfig config = new SmallRyeConfigBuilder()
+                .addDefaultInterceptors()
+                .withMapping(EmulatorConfig.class)
+                .build().getConfigMapping(EmulatorConfig.class);
+
+        assertEquals(100L, config.services().codepipeline().workerPollIntervalMs());
+        assertEquals(500L, config.services().codepipeline().sourcePollIntervalMs());
     }
 
     @Test
-    void explicitWorkerIntervalLeavesSourceIntervalAndRunFinishHooksUnchanged() throws Exception {
-        AtomicInteger cleanupCalls = new AtomicInteger();
-        Runnable cleanup = cleanupCalls::incrementAndGet;
-        CodePipelineService extended = new CodePipelineService(new InMemoryStorageFactory(), mapper,
-                mock(CodeBuildService.class), mock(CodeDeployService.class), mock(LambdaService.class),
-                mock(S3Service.class), mock(CodePipelineEventPublisher.class), 739L, 123456L, cleanup, 5L);
-        try {
-            assertEquals(5L, longField(service, "workerPollIntervalMs"));
-            assertEquals(500L, longField(service, "sourcePollIntervalMs"));
-            assertEquals(TimeUnit.SECONDS.toNanos(5), longField(service, "runFinishWaitNanos"));
-            assertEquals(5L, longField(extended, "workerPollIntervalMs"));
-            assertEquals(739L, longField(extended, "sourcePollIntervalMs"));
-            assertEquals(123456L, longField(extended, "runFinishWaitNanos"));
-            Field probe = CodePipelineService.class.getDeclaredField("beforeOverrideTimeoutCleanup");
-            probe.setAccessible(true);
-            assertEquals(cleanup, probe.get(extended));
-            assertEquals(0, cleanupCalls.get());
-        } finally {
-            extended.shutdown();
-        }
+    void workerPollingConfigOverrideDoesNotChangeSourcePolling() {
+        EmulatorConfig config = new SmallRyeConfigBuilder()
+                .addDefaultInterceptors()
+                .withMapping(EmulatorConfig.class)
+                .withDefaultValue("floci.services.codepipeline.worker-poll-interval-ms", "1")
+                .build().getConfigMapping(EmulatorConfig.class);
+
+        assertEquals(1L, config.services().codepipeline().workerPollIntervalMs());
+        assertEquals(500L, config.services().codepipeline().sourcePollIntervalMs());
     }
 
-    private static long longField(CodePipelineService pipelineService, String name) throws Exception {
-        Field field = CodePipelineService.class.getDeclaredField(name);
-        field.setAccessible(true);
-        return field.getLong(pipelineService);
+    @Test
+    void sourcePollingConfigOverrideDoesNotChangeWorkerPolling() {
+        EmulatorConfig config = new SmallRyeConfigBuilder()
+                .addDefaultInterceptors()
+                .withMapping(EmulatorConfig.class)
+                .withDefaultValue("floci.services.codepipeline.source-poll-interval-ms", "739")
+                .build().getConfigMapping(EmulatorConfig.class);
+
+        assertEquals(739L, config.services().codepipeline().sourcePollIntervalMs());
+        assertEquals(100L, config.services().codepipeline().workerPollIntervalMs());
+    }
+
+    @Test
+    void applicationYamlDeclaresIndependentProductionAndTestPollingIntervals() throws Exception {
+        YAMLMapper yaml = new YAMLMapper();
+        JsonNode production = yaml.readTree(Path.of("src/main/resources/application.yml").toFile())
+                .path("floci").path("services").path("codepipeline");
+        JsonNode test = yaml.readTree(Path.of("src/test/resources/application.yml").toFile())
+                .path("floci").path("services").path("codepipeline");
+
+        assertEquals("${FLOCI_SERVICES_CODEPIPELINE_WORKER_POLL_INTERVAL_MS:100}",
+                production.path("worker-poll-interval-ms").asText());
+        assertEquals(1L, test.path("worker-poll-interval-ms").asLong());
+        assertEquals(500L, production.path("source-poll-interval-ms").asLong());
+        assertEquals(100L, test.path("source-poll-interval-ms").asLong());
     }
 
     /**
@@ -140,8 +133,6 @@ class CodePipelineServiceTest {
                     mock(S3Service.class),
                     configWithPollInterval(interval));
             try {
-                assertEquals(100L, longField(configured, "workerPollIntervalMs"));
-                assertEquals(500L, longField(configured, "sourcePollIntervalMs"));
                 assertDoesNotThrow(configured::resumePersistedExecutions,
                         "interval " + interval + " must not abort startup");
             } finally {
@@ -151,7 +142,7 @@ class CodePipelineServiceTest {
     }
 
     /**
-     * The guard above is unreachable while the constructor reads only the one key, so this is what
+     * The guard below is unreachable while the constructor reads only the answered keys, so this is what
      * keeps the message it produces from rotting. {@code enabled()} returns a primitive and is not
      * in the answers map, which is exactly the shape that used to fail as "not an interface".
      */
@@ -167,17 +158,16 @@ class CodePipelineServiceTest {
     }
 
     /**
-     * Minimal {@link EmulatorConfig} view: the constructor reads only the source poll interval, so
-     * a proxy answering that avoids standing up the Quarkus config container.
+     * Minimal {@link EmulatorConfig} view answering both polling intervals without standing up the
+     * Quarkus config container.
      *
      * <p>Anything not in the answers map is assumed to be a further config view and is proxied in
-     * turn. That assumption holds only while the constructor reads exactly one key. If a second read
-     * lands and it returns a {@code String} or a primitive there is no interface to proxy, so the
+     * turn. If another read returns a {@code String} or a primitive there is no interface to proxy, so the
      * handler says which method it could not answer instead of letting the JDK fail further down
      * with "not an interface".
      */
     private static EmulatorConfig configWithPollInterval(long intervalMs) {
-        Map<String, Object> answers = Map.of("sourcePollIntervalMs", intervalMs);
+        Map<String, Object> answers = Map.of("sourcePollIntervalMs", intervalMs, "workerPollIntervalMs", 1L);
 
         InvocationHandler handler = new InvocationHandler() {
             @Override
@@ -209,7 +199,7 @@ class CodePipelineServiceTest {
                 mock(CodeBuildService.class),
                 mock(CodeDeployService.class),
                 mock(LambdaService.class),
-                mock(S3Service.class), 5L);
+                mock(S3Service.class), configWithPollInterval(500L));
         CodePipelinePipeline pipeline = mapper.readValue("""
                 {
                     "accountId": "000000000000",
@@ -269,7 +259,7 @@ class CodePipelineServiceTest {
                 mock(CodeBuildService.class),
                 mock(CodeDeployService.class),
                 mock(LambdaService.class),
-                s3Service, 5L);
+                s3Service, configWithPollInterval(500L));
         String pipelineRequest = """
                 {
                     "pipeline": {
@@ -559,10 +549,11 @@ class CodePipelineServiceTest {
             awaitWaitingStage(service, pipeline, first, "External");
             String second = startExecution(service, pipeline);
             waitForExecutionStatus(service, pipeline, first, "Superseded");
-            await().atMost(Duration.ofSeconds(3)).until(() -> !service.activeRuns.contains(ACCOUNT + ":" + first));
+            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(3))
+                    .until(() -> !service.activeRuns.contains(ACCOUNT + ":" + first));
 
             handle("EnableStageTransition", transition);
-            await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(3)).untilAsserted(() ->
                     assertFalse(handle("ListActionExecutions", """
                             {"pipelineName":"%s","filter":{"pipelineExecutionId":"%s"}}
                             """.formatted(pipeline, second)).path("actionExecutionDetails").isEmpty()));
@@ -584,7 +575,7 @@ class CodePipelineServiceTest {
         CapturingStorageFactory storage = new CapturingStorageFactory();
         CodePipelineService catchUpService = new CodePipelineService(storage, mapper,
                 mock(CodeBuildService.class), mock(CodeDeployService.class),
-                mock(LambdaService.class), mock(S3Service.class), 5L);
+                mock(LambdaService.class), mock(S3Service.class), configWithPollInterval(500L));
         String pipelineName = "enabled-catch-up";
         try {
             createExternalActionPipeline(catchUpService, pipelineName, """
@@ -651,7 +642,7 @@ class CodePipelineServiceTest {
         storage.fixedExecutionStartTime = 10.0;
         CodePipelineService pipelineService = new CodePipelineService(storage, mapper,
                 mock(CodeBuildService.class), mock(CodeDeployService.class),
-                mock(LambdaService.class), mock(S3Service.class), 5L);
+                mock(LambdaService.class), mock(S3Service.class), configWithPollInterval(500L));
         String pipeline = "ordinal-admission";
         try {
             createExternalActionPipeline(pipelineService, pipeline, """
@@ -681,7 +672,7 @@ class CodePipelineServiceTest {
             }
 
             // Observe both actual workers reaching their first action before cleanup.
-            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
                 for (String id : new String[] {firstId, secondId}) {
                     assertFalse(handle(pipelineService, "ListActionExecutions", """
                             {"pipelineName":"%s","filter":{"pipelineExecutionId":"%s"}}
@@ -702,7 +693,7 @@ class CodePipelineServiceTest {
         CapturingStorageFactory storage = new CapturingStorageFactory();
         CodePipelineService pipelineService = new CodePipelineService(storage, mapper,
                 mock(CodeBuildService.class), mock(CodeDeployService.class),
-                mock(LambdaService.class), mock(S3Service.class), 5L);
+                mock(LambdaService.class), mock(S3Service.class), configWithPollInterval(500L));
         String pipeline = "ordinal-reverse-arrival";
         try {
             createExternalActionPipeline(pipelineService, pipeline, """
@@ -850,12 +841,12 @@ class CodePipelineServiceTest {
         }
 
         private void awaitDeployWaiters(int count) {
-            await().atMost(TIMEOUT).until(() -> deployWaiters.size() == count);
+            await().pollInterval(Duration.ofMillis(1)).atMost(TIMEOUT).until(() -> deployWaiters.size() == count);
         }
 
         private JsonNode job(String stage, String execution) {
             AtomicReference<JsonNode> found = new AtomicReference<>();
-            await().atMost(TIMEOUT).until(() -> {
+            await().pollInterval(Duration.ofMillis(1)).atMost(TIMEOUT).until(() -> {
                 JsonNode response = handle("PollForJobs", """
                         {"actionTypeId":{"category":"%s","owner":"Custom",
                          "provider":"Review%s","version":"1"},"maxBatchSize":10}
@@ -887,11 +878,13 @@ class CodePipelineServiceTest {
         }
 
         private void awaitStatus(String execution, String expected) {
-            await().atMost(TIMEOUT).untilAsserted(() -> assertEquals(expected, status(execution)));
+            await().pollInterval(Duration.ofMillis(1)).atMost(TIMEOUT)
+                    .untilAsserted(() -> assertEquals(expected, status(execution)));
         }
 
         private void awaitWorkerExit(String execution) {
-            await().atMost(TIMEOUT).until(() -> !service.activeRuns.contains(ACCOUNT + ":" + execution));
+            await().pollInterval(Duration.ofMillis(1)).atMost(TIMEOUT)
+                    .until(() -> !service.activeRuns.contains(ACCOUNT + ":" + execution));
         }
 
         private JsonNode actions(String execution) throws Exception {
@@ -941,7 +934,7 @@ class CodePipelineServiceTest {
 
     private void awaitWaitingStage(CodePipelineService pipelineService, String pipeline,
                                    String executionId, String stage) throws Exception {
-        await().atMost(Duration.ofSeconds(3)).until(() -> {
+        await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(3)).until(() -> {
             CodePipelineExecution execution = storage.executionStore
                     .getForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + executionId).orElseThrow();
             return stage.equals(execution.getWaitingStage())
@@ -958,7 +951,7 @@ class CodePipelineServiceTest {
                     "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
                     """);
             String first = startExecution(service, pipeline);
-            await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+            await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(3)).untilAsserted(() ->
                     assertFalse(handle("ListActionExecutions", """
                             {"pipelineName":"%s","filter":{"pipelineExecutionId":"%s"}}
                             """.formatted(pipeline, first)).path("actionExecutionDetails").isEmpty()));
@@ -979,7 +972,7 @@ class CodePipelineServiceTest {
                                             CodeDeployService codeDeployService) {
         return new CodePipelineService(
                 new InMemoryStorageFactory(), mapper, codeBuildService, codeDeployService,
-                mock(LambdaService.class), mock(S3Service.class), 5L);
+                mock(LambdaService.class), mock(S3Service.class), configWithPollInterval(500L));
     }
 
     private void createExternalActionPipeline(CodePipelineService pipelineService,

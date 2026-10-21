@@ -113,6 +113,7 @@ the approval token, `expires` as an ISO-8601 timestamp, `consoleLink`, `approval
 | `FLOCI_STORAGE_SERVICES_CODEPIPELINE_MODE` | global mode | Overrides CodePipeline storage mode |
 | `FLOCI_STORAGE_SERVICES_CODEPIPELINE_FLUSH_INTERVAL_MS` | `5000` | Hybrid storage flush interval |
 | `FLOCI_SERVICES_CODEPIPELINE_SOURCE_POLL_INTERVAL_MS` | `500` | How often (ms) S3 sources are polled for a new object revision |
+| `FLOCI_SERVICES_CODEPIPELINE_WORKER_POLL_INTERVAL_MS` | `100` | How often (ms) execution workers check for progress, independently of S3 source polling |
 
 ## Example
 

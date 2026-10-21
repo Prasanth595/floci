@@ -1312,6 +1312,10 @@ public interface EmulatorConfig {
         /** How often, in milliseconds, S3 sources are polled for a new object revision. */
         @WithDefault("500")
         long sourcePollIntervalMs();
+
+        /** How often, in milliseconds, execution workers check for progress. */
+        @WithDefault("100")
+        long workerPollIntervalMs();
     }
 
     interface SsmServiceConfig {

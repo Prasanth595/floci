@@ -127,7 +127,7 @@ public class CodePipelineService {
     // on sibling actions. Retries check this set so they never overlap a runner that has not finished.
     final Set<String> activeRuns = ConcurrentHashMap.newKeySet();
     private final long sourcePollIntervalMs;
-    private final long workerPollIntervalMs;
+    private long workerPollIntervalMs = DEFAULT_WORKER_POLL_INTERVAL_MS;
     // Test hooks, set only through the package-private constructor: a shortened wait, and a probe
     // for the gap before the override timeout cleanup.
     private final long runFinishWaitNanos;
@@ -149,15 +149,8 @@ public class CodePipelineService {
                         CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                         LambdaService lambdaService, S3Service s3Service) {
         this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
-                DEFAULT_WORKER_POLL_INTERVAL_MS);
-    }
-
-    CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
-                        CodeBuildService codeBuildService, CodeDeployService codeDeployService,
-                        LambdaService lambdaService, S3Service s3Service, long workerPollIntervalMs) {
-        this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
                 detachedEventPublisher(mapper), DEFAULT_SOURCE_POLL_INTERVAL_MS,
-                DEFAULT_RUN_FINISH_WAIT_NANOS, () -> { }, workerPollIntervalMs);
+                DEFAULT_RUN_FINISH_WAIT_NANOS, () -> { });
     }
 
     public CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
@@ -177,6 +170,7 @@ public class CodePipelineService {
                 eventPublisher,
                 resolveSourcePollInterval(config.services().codepipeline().sourcePollIntervalMs()),
                 DEFAULT_RUN_FINISH_WAIT_NANOS, () -> { });
+        this.workerPollIntervalMs = config.services().codepipeline().workerPollIntervalMs();
     }
 
     /**
@@ -201,23 +195,12 @@ public class CodePipelineService {
         return DEFAULT_SOURCE_POLL_INTERVAL_MS;
     }
 
-    CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
-                        CodeBuildService codeBuildService, CodeDeployService codeDeployService,
-                        LambdaService lambdaService, S3Service s3Service,
-                        CodePipelineEventPublisher eventPublisher, long sourcePollIntervalMs,
-                        long runFinishWaitNanos, Runnable beforeOverrideTimeoutCleanup) {
-        this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
-                eventPublisher, sourcePollIntervalMs, runFinishWaitNanos, beforeOverrideTimeoutCleanup,
-                DEFAULT_WORKER_POLL_INTERVAL_MS);
-    }
-
     @SuppressWarnings("unchecked")
     CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
                         CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                         LambdaService lambdaService, S3Service s3Service,
                         CodePipelineEventPublisher eventPublisher, long sourcePollIntervalMs,
-                        long runFinishWaitNanos, Runnable beforeOverrideTimeoutCleanup,
-                        long workerPollIntervalMs) {
+                        long runFinishWaitNanos, Runnable beforeOverrideTimeoutCleanup) {
         this.pipelineStore = storageFactory.create(
                 "codepipeline", "codepipeline-pipelines.json", new TypeReference<Map<String, CodePipelinePipeline>>() {});
         this.executionStore = storageFactory.create(
@@ -231,7 +214,6 @@ public class CodePipelineService {
         this.s3Service = s3Service;
         this.eventPublisher = eventPublisher;
         this.sourcePollIntervalMs = sourcePollIntervalMs;
-        this.workerPollIntervalMs = workerPollIntervalMs;
         this.runFinishWaitNanos = runFinishWaitNanos;
         this.beforeOverrideTimeoutCleanup = beforeOverrideTimeoutCleanup;
     }
