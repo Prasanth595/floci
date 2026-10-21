@@ -477,6 +477,10 @@ class Ec2RepeatedFilterNamesTest {
                 filter("instance-type", "t3.micro", "m5.large"), filter("instance-type", "t3.micro")), "instanceType"));
         assertEquals(lone, ids(describe("DescribeInstanceTypeOfferings", params,
                 filter("instance-type", "t3.micro"), filter("instance-type", "t3.micro", "m5.large")), "instanceType"));
+        assertEquals(lone, ids(describe("DescribeInstanceTypeOfferings", params,
+                filter("instance-type"), filter("instance-type", "t3.micro")), "instanceType"));
+        assertEquals(lone, ids(describe("DescribeInstanceTypeOfferings", params,
+                filter("instance-type", "t3.micro"), filter("instance-type")), "instanceType"));
     }
 
     @Test

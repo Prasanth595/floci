@@ -3540,7 +3540,7 @@ public class Ec2QueryHandler {
             // A filter's values are an OR, so the wildcard is whichever value carries one rather
             // than whichever comes first. Taking the first outright meant an exact value ahead of
             // a wildcard skipped synthesis and the lookup got nothing. Each name filter offers its
-            // wildcard in turn, since the image one builds may fail another.
+            // first wildcard in turn, since the image one builds may fail another.
             for (List<String> nameFilter : nameFilters) {
                 String namePattern = nameFilter.stream()
                         .filter(v -> v != null && (v.contains("*") || v.contains("?")))

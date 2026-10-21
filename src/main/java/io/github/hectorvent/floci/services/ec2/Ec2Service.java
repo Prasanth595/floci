@@ -9034,7 +9034,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private boolean matchesImageTagFilter(Image image, String name, List<String> values) {
-        return matchesTagFilter(image.getTags(), name, values, this::matchesFilterValue);
+        return matchesTagFilter(image.getTags(), name, values, Ec2Service::matchesFilterValue);
     }
 
     private boolean matchesTagFilter(List<Tag> resourceTags, String filterName, List<String> values,
@@ -9097,7 +9097,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         };
     }
 
-    private boolean matchesFilterValue(List<String> patterns, String value) {
+    private static boolean matchesFilterValue(List<String> patterns, String value) {
         if (patterns == null || patterns.isEmpty()) {
             return true;
         }
@@ -9115,7 +9115,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * caller-supplied pattern of many stars made the regex backtrack for seconds, and its dot
      * skipped line terminators that a tag value may hold.
      */
-    private boolean wildcardMatches(String pattern, String value) {
+    private static boolean wildcardMatches(String pattern, String value) {
         return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
     }
 
@@ -11659,8 +11659,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                             List<Map.Entry<String, List<String>>> filters) {
         // The first instance-type filter names the types to look up beside InstanceType.N, as a
         // lone one always has, and each later one keeps only the filtered types it names too, so
-        // the answer is InstanceType.N plus the types every filter names.
-        List<List<String>> typeFilters = filterValues(filters, "instance-type");
+        // the answer is InstanceType.N plus the types every filter names. A filter without values
+        // names nothing and narrows nothing, as a lone one never added a type.
+        List<List<String>> typeFilters = filterValues(filters, "instance-type").stream()
+                .filter(values -> !values.isEmpty())
+                .toList();
         List<String> effectiveTypeNames = new ArrayList<>(new LinkedHashSet<>(instanceTypeNames));
         if (!typeFilters.isEmpty()) {
             effectiveTypeNames.addAll(typeFilters.getFirst());
@@ -11680,8 +11683,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<Map<String, String>> offerings = new ArrayList<>();
         for (Map<String, Object> type : describeInstanceTypes(effectiveTypeNames)) {
             String instanceType = (String) type.get("instanceType");
-            if (!instanceTypeNames.contains(instanceType) && laterTypeFilters.stream()
-                    .anyMatch(values -> !values.isEmpty() && !values.contains(instanceType))) {
+            if (!instanceTypeNames.contains(instanceType)
+                    && laterTypeFilters.stream().anyMatch(values -> !values.contains(instanceType))) {
                 continue;
             }
             for (String location : locations) {
@@ -11726,12 +11729,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Whether every one of {@code filters} admits {@code value}, its values compared the way the
-     * image matchers compare them. A filter without values admits anything.
+     * Whether every one of {@code filters} admits {@code value}, as the image matchers test a
+     * filter. A filter without values admits anything.
      */
     static boolean everyFilterAdmits(List<List<String>> filters, String value) {
-        return filters.stream().allMatch(values -> values.isEmpty()
-                || values.stream().anyMatch(pattern -> IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value)));
+        return filters.stream().allMatch(values -> matchesFilterValue(values, value));
     }
 
     private boolean matchesValue(String resourceValue, List<String> filterValues) {
