@@ -861,7 +861,7 @@ class Ec2Tests {
     }
 
     @Test
-    @Order(37)
+    @Order(52)
     @DisplayName("DescribeTags - paginator pages with MaxResults and honours tag:<key>")
     void describeTagsPaginatesAndFiltersByTagKey() {
         String pagedVpcId = ec2.createVpc(CreateVpcRequest.builder().cidrBlock("10.98.0.0/16").build())

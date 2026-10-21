@@ -78,10 +78,10 @@ class Ec2DescribeTagsFilterIntegrationTest {
 
     @Test
     void maxResultsOutsideFiveToAThousandIsRejected() {
-        ec2("DescribeTags", "MaxResults", "4").when().post("/").then().statusCode(400)
-                .body("Response.Errors.Error.Code", equalTo("InvalidMaxResults"));
-        ec2("DescribeTags", "MaxResults", "1001").when().post("/").then().statusCode(400)
-                .body("Response.Errors.Error.Code", equalTo("InvalidMaxResults"));
+        for (String maxResults : List.of("0", "-1", "4", "1001")) {
+            ec2("DescribeTags", "MaxResults", maxResults).when().post("/").then().statusCode(400)
+                    .body("Response.Errors.Error.Code", equalTo("InvalidMaxResults"));
+        }
     }
 
     @Test

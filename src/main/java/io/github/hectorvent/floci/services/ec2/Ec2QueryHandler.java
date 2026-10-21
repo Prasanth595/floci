@@ -3812,8 +3812,10 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
+        String maxResults = p.getFirst("MaxResults");
         PaginatedResult<Map<String, String>> result = service.describeTags(region, getFiltersList(p),
-                parseIntParam(p, "MaxResults", 0), p.getFirst("NextToken"));
+                maxResults == null || maxResults.isEmpty() ? null : parseIntParam(p, "MaxResults", 0),
+                p.getFirst("NextToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTagsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());

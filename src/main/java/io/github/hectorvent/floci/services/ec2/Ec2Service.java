@@ -98,6 +98,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo
 import io.github.hectorvent.floci.services.ec2.net.Cidr4;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import jakarta.annotation.PostConstruct;
@@ -8911,23 +8912,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * AWS filter values take two wildcards, {@code *} for any run of characters and {@code ?} for
      * exactly one. Only {@code *} was honoured here, so a {@code ?} was matched literally and a
      * pattern like {@code ubuntu-?} found nothing, while {@link #wildcardToRegex} a few hundred
-     * lines down already treated both.
+     * lines down already treated both. The match is a two-pointer glob rather than a regex: a
+     * caller-supplied pattern of many stars made the regex backtrack for seconds, and its dot
+     * skipped line terminators that a tag value may hold.
      */
     private boolean wildcardMatches(String pattern, String value) {
-        if (pattern == null) {
-            return false;
-        }
-        if (!pattern.contains("*") && !pattern.contains("?")) {
-            return pattern.equals(value);
-        }
-        String regex = pattern.chars()
-                .mapToObj(ch -> switch (ch) {
-                    case '*' -> ".*";
-                    case '?' -> ".";
-                    default -> java.util.regex.Pattern.quote(String.valueOf((char) ch));
-                })
-                .collect(Collectors.joining());
-        return value.matches(regex);
+        return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
     }
 
     // ─── Tags ──────────────────────────────────────────────────────────────────
@@ -9317,19 +9307,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<Map.Entry<String, List<String>>> filterList = filters != null
                 ? new ArrayList<>(filters.entrySet())
                 : List.of();
-        return describeTags(region, filterList, 0, null).items();
+        return describeTags(region, filterList, null, null).items();
     }
 
     /**
      * DescribeTags. Filters are ANDed and the values of one filter ORed, each value taking the
      * {@code *} and {@code ?} wildcards. {@code tag:<key>} is the documented alternate spelling of
      * a {@code key} filter plus a {@code value} filter. Tags are listed by resource id, so a page
-     * boundary stays put while nothing is written; a {@code maxResults} of 0 means unpaged.
+     * boundary stays put while nothing is written; a null {@code maxResults} means unpaged, and any
+     * value sent outside 5 to 1000, zero and negatives included, is refused.
      */
     public PaginatedResult<Map<String, String>> describeTags(String region,
                                                              List<Map.Entry<String, List<String>>> filters,
-                                                             int maxResults, String nextToken) {
-        if (maxResults > 0 && (maxResults < 5 || maxResults > 1000)) {
+                                                             Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 5 || maxResults > 1000)) {
             throw new AwsException("InvalidMaxResults",
                     "Value (" + maxResults + ") for parameter MaxResults is invalid. "
                             + "Expecting a value between 5 and 1000.", 400);
@@ -9365,13 +9356,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
-        if (maxResults <= 0) {
+        if (maxResults == null) {
             return new PaginatedResult<>(result, null);
         }
         int total = result.size();
-        int toIndex = Math.min(offset + maxResults, total);
-        List<Map<String, String>> page = offset < total ? result.subList(offset, toIndex) : List.of();
-        return new PaginatedResult<>(new ArrayList<>(page), toIndex < total ? encodeToken(toIndex) : null);
+        if (offset >= total) {
+            return new PaginatedResult<>(List.of(), null);
+        }
+        int toIndex = offset + Math.min(maxResults, total - offset);
+        return new PaginatedResult<>(new ArrayList<>(result.subList(offset, toIndex)),
+                toIndex < total ? encodeToken(toIndex) : null);
     }
 
     private boolean matchesTagFilter(Map.Entry<String, List<String>> filter, String resourceId,
