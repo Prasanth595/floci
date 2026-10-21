@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -608,9 +609,37 @@ class LambdaWebServiceTest {
         assertEquals("first", new String(code.read(ACCOUNT_ID, REGION, "app", first), StandardCharsets.UTF_8));
         assertEquals("second", new String(code.read(ACCOUNT_ID, REGION, "app", second), StandardCharsets.UTF_8));
         service.deleteRevision(REGION, "app", first);
-        assertNull(code.read(ACCOUNT_ID, REGION, "app", first));
+        assertThrows(UncheckedIOException.class, () -> code.read(ACCOUNT_ID, REGION, "app", first));
         service.deleteFunction(REGION, "app");
-        assertNull(code.read(ACCOUNT_ID, REGION, "app", second));
+        assertThrows(UncheckedIOException.class, () -> code.read(ACCOUNT_ID, REGION, "app", second));
+    }
+
+    @Test
+    void aStartKeepsOnlyTheCopiesOfStoredRevisions() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.getObject("code", "app.zip", null)).thenReturn(object("code"));
+        FileStorageFactory storage = new FileStorageFactory(storageDir);
+        String revisionId = service(storage, "http://localhost:4566", s3).createFunction(REGION, createRequest("app"))
+                .revisions.keySet().iterator().next();
+        LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
+        code.store(ACCOUNT_ID, REGION, "app", "rev-stray", new byte[] {1});
+
+        service(new FileStorageFactory(storageDir), "http://localhost:4566", s3);
+        assertEquals("code", new String(code.read(ACCOUNT_ID, REGION, "app", revisionId), StandardCharsets.UTF_8));
+        assertThrows(UncheckedIOException.class, () -> code.read(ACCOUNT_ID, REGION, "app", "rev-stray"));
+
+        service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        assertThrows(UncheckedIOException.class, () -> code.read(ACCOUNT_ID, REGION, "app", revisionId));
+    }
+
+    @Test
+    void regionsThatLookAlikeKeepTheirOwnCopies() {
+        LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
+        code.store(ACCOUNT_ID, ".", "app", "rev-aaaaa", new byte[] {1});
+        code.store(ACCOUNT_ID, "_", "app", "rev-aaaaa", new byte[] {2});
+        code.deleteFunction(ACCOUNT_ID, ".", "app");
+
+        assertEquals(2, code.read(ACCOUNT_ID, "_", "app", "rev-aaaaa")[0]);
     }
 
     @Test

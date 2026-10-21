@@ -176,6 +176,7 @@ public class LambdaWebService implements Resettable {
         for (WebFunction fn : all) {
             fn.endpoints.values().forEach(endpoint -> indexDomains(fn, endpoint));
         }
+        code.retainOnly(all);
     }
 
     @Override

@@ -9,7 +9,6 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
-import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -27,7 +26,6 @@ import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCr
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
-import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -261,7 +259,6 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private final DockerClient streamingDocker;
     private final ImageResolver imageResolver;
     private final EcrRegistryManager ecrRegistryManager;
-    private final S3Service s3Service;
     private final LambdaWebCode code;
     private final ZipExtractor zipExtractor;
     private final LaunchedContainerAwsEnv awsEnv;
@@ -281,8 +278,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     public LambdaWebEnvironmentManager(EmulatorConfig config, ContainerBuilder containerBuilder,
                                        ContainerLifecycleManager lifecycleManager,
                                        @StreamingDocker DockerClient streamingDocker, ImageResolver imageResolver,
-                                       EcrRegistryManager ecrRegistryManager, S3Service s3Service,
-                                       LambdaWebCode code, ZipExtractor zipExtractor, LaunchedContainerAwsEnv awsEnv,
+                                       EcrRegistryManager ecrRegistryManager, LambdaWebCode code,
+                                       ZipExtractor zipExtractor, LaunchedContainerAwsEnv awsEnv,
                                        LambdaExecutionRoleCredentials executionRoleCredentials, LambdaWebLogs logs,
                                        LambdaWebMetrics metrics) {
         this.config = config;
@@ -291,7 +288,6 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         this.streamingDocker = streamingDocker;
         this.imageResolver = imageResolver;
         this.ecrRegistryManager = ecrRegistryManager;
-        this.s3Service = s3Service;
         this.code = code;
         this.zipExtractor = zipExtractor;
         this.awsEnv = awsEnv;
@@ -685,12 +681,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     /** The code goes in by {@code docker cp}, so it works when Floci itself runs in a container. */
     private void copyCode(String containerId, String accountId, String region, WebFunction fn,
                           WebFunctionRevision revision) {
-        WebFunctionRevision.BuildConfig build = revision.buildConfig;
         byte[] zip = code.read(accountId, region, fn.functionName, revision.revisionId);
-        if (zip == null) {
-            zip = RequestScopes.callAs(accountId, region,
-                    () -> s3Service.getObject(build.bucket, build.key, build.versionId)).getData();
-        }
         Path dir;
         try {
             dir = Files.createTempDirectory("floci-lambda-web-");
