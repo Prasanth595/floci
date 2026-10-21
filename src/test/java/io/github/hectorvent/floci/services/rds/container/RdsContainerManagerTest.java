@@ -1401,7 +1401,18 @@ class RdsContainerManagerTest {
         manager.enterRuntime(newRuntime).close();
 
         verify(dockerClient, never()).unpauseContainerCmd("new-container");
+        assertSame(RdsBackendGate.Lease.NONE, manager.enterRuntime(removedRuntime));
         assertFalse(manager.pauseIfIdle(removedRuntime), "the removed container's auto-pause is gone");
+    }
+
+    @Test
+    void rejectsMissingRuntimeIdentityAtTheGate() {
+        RdsContainerManager manager = autoPauseManager(
+                config(tempDir.resolve("missing-runtime-root")), mock(ContainerLifecycleManager.class));
+
+        for (String runtimeId : new String[] {null, "", " "}) {
+            assertThrows(IllegalArgumentException.class, () -> manager.enterRuntime(runtimeId));
+        }
     }
 
     private RdsContainerManager autoPauseManager(EmulatorConfig config, ContainerLifecycleManager lifecycleManager) {
