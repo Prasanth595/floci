@@ -821,6 +821,16 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void dynamoDbBuildsArnFromTheSourceOfAPointInTimeRestore() {
+        setJsonBody("{\"SourceTableName\":\"Music\",\"TargetTableName\":\"MusicCopy\"}");
+        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/Music",
+                builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+        String sourceArn = "arn:aws:dynamodb:eu-west-2:000000000000:table/Music";
+        setJsonBody("{\"SourceTableArn\":\"" + sourceArn + "\",\"TargetTableName\":\"MusicCopy\"}");
+        assertEquals(sourceArn, builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
     void dynamoDbBuildsArnFromSingleTableBatchRequest() {
         setJsonBody("{\"RequestItems\":{\"MyTable\":{\"Keys\":[]}}}");
         String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");

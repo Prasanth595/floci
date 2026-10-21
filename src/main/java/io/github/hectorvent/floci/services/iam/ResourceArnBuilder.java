@@ -977,6 +977,19 @@ public class ResourceArnBuilder {
                     return List.of(importArn);
                 }
             }
+            // AWS authorizes RestoreTableToPointInTime on its source table.
+            if (json.hasNonNull("SourceTableArn")) {
+                String sourceTableArn = json.get("SourceTableArn").asText().trim();
+                if (!sourceTableArn.isEmpty()) {
+                    return List.of(sourceTableArn);
+                }
+            }
+            if (json.hasNonNull("SourceTableName")) {
+                String sourceTableName = json.get("SourceTableName").asText().trim();
+                if (!sourceTableName.isEmpty()) {
+                    return List.of(toDynamoDbTableArn(sourceTableName, region, accountId));
+                }
+            }
             if (json.hasNonNull("RequestItems") && json.get("RequestItems").isObject()) {
                 Set<String> arns = new LinkedHashSet<>();
                 Iterator<String> fieldNames = json.get("RequestItems").fieldNames();
