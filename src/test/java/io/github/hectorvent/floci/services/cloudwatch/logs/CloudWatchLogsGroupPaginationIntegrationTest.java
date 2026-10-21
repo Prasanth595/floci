@@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
@@ -88,12 +89,35 @@ class CloudWatchLogsGroupPaginationIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"0, greater than or equal to 1", "51, less than or equal to 50"})
+    void reportsOutOfRangeLimitsWithSmithyValidation(int limit, String constraint) {
+        logs("DescribeLogGroups", Map.of("limit", limit)).then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("1 validation error detected: Value '" + limit
+                        + "' at 'limit' failed to satisfy constraint: Member must have value " + constraint));
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"\"not-base64!\"", "\"d3Jvbmctb3BlcmF0aW9u\"", "\"\"", "123", "{}"})
     void rejectsInvalidTokens(String token) {
         given().contentType("application/x-amz-json-1.1")
                 .header("X-Amz-Target", "Logs_20140328.DescribeLogGroups")
                 .body("{\"nextToken\":" + token + "}").post("/").then().statusCode(400)
-                .body("__type", equalTo("InvalidParameterException"));
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("The specified nextToken is invalid."));
+    }
+
+    @Test
+    void reportsBadTokensLikeDescribeLogStreams() {
+        createGroups(1);
+        String group = groups.getFirst();
+        logs("CreateLogStream", Map.of("logGroupName", group, "logStreamName", "stream"))
+                .then().statusCode(200);
+        String streamError = logs("DescribeLogStreams", Map.of("logGroupName", group, "nextToken", "bad!"))
+                .then().statusCode(400).extract().path("message");
+        logs("DescribeLogGroups", Map.of("nextToken", "bad!")).then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo(streamError));
     }
 
     @Test

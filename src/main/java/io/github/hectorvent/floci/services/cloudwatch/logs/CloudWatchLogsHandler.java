@@ -8,7 +8,6 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
-import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.AccountPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogDestination;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
@@ -132,19 +131,16 @@ public class CloudWatchLogsHandler {
         int limit = 50;
         if (request.hasNonNull("limit")) {
             JsonNode value = request.get("limit");
-            if (!value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 1 || value.intValue() > 50) {
-                throw new AwsException("InvalidParameterException", "limit must be an integer between 1 and 50.", 400);
+            if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+                throw new AwsException("InvalidParameterException", "limit must be an integer.", 400);
             }
             limit = value.intValue();
         }
         String nextToken = request.path("nextToken").asText(null);
-        if (request.hasNonNull("nextToken") && (!request.get("nextToken").isTextual() || nextToken.isEmpty())) {
-            throw new AwsException("InvalidParameterException", "Invalid nextToken.", 400);
+        if (request.hasNonNull("nextToken") && !request.get("nextToken").isTextual()) {
+            throw CloudWatchLogsService.invalidNextToken();
         }
-        List<LogGroup> groups = logsService.describeLogGroups(prefix, region);
-        PaginatedResult<LogGroup> page = Pagination.paginate(groups, LogGroup::getLogGroupName, limit, nextToken,
-                "DescribeLogGroups:" + region + ":" + (prefix == null ? "" : prefix),
-                token -> new AwsException("InvalidParameterException", "Invalid nextToken.", 400));
+        PaginatedResult<LogGroup> page = logsService.describeLogGroups(prefix, region, limit, nextToken);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode groupsArray = objectMapper.createArrayNode();

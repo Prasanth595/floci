@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -361,8 +363,28 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     }
 
     public List<LogGroup> describeLogGroups(String prefix, String region) {
+        List<LogGroup> result = matchingLogGroups(prefix, region);
+        result.sort(Comparator.comparing(LogGroup::getLogGroupName));
+        return result;
+    }
+
+    PaginatedResult<LogGroup> describeLogGroups(String prefix, String region, int limit, String nextToken) {
+        if (limit < 1 || limit > 50) {
+            String constraint = limit < 1 ? "greater than or equal to 1" : "less than or equal to 50";
+            throw SmithyValidationErrors.exception("InvalidParameterException",
+                    "Value '" + limit + "' at 'limit' failed to satisfy constraint: Member must have value " + constraint);
+        }
+        if (nextToken != null && nextToken.isEmpty()) {
+            throw invalidNextToken();
+        }
+        return Pagination.paginate(matchingLogGroups(prefix, region), LogGroup::getLogGroupName, limit, nextToken,
+                "DescribeLogGroups:" + region + ":" + (prefix == null ? "" : prefix),
+                token -> invalidNextToken());
+    }
+
+    private List<LogGroup> matchingLogGroups(String prefix, String region) {
         String storagePrefix = groupKeyPrefix(region);
-        List<LogGroup> result = groupStore.scan(k -> {
+        return groupStore.scan(k -> {
             if (!k.startsWith(storagePrefix)) {
                 return false;
             }
@@ -372,8 +394,6 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
             String groupName = k.substring(storagePrefix.length());
             return groupName.startsWith(prefix);
         });
-        result.sort(Comparator.comparing(LogGroup::getLogGroupName));
-        return result;
     }
 
     public long getStoredBytesForLogGroup(String groupName, String region) {
@@ -650,7 +670,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         return Base64Url.encode(raw);
     }
 
-    private static AwsException invalidNextToken() {
+    static AwsException invalidNextToken() {
         return new AwsException("InvalidParameterException", "The specified nextToken is invalid.", 400);
     }
 
