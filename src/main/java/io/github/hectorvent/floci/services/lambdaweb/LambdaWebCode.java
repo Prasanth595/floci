@@ -65,6 +65,7 @@ public class LambdaWebCode {
         } catch (ZipException e) {
             return false;
         } catch (IOException e) {
+            deleteRevision(accountId, region, functionName, revisionId);
             throw new UncheckedIOException("Could not read the code of " + functionName + " revision " + revisionId, e);
         }
     }

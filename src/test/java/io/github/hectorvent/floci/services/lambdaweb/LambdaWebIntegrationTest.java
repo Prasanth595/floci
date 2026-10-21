@@ -650,7 +650,7 @@ class LambdaWebIntegrationTest {
                 .then().statusCode(202)
                 .body("state", equalTo("Pending"));
 
-        // An empty object is an internal error with an empty body, as on AWS.
+        // An empty object is an internal error with the body {}, as on AWS.
         given().contentType("application/json").body(notZip.replace("notzip.zip", "empty.zip"))
                 .when().post(BASE + "/web-functions/" + fn + "/revisions")
                 .then().statusCode(500)

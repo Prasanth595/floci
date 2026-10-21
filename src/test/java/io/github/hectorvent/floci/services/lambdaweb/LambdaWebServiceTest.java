@@ -23,6 +23,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -649,6 +650,16 @@ class LambdaWebServiceTest {
         code.deleteFunction(ACCOUNT_ID, ".", "app");
 
         assertEquals(2, Files.readAllBytes(code.file(ACCOUNT_ID, "_", "app", "rev-aaaaa"))[0]);
+    }
+
+    @Test
+    void aCopyThatCannotBeReadIsRemoved() throws IOException {
+        LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
+        Path copy = code.file(ACCOUNT_ID, REGION, "app", "rev-aaaaa");
+        Files.createDirectories(copy);
+
+        assertThrows(UncheckedIOException.class, () -> code.opensAsZip(ACCOUNT_ID, REGION, "app", "rev-aaaaa"));
+        assertFalse(Files.exists(copy));
     }
 
     @Test
