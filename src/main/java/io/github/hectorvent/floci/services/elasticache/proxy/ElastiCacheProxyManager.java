@@ -18,11 +18,13 @@ public class ElastiCacheProxyManager {
     private static final Logger LOG = Logger.getLogger(ElastiCacheProxyManager.class);
 
     private final SigV4Validator sigV4Validator;
+    private final ElastiCacheTlsCertificates tlsCertificates;
     private final ConcurrentHashMap<String, ElastiCacheAuthProxy> proxies = new ConcurrentHashMap<>();
 
     @Inject
-    public ElastiCacheProxyManager(SigV4Validator sigV4Validator) {
+    public ElastiCacheProxyManager(SigV4Validator sigV4Validator, ElastiCacheTlsCertificates tlsCertificates) {
         this.sigV4Validator = sigV4Validator;
+        this.tlsCertificates = tlsCertificates;
     }
 
     public void startProxy(String groupId, AuthMode authMode, int proxyPort,
@@ -36,7 +38,7 @@ public class ElastiCacheProxyManager {
                            ElastiCacheAuthProxy.PasswordValidator passwordValidator, String authIdentity) {
         ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy(
                 authIdentity, authMode, backendHost, backendPort,
-                passwordValidator, sigV4Validator);
+                passwordValidator, sigV4Validator, tlsCertificates::sslContext);
         try {
             proxy.start(proxyPort);
             proxies.put(groupId, proxy);

@@ -6,6 +6,28 @@
 
 Floci manages real Valkey/Redis Docker containers and proxies TCP connections to them. This means any Redis client works — including IAM authentication.
 
+## Encrypted cache connections
+
+Redis/Valkey replication groups with transit encryption enabled require TLS at the
+advertised proxy endpoint. This includes groups using an AUTH token or IAM authentication,
+and a group remains encrypted when its last user group is removed. Serverless Redis/Valkey
+endpoints also require TLS. Unencrypted caches and Memcached retain their existing transport.
+
+The cache listener uses a server certificate issued by Floci's shared local CA, including
+`localhost`, `127.0.0.1`, the configured Floci hostname and cluster-announce hostname.
+Trust `{persistent-path}/tls/floci-root-ca.crt` or the CA from `GET /_floci/ca.pem`.
+The main HTTP listener's TLS setting does not disable cache transit encryption.
+
+```bash
+valkey-cli --tls --cacert ./floci-root-ca.crt -h localhost -p "$CACHE_PORT" \
+  --user "$CACHE_USER" --askpass PING
+```
+
+TLS terminates in Floci's cache proxy; the Docker backend hop retains its existing
+transport. This implements required TLS. Mixed plaintext/TLS migration for
+`TransitEncryptionMode=preferred` is not implemented; encrypted endpoints require TLS.
+This does not add Memcached transit encryption or change cache-user ACL enforcement.
+
 ## Supported Management Actions
 
 <!-- floci:actions:start -->
