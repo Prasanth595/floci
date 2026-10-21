@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -97,6 +98,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo
 import io.github.hectorvent.floci.services.ec2.net.Cidr4;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import jakarta.annotation.PostConstruct;
@@ -128,6 +130,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -8982,23 +8985,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * AWS filter values take two wildcards, {@code *} for any run of characters and {@code ?} for
      * exactly one. Only {@code *} was honoured here, so a {@code ?} was matched literally and a
      * pattern like {@code ubuntu-?} found nothing, while {@link #wildcardToRegex} a few hundred
-     * lines down already treated both.
+     * lines down already treated both. The match is a two-pointer glob rather than a regex: a
+     * caller-supplied pattern of many stars made the regex backtrack for seconds, and its dot
+     * skipped line terminators that a tag value may hold.
      */
     private boolean wildcardMatches(String pattern, String value) {
-        if (pattern == null) {
-            return false;
-        }
-        if (!pattern.contains("*") && !pattern.contains("?")) {
-            return pattern.equals(value);
-        }
-        String regex = pattern.chars()
-                .mapToObj(ch -> switch (ch) {
-                    case '*' -> ".*";
-                    case '?' -> ".";
-                    default -> java.util.regex.Pattern.quote(String.valueOf((char) ch));
-                })
-                .collect(Collectors.joining());
-        return value.matches(regex);
+        return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
     }
 
     // ─── Tags ──────────────────────────────────────────────────────────────────
@@ -9383,74 +9375,87 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return List.copyOf(tagsOf(region, resourceId).orElse(List.of()));
     }
 
+    /** Every tag in {@code region} that matches {@code filters}, unpaged. */
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
-        ensureDefaultResources(region);
-        List<String> filterResourceIds   = filters != null ? filters.get("resource-id")   : null;
-        List<String> filterResourceTypes = filters != null ? filters.get("resource-type") : null;
-        List<String> filterKeys          = filters != null ? filters.get("key")            : null;
-        List<String> filterValues        = filters != null ? filters.get("value")          : null;
+        List<Map.Entry<String, List<String>>> filterList = filters != null
+                ? new ArrayList<>(filters.entrySet())
+                : List.of();
+        return describeTags(region, filterList, null, null).items();
+    }
 
-        List<Map<String, String>> result = new ArrayList<>();
-        Set<String> processedResourceIds = new LinkedHashSet<>();
+    /**
+     * DescribeTags. Filters are ANDed and the values of one filter ORed, each value taking the
+     * {@code *} and {@code ?} wildcards. {@code tag:<key>} is the documented alternate spelling of
+     * a {@code key} filter plus a {@code value} filter. Tags are listed by resource id, so a page
+     * boundary stays put while nothing is written; a null {@code maxResults} means unpaged, and any
+     * value sent outside 5 to 1000, zero and negatives included, is refused.
+     */
+    public PaginatedResult<Map<String, String>> describeTags(String region,
+                                                             List<Map.Entry<String, List<String>>> filters,
+                                                             Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidMaxResults",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 1000.", 400);
+        }
+        int offset = decodeToken(nextToken);
+        ensureDefaultResources(region);
+
+        Map<String, List<Tag>> tagsByResource = new TreeMap<>();
         String regionPrefix = region + "::";
         for (String tagKey : new ArrayList<>(tags.keys())) {
-            if (!tagKey.startsWith(regionPrefix)) {
-                continue;
-            }
-            String resourceId = tagKey.substring(regionPrefix.length());
-            processedResourceIds.add(resourceId);
-            String resourceType = inferResourceType(resourceId);
-
-            if (filterResourceIds != null && !filterResourceIds.contains(resourceId)) {
-                continue;
-            }
-            if (filterResourceTypes != null && !filterResourceTypes.contains(resourceType)) {
-                continue;
-            }
-            for (Tag tag : tagsOf(region, resourceId).orElse(List.of())) {
-                if (filterKeys != null && !filterKeys.contains(tag.getKey())) {
-                    continue;
-                }
-                if (filterValues != null && !filterValues.contains(tag.getValue())) {
-                    continue;
-                }
-                Map<String, String> item = new LinkedHashMap<>();
-                item.put("resourceId", resourceId);
-                item.put("resourceType", resourceType);
-                item.put("key", tag.getKey());
-                item.put("value", tag.getValue());
-                result.add(item);
+            if (tagKey.startsWith(regionPrefix)) {
+                String resourceId = tagKey.substring(regionPrefix.length());
+                tagsByResource.put(resourceId, tagsOf(region, resourceId).orElse(List.of()));
             }
         }
-
         for (Instance ext : listExternalInstances(callerAccountId(), region)) {
-            String resourceId = ext.getInstanceId();
-            if (processedResourceIds.contains(resourceId)) {
-                continue;
-            }
+            tagsByResource.putIfAbsent(ext.getInstanceId(), ext.getTags() != null ? ext.getTags() : List.of());
+        }
+
+        List<Map<String, String>> result = new ArrayList<>();
+        for (Map.Entry<String, List<Tag>> resource : tagsByResource.entrySet()) {
+            String resourceId = resource.getKey();
             String resourceType = inferResourceType(resourceId);
-            if (filterResourceIds != null && !filterResourceIds.contains(resourceId)) {
-                continue;
-            }
-            if (filterResourceTypes != null && !filterResourceTypes.contains(resourceType)) {
-                continue;
-            }
-            for (Tag tag : ext.getTags() != null ? ext.getTags() : List.<Tag>of()) {
-                if (filterKeys != null && !filterKeys.contains(tag.getKey())) {
-                    continue;
+            for (Tag tag : resource.getValue()) {
+                if (filters.stream().allMatch(filter -> matchesTagFilter(filter, resourceId, resourceType, tag))) {
+                    Map<String, String> item = new LinkedHashMap<>();
+                    item.put("resourceId", resourceId);
+                    item.put("resourceType", resourceType);
+                    item.put("key", tag.getKey());
+                    item.put("value", tag.getValue());
+                    result.add(item);
                 }
-                if (filterValues != null && !filterValues.contains(tag.getValue())) {
-                    continue;
-                }
-                Map<String, String> item = new LinkedHashMap<>();
-                item.put("resourceId", resourceId);
-                item.put("resourceType", resourceType);
-                item.put("key", tag.getKey());
-                item.put("value", tag.getValue());
-                result.add(item);
             }
         }
-        return result;
+
+        if (maxResults == null) {
+            return new PaginatedResult<>(result, null);
+        }
+        int total = result.size();
+        if (offset >= total) {
+            return new PaginatedResult<>(List.of(), null);
+        }
+        int toIndex = offset + Math.min(maxResults, total - offset);
+        return new PaginatedResult<>(new ArrayList<>(result.subList(offset, toIndex)),
+                toIndex < total ? encodeToken(toIndex) : null);
+    }
+
+    private boolean matchesTagFilter(Map.Entry<String, List<String>> filter, String resourceId,
+                                     String resourceType, Tag tag) {
+        String name = filter.getKey();
+        List<String> values = filter.getValue();
+        String value = tag.getValue() != null ? tag.getValue() : "";
+        if (name.startsWith("tag:")) {
+            return name.substring("tag:".length()).equals(tag.getKey()) && matchesFilterValue(values, value);
+        }
+        return switch (name) {
+            case "key" -> matchesFilterValue(values, tag.getKey());
+            case "value" -> matchesFilterValue(values, value);
+            case "resource-id" -> matchesFilterValue(values, resourceId);
+            case "resource-type" -> matchesFilterValue(values, resourceType);
+            default -> true;
+        };
     }
 
     private String inferResourceType(String resourceId) {

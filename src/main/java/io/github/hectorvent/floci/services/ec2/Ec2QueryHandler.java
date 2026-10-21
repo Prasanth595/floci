@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -3814,13 +3815,18 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
-        Map<String, List<String>> filters = getFilters(p);
-        List<Map<String, String>> tagItems = service.describeTags(region, filters);
+        String maxResults = p.getFirst("MaxResults");
+        PaginatedResult<Map<String, String>> result = service.describeTags(region, getFiltersList(p),
+                maxResults == null || maxResults.isEmpty() ? null : parseIntParam(p, "MaxResults", 0),
+                p.getFirst("NextToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTagsResponse", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .start("tagSet");
-        for (Map<String, String> item : tagItems) {
+                .elem("requestId", UUID.randomUUID().toString());
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        xml.start("tagSet");
+        for (Map<String, String> item : result.items()) {
             xml.start("item")
                     .elem("resourceId", item.get("resourceId"))
                     .elem("resourceType", item.get("resourceType"))

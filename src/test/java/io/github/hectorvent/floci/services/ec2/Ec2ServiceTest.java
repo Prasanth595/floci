@@ -5,6 +5,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ListNetworksCmd;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -77,6 +78,7 @@ import org.mockito.MockedStatic;
 import java.io.StringReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.time.Duration;
@@ -118,6 +120,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -702,6 +705,37 @@ class Ec2ServiceTest {
         assertTrue(service.describeTags("eu-west-1", Map.of("resource-id", List.of(east))).isEmpty());
         assertTrue(service.resourceTags("eu-west-1", east).isEmpty());
         assertEquals("east", service.resourceTags("us-east-1", east).getFirst().getValue());
+    }
+
+    @Test
+    void describeTagsWildcardsMatchLineTerminatorsAndStayLinear() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.82.0.0/16", false).getVpcId();
+        service.createTags("us-east-1", List.of(vpcId),
+                List.of(new Tag("Note", "first\nsecond"), new Tag("Long", "a".repeat(256))));
+
+        assertEquals(2, service.describeTags("us-east-1", Map.of("resource-id", List.of(vpcId),
+                "value", List.of("*"))).size());
+        assertEquals(1, service.describeTags("us-east-1", Map.of("resource-id", List.of(vpcId),
+                "value", List.of("first?second"))).size());
+        String manyStars = "*a".repeat(40) + "*b";
+        assertTimeoutPreemptively(Duration.ofSeconds(2), () -> assertTrue(service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(vpcId), "value", List.of(manyStars))).isEmpty()));
+    }
+
+    @Test
+    void describeTagsRefusesEverySentMaxResultsOutsideTheRangeAndEndsOnAPastTheEndToken() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        for (int maxResults : new int[] {0, -1, 4, 1001}) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.describeTags("us-east-1", List.of(), maxResults, null));
+            assertEquals("InvalidMaxResults", error.getErrorCode());
+        }
+        String pastTheEnd = Base64.getEncoder().encodeToString(
+                ("{\"offset\":" + Integer.MAX_VALUE + "}").getBytes(StandardCharsets.UTF_8));
+        PaginatedResult<Map<String, String>> page = service.describeTags("us-east-1", List.of(), 5, pastTheEnd);
+        assertTrue(page.items().isEmpty());
+        assertNull(page.nextToken());
     }
 
     @Test

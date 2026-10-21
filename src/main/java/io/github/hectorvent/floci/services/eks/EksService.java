@@ -1052,13 +1052,16 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         String previousType = EksClusterManager.nodeInstanceType(currentCluster);
         currentCluster.setNodeInstanceType(selectedType);
         if (currentCluster.getContainerId() != null && !selectedType.equals(previousType)) {
-            currentCluster.setStatus(ClusterStatus.CREATING);
             try {
                 if (!clusterManager.restartForNodeCapacity(currentCluster, previousType)) {
                     nodeGroup.setStatus(NodegroupStatus.CREATE_FAILED);
                     nodeGroup.setHealth(failedNodeGroupHealth(nodegroupName,
                             "Could not apply node capacity; the previous node was restored"));
                 }
+                // Set only now: before the swap the poller would verify the old container, still
+                // answering while it stops. A failed swap restarts the previous node, so it is
+                // verified too.
+                currentCluster.setFinalizePending(true);
             } catch (RuntimeException e) {
                 currentCluster.setNodeInstanceType(previousType);
                 currentCluster.setStatus(ClusterStatus.FAILED);
@@ -1603,26 +1606,41 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     private void startReadinessPoller() {
-        poller.scheduleAtFixedRate(() -> {
-            try {
-                for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
-                    Cluster cluster = entry.value();
-                    if (cluster.getStatus() == ClusterStatus.CREATING) {
-                        if (clusterManager.isReady(cluster)) {
-                            LOG.infov("EKS cluster {0} is now ACTIVE", cluster.getName());
-                            clusterManager.finalizeCluster(cluster);
+        poller.scheduleAtFixedRate(this::pollClusterReadiness, 2, 3, TimeUnit.SECONDS);
+    }
+
+    void pollClusterReadiness() {
+        try {
+            for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+                Cluster cluster = entry.value();
+                boolean replacedNode = cluster.getStatus() == ClusterStatus.ACTIVE && cluster.isFinalizePending();
+                if (cluster.getStatus() == ClusterStatus.CREATING || replacedNode) {
+                    if (clusterManager.isReady(cluster)) {
+                        clusterManager.finalizeCluster(cluster);
+                        // A delete that ran while the API server was probed must not get its
+                        // cluster written back.
+                        synchronized (clustersBeingDeleted) {
+                            if (isClusterDeleting(entry.accountId(), cluster)) {
+                                continue;
+                            }
+                            cluster.setFinalizePending(false);
                             cluster.setStatus(ClusterStatus.ACTIVE);
                             putCluster(cluster);
-                            restoreJoinedInstancesAsync(entry.accountId(), cluster);
                         }
-                    } else if (cluster.getStatus() == ClusterStatus.ACTIVE && hasPendingJoinedInstances(cluster)) {
+                        if (replacedNode) {
+                            LOG.infov("Replaced k3s node of EKS cluster {0} is ready", cluster.getName());
+                        } else {
+                            LOG.infov("EKS cluster {0} is now ACTIVE", cluster.getName());
+                        }
                         restoreJoinedInstancesAsync(entry.accountId(), cluster);
                     }
+                } else if (cluster.getStatus() == ClusterStatus.ACTIVE && hasPendingJoinedInstances(cluster)) {
+                    restoreJoinedInstancesAsync(entry.accountId(), cluster);
                 }
-            } catch (Exception e) {
-                LOG.error("Error in EKS readiness poller", e);
             }
-        }, 2, 3, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.error("Error in EKS readiness poller", e);
+        }
     }
 
     private void restoreJoinedInstancesAsync(String accountId, Cluster cluster) {

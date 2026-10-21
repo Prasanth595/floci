@@ -97,6 +97,32 @@ class EmrServerlessTagIntegrationTest {
     }
 
     @Test
+    void terminatedApplicationsCannotBeTagged() {
+        String[] app = createApplication("{ \"team\": \"data\" }");
+        String path = tagsPath(app[1]);
+
+        emr().when().delete("/applications/" + app[0])
+        .then().statusCode(200);
+
+        emr().when().get(path)
+        .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        emr().body("{ \"tags\": { \"env\": \"dev\" } }")
+        .when().post(path)
+        .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        emr().when().delete(path + "?tagKeys=team")
+        .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        emr().when().get("/applications/" + app[0])
+        .then().statusCode(200)
+                .body("application.state", equalTo("TERMINATED"))
+                .body("application.tags.team", equalTo("data"))
+                .body("application.tags", not(hasKey("env")));
+    }
+
+    @Test
     void unknownApplicationsAndJobRunsAreNotFoundAndBadTagsAreRefused() {
         String arn = createApplication("{}")[1];
         String missing = arn.substring(0, arn.lastIndexOf('/') + 1) + "00missing00";

@@ -68,6 +68,7 @@ or at the AWS Sign-In host of a region in the deployment's partition; any other 
 | DeleteRole | Deletes an IAM role from the local IAM store. |
 | ListRoles | Lists IAM roles in the local account, with `Marker` and `MaxItems` paging. |
 | UpdateRole | Updates mutable IAM role fields. |
+| UpdateRoleDescription | Modifies only a role's description and returns the modified role. |
 | CreateServiceLinkedRole | Creates a role under /aws-service-role/ for a service principal. |
 | DeleteServiceLinkedRole | Deletes a service-linked role and returns a deletion task id. |
 | GetServiceLinkedRoleDeletionStatus | Returns the status of a service-linked role deletion. |
@@ -77,6 +78,10 @@ or at the AWS Sign-In host of a region in the deployment's partition; any other 
 | ListRoleTags | Lists tags stored for an IAM role. |
 
 `CreateRole` and every action that takes a `RoleName` (`GetRole`, `DeleteRole`, `UpdateRole`, `TagRole`, `AttachRolePolicy`, `PutRolePolicy` and the rest) check it as AWS does: 1-64 characters of `[\w+=,.@-]`, otherwise `ValidationError`. A colon is never valid, so no role can take the name of the EC2 instance identity role, `aws:ec2-instance`.
+
+`UpdateRoleDescription` is the description half of `UpdateRole`, which is what AWS's own reference tells callers to use instead. Both of its members are required, so a request without `Description` answers `ValidationError` rather than leaving the role as it is, an empty `Description` is a value that clears the description, and the modified role comes back in the response, which `UpdateRole` does not answer at all.
+
+A role `Description` is held to the shape AWS publishes for it on every action that takes one, `CreateRole`, `UpdateRole`, `UpdateRoleDescription` and `CreateServiceLinkedRole`: at most 1000 characters of `[\u0009\u000A\u000D\u0020-\u007E\u00A1-\u00FF]`, which admits tab, newline and carriage return and no other control character, otherwise `ValidationError`. The check runs before the role is looked up or created, so a refused description never reaches a stored role, and the `Role` these actions and `GetRole` answer always stays parsable XML.
 
 ### Policies
 
@@ -1246,16 +1251,28 @@ a Query `Action` field on it does not change the action it is checked as, and it
 still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
 the route's rule miss.
 
-The REST routes mapped to an action are those of S3, Lambda, API Gateway, SES v2, RDS Data and
-Kinesis. In Lambda they are the function, alias, event source mapping, function URL, durable
-execution and Web Function routes, `InvokeWithResponseStream` (checked as `lambda:InvokeFunction`)
-and `GetLayerVersionByArn` (`lambda:GetLayerVersion`); the other Lambda routes, such as layers,
-versions, concurrency and MicroVMs, are not mapped yet. API Gateway's management API, v1 and v2, is
-checked as `apigateway:` and the HTTP method, `apigateway:GET`, `apigateway:POST` and so on, except
+The REST routes mapped to an action are those of S3, Lambda, API Gateway, SES v2, RDS Data,
+Kinesis, EventBridge Scheduler and EventBridge Pipes. In Lambda they are the function, alias,
+event source mapping, function URL, durable execution and Web Function routes,
+`InvokeWithResponseStream` (checked as `lambda:InvokeFunction`) and `GetLayerVersionByArn`
+(`lambda:GetLayerVersion`); the other Lambda routes, such as layers, versions, concurrency and
+MicroVMs, are not mapped yet. API Gateway's management API, v1 and v2, is checked as `apigateway:`
+and the HTTP method, `apigateway:GET`, `apigateway:POST` and so on, except
 `RejectDomainNameAccessAssociation` (`apigateway:RejectAccessAssociation`) and `PutRoutingRule`
 (`apigateway:UpdateRoutingRule`); the v2 routing rule, portal and portal product operations, which
-AWS checks as actions of their own names, are not served. A route no rule maps is not checked, as
-an unsigned REST request is not; the other REST services' routes are not mapped yet.
+AWS checks as actions of their own names, are not served.
+
+A Scheduler request is checked against `schedule/<group>/<name>`, the group from the body's
+`GroupName` on a create or an update, from `groupName` otherwise, and `default` when neither names
+one, or `schedule-group/<name>`. A Pipes request is checked against `pipe/<name>`.
+
+The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service its ARN names,
+and it is checked as that service, against that ARN, whatever scope it is signed with. The ARN is
+the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
+`resourceArn` query parameter on the other bare routes.
+
+A route no rule maps is not checked, as an unsigned REST request is not; the other REST services'
+routes are not mapped yet.
 
 An S3 `CreateBucket` is checked as `s3:CreateBucket`, and also needs one action for each header
 that configures the new bucket, as the CreateBucket API reference lists them:
@@ -1355,7 +1372,9 @@ role each passes:
 - **Step Functions:** `CreateStateMachine` and `UpdateStateMachine` pass `roleArn` to
   `states.amazonaws.com`, in a JSON or a CBOR body.
 - **EventBridge:** `PutRule` passes `RoleArn`, and `PutTargets` each target's `RoleArn`, to
-  `events.amazonaws.com`.
+  `events.amazonaws.com`. **EventBridge Scheduler:** `CreateSchedule` and `UpdateSchedule` pass the
+  target's `RoleArn` to `scheduler.amazonaws.com`. **EventBridge Pipes:** `CreatePipe` and
+  `UpdatePipe` pass `RoleArn` to `pipes.amazonaws.com`.
 - **CloudFormation:** `CreateStack`, `UpdateStack`, `DeleteStack`, `CreateChangeSet` and
   `ContinueUpdateRollback` pass `RoleARN` to `cloudformation.amazonaws.com` when the request names
   one. `CreateStackSet` and `UpdateStackSet` pass `AdministrationRoleARN`, or, for a self-managed
@@ -1941,11 +1960,14 @@ the emulator cannot reason about:
 `CreateServiceLinkedRole` puts a role under `/aws-service-role/<principal>/` and marks it as
 service-linked. As on AWS, a role carrying that mark is protected: `AttachRolePolicy`,
 `DetachRolePolicy`, `PutRolePolicy`, `DeleteRolePolicy`, `PutRolePermissionsBoundary`,
-`DeleteRolePermissionsBoundary`, `UpdateRole`, `UpdateAssumeRolePolicy`, `AddRoleToInstanceProfile`,
+`DeleteRolePermissionsBoundary`, `UpdateAssumeRolePolicy`, `AddRoleToInstanceProfile`,
 `RemoveRoleFromInstanceProfile` and `DeleteRole` all answer `UnmodifiableEntity` and name the
-linked service to go through instead. `TagRole` and `UntagRole` are allowed, as on AWS. Within the
-IAM API `DeleteServiceLinkedRole` is the only way to remove such a role — the emulator's own
-`/_floci/state/reset` still clears it along with everything else.
+linked service to go through instead. The description is the one field AWS leaves editable, "from
+the IAM console, API, or CLI", so `UpdateRoleDescription` goes through on a service-linked role and
+so does an `UpdateRole` carrying only a `Description`; `UpdateRole` answers `UnmodifiableEntity`
+once it carries `MaxSessionDuration`, and then writes neither field. `TagRole` and `UntagRole` are
+allowed, as on AWS. Within the IAM API `DeleteServiceLinkedRole` is the only way to remove such a
+role — the emulator's own `/_floci/state/reset` still clears it along with everything else.
 
 Four deviations to be aware of:
 
