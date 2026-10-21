@@ -45,6 +45,11 @@ class KinesisListStreamsIntegrationTest {
                 .then().statusCode(200).extract().response();
         assertEquals(List.of(streams.get(0)), first.jsonPath().getList("StreamNames", String.class));
         assertTrue(first.jsonPath().getBoolean("HasMoreStreams"));
+        String token = first.jsonPath().getString("NextToken");
+        assertTrue(token != null && !token.isEmpty());
+        Response tokenPage = kinesis("ListStreams", Map.of("Limit", 1, "NextToken", token))
+                .then().statusCode(200).extract().response();
+        assertEquals(List.of(streams.get(1)), tokenPage.jsonPath().getList("StreamNames", String.class));
         Response last = kinesis("ListStreams", Map.of("Limit", 1, "ExclusiveStartStreamName", streams.get(0)))
                 .then().statusCode(200).extract().response();
         assertEquals(List.of(streams.get(1)), last.jsonPath().getList("StreamNames", String.class));

@@ -239,14 +239,54 @@ public class KinesisJsonHandler {
                 && (!start.isTextual() || !startName.matches("[a-zA-Z0-9_.-]{1,128}"))) {
             throw new AwsException("InvalidArgumentException", "ExclusiveStartStreamName must be a valid stream name", 400);
         }
+        JsonNode token = request.path("NextToken");
+        if (!token.isMissingNode() && !token.isNull() && !token.isTextual()) {
+            throw invalidNextToken();
+        }
+        String after = token.isTextual() ? decodeStreamToken(token.textValue(), region) : startName;
         List<String> streamNames = service.listStreams(region).stream()
-                .filter(name -> startName == null || name.compareTo(startName) > 0)
+                .filter(name -> after == null || name.compareTo(after) > 0)
                 .toList();
+        List<String> page = streamNames.stream().limit(limit).toList();
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode names = response.putArray("StreamNames");
-        streamNames.stream().limit(limit).forEach(names::add);
+        page.forEach(names::add);
         response.put("HasMoreStreams", streamNames.size() > limit);
+        if (streamNames.size() > limit) {
+            response.put("NextToken", Base64Url.encode("ListStreams|" + region + "|"
+                    + Base64Url.encode(page.getLast()) + "|" + System.currentTimeMillis()));
+        }
         return Response.ok(response).build();
+    }
+
+    private String decodeStreamToken(String token, String region) {
+        if (token.isEmpty() || token.length() > 1_048_576) {
+            throw invalidNextToken();
+        }
+        String[] parts;
+        String cursor;
+        long issuedAt;
+        try {
+            parts = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8).split("\\|", -1);
+            if (parts.length != 4 || !"ListStreams".equals(parts[0]) || !region.equals(parts[1])) {
+                throw invalidNextToken();
+            }
+            cursor = new String(Base64.getUrlDecoder().decode(parts[2]), StandardCharsets.UTF_8);
+            if (!Base64Url.encode(cursor).equals(parts[2])) {
+                throw invalidNextToken();
+            }
+            issuedAt = Long.parseLong(parts[3]);
+        } catch (IllegalArgumentException e) {
+            throw invalidNextToken();
+        }
+        long now = System.currentTimeMillis();
+        if (issuedAt > now) {
+            throw invalidNextToken();
+        }
+        if (issuedAt <= now - 300_000) {
+            throw new AwsException("ExpiredNextTokenException", "The NextToken has expired.", 400);
+        }
+        return cursor;
     }
 
     private Response handleDescribeStream(JsonNode request, String region) {
