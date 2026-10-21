@@ -108,6 +108,20 @@ public class DynamoDbPartiQLParser {
         }
     }
 
+    /** The IAM action for a single statement, using the same keyword tokens as execution. */
+    public static String iamAction(String statement) {
+        if (statement == null || statement.isBlank()) {
+            return null;
+        }
+        return switch (tokenize(statement.trim()).getFirst().type()) {
+            case SELECT -> "dynamodb:PartiQLSelect";
+            case INSERT -> "dynamodb:PartiQLInsert";
+            case UPDATE -> "dynamodb:PartiQLUpdate";
+            case DELETE -> "dynamodb:PartiQLDelete";
+            default -> null;
+        };
+    }
+
     /**
      * Extracts the target table name from a PartiQL statement using the parser tokenizer,
      * ensuring quoted attribute names containing SQL keywords are not mistakenly treated as table names.

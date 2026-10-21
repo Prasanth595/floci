@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.iam;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.ProtocolClaim;
 import io.github.hectorvent.floci.core.common.WireProtocol;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -28,6 +30,7 @@ import java.util.regex.Pattern;
 public class IamActionRegistry {
 
     private static final Logger LOG = Logger.getLogger(IamActionRegistry.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /**
      * A route and the action it is checked as. A rule naming a query parameter matches only a request
@@ -344,6 +347,13 @@ public class IamActionRegistry {
         String target = ctx.getHeaderString("X-Amz-Target");
         if (target != null && target.contains(".")) {
             String operationName = target.substring(target.lastIndexOf('.') + 1);
+            if ("dynamodb".equals(credentialScope) && "ExecuteStatement".equals(operationName)) {
+                String statement = RequestBodyReader.jsonField(ctx, MAPPER, "Statement");
+                String statementAction = DynamoDbPartiQLParser.iamAction(statement);
+                if (statementAction != null) {
+                    return statementAction;
+                }
+            }
             return IamAuthorizedActions.actionFor(credentialScope, operationName);
         }
 

@@ -536,3 +536,11 @@ are not durable and are lost on restart (this is an emulator, not an at-least-on
 or overflow) are counted and logged, and per-destination delivery health (forwarded/retried/dropped
 counts, queue depth, last error, and current health) is tracked for inspection.
 ```
+
+### Single-statement PartiQL IAM actions
+
+With IAM enforcement enabled, `ExecuteStatement` checks `dynamodb:PartiQLSelect`,
+`dynamodb:PartiQLInsert`, `dynamodb:PartiQLUpdate` or `dynamodb:PartiQLDelete` according to the
+statement's operation. A policy can grant that action on the specific table ARN; a wildcard
+resource or a `dynamodb:ExecuteStatement` permission is not required. This mapping covers the
+single-statement API; batch and transaction authorization are separate paths.
