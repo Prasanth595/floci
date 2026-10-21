@@ -39,6 +39,13 @@
 | `UpdateShardCount` | - |
 <!-- floci:actions:end -->
 
+## Stream Listing
+
+`ListStreams` returns sorted `StreamNames`, with at most 100 names per page by default.
+`Limit` accepts integers from 1 to 10000, but values above 100 still return at most 100 names.
+When `HasMoreStreams` is true, pass the last returned name as `ExclusiveStartStreamName`
+to continue. `NextToken` pagination and `StreamSummaries` are not currently modeled.
+
 ## Local Inspection Endpoints
 
 These endpoints are Floci-local read-only helpers for the UI and tests. AWS SDK

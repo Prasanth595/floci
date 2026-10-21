@@ -225,11 +225,27 @@ public class KinesisJsonHandler {
     }
 
     private Response handleListStreams(JsonNode request, String region) {
-        List<String> streamNames = service.listStreams(region);
+        int limit = 100;
+        if (request.hasNonNull("Limit")) {
+            JsonNode value = request.get("Limit");
+            if (!value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 1 || value.intValue() > 10000) {
+                throw new AwsException("InvalidArgumentException", "Limit must be an integer between 1 and 10000", 400);
+            }
+            limit = Math.min(value.intValue(), 100);
+        }
+        JsonNode start = request.path("ExclusiveStartStreamName");
+        String startName = start.asText(null);
+        if (!start.isMissingNode() && !start.isNull()
+                && (!start.isTextual() || !startName.matches("[a-zA-Z0-9_.-]{1,128}"))) {
+            throw new AwsException("InvalidArgumentException", "ExclusiveStartStreamName must be a valid stream name", 400);
+        }
+        List<String> streamNames = service.listStreams(region).stream()
+                .filter(name -> startName == null || name.compareTo(startName) > 0)
+                .toList();
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode names = response.putArray("StreamNames");
-        streamNames.forEach(names::add);
-        response.put("HasMoreStreams", false);
+        streamNames.stream().limit(limit).forEach(names::add);
+        response.put("HasMoreStreams", streamNames.size() > limit);
         return Response.ok(response).build();
     }
 
