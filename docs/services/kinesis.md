@@ -46,7 +46,8 @@
 When `HasMoreStreams` is true, pass the last returned name as `ExclusiveStartStreamName`
 to continue. Truncated pages also return `NextToken`, which CLI and SDK paginators can send
 back without an `ExclusiveStartStreamName`. Tokens are scoped to this operation and region,
-expire after five minutes, and remain usable if the cursor stream is deleted.
+use the same configurable lifetime as `ListShards` tokens (see the TTL setting below),
+and remain usable if the cursor stream is deleted.
 `StreamSummaries` are not currently modeled.
 
 ## Local Inspection Endpoints
@@ -110,7 +111,7 @@ action, so that limit is intentionally unenforced here.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_KINESIS_ENABLED` | `true` | Enable or disable the service |
-| `FLOCI_SERVICES_KINESIS_LIST_SHARDS_NEXT_TOKEN_TTL_MILLIS` | `300000` | Lifetime of a `ListShards` `NextToken` in milliseconds; AWS expires tokens after 300000 ms. Lower it to exercise `ExpiredNextTokenException` without waiting |
+| `FLOCI_SERVICES_KINESIS_LIST_SHARDS_NEXT_TOKEN_TTL_MILLIS` | `300000` | Lifetime of `ListShards` and `ListStreams` `NextToken` values in milliseconds. Lower it to exercise `ExpiredNextTokenException` without waiting |
 
 ## Enhanced Fan-Out (EFO)
 

@@ -1988,9 +1988,8 @@ public interface EmulatorConfig {
         boolean enabled();
 
         /**
-         * Lifetime of a ListShards NextToken, in milliseconds. AWS expires these tokens 300000
-         * milliseconds after they are issued; lowering it lets tests exercise the expiry path
-         * without waiting.
+         * Lifetime of ListShards and ListStreams NextTokens, in milliseconds. Defaults to 300000;
+         * lowering it lets tests exercise the expiry path without waiting.
          */
         @WithDefault("300000")
         long listShardsNextTokenTtlMillis();

@@ -11,9 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -86,23 +84,66 @@ class KinesisListStreamsTokenTest {
                         "NextToken", first.path("NextToken").asText())), "eu-west-1"));
         assertEquals("InvalidArgumentException", regionError.getErrorCode());
         AwsException operationError = assertThrows(AwsException.class,
-                () -> list(Map.of("NextToken", KinesisJsonHandler.encodeShardToken("a", "shard-0",
+                () -> list(Map.of("NextToken", KinesisJsonHandler.encodeNextToken("a", "shard-0",
                         System.currentTimeMillis()))));
         assertEquals("InvalidArgumentException", operationError.getErrorCode());
+        AwsException reverseOperationError = assertThrows(AwsException.class,
+                () -> handler.handle("ListShards", mapper.valueToTree(Map.of(
+                        "NextToken", first.path("NextToken").asText())), REGION));
+        assertEquals("InvalidArgumentException", reverseOperationError.getErrorCode());
+    }
+
+    @Test
+    void rejectsFutureTokens() {
+        String token = KinesisJsonHandler.encodeNextToken("ListStreams|" + REGION,
+                Base64Url.encode("a"), System.currentTimeMillis() + 60_000);
+        AwsException error = assertThrows(AwsException.class, () -> list(Map.of("NextToken", token)));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
     }
 
     @ParameterizedTest
-    @ValueSource(longs = {300_000, -60_000})
-    void rejectsExpiredAndFutureTokens(long ageMillis) {
-        createThreeStreams();
-        ObjectNode first = list(Map.of("Limit", 1));
-        assertTrue(first.hasNonNull("NextToken"));
-        String raw = new String(Base64.getUrlDecoder().decode(first.path("NextToken").asText()), StandardCharsets.UTF_8);
-        String token = Base64Url.encode(raw.substring(0, raw.lastIndexOf('|') + 1)
-                + (System.currentTimeMillis() - ageMillis));
-        AwsException error = assertThrows(AwsException.class, () -> list(Map.of("NextToken", token)));
-        assertEquals(ageMillis > 0 ? "ExpiredNextTokenException" : "InvalidArgumentException", error.getErrorCode());
+    @ValueSource(strings = {"ListStreams", "ListShards"})
+    void usesConfiguredExpiryForBothListOperations(String operation) {
+        service.createStream("a", 3, REGION);
+        service.createStream("b", 1, REGION);
+        KinesisJsonHandler expiringHandler = new KinesisJsonHandler(service, mapper, 0);
+        Map<String, ?> firstRequest = "ListStreams".equals(operation)
+                ? Map.of("Limit", 1) : Map.of("StreamName", "a", "MaxResults", 1);
+        String token;
+        try (Response first = expiringHandler.handle(operation, mapper.valueToTree(firstRequest), REGION)) {
+            ObjectNode page = (ObjectNode) first.getEntity();
+            assertTrue(page.hasNonNull("NextToken"));
+            token = page.path("NextToken").asText();
+        }
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> expiringHandler.handle(operation, mapper.valueToTree(Map.of("NextToken", token)), REGION));
+        assertEquals("ExpiredNextTokenException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ListStreams", "ListShards"})
+    void acceptsTokensMintedByThePreviousCodec(String operation) {
+        service.createStream("a", 3, REGION);
+        service.createStream("b", 1, REGION);
+        String shardId = service.describeStream("a", REGION).getShards().getFirst().getShardId();
+        String oldPayload = "ListStreams".equals(operation)
+                ? "ListStreams|" + REGION + "|" + Base64Url.encode("a") : "a|" + shardId;
+        String token = Base64Url.encode(oldPayload + "|" + System.currentTimeMillis());
+        try (Response response = handler.handle(operation, mapper.valueToTree(Map.of("NextToken", token)), REGION)) {
+            assertEquals(200, response.getStatus());
+            ObjectNode page = (ObjectNode) response.getEntity();
+            if ("ListStreams".equals(operation)) {
+                assertEquals(List.of("b"), names(page));
+            } else {
+                assertEquals(2, page.path("Shards").size());
+                assertEquals(service.describeStream("a", REGION).getShards().get(1).getShardId(),
+                        page.path("Shards").get(0).path("ShardId").asText());
+            }
+            assertFalse(page.has("NextToken"));
+        }
     }
 
     private void createThreeStreams() {
