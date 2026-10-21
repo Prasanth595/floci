@@ -28,11 +28,7 @@ A `QUEUED` or `PARALLEL` pipeline holds at most 50 active executions, as on AWS;
 In `SUPERSEDED` mode, a newer execution supersedes an older execution waiting at the same stage
 transition only when it catches up to that transition, not when it starts. If the newer execution
 fails before reaching that transition, the older execution can continue when the transition is enabled.
-A superseded worker exits without starting another stage or overwriting its terminal status;
-enabling the transition lets the newer execution proceed. Already-running stages are not interrupted.
-Execution age uses start time, with a persisted per-pipeline admission ordinal breaking equal-time
-ties. Legacy executions without an ordinal are conservatively left unordered when their start times
-are equal; neither supersedes the other solely on that tie.
+Enabling the transition lets the newer execution proceed. Already-running stages are not interrupted.
 
 S3 source actions poll for source changes by default, matching AWS when `PollForSourceChanges` is
 omitted or set to `true`. Floci establishes a baseline for the configured object and starts one new

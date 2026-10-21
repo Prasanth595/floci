@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.codedeploy.model.Deployment;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeline;
+import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeline.TransitionState;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -23,7 +24,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -51,8 +54,9 @@ class CodePipelineServiceTest {
     private static final String ACCOUNT = "000000000000";
 
     private final ObjectMapper mapper = new ObjectMapper();
+    private final CapturingStorageFactory storage = new CapturingStorageFactory();
     private final CodePipelineService service = new CodePipelineService(
-            new InMemoryStorageFactory(),
+            storage,
             mapper,
             mock(CodeBuildService.class),
             mock(CodeDeployService.class),
@@ -548,18 +552,15 @@ class CodePipelineServiceTest {
 
             // Exercise arrival at an enabled transition while the older execution is still marked
             // waiting (the window before its polling worker observes EnableStageTransition).
-            Method waitForTransition = CodePipelineService.class.getDeclaredMethod("waitForTransition",
-                    CodePipelinePipeline.class, CodePipelineExecution.class, String.class);
-            waitForTransition.setAccessible(true);
             CodePipelinePipeline pipeline = storage.pipelineStore()
                     .getForAccount(ACCOUNT, REGION + ":" + pipelineName).orElseThrow();
             for (String mode : new String[] {"QUEUED", "PARALLEL"}) {
                 newer.setExecutionMode(mode);
-                waitForTransition.invoke(catchUpService, pipeline, newer, "External");
+                catchUpService.waitForTransition(pipeline, newer, "External");
                 assertEquals("InProgress", older.getStatus(), mode + " must not supersede waiters");
             }
             newer.setExecutionMode("SUPERSEDED");
-            waitForTransition.invoke(catchUpService, pipeline, newer, "External");
+            catchUpService.waitForTransition(pipeline, newer, "External");
 
             assertEquals("Superseded", older.getStatus());
             assertEquals("Superseded", sameTimeOlder.getStatus());
@@ -650,25 +651,214 @@ class CodePipelineServiceTest {
             older.setAdmissionOrdinal(1L);
             CodePipelineExecution newer = waitingExecution(storage, pipeline, "newer", 10.0, "External");
             newer.setAdmissionOrdinal(2L);
-            Method arrive = CodePipelineService.class.getDeclaredMethod("waitForTransition",
-                    CodePipelinePipeline.class, CodePipelineExecution.class, String.class);
-            arrive.setAccessible(true);
             CodePipelinePipeline definition = storage.pipelineStore()
                     .getForAccount(ACCOUNT, REGION + ":" + pipeline).orElseThrow();
 
             // B has reached the transition before A's delayed worker catches up. A cannot kill B.
-            arrive.invoke(pipelineService, definition, older, "External");
+            pipelineService.waitForTransition(definition, older, "External");
             assertEquals("InProgress", newer.getStatus());
             assertEquals("InProgress", older.getStatus());
             // B's next observation catches the older waiter; A's subsequent observation stays terminal.
-            arrive.invoke(pipelineService, definition, newer, "External");
+            pipelineService.waitForTransition(definition, newer, "External");
             assertEquals("Superseded", older.getStatus());
-            arrive.invoke(pipelineService, definition, older, "External");
+            pipelineService.waitForTransition(definition, older, "External");
             assertEquals("InProgress", newer.getStatus());
             assertEquals("Superseded", older.getStatus());
             assertNull(older.getWaitingStage());
         } finally {
             pipelineService.shutdown();
+        }
+    }
+
+    @Test
+    void newerExecutionFailingBuildDoesNotSupersedeOlderWaitingAtDeploy() throws Exception {
+        try (CatchUpFixture fixture = new CatchUpFixture()) {
+            String older = fixture.start();
+            fixture.complete(fixture.job("Build", older), true);
+            fixture.awaitDeployWaiters(1);
+            fixture.assertAction(older, "Build", "Succeeded");
+            fixture.assertNoDeploy(older);
+
+            String newer = fixture.start();
+            JsonNode newerBuild = fixture.job("Build", newer);
+            fixture.complete(newerBuild, false);
+            fixture.awaitStatus(newer, "Failed");
+            fixture.awaitWorkerExit(newer);
+            fixture.assertAction(newer, "Build", "Failed");
+            fixture.assertNoDeploy(newer);
+            assertEquals(1, fixture.deployWaiters.size(), "B must fail before reaching Deploy");
+
+            assertEquals("InProgress", fixture.status(older),
+                    "A waiting at Deploy must survive B failing in Build");
+            assertTrue(service.activeRuns.contains(ACCOUNT + ":" + older));
+            fixture.enableDeploy();
+            fixture.complete(fixture.job("Deploy", older), true);
+            fixture.awaitStatus(older, "Succeeded");
+            fixture.awaitWorkerExit(older);
+            fixture.assertAction(older, "Deploy", "Succeeded");
+            assertEquals("Failed", fixture.status(newer));
+        }
+    }
+
+    @Test
+    void olderExecutionIsSupersededOnlyWhenNewerReachesSameDisabledDeploy() throws Exception {
+        try (CatchUpFixture fixture = new CatchUpFixture()) {
+            String older = fixture.start();
+            fixture.complete(fixture.job("Build", older), true);
+            fixture.awaitDeployWaiters(1);
+            fixture.assertAction(older, "Build", "Succeeded");
+            fixture.assertNoDeploy(older);
+
+            String newer = fixture.start();
+            JsonNode newerBuild = fixture.job("Build", newer);
+            // The job is deliberately unfinished: B's real worker is still in Build, not Deploy.
+            fixture.assertAction(newer, "Build", "InProgress");
+            assertEquals(1, fixture.deployWaiters.size());
+            assertEquals("InProgress", fixture.status(older),
+                    "Starting B is not catch-up: A must remain live while B is in Build");
+            assertTrue(service.activeRuns.contains(ACCOUNT + ":" + older));
+
+            fixture.complete(newerBuild, true);
+            fixture.awaitDeployWaiters(2);
+            fixture.assertAction(newer, "Build", "Succeeded");
+            fixture.awaitStatus(older, "Superseded");
+            fixture.awaitWorkerExit(older);
+            fixture.assertNoDeploy(older);
+            fixture.assertNoDeploy(newer);
+            assertEquals("InProgress", fixture.status(newer));
+
+            fixture.enableDeploy();
+            fixture.complete(fixture.job("Deploy", newer), true);
+            fixture.awaitStatus(newer, "Succeeded");
+            fixture.awaitWorkerExit(newer);
+            fixture.assertAction(newer, "Deploy", "Succeeded");
+            assertEquals("Superseded", fixture.status(older));
+            fixture.assertNoDeploy(older);
+        }
+    }
+
+    /** Custom jobs provide explicit action barriers without external services or timed sleeps. */
+    private final class CatchUpFixture implements AutoCloseable {
+        private static final String PIPELINE = "review-catch-up";
+        private static final Duration TIMEOUT = Duration.ofSeconds(5);
+        private final Set<Thread> deployWaiters = ConcurrentHashMap.newKeySet();
+
+        private CatchUpFixture() throws Exception {
+            handle("CreatePipeline", """
+                    {"pipeline": {
+                      "name":"review-catch-up", "executionMode":"SUPERSEDED",
+                      "roleArn":"arn:aws:iam::000000000000:role/codepipeline-role",
+                      "artifactStore":{"type":"S3","location":"artifacts"},
+                      "stages":[
+                        {"name":"Build","actions":[{"name":"BuildAction",
+                          "actionTypeId":{"category":"Build","owner":"Custom",
+                            "provider":"ReviewBuild","version":"1"}}]},
+                        {"name":"Deploy","actions":[{"name":"DeployAction",
+                          "actionTypeId":{"category":"Deploy","owner":"Custom",
+                            "provider":"ReviewDeploy","version":"1"}}]}
+                      ]}}
+                    """);
+            transition("DisableStageTransition");
+            CodePipelinePipeline pipeline = storage.pipelineStore()
+                    .getForAccount(ACCOUNT, REGION + ":" + PIPELINE).orElseThrow();
+            TransitionState disabled = spy(pipeline.getTransitions().get("Deploy"));
+            // Probe the actual transition read, not merely activeRuns admission or Build completion.
+            // Only execution workers read this transition in this fixture (no GetPipelineState calls).
+            doAnswer(invocation -> {
+                deployWaiters.add(Thread.currentThread());
+                return invocation.callRealMethod();
+            }).when(disabled).isEnabled();
+            pipeline.getTransitions().put("Deploy", disabled);
+        }
+
+        private String start() throws Exception {
+            return handle("StartPipelineExecution", "{\"name\":\"" + PIPELINE + "\"}")
+                    .path("pipelineExecutionId").asText();
+        }
+
+        private void transition(String action) throws Exception {
+            handle(action, """
+                    {"pipelineName":"review-catch-up","stageName":"Deploy",
+                     "transitionType":"Inbound","reason":"test barrier"}
+                    """);
+        }
+
+        private void enableDeploy() throws Exception {
+            transition("EnableStageTransition");
+        }
+
+        private void awaitDeployWaiters(int count) {
+            await().atMost(TIMEOUT).until(() -> deployWaiters.size() == count);
+        }
+
+        private JsonNode job(String stage, String execution) {
+            AtomicReference<JsonNode> found = new AtomicReference<>();
+            await().atMost(TIMEOUT).until(() -> {
+                JsonNode response = handle("PollForJobs", """
+                        {"actionTypeId":{"category":"%s","owner":"Custom",
+                         "provider":"Review%s","version":"1"},"maxBatchSize":10}
+                        """.formatted(stage, stage));
+                for (JsonNode job : response.path("jobs")) {
+                    if (execution.equals(job.path("data").path("pipelineContext")
+                            .path("pipelineExecutionId").asText())) {
+                        found.set(job);
+                        return true;
+                    }
+                }
+                return false;
+            });
+            return found.get();
+        }
+
+        private void complete(JsonNode job, boolean success) throws Exception {
+            handle("AcknowledgeJob", mapper.createObjectNode().put("jobId", job.path("id").asText())
+                    .put("nonce", job.path("nonce").asText()).toString());
+            handle(success ? "PutJobSuccessResult" : "PutJobFailureResult", """
+                    {"jobId":"%s","failureDetails":{"type":"JobFailed","message":"Build failed"}}
+                    """.formatted(job.path("id").asText()));
+        }
+
+        private String status(String execution) throws Exception {
+            return handle("GetPipelineExecution", """
+                    {"pipelineName":"review-catch-up","pipelineExecutionId":"%s"}
+                    """.formatted(execution)).path("pipelineExecution").path("status").asText();
+        }
+
+        private void awaitStatus(String execution, String expected) {
+            await().atMost(TIMEOUT).untilAsserted(() -> assertEquals(expected, status(execution)));
+        }
+
+        private void awaitWorkerExit(String execution) {
+            await().atMost(TIMEOUT).until(() -> !service.activeRuns.contains(ACCOUNT + ":" + execution));
+        }
+
+        private JsonNode actions(String execution) throws Exception {
+            return handle("ListActionExecutions", """
+                    {"pipelineName":"review-catch-up","filter":{"pipelineExecutionId":"%s"}}
+                    """.formatted(execution)).path("actionExecutionDetails");
+        }
+
+        private void assertAction(String execution, String stage, String expected) throws Exception {
+            int count = 0;
+            for (JsonNode action : actions(execution)) {
+                if (stage.equals(action.path("stageName").asText())) {
+                    count++;
+                    assertEquals(expected, action.path("status").asText());
+                }
+            }
+            assertEquals(1, count, "Expected exactly one " + stage + " action for " + execution);
+        }
+
+        private void assertNoDeploy(String execution) throws Exception {
+            for (JsonNode action : actions(execution)) {
+                assertFalse("Deploy".equals(action.path("stageName").asText()),
+                        "Disabled/superseded execution must not run Deploy: " + execution);
+            }
+        }
+
+        @Override
+        public void close() {
+            service.shutdown();
         }
     }
 
@@ -689,12 +879,9 @@ class CodePipelineServiceTest {
 
     private void awaitWaitingStage(CodePipelineService pipelineService, String pipeline,
                                    String executionId, String stage) throws Exception {
-        Method requireExecution = CodePipelineService.class.getDeclaredMethod("requireExecution",
-                String.class, String.class, String.class, String.class);
-        requireExecution.setAccessible(true);
         await().atMost(Duration.ofSeconds(3)).until(() -> {
-            CodePipelineExecution execution = (CodePipelineExecution) requireExecution.invoke(
-                    pipelineService, ACCOUNT, REGION, pipeline, executionId);
+            CodePipelineExecution execution = storage.executionStore
+                    .getForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + executionId).orElseThrow();
             return stage.equals(execution.getWaitingStage())
                     && pipelineService.activeRuns.contains(ACCOUNT + ":" + executionId);
         });

@@ -2551,7 +2551,7 @@ public class CodePipelineService {
                 && candidate.getAdmissionOrdinal() < execution.getAdmissionOrdinal();
     }
 
-    private void waitForTransition(CodePipelinePipeline pipeline, CodePipelineExecution execution,
+    void waitForTransition(CodePipelinePipeline pipeline, CodePipelineExecution execution,
                                    String stageName) throws InterruptedException {
         while (true) {
             boolean enabled = pipeline.getTransitions().getOrDefault(stageName, enabledTransition()).isEnabled();
