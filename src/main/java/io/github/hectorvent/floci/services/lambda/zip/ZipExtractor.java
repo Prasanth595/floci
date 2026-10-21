@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda.zip;
 
+import io.github.hectorvent.floci.core.common.FileTrees;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
@@ -10,10 +11,8 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.UUID;
-import java.util.stream.Stream;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
@@ -172,7 +171,7 @@ public class ZipExtractor {
         } finally {
             // A no-op once install() moved it; on failure this discards the partial staging tree
             // and leaves the previous extraction untouched.
-            deleteRecursively(staging);
+            FileTrees.delete(staging);
         }
 
         LOG.debugv("Extracted ZIP to: {0}", absTarget);
@@ -230,7 +229,7 @@ public class ZipExtractor {
             // its metadata and warm pool updates while the new code is already serving. Leaving
             // the tree behind costs disk and is recoverable; lying about the outcome is not.
             try {
-                deleteRecursively(previous);
+                FileTrees.delete(previous);
             } catch (IOException e) {
                 LOG.warnv("Installed {0} but could not remove the superseded package at {1}: {2}",
                         absTarget, previous, e.getMessage());
@@ -244,17 +243,6 @@ public class ZipExtractor {
         } catch (AtomicMoveNotSupportedException e) {
             // Some filesystems (and bind mounts inside containers) cannot rename atomically.
             Files.move(source, destination);
-        }
-    }
-
-    private static void deleteRecursively(Path root) throws IOException {
-        if (!Files.exists(root)) {
-            return;
-        }
-        try (Stream<Path> paths = Files.walk(root)) {
-            for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) {
-                Files.deleteIfExists(p);
-            }
         }
     }
 

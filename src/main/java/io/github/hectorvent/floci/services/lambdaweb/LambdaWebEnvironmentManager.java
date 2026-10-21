@@ -9,6 +9,7 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -720,11 +721,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     }
 
     private static void deleteRecursively(Path dir) {
-        try (Stream<Path> walk = Files.walk(dir)) {
-            List<Path> paths = walk.sorted(Comparator.reverseOrder()).toList();
-            for (Path path : paths) {
-                Files.deleteIfExists(path);
-            }
+        try {
+            FileTrees.delete(dir);
         } catch (IOException e) {
             LOG.debugv(e, "Could not remove the unpacked code at {0}", dir);
         }

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -39,7 +40,6 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -52,7 +52,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 @ApplicationScoped
 public class CodeArtifactService implements Resettable {
@@ -2709,14 +2708,8 @@ public class CodeArtifactService implements Resettable {
         if (!Files.isDirectory(assetRoot)) {
             return;
         }
-        try (Stream<Path> paths = Files.walk(assetRoot)) {
-            paths.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (IOException e) {
-                    LOG.errorv(e, "Failed to delete CodeArtifact asset file: {0}", p);
-                }
-            });
+        try {
+            FileTrees.delete(assetRoot);
         } catch (IOException e) {
             LOG.errorv(e, "Failed to reset CodeArtifact asset storage under {0}", assetRoot);
         }

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambdaweb;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -134,18 +135,9 @@ public class LambdaWebCode {
     }
 
     private static void deleteTree(Path root) {
-        if (!Files.exists(root)) {
-            return;
-        }
-        try (Stream<Path> walk = Files.walk(root)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(path -> {
-                try {
-                    Files.delete(path);
-                } catch (IOException e) {
-                    LOG.warnv("Could not delete {0}: {1}", path, e.getMessage());
-                }
-            });
-        } catch (IOException | UncheckedIOException e) {
+        try {
+            FileTrees.delete(root);
+        } catch (IOException e) {
             LOG.warnv("Could not delete {0}: {1}", root, e.getMessage());
         }
     }
