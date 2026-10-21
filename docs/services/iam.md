@@ -1145,12 +1145,35 @@ token offered by any other account answers `AccessDenied`, which is a refusal ra
 expiry. `PackedPolicySize` is left out of the response, the model deprecating it and stating it is
 not populated here.
 
-Three things are deliberately not modeled. IAM publishes the exchange token only in an SNS
-notification, and Floci sends none yet, so the token is minted onto the request and no operation
-hands it back: `NotificationChannel` is validated and stored with nothing reading it.
-`GetHumanReadableSummary` is undispatched, its summary being LLM-generated on AWS.
-`PermissionCheckResult` answers `UNSURE` when `DelegationPermissionCheck` is asked for, which the
-enum models, because a delegation request carries no permission for Floci to evaluate. Policy
+IAM tells the partner how the request is going on the SNS topic it named, which is the only channel
+this family has outwards. Every state AWS lists notifies, `ASSIGNED`, `PENDING_APPROVAL`,
+`ACCEPTED`, `FINALIZED`, `REJECTED` and `EXPIRED`, so the one state nobody is told about is the
+`UNASSIGNED` a request starts in, which the partner filed itself. `FINALIZED` sends two: a
+`StateChange`, and the `ExchangeToken` notification that carries the token and an `ExpiresAt` of
+release plus `SessionDuration`. The payload is a JSON string in the `Message` of an ordinary SNS
+notification, with `Type`, `RequestId`, `RequestorWorkflowId`, `State`, `OwnerAccountId` and
+`UpdatedAt`, and the owner account left out until the request carries one: a request filed at a
+named customer carries it from the start, an open one only once it is claimed. An expiry is
+noticed on the read that finds it due, so that read is what announces it, and a call that then
+fails on the expired request still sends the notification.
+
+IAM publishes as `iam.amazonaws.com` rather than as the caller, so the topic's own policy decides
+and nothing the partner or the customer holds plays any part. Under enforcement the topic has to
+allow `SNS:Publish` to that principal, which is the statement the guide has partners add, and the
+request's own ARN and the account that filed it are passed as `aws:SourceArn` and
+`aws:SourceAccount`. `NotificationChannel` is held to more than its declared shape. That shape, 2 to 400 characters of
+`[a-zA-Z0-9:_.-]`, is looser than an ARN, while the member's own documentation says "At this time,
+only SNS topic ARNs are accepted for notification", so a value inside the shape that names no
+topic is refused on the create with `InvalidInput`, the modeled error for a value that cannot be
+read as the member's type. The code is the part no source states; the refusal itself is the
+member's own sentence. A notification that cannot be delivered, whether the policy refuses it or the
+topic is gone, costs the notification and not the call that produced it: the state has already changed, and AWS rolls nothing back for a message it
+could not deliver.
+
+Two things are deliberately not modeled. `GetHumanReadableSummary` is undispatched, its summary
+being LLM-generated on AWS. `PermissionCheckResult` answers `UNSURE` when
+`DelegationPermissionCheck` is asked for, which the enum models, because a delegation request
+carries no permission for Floci to evaluate. Policy
 templates and permission boundaries are registered by AWS out of band, with no API, so
 `PolicyTemplateArn` is kept as given and resolved against nothing, and `LimitExceeded` is modeled
 with no published quota behind it, so no limit is enforced. Nothing renders a request's

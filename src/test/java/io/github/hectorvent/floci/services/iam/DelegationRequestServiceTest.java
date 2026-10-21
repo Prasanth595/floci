@@ -14,6 +14,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -27,6 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 /**
  * The state machine and both expiry windows, driven with a clock this test owns.
@@ -43,6 +47,7 @@ class DelegationRequestServiceTest {
     /** A second identity in the customer's account, the privileged approver the reference names. */
     private static final String APPROVER_ARN = "arn:aws:iam::000000000002:user/security-admin";
     private static final String REGION = "us-east-1";
+    private static final String TOPIC = "arn:aws:sns:us-east-1:000000000001:partner-notifications";
 
     /** Enough trials and racers to surface an unguarded read-then-write reliably. */
     private static final int TRIALS = 50;
@@ -50,12 +55,25 @@ class DelegationRequestServiceTest {
 
     private MutableClock clock;
     private DelegationRequestService service;
+    /** Every notification the service has published, in order, with nothing reaching SNS. */
+    private final List<DelegationNotifier.Notice> published = new ArrayList<>();
 
     @BeforeEach
     void setUp() {
         clock = new MutableClock();
+        published.clear();
+        DelegationNotifier notifier = mock(DelegationNotifier.class);
+        doAnswer(invocation -> {
+            published.addAll(invocation.getArgument(0));
+            return null;
+        }).when(notifier).publish(anyList());
         service = new DelegationRequestService(
-                AccountAwareStorageBackend.inMemory(PARTNER), clock);
+                AccountAwareStorageBackend.inMemory(PARTNER), clock, notifier);
+    }
+
+    /** What went out, as the type and state of each notification in the order it was published. */
+    private List<String> announced() {
+        return published.stream().map(notice -> notice.type() + ":" + notice.state()).toList();
     }
 
     private DelegationRequestService.Created createdIn(String region, String workflowId,
@@ -66,8 +84,14 @@ class DelegationRequestServiceTest {
     private DelegationRequestService.Created createdIn(String region, String workflowId,
                                                        String ownerAccountId,
                                                        Boolean onlySendByOwner) {
+        return createdIn(region, workflowId, ownerAccountId, onlySendByOwner, TOPIC);
+    }
+
+    private DelegationRequestService.Created createdIn(String region, String workflowId,
+                                                       String ownerAccountId,
+                                                       Boolean onlySendByOwner, String channel) {
         return service.create(PARTNER, region, new DelegationRequestService.NewRequest(
-                "Set up the integration", "arn:aws:sns:us-east-1:000000000001:partner-notifications",
+                "Set up the integration", channel,
                 workflowId, 3600,
                 new DelegationPermission("arn:aws:iam::partner:policy/template/example",
                         List.of(new PolicyParameter("BucketName", PolicyParameter.TYPE_STRING,
@@ -363,33 +387,33 @@ class DelegationRequestServiceTest {
     @Test
     void sessionDurationIsHeldToTheRangeTheModelPublishes() {
         assertEquals("ValidationError", assertThrows(AwsException.class, () -> service.create(PARTNER,
-                REGION, new DelegationRequestService.NewRequest("d", "topic", "workflow-1", 299,
+                REGION, new DelegationRequestService.NewRequest("d", TOPIC, "workflow-1", 299,
                         new DelegationPermission(null, List.of()), null, null, null, null)))
                 .getErrorCode());
         assertEquals("ValidationError", assertThrows(AwsException.class, () -> service.create(PARTNER,
-                REGION, new DelegationRequestService.NewRequest("d", "topic", "workflow-2", 43201,
+                REGION, new DelegationRequestService.NewRequest("d", TOPIC, "workflow-2", 43201,
                         new DelegationPermission(null, List.of()), null, null, null, null)))
                 .getErrorCode());
         assertNotNull(service.create(PARTNER, REGION, new DelegationRequestService.NewRequest(
-                "d", "topic", "workflow-3", 300, new DelegationPermission(null, List.of()),
+                "d", TOPIC, "workflow-3", 300, new DelegationPermission(null, List.of()),
                 null, null, null, null)).request());
     }
 
     @Test
     void theRequiredMembersAreRequired() {
         assertEquals("ValidationError", assertThrows(AwsException.class, () -> service.create(PARTNER,
-                REGION, new DelegationRequestService.NewRequest(null, "topic", "workflow-1", 3600,
+                REGION, new DelegationRequestService.NewRequest(null, TOPIC, "workflow-1", 3600,
                         new DelegationPermission(null, List.of()), null, null, null, null)))
                 .getErrorCode());
         assertEquals("ValidationError", assertThrows(AwsException.class, () -> service.create(PARTNER,
-                REGION, new DelegationRequestService.NewRequest("d", "topic", "workflow-1", 3600,
+                REGION, new DelegationRequestService.NewRequest("d", TOPIC, "workflow-1", 3600,
                         null, null, null, null, null))).getErrorCode());
     }
 
     private AwsException refusedCreate(String description, String workflowId,
                                        String redirectUrl, DelegationPermission permissions) {
         return assertThrows(AwsException.class, () -> service.create(PARTNER, REGION,
-                new DelegationRequestService.NewRequest(description, "topic", workflowId, 3600,
+                new DelegationRequestService.NewRequest(description, TOPIC, workflowId, 3600,
                         permissions, null, redirectUrl, null, null)));
     }
 
@@ -398,7 +422,7 @@ class DelegationRequestServiceTest {
         // Description is required and its pattern ends in '*' with no minimum, so an empty value
         // is inside the constraints AWS publishes and is not the same as leaving it out.
         DelegationRequest request = service.create(PARTNER, REGION,
-                new DelegationRequestService.NewRequest("", "topic", "workflow-1", 3600,
+                new DelegationRequestService.NewRequest("", TOPIC, "workflow-1", 3600,
                         new DelegationPermission(null, List.of()), null, null, "", null)).request();
 
         assertEquals("", request.getDescription());
@@ -412,7 +436,7 @@ class DelegationRequestServiceTest {
         assertEquals("ValidationError", refusedCreate("bad \u0000 text", "workflow-1", null,
                 new DelegationPermission(null, List.of())).getErrorCode());
         assertNotNull(service.create(PARTNER, REGION, new DelegationRequestService.NewRequest(
-                "line one\nline two\ttabbed", "topic", "workflow-2", 3600,
+                "line one\nline two\ttabbed", TOPIC, "workflow-2", 3600,
                 new DelegationPermission(null, List.of()), null, null, null, null)).request());
     }
 
@@ -421,7 +445,7 @@ class DelegationRequestServiceTest {
         assertEquals("ValidationError", refusedCreate("d", "workflow-1", "not-a-url",
                 new DelegationPermission(null, List.of())).getErrorCode());
         assertNotNull(service.create(PARTNER, REGION, new DelegationRequestService.NewRequest(
-                "d", "topic", "workflow-2", 3600, new DelegationPermission(null, List.of()),
+                "d", TOPIC, "workflow-2", 3600, new DelegationPermission(null, List.of()),
                 null, "https://partner.example.com/resume?workflow=12345", null, null)).request());
     }
 
@@ -549,5 +573,134 @@ class DelegationRequestServiceTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    /**
+     * Every state the guide's notification table lists, and nothing for the one it leaves out:
+     * the table runs from {@code ASSIGNED} to {@code EXPIRED}, and the partner filed the request
+     * itself, so {@code UNASSIGNED} is the single state nobody is told about.
+     */
+    @Test
+    void everyTransitionIsAnnouncedOnThePartnersTopic() {
+        String id = created("workflow-1", null).getDelegationRequestId();
+        assertEquals(List.of(), announced());
+
+        service.associate(CUSTOMER, CUSTOMER_ARN, id);
+        service.update(CUSTOMER, id, "please approve");
+        service.accept(CUSTOMER, APPROVER_ARN, id);
+        service.release(CUSTOMER, CUSTOMER_ARN, id);
+
+        // FINALIZED notifies twice, which is how the token travels: the table lists a StateChange
+        // and an ExchangeToken for that state and only for that state.
+        assertEquals(List.of("StateChange:ASSIGNED", "StateChange:PENDING_APPROVAL",
+                "StateChange:ACCEPTED", "StateChange:FINALIZED", "ExchangeToken:FINALIZED"),
+                announced());
+    }
+
+    @Test
+    void theTokenNotificationCarriesTheTokenAndWhenTheAccessExpires() {
+        DelegationRequest request = finalized("workflow-1");
+
+        DelegationNotifier.Notice notice = published.getLast();
+        assertEquals(DelegationNotifier.EXCHANGE_TOKEN, notice.type());
+        assertEquals(request.getExchangeToken(), notice.exchangeToken());
+        // Release plus SessionDuration, which is when the credentials it buys expire however late
+        // it is exchanged.
+        assertEquals(request.getTokenReleasedAt().plusSeconds(3600), notice.expiresAt());
+        assertEquals(request.getDelegationRequestId(), notice.requestId());
+        assertEquals(request.getNotificationChannel(), notice.topicArn());
+        assertEquals(PARTNER, notice.requestorAccountId());
+    }
+
+    @Test
+    void aRejectionIsAnnouncedWithTheRest() {
+        String id = assigned("workflow-1").getDelegationRequestId();
+        published.clear();
+
+        service.reject(CUSTOMER, id, "not this time");
+
+        assertEquals(List.of("StateChange:REJECTED"), announced());
+    }
+
+    /**
+     * Expiry is a transition like any other and notifies like one. The read that finds a request
+     * due is the only moment Floci has, there being no sweeper, so that read is what announces it.
+     */
+    @Test
+    void anExpiryFoundOnAReadIsAnnounced() {
+        String id = created("workflow-1", null).getDelegationRequestId();
+        published.clear();
+
+        clock.advance(Duration.ofDays(1).plusSeconds(1));
+        service.get(PARTNER, id);
+
+        assertEquals(List.of("StateChange:EXPIRED"), announced());
+    }
+
+    /**
+     * The channel has to be able to name a topic. Its declared shape is looser than an ARN, so the
+     * shape alone would accept a request nothing could ever be published for, where the guide asks
+     * for "an SNS topic ARN from your registered AWS account".
+     */
+    @Test
+    void aChannelThatNamesNoTopicIsRefusedOnTheCreate() {
+        AwsException refused = assertThrows(AwsException.class,
+                () -> createdIn(REGION, "workflow-1", null, null, "partner-notifications"));
+
+        assertEquals("InvalidInput", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        // Refused before anything was written, so there is no request and nothing was announced.
+        assertEquals(List.of(), service.list(PARTNER, null));
+        assertEquals(List.of(), announced());
+    }
+
+    /**
+     * A notification follows a transition rather than a call. A second
+     * {@code UpdateDelegationRequest} on a request already under review moves nothing, so the
+     * partner hears nothing and cannot read a transition into it.
+     */
+    @Test
+    void aSecondUpdateAnnouncesNothingBecauseNothingMoved() {
+        String id = assigned("workflow-1").getDelegationRequestId();
+        service.update(CUSTOMER, id, "please approve");
+        published.clear();
+
+        service.update(CUSTOMER, id, "still waiting on the administrator");
+
+        assertEquals(List.of(), announced());
+    }
+
+    /**
+     * A request filed at a named customer carries that account before anyone claims it, so its
+     * notifications name it. What leaves the owner account out of a payload is the request not
+     * carrying one, which is not the same thing as nobody having claimed it.
+     */
+    @Test
+    void aTargetedRequestAnnouncesTheCustomerAccountBeforeAnyoneClaimsIt() {
+        String id = created("workflow-1", CUSTOMER).getDelegationRequestId();
+        published.clear();
+
+        clock.advance(Duration.ofDays(1).plusSeconds(1));
+        // The read is the customer's: a request naming an owner account is visible to that
+        // account alone, which is the lifecycle's own rule and not this notification's.
+        service.get(CUSTOMER, id);
+
+        assertEquals(List.of("StateChange:EXPIRED"), announced());
+        assertEquals(CUSTOMER, published.getLast().ownerAccountId());
+    }
+
+    /**
+     * The expiry still goes out when the call that found it then fails on it. The request moved,
+     * and what the caller was trying to do with it does not change that.
+     */
+    @Test
+    void aCallRefusedAfterExpiringARequestStillAnnouncesTheExpiry() {
+        String id = created("workflow-1", null).getDelegationRequestId();
+        published.clear();
+
+        clock.advance(Duration.ofDays(1).plusSeconds(1));
+        assertThrows(AwsException.class, () -> service.associate(CUSTOMER, CUSTOMER_ARN, id));
+
+        assertEquals(List.of("StateChange:EXPIRED"), announced());
     }
 }

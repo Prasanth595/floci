@@ -2571,8 +2571,8 @@ public class IamQueryHandler {
      * Releases the exchange token on an accepted request, which finalizes it.
      *
      * <p>The operation answers no output shape at all, so the envelope carries no result, and the
-     * token itself goes nowhere from here: AWS publishes it on the partner's SNS topic and
-     * returns it from no operation on the family.
+     * token leaves by the one door AWS gives it: the {@code ExchangeToken} notification on the
+     * partner's topic, which the release publishes, and no operation on the family returns it.
      *
      * <p>The caller's ARN goes with the account because this is the one delegation call that can
      * be scoped to an identity: {@code OnlySendByOwner} holds the release to whoever claimed the

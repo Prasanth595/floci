@@ -43,9 +43,10 @@ class DelegationRequestIntegrationTest {
             + "/20261011/us-east-1/sts/aws4_request, SignedHeaders=host, Signature=abc";
 
     /**
-     * The exchange token reaches the partner over SNS and is answered by no operation, so the one
-     * step of this workflow that cannot be driven over the wire is reading it back. Everything
-     * either side of it is.
+     * The exchange token is answered by no operation: it reaches the partner on the SNS topic the
+     * request names. This class drives no topic, so it reads the token off the record, and
+     * {@code DelegationNotificationIntegrationTest} is where the notification carrying it is
+     * driven over the wire instead.
      */
     @Inject
     DelegationRequestService delegationRequests;

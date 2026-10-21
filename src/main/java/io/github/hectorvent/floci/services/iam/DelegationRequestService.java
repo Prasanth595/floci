@@ -17,6 +17,7 @@ import jakarta.inject.Inject;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
@@ -42,7 +43,17 @@ import java.util.regex.Pattern;
  * {@code ValidationError}, which the reference's common errors publish for exactly that across
  * every IAM operation and which the rest of IAM answers in the same shape. The modeled
  * {@code InvalidInput} is kept for a value that cannot be read as the member's type at all, the
- * way the shared pagination already answers a {@code MaxItems} that is not a number.
+ * way the shared pagination already answers a {@code MaxItems} that is not a number, and that is
+ * what a {@code NotificationChannel} naming no topic gets: the member's declared shape is looser
+ * than an ARN, so the shape alone would let through a channel nothing could be published to.
+ *
+ * <p>Every state the service writes is announced on the partner's topic through
+ * {@link DelegationNotifier}, which is the only channel this family has outwards. A notice is
+ * taken wherever a state is written, so an expiry noticed on a read announces itself the same way
+ * a claim does, and they are published once the lock is released: delivery reaches SNS and its
+ * subscribers, which is not work to hold a lock over, and a notification that cannot be delivered
+ * must not undo the transition that earned it. A call that fails after expiring a request still
+ * announces the expiry, which is why they are published in a finally rather than on the way out.
  */
 @ApplicationScoped
 public class DelegationRequestService {
@@ -88,6 +99,7 @@ public class DelegationRequestService {
     private final SecureRandom random = new SecureRandom();
     private final AccountAwareStorageBackend<DelegationRequest> requests;
     private final Clock clock;
+    private final DelegationNotifier notifier;
     /**
      * Serializes the read, check and write every lifecycle call makes, the way the sibling IAM
      * services guard theirs. Without it two callers can both claim the same unassigned request, or
@@ -96,13 +108,17 @@ public class DelegationRequestService {
     private final Object requestLock = new Object();
 
     @Inject
-    public DelegationRequestService(StorageFactory storageFactory, Clock clock) {
-        this(storageFactory.create("iam", "iam-delegation-requests.json", new TypeReference<>() {}), clock);
+    public DelegationRequestService(StorageFactory storageFactory, Clock clock,
+                                    DelegationNotifier notifier) {
+        this(storageFactory.create("iam", "iam-delegation-requests.json", new TypeReference<>() {}),
+                clock, notifier);
     }
 
-    DelegationRequestService(AccountAwareStorageBackend<DelegationRequest> requests, Clock clock) {
+    DelegationRequestService(AccountAwareStorageBackend<DelegationRequest> requests, Clock clock,
+                             DelegationNotifier notifier) {
         this.requests = requests;
         this.clock = clock;
+        this.notifier = notifier;
     }
 
     /** The {@code CreateDelegationRequest} request, as the handler parsed it. */
@@ -159,6 +175,15 @@ public class DelegationRequestService {
             throw constraintViolation(command.ownerAccountId(), "ownerAccountId",
                     "Member must satisfy regular expression pattern: " + ACCOUNT_PATTERN.pattern());
         }
+        // Last, because every check above enforces a declared constraint and this one enforces a
+        // documented one: notificationChannelType is looser than an ARN, while the member's own
+        // documentation says "At this time, only SNS topic ARNs are accepted for notification".
+        // A value inside the shape that names no topic cannot be read as the member's type, which
+        // is what InvalidInput is for here.
+        if (!DelegationNotifier.namesATopic(command.notificationChannel())) {
+            throw new AwsException("InvalidInput",
+                    "NotificationChannel must be an Amazon SNS topic ARN.", 400);
+        }
         synchronized (requestLock) {
             return fileNewRequest(requestorAccountId, region, command);
         }
@@ -208,24 +233,35 @@ public class DelegationRequestService {
      * another account answers {@code NoSuchEntity} rather than a refusal that names it.
      */
     public DelegationRequest associate(String callerAccountId, String callerArn, String id) {
-        synchronized (requestLock) {
-            Instant now = clock.instant();
-            DelegationRequest request = visible(callerAccountId, id, now);
-            requireState(request, DelegationRequestState.UNASSIGNED);
-            request.setOwnerAccountId(callerAccountId);
-            request.setOwnerId(callerArn);
-            return moveTo(request, DelegationRequestState.ASSIGNED, now);
+        List<DelegationNotifier.Notice> notices = new ArrayList<>();
+        try {
+            synchronized (requestLock) {
+                Instant now = clock.instant();
+                DelegationRequest request = visible(callerAccountId, id, now, notices);
+                requireState(request, DelegationRequestState.UNASSIGNED);
+                request.setOwnerAccountId(callerAccountId);
+                request.setOwnerId(callerArn);
+                return moveTo(request, DelegationRequestState.ASSIGNED, now, notices);
+            }
+        } finally {
+            notifier.publish(notices);
         }
     }
 
     /** Approves a request, from {@code ASSIGNED} or from an administrator's review. */
     public DelegationRequest accept(String callerAccountId, String callerArn, String id) {
-        synchronized (requestLock) {
-            Instant now = clock.instant();
-            DelegationRequest request = visible(callerAccountId, id, now);
-            requireState(request, DelegationRequestState.ASSIGNED, DelegationRequestState.PENDING_APPROVAL);
-            request.setApproverId(callerArn);
-            return moveTo(request, DelegationRequestState.ACCEPTED, now);
+        List<DelegationNotifier.Notice> notices = new ArrayList<>();
+        try {
+            synchronized (requestLock) {
+                Instant now = clock.instant();
+                DelegationRequest request = visible(callerAccountId, id, now, notices);
+                requireState(request, DelegationRequestState.ASSIGNED,
+                        DelegationRequestState.PENDING_APPROVAL);
+                request.setApproverId(callerArn);
+                return moveTo(request, DelegationRequestState.ACCEPTED, now, notices);
+            }
+        } finally {
+            notifier.publish(notices);
         }
     }
 
@@ -235,13 +271,18 @@ public class DelegationRequestService {
      */
     public DelegationRequest reject(String callerAccountId, String id, String notes) {
         checkText(notes, "notes", 0, 500, TEXT_PATTERN);
-        synchronized (requestLock) {
-            Instant now = clock.instant();
-            DelegationRequest request = visible(callerAccountId, id, now);
-            requireState(request, DelegationRequestState.ASSIGNED,
-                    DelegationRequestState.PENDING_APPROVAL, DelegationRequestState.ACCEPTED);
-            request.setRejectionReason(notes);
-            return moveTo(request, DelegationRequestState.REJECTED, now);
+        List<DelegationNotifier.Notice> notices = new ArrayList<>();
+        try {
+            synchronized (requestLock) {
+                Instant now = clock.instant();
+                DelegationRequest request = visible(callerAccountId, id, now, notices);
+                requireState(request, DelegationRequestState.ASSIGNED,
+                        DelegationRequestState.PENDING_APPROVAL, DelegationRequestState.ACCEPTED);
+                request.setRejectionReason(notes);
+                return moveTo(request, DelegationRequestState.REJECTED, now, notices);
+            }
+        } finally {
+            notifier.publish(notices);
         }
     }
 
@@ -252,12 +293,18 @@ public class DelegationRequestService {
      */
     public DelegationRequest update(String callerAccountId, String id, String notes) {
         checkText(notes, "notes", 0, 500, TEXT_PATTERN);
-        synchronized (requestLock) {
-            Instant now = clock.instant();
-            DelegationRequest request = visible(callerAccountId, id, now);
-            requireState(request, DelegationRequestState.ASSIGNED, DelegationRequestState.PENDING_APPROVAL);
-            request.setNotes(notes);
-            return moveTo(request, DelegationRequestState.PENDING_APPROVAL, now);
+        List<DelegationNotifier.Notice> notices = new ArrayList<>();
+        try {
+            synchronized (requestLock) {
+                Instant now = clock.instant();
+                DelegationRequest request = visible(callerAccountId, id, now, notices);
+                requireState(request, DelegationRequestState.ASSIGNED,
+                        DelegationRequestState.PENDING_APPROVAL);
+                request.setNotes(notes);
+                return moveTo(request, DelegationRequestState.PENDING_APPROVAL, now, notices);
+            }
+        } finally {
+            notifier.publish(notices);
         }
     }
 
@@ -278,24 +325,32 @@ public class DelegationRequestService {
      * who accepted the request is a different ARN from the owner who claimed it, and with the flag
      * set only the second of them may release.
      *
-     * <p>Nothing hands the token back. AWS publishes it only in the {@code ExchangeToken}
-     * notification on the partner's SNS topic, and no operation on the family answers it, so it
-     * stays on the record until there is a notification to carry it.
+     * <p>No operation on the family answers the token. AWS publishes it only in the
+     * {@code ExchangeToken} notification on the partner's topic, which is sent here beside the
+     * state change rather than instead of it, the guide listing both for {@code FINALIZED}.
      */
     public DelegationRequest release(String callerAccountId, String callerArn, String id) {
-        synchronized (requestLock) {
-            Instant now = clock.instant();
-            DelegationRequest request = visible(callerAccountId, id, now);
-            requireState(request, DelegationRequestState.ACCEPTED);
-            if (Boolean.TRUE.equals(request.getOnlySendByOwner())
-                    && !request.getOwnerId().equals(callerArn)) {
-                throw new AwsException("AccessDenied", "User is not authorized to perform: "
-                        + "iam:SendDelegationToken on " + request.getDelegationRequestId()
-                        + ", which is marked to be sent only by its owner.", 403);
+        List<DelegationNotifier.Notice> notices = new ArrayList<>();
+        try {
+            synchronized (requestLock) {
+                Instant now = clock.instant();
+                DelegationRequest request = visible(callerAccountId, id, now, notices);
+                requireState(request, DelegationRequestState.ACCEPTED);
+                if (Boolean.TRUE.equals(request.getOnlySendByOwner())
+                        && !request.getOwnerId().equals(callerArn)) {
+                    throw new AwsException("AccessDenied", "User is not authorized to perform: "
+                            + "iam:SendDelegationToken on " + request.getDelegationRequestId()
+                            + ", which is marked to be sent only by its owner.", 403);
+                }
+                request.setExchangeToken(newToken());
+                request.setTokenReleasedAt(now);
+                DelegationRequest finalized =
+                        moveTo(request, DelegationRequestState.FINALIZED, now, notices);
+                notices.add(DelegationNotifier.Notice.exchangeToken(finalized));
+                return finalized;
             }
-            request.setExchangeToken(newToken());
-            request.setTokenReleasedAt(now);
-            return moveTo(request, DelegationRequestState.FINALIZED, now);
+        } finally {
+            notifier.publish(notices);
         }
     }
 
@@ -345,8 +400,13 @@ public class DelegationRequestService {
 
     /** One request, by id, as the calling account is allowed to see it. */
     public DelegationRequest get(String callerAccountId, String id) {
-        synchronized (requestLock) {
-            return visible(callerAccountId, id, clock.instant());
+        List<DelegationNotifier.Notice> notices = new ArrayList<>();
+        try {
+            synchronized (requestLock) {
+                return visible(callerAccountId, id, clock.instant(), notices);
+            }
+        } finally {
+            notifier.publish(notices);
         }
     }
 
@@ -362,14 +422,21 @@ public class DelegationRequestService {
     public List<DelegationRequest> list(String callerAccountId, String ownerId) {
         checkText(ownerId, "ownerId", 20, 2048, OWNER_ID_PATTERN);
         Instant now = clock.instant();
-        synchronized (requestLock) {
-            return visibleToOwner(callerAccountId, ownerId, now);
+        List<DelegationNotifier.Notice> notices = new ArrayList<>();
+        try {
+            synchronized (requestLock) {
+                return visibleToOwner(callerAccountId, ownerId, now, notices);
+            }
+        } finally {
+            notifier.publish(notices);
         }
     }
 
-    private List<DelegationRequest> visibleToOwner(String callerAccountId, String ownerId, Instant now) {
+    private List<DelegationRequest> visibleToOwner(String callerAccountId, String ownerId,
+                                                   Instant now,
+                                                   List<DelegationNotifier.Notice> notices) {
         return requests.scanAllAccounts().stream()
-                .map(request -> expireIfDue(request, now))
+                .map(request -> expireIfDue(request, now, notices))
                 .filter(request -> request.getOwnerId() != null
                         && callerAccountId.equals(request.getOwnerAccountId()))
                 .filter(request -> ownerId == null || ownerId.equals(request.getOwnerId()))
@@ -389,7 +456,8 @@ public class DelegationRequestService {
      * being no per-identity permission on a delegation request to consult, so the last two collapse
      * into the same answer.
      */
-    private DelegationRequest visible(String callerAccountId, String id, Instant now) {
+    private DelegationRequest visible(String callerAccountId, String id, Instant now,
+                                      List<DelegationNotifier.Notice> notices) {
         requirePresent(id, "delegationRequestId");
         checkText(id, "delegationRequestId", 16, 128, ID_PATTERN);
         DelegationRequest request = requests.scanAllAccounts().stream()
@@ -400,7 +468,7 @@ public class DelegationRequestService {
                 && !request.getOwnerAccountId().equals(callerAccountId)) {
             throw noSuchRequest(id);
         }
-        return expireIfDue(request, now);
+        return expireIfDue(request, now, notices);
     }
 
     private Optional<DelegationRequest> findByWorkflowId(String requestorAccountId, String workflowId) {
@@ -412,8 +480,11 @@ public class DelegationRequestService {
     /**
      * Applies the state's own window. A request sitting past it is {@code EXPIRED} from the next
      * read onwards, and the transition is written back so the answer does not depend on who asks.
+     * It is a transition like any other, so it notifies: the guide lists {@code EXPIRED} among the
+     * states a partner hears about, and the read that notices it is the only moment Floci has.
      */
-    private DelegationRequest expireIfDue(DelegationRequest request, Instant now) {
+    private DelegationRequest expireIfDue(DelegationRequest request, Instant now,
+                                          List<DelegationNotifier.Notice> notices) {
         if (request.getState() == DelegationRequestState.EXPIRED
                 || request.getExpirationTime() == null
                 || now.isBefore(request.getExpirationTime())) {
@@ -422,19 +493,28 @@ public class DelegationRequestService {
         request.setState(DelegationRequestState.EXPIRED);
         request.setUpdatedTime(now);
         put(request);
+        notices.add(DelegationNotifier.Notice.stateChange(request));
         return request;
     }
 
     /**
-     * Commits a transition. It takes the same instant the lookup expired against, so the deadline
-     * cannot fall between the two and let a request that is already past its window move on
-     * instead of expiring.
+     * Commits a transition and takes the notice for it. It is given the same instant the lookup
+     * expired against, so the deadline cannot fall between the two and let a request that is
+     * already past its window move on instead of expiring.
      */
-    private DelegationRequest moveTo(DelegationRequest request, DelegationRequestState state, Instant now) {
+    private DelegationRequest moveTo(DelegationRequest request, DelegationRequestState state,
+                                     Instant now, List<DelegationNotifier.Notice> notices) {
+        // A StateChange is sent "when a delegation request transitions to a new state", so a
+        // second UpdateDelegationRequest on a request already under review writes the notes it
+        // carries, refreshes the expiry window and tells the partner nothing.
+        boolean moved = request.getState() != state;
         request.setState(state);
         request.setUpdatedTime(now);
         request.setExpirationTime(state.window() == null ? null : now.plus(state.window()));
         put(request);
+        if (moved) {
+            notices.add(DelegationNotifier.Notice.stateChange(request));
+        }
         return request;
     }
 
