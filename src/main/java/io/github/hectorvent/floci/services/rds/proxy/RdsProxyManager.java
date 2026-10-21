@@ -39,41 +39,6 @@ public class RdsProxyManager {
         this.containerManager = containerManager;
     }
 
-    RdsProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
-                    EmulatorConfig config) {
-        this(sigV4Validator, tlsCertificates, config, RdsBackendGate.OPEN, null);
-    }
-
-    public RdsProxyManager(RdsSigV4Validator sigV4Validator,
-                           RdsProxyTlsCertificates tlsCertificates,
-                           EmulatorConfig config, RdsBackendGate backendGate) {
-        this(sigV4Validator, tlsCertificates, config, backendGate, null);
-    }
-
-    public synchronized void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
-                                        int proxyPort, String backendHost, int backendPort,
-                                        String advertisedHost,
-                                        String masterUsername, String masterPassword, String dbName,
-                                        RdsAuthProxy.MasterPasswordCheck passwordValidator,
-                                        RdsProxyBinding binding) {
-        startProxy(instanceId, engine, iamEnabled, proxyPort, backendHost, backendPort,
-                advertisedHost, masterUsername, masterPassword, dbName, passwordValidator,
-                binding, RdsAuthProxy.EndpointKind.DATABASE);
-    }
-
-    public synchronized void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
-                                        int proxyPort, String backendHost, int backendPort,
-                                        String advertisedHost,
-                                        String masterUsername, String masterPassword, String dbName,
-                                        RdsAuthProxy.MasterPasswordCheck passwordValidator,
-                                        RdsProxyBinding binding, RdsAuthProxy.EndpointKind endpointKind) {
-        RdsAuthProxy.BackendEndpointResolver endpointResolver =
-                () -> new RdsAuthProxy.BackendEndpoint(backendHost, backendPort);
-        startProxy(instanceId, null, engine, iamEnabled, proxyPort, backendHost, backendPort,
-                endpointResolver, advertisedHost, masterUsername, masterPassword, dbName,
-                passwordValidator, binding, endpointKind);
-    }
-
     public synchronized void startProxy(String instanceId, String backendRuntimeId,
                                         DatabaseEngine engine, boolean iamEnabled,
                                         int proxyPort, String backendHost, int backendPort,
