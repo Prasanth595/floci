@@ -26,6 +26,8 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -133,10 +135,11 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
             return;
         }
 
-        String credential = component(authorization, "Credential");
-        String signedHeaders = component(authorization, "SignedHeaders");
-        String signature = component(authorization, "Signature");
-        if (credential == null || signedHeaders == null || signature == null) {
+        Map<String, String> components = parseComponents(authorization);
+        String credential = components != null ? components.get("Credential") : null;
+        String signedHeaders = components != null ? components.get("SignedHeaders") : null;
+        String signature = components != null ? components.get("Signature") : null;
+        if (components == null || credential == null || signedHeaders == null || signature == null) {
             abort(ctx, 400, "AuthorizationHeaderMalformed", "The authorization header is malformed; "
                     + "the authorization header requires three components: "
                     + "Credential, SignedHeaders, and Signature.");
@@ -327,17 +330,27 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
         return null;
     }
 
-    /** The value of one {@code Name=value} component of a SigV4 {@code Authorization} header. */
-    private static String component(String authorization, String name) {
-        String parameters = authorization.substring(authorization.indexOf(' ') + 1);
+    /** Parses the {@code Name=value} components of a SigV4 {@code Authorization} header. */
+    private static Map<String, String> parseComponents(String authorization) {
+        int space = authorization.indexOf(' ');
+        if (space < 0) {
+            return null;
+        }
+        String parameters = authorization.substring(space + 1).trim();
+        Map<String, String> components = new LinkedHashMap<>();
         for (String part : parameters.split(",")) {
             String trimmed = part.trim();
-            if (trimmed.startsWith(name + "=")) {
-                String value = trimmed.substring(name.length() + 1).trim();
-                return value.isEmpty() ? null : value;
+            int eq = trimmed.indexOf('=');
+            if (eq <= 0) {
+                return null;
+            }
+            String name = trimmed.substring(0, eq).trim();
+            String value = trimmed.substring(eq + 1).trim();
+            if (value.isEmpty() || components.putIfAbsent(name, value) != null) {
+                return null;
             }
         }
-        return null;
+        return components;
     }
 
     private static boolean isBlank(String value) {

@@ -174,6 +174,17 @@ class S3RequestAuthorizationParserTest {
         assertThrows(AwsException.class, () -> parse(null, query));
     }
 
+    @Test
+    void rejectsAuthorizationHeaderWithDuplicateCredentialComponent() {
+        String authorization = "AWS4-HMAC-SHA256 Credential=KEY1/20260702/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=test, "
+                + "Credential=KEY2/20260702/us-east-1/s3/aws4_request";
+
+        AwsException e = assertThrows(AwsException.class, () -> parse(authorization, query()));
+        assertEquals("AuthorizationHeaderMalformed", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
     private static MultivaluedMap<String, String> sigV4aPresignedQuery() {
         MultivaluedMap<String, String> query = query();
         query.add("X-Amz-Algorithm", "AWS4-ECDSA-P256-SHA256");

@@ -135,9 +135,13 @@ final class S3RequestAuthorizationParser {
         for (String part : parameters.split(",")) {
             int equals = part.indexOf('=');
             if (equals <= 0) {
-                continue;
+                return Map.of();
             }
-            parsed.put(part.substring(0, equals).trim(), part.substring(equals + 1).trim());
+            String key = part.substring(0, equals).trim();
+            String value = part.substring(equals + 1).trim();
+            if (parsed.putIfAbsent(key, value) != null) {
+                return Map.of();
+            }
         }
         return parsed;
     }

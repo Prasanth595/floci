@@ -121,4 +121,21 @@ class S3HeaderSignatureFilterTest {
         assertTrue(entity.contains("<Code>AuthorizationHeaderMalformed</Code>"), entity);
         assertTrue(entity.contains("YYYYMMDD/SERVICE/aws4_request"), entity);
     }
+
+    @Test
+    void abortsWhenAuthorizationHeaderContainsDuplicateComponent() throws IOException {
+        when(ctx.getHeaderString("Authorization"))
+                .thenReturn("AWS4-HMAC-SHA256 Credential=AKID/20261001/us-east-1/s3/aws4_request, "
+                        + "SignedHeaders=host, Signature=abc, "
+                        + "Credential=AKID2/20261001/us-east-1/s3/aws4_request");
+
+        filter.filter(ctx);
+
+        ArgumentCaptor<Response> captor = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(captor.capture());
+        Response response = captor.getValue();
+        assertEquals(400, response.getStatus());
+        String entity = (String) response.getEntity();
+        assertTrue(entity.contains("<Code>AuthorizationHeaderMalformed</Code>"), entity);
+    }
 }

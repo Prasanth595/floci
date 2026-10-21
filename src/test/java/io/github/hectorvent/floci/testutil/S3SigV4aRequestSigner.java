@@ -84,7 +84,8 @@ public final class S3SigV4aRequestSigner implements Filter {
     public Response filter(FilterableRequestSpecification request,
                            FilterableResponseSpecification response, FilterContext ctx) {
         try {
-            headersFor(request.getMethod(), URI.create(request.getURI()), bodyBytes(request.getBody()))
+            headersFor(request.getMethod(), URI.create(request.getURI()),
+                    S3RequestSigner.bodyBytes(request.getBody()))
                     .forEach(request::header);
         } catch (Exception e) {
             throw new IllegalStateException("could not sign the request", e);
@@ -98,7 +99,7 @@ public final class S3SigV4aRequestSigner implements Filter {
         String contentSha256 = Digests.sha256Hex(body);
 
         Map<String, String> signed = new LinkedHashMap<>();
-        signed.put("host", host(uri));
+        signed.put("host", S3RequestSigner.host(uri));
         signed.put("x-amz-content-sha256", contentSha256);
         signed.put("x-amz-date", amzDate);
         if (signRegionSet) {
@@ -143,7 +144,7 @@ public final class S3SigV4aRequestSigner implements Filter {
                 .collect(Collectors.joining("&"));
         String canonicalRequest = method + "\n" + rawPath(uri) + "\n"
                 + S3RequestSigner.canonicalQueryString(query) + "\n"
-                + "host:" + host(uri) + "\n\nhost\nUNSIGNED-PAYLOAD";
+                + "host:" + S3RequestSigner.host(uri) + "\n\nhost\nUNSIGNED-PAYLOAD";
         return query + "&X-Amz-Signature=" + signature(amzDate, scopeDate, canonicalRequest);
     }
 
@@ -170,24 +171,5 @@ public final class S3SigV4aRequestSigner implements Filter {
 
     private static String rawPath(URI uri) {
         return uri.getRawPath() == null || uri.getRawPath().isEmpty() ? "/" : uri.getRawPath();
-    }
-
-    private static String host(URI uri) {
-        return uri.getPort() > 0 && uri.getPort() != 80 && uri.getPort() != 443
-                ? uri.getHost() + ":" + uri.getPort()
-                : uri.getHost();
-    }
-
-    private static byte[] bodyBytes(Object body) {
-        if (body == null) {
-            return new byte[0];
-        }
-        if (body instanceof byte[] bytes) {
-            return bytes;
-        }
-        if (body instanceof String text) {
-            return text.getBytes(StandardCharsets.UTF_8);
-        }
-        throw new IllegalArgumentException("unsupported body type " + body.getClass().getName());
     }
 }

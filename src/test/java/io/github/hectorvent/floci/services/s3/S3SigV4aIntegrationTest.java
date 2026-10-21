@@ -147,4 +147,17 @@ class S3SigV4aIntegrationTest {
         given().urlEncodingEnabled(false).when().get(PATH + "?" + query).then()
                 .statusCode(400).body("Error.Code", equalTo("AuthorizationQueryParametersError"));
     }
+
+    @Test
+    @Order(16)
+    void headerWithDuplicateCredentialIsRejected() {
+        given()
+            .header("Authorization", "AWS4-ECDSA-P256-SHA256 Credential=test/20260101/s3/aws4_request, "
+                    + "SignedHeaders=host;x-amz-date;x-amz-region-set, Signature=3006020101020101, "
+                    + "Credential=test2/20260101/s3/aws4_request")
+            .header("X-Amz-Region-Set", "*")
+            .header("x-amz-date", "20260101T000000Z")
+        .when().get(PATH).then()
+            .statusCode(400).body("Error.Code", equalTo("AuthorizationHeaderMalformed"));
+    }
 }

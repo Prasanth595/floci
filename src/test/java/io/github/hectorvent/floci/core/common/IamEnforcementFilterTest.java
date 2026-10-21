@@ -25,6 +25,7 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
@@ -184,6 +185,88 @@ class IamEnforcementFilterTest {
         filter.filter(containerRequest);
 
         verify(arnBuilder).buildResources("lambda", containerRequest, "us-east-1", "222233334444");
+    }
+
+    @Test
+    void filterAcceptsSigV4aCredentialScope() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+
+        String auth = "AWS4-ECDSA-P256-SHA256 Credential=ASIAP256KEY/20260629/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("222233334444");
+        requestContext.setRegion("us-east-1");
+
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIAP256KEY");
+        when(accountResolver.resolve(auth)).thenReturn("000000000000");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext(eq("ASIAP256KEY"), any()))
+                .thenReturn(CallerContext.of(List.of("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"s3:GetObject",
+                           "Resource":"arn:aws:s3:::mybucket/obj"}
+                        ]}""")));
+        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+                .thenReturn(List.of("arn:aws:s3:::mybucket/obj"));
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("s3:GetObject"),
+                eq("arn:aws:s3:::mybucket/obj"),
+                any()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+        when(conditionContextResolver.resolve("s3", "s3:GetObject", containerRequest))
+                .thenReturn(null);
+
+        IamEnforcementFilter filter = newFilter();
+
+        filter.filter(containerRequest);
+
+        verify(containerRequest, never()).abortWith(any());
+        verify(evaluator).evaluateResolvedResourcePolicy(
+                any(), any(), any(), eq("s3:GetObject"), eq("arn:aws:s3:::mybucket/obj"), any());
+    }
+
+    @Test
+    void filterAcceptsSigV4aPresignedCredentialScope() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("X-Amz-Algorithm", "AWS4-ECDSA-P256-SHA256");
+        query.add("X-Amz-Credential", "ASIAP256KEY/20260629/s3/aws4_request");
+        when(containerRequest.getUriInfo()).thenReturn(uriInfo);
+        when(uriInfo.getQueryParameters()).thenReturn(query);
+
+        String synthesizedAuth = "Credential=ASIAP256KEY/20260629/s3/aws4_request";
+        requestContext.setAccountId("222233334444");
+        requestContext.setRegion("us-east-1");
+
+        when(accountResolver.extractAccessKeyId(synthesizedAuth)).thenReturn("ASIAP256KEY");
+        when(accountResolver.resolve(synthesizedAuth)).thenReturn("000000000000");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext(eq("ASIAP256KEY"), any()))
+                .thenReturn(CallerContext.of(List.of("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"s3:GetObject",
+                           "Resource":"arn:aws:s3:::mybucket/obj"}
+                        ]}""")));
+        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+                .thenReturn(List.of("arn:aws:s3:::mybucket/obj"));
+        when(evaluator.evaluateResolvedResourcePolicy(
+                any(),
+                eq(ResourcePolicyDecision.NEUTRAL),
+                eq(ResourceAccountRelationship.SAME_ACCOUNT),
+                eq("s3:GetObject"),
+                eq("arn:aws:s3:::mybucket/obj"),
+                isNull()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+
+        IamEnforcementFilter filter = newFilter();
+
+        filter.filter(containerRequest);
+
+        verify(containerRequest, never()).abortWith(any());
     }
 
     @Test

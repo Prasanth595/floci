@@ -85,7 +85,9 @@ public class RegionResolver {
             return defaultRegion;
         }
         String authorization = headers.getHeaderString("Authorization");
-        if (authorization != null && authorization.trim().startsWith(SigV4aSignature.ALGORITHM + " ")) {
+        if (authorization != null
+                && authorization.trim().startsWith(SigV4aSignature.ALGORITHM + " ")
+                && "s3".equals(SigV4CredentialScope.serviceName(authorization).orElse(null))) {
             return resolveRegionFromRegionSet(headers.getHeaderString("X-Amz-Region-Set"));
         }
         return resolveRegionFromAuth(authorization);
@@ -166,9 +168,12 @@ public class RegionResolver {
         if (regionSet == null || regionSet.isBlank()) {
             return defaultRegion;
         }
-        String[] regions = regionSet.split(",");
+        String[] regions = regionSet.split(",", -1);
+        if (regions.length != 1) {
+            return defaultRegion;
+        }
         String only = regions[0].trim();
-        if (regions.length != 1 || only.isEmpty() || only.contains("*")) {
+        if (only.isEmpty() || only.contains("*")) {
             return defaultRegion;
         }
         return withoutPseudoRegion(only);

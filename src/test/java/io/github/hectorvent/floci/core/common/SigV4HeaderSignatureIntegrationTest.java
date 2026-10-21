@@ -104,6 +104,24 @@ class SigV4HeaderSignatureIntegrationTest {
     }
 
     @Test
+    void sigV4aHeaderToNonS3ServiceIsRefused() {
+        given()
+            .header("Authorization", "AWS4-ECDSA-P256-SHA256 Credential=test/20260101/sqs/aws4_request, "
+                    + "SignedHeaders=content-type;host;x-amz-date;x-amz-region-set;x-amz-target, "
+                    + "Signature=3006020101020101")
+            .header("X-Amz-Region-Set", "us-east-1")
+            .header("X-Amz-Date", "20260101T000000Z")
+            .contentType(JSON_1_0)
+            .header("X-Amz-Target", "AmazonSQS.ListQueues")
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidSignatureException"));
+    }
+
+    @Test
     @Order(3)
     void queryRequestWithTheWrongSecretIsRefusedInXml() {
         given()
