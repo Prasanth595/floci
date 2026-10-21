@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.dsql.dataplane;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.dsql.model.DsqlCluster;
@@ -183,7 +184,8 @@ public class DsqlEndpoint {
         URI uri;
         try {
             uri = URI.create("https://" + token);
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException ignored) {
+            // A password that is no token is refused without a hint, as DSQL refuses one.
             return Admission.refused(null);
         }
         String host = uri.getHost();
@@ -254,7 +256,9 @@ public class DsqlEndpoint {
         Instant expiry;
         try {
             expiry = Instant.from(AMZ_DATE.parse(date)).plusSeconds(Long.parseLong(expires));
-        } catch (RuntimeException e) {
+        } catch (RuntimeException ignored) {
+            // A date or expiry that does not parse gets no hint here: the signature check that
+            // follows refuses the token without one, as DSQL does.
             return null;
         }
         Instant now = Instant.now();
@@ -331,7 +335,7 @@ public class DsqlEndpoint {
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(backend.host(), backend.port()), 5_000);
             OutputStream out = socket.getOutputStream();
-            out.write(ByteBuffer.allocate(16).putInt(16).putInt(PgWire.CANCEL_REQUEST)
+            out.write(ByteBuffer.allocate(16).putInt(16).putInt(PostgresWire.CANCEL_REQUEST)
                     .put(keyData, 0, 8).array());
             out.flush();
         } catch (IOException e) {

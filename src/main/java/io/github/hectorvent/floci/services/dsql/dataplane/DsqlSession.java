@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dsql.dataplane;
 
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.dsql.DsqlIdentifiers;
 
 import javax.net.ssl.SNIHostName;
@@ -33,6 +34,9 @@ import java.util.stream.Stream;
 final class DsqlSession {
 
     static final Duration CONNECTION_LIFETIME = Duration.ofHours(1);
+    // A startup packet is refused above PostgreSQL's own limit, 10,000 bytes, and a message above 64 MB.
+    private static final int MAX_STARTUP = 10_000;
+    private static final int MAX_MESSAGE = 64 * 1024 * 1024;
     private static final String ACCESS_DENIED = "unable to accept connection, access denied";
 
     private final Socket socket;
@@ -50,17 +54,17 @@ final class DsqlSession {
         socket.setSoTimeout(endpoint.handshakeTimeoutMillis());
         InputStream rawIn = socket.getInputStream();
         OutputStream rawOut = socket.getOutputStream();
-        PgWire.Startup first = PgWire.readStartup(rawIn);
-        if (first.code() == PgWire.CANCEL_REQUEST) {
+        PostgresWire.Startup first = PostgresWire.readStartup(rawIn, MAX_STARTUP, "startup message");
+        if (first.code() == PostgresWire.CANCEL_REQUEST) {
             endpoint.forwardCancel(first.body());
             return;
         }
-        if (first.code() == PgWire.GSSENC_REQUEST) {
+        if (first.code() == PostgresWire.GSSENC_REQUEST) {
             rawOut.write('N');
             rawOut.flush();
-            first = PgWire.readStartup(rawIn);
+            first = PostgresWire.readStartup(rawIn, MAX_STARTUP, "startup message");
         }
-        if (first.code() != PgWire.SSL_REQUEST) {
+        if (first.code() != PostgresWire.SSL_REQUEST) {
             refuse(rawOut, "08P01", "unable to accept connection, SSL is mandatory. AWS Authentication is required.",
                     null);
             return;
@@ -86,27 +90,27 @@ final class DsqlSession {
 
         InputStream in = new BufferedInputStream(tls.getInputStream());
         OutputStream out = new BufferedOutputStream(tls.getOutputStream());
-        PgWire.Startup startup = PgWire.readStartup(in);
-        if (startup.code() == PgWire.CANCEL_REQUEST) {
+        PostgresWire.Startup startup = PostgresWire.readStartup(in, MAX_STARTUP, "startup message");
+        if (startup.code() == PostgresWire.CANCEL_REQUEST) {
             endpoint.forwardCancel(startup.body());
             return;
         }
-        if (startup.code() != PgWire.PROTOCOL_3) {
+        if (startup.code() != PostgresWire.PROTOCOL_3) {
             refuse(out, "08P01", "unsupported frontend protocol", null);
             return;
         }
-        Map<String, String> startupParameters = PgWire.startupParameters(startup.body());
+        Map<String, String> startupParameters = PostgresWire.startupParameters(startup.body());
         String user = startupParameters.getOrDefault("user", "");
         String database = startupParameters.getOrDefault("database", user);
 
-        PgWire.write(out, (byte) 'R', PgWire.int32(3));
+        PostgresWire.write(out, (byte) 'R', PostgresWire.int32(3));
         out.flush();
-        PgWire.Message password = PgWire.read(in);
+        PostgresWire.Message password = PostgresWire.read(in, MAX_MESSAGE, "message");
         if (password.type() != 'p') {
             refuse(out, "08006", ACCESS_DENIED, null);
             return;
         }
-        String token = PgWire.cString(password.body(), 0).value();
+        String token = PostgresWire.cString(password.body(), 0).value();
         DsqlEndpoint.Admission admission = endpoint.admit(token, user, serverName[0]);
         if (!admission.allowed()) {
             refuse(out, admission.state(), ACCESS_DENIED, admission.hint());
@@ -138,7 +142,7 @@ final class DsqlSession {
                 backendStartup.put("options", backendOptions(optionSettings));
             }
             backendStartup.put("database", "postgres");
-            backendOut.write(PgWire.startupMessage(backendStartup));
+            backendOut.write(PostgresWire.startupMessage(backendStartup));
             backendOut.flush();
 
             Thread toClient = Thread.ofVirtual().name("dsql-backend-" + sessionId)
@@ -169,8 +173,8 @@ final class DsqlSession {
 
     private static void relayToBackend(InputStream in, OutputStream backendOut) throws IOException {
         while (true) {
-            PgWire.Message message = PgWire.read(in);
-            PgWire.write(backendOut, message);
+            PostgresWire.Message message = PostgresWire.read(in, MAX_MESSAGE, "message");
+            PostgresWire.write(backendOut, message);
             if (message.type() == 'X') {
                 backendOut.flush();
                 return;
@@ -221,10 +225,10 @@ final class DsqlSession {
 
     private void relayToClient(InputStream backendIn, OutputStream out, DsqlDatabases.Backend backend, Socket client) {
         try {
-            PgWire.Message authenticated = null;
+            PostgresWire.Message authenticated = null;
             boolean started = false;
             while (true) {
-                PgWire.Message message = PgWire.read(backendIn);
+                PostgresWire.Message message = PostgresWire.read(backendIn, MAX_MESSAGE, "message");
                 if (!started) {
                     // DSQL refuses a connection instead of authenticating it, so the database's
                     // AuthenticationOk waits for what follows it, and a refusal takes its place.
@@ -233,9 +237,9 @@ final class DsqlSession {
                         continue;
                     }
                     if (message.type() == 'E') {
-                        message = new PgWire.Message(message.type(), withSessionId(message.body()));
+                        message = new PostgresWire.Message(message.type(), withSessionId(message.body()));
                     } else if (authenticated != null) {
-                        PgWire.write(out, authenticated);
+                        PostgresWire.write(out, authenticated);
                     }
                     authenticated = null;
                     started = message.type() == 'Z';
@@ -243,12 +247,13 @@ final class DsqlSession {
                 if (message.type() == 'K') {
                     cancelKey = endpoint.registerCancelKey(message.body(), backend);
                 }
-                PgWire.write(out, message);
+                PostgresWire.write(out, message);
                 if (backendIn.available() == 0) {
                     out.flush();
                 }
             }
-        } catch (IOException e) {
+        } catch (IOException ignored) {
+            // The database or the client ended the connection: the client's side is closed with it.
             closeQuietly(client);
         }
     }
@@ -258,17 +263,33 @@ final class DsqlSession {
      * source location.
      */
     private byte[] withSessionId(byte[] body) {
-        Map<Character, String> fields = PgWire.parseFields(body);
+        Map<Character, String> fields = PostgresWire.parseFields(body, 0);
         fields.remove('F');
         fields.remove('L');
         fields.remove('R');
         fields.putIfAbsent('D', "Session Id: " + sessionId);
-        return PgWire.fields(fields);
+        return PostgresWire.fields(fields);
+    }
+
+    /** An ErrorResponse body of {@code severity} (FATAL, ERROR), as DSQL orders its fields. */
+    static byte[] error(String severity, String state, String message, String detail, String hint) {
+        Map<Character, String> fields = new LinkedHashMap<>();
+        fields.put('S', severity);
+        fields.put('V', severity);
+        fields.put('C', state);
+        fields.put('M', message);
+        if (detail != null) {
+            fields.put('D', detail);
+        }
+        if (hint != null) {
+            fields.put('H', hint);
+        }
+        return PostgresWire.fields(fields);
     }
 
     /** A refusal as DSQL words every one: FATAL, with the session's id as its detail. */
     private void refuse(OutputStream out, String state, String message, String hint) throws IOException {
-        PgWire.write(out, (byte) 'E', PgWire.error("FATAL", state, message, "Session Id: " + sessionId, hint));
+        PostgresWire.write(out, (byte) 'E', error("FATAL", state, message, "Session Id: " + sessionId, hint));
         out.flush();
     }
 

@@ -51,10 +51,7 @@ class DsqlServiceTest {
     @BeforeEach
     void caller() {
         // A database that is ready at once and gone at once, as with floci.services.dsql.mock.
-        doAnswer(call -> {
-            call.<Consumer<Boolean>>getArgument(1).accept(true);
-            return null;
-        }).when(dataPlane).provision(any(), any());
+        readyAtOnce(dataPlane);
         doAnswer(call -> {
             call.<Runnable>getArgument(1).run();
             return null;
@@ -254,10 +251,7 @@ class DsqlServiceTest {
         AccountAwareStorageBackend<DsqlCluster> storage =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT);
         DsqlDataPlane stopping = mock(DsqlDataPlane.class);
-        doAnswer(call -> {
-            call.<Consumer<Boolean>>getArgument(1).accept(true);
-            return null;
-        }).when(stopping).provision(any(), any());
+        readyAtOnce(stopping);
         DsqlService before = service(storage, stopping);
         DsqlCluster kept = before.createCluster(REGION, false, null, null, null, null, null, null, false);
         DsqlCluster deleting = before.createCluster(REGION, false, null, null, null, null, null, null, false);
@@ -271,6 +265,14 @@ class DsqlServiceTest {
         verify(dataPlane).deprovision(argThat(cluster -> deleting.getIdentifier().equals(cluster.getIdentifier())), any());
         assertEquals(DsqlService.ACTIVE, after.getCluster(REGION, kept.getIdentifier()).getStatus());
         assertThrows(AwsException.class, () -> after.getCluster(REGION, deleting.getIdentifier()));
+    }
+
+    /** Makes {@code plane} start every cluster's database at once. */
+    private static void readyAtOnce(DsqlDataPlane plane) {
+        doAnswer(call -> {
+            call.<Consumer<Boolean>>getArgument(1).accept(true);
+            return null;
+        }).when(plane).provision(any(), any());
     }
 
     private DsqlService service(AccountAwareStorageBackend<DsqlCluster> storage, DsqlDataPlane plane) {

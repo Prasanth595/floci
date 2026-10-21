@@ -2,10 +2,11 @@ package io.github.hectorvent.floci.services.dsql;
 
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.services.dsql.dataplane.DsqlEndpoint;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.postgresql.util.PSQLException;
 
 import java.sql.Connection;
@@ -57,6 +59,9 @@ class DsqlDataPlaneIntegrationTest {
 
     @ConfigProperty(name = "quarkus.http.test-port", defaultValue = "0")
     int httpPort;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     private String identifier;
     private String host;
@@ -195,29 +200,21 @@ class DsqlDataPlaneIntegrationTest {
      */
     @Test
     void aLongTermKeySignsInOnlyToItsOwnAccountsClusters() throws Exception {
-        String[] own = accessKey(ACCOUNT);
-        String[] other = accessKey("000000000000");
+        EnforcementFixtures.UserCredentials own = accessKey(ACCOUNT);
+        EnforcementFixtures.UserCredentials other = accessKey("000000000000");
 
-        connect("admin", token("DbConnectAdmin", own[0], own[1], Instant.now(), 900, null)).close();
-        PSQLException foreign = assertThrows(PSQLException.class, () ->
-                connect("admin", token("DbConnectAdmin", other[0], other[1], Instant.now(), 900, null)).close());
+        connect("admin", token("DbConnectAdmin", own.accessKeyId(), own.secretAccessKey(), Instant.now(), 900,
+                null)).close();
+        PSQLException foreign = assertThrows(PSQLException.class, () -> connect("admin", token("DbConnectAdmin",
+                other.accessKeyId(), other.secretAccessKey(), Instant.now(), 900, null)).close());
         assertEquals("08006", foreign.getSQLState());
         assertEquals("unable to accept connection, access denied", foreign.getServerErrorMessage().getMessage());
     }
 
-    /** A new IAM user's access key in {@code account}: its id and secret. */
-    private String[] accessKey(String account) {
-        String auth = "AWS4-HMAC-SHA256 Credential=" + account
-                + "/20261016/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=abc";
-        String user = "dsql-" + System.nanoTime();
-        given().port(httpPort).header("Authorization", auth).contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateUser").formParam("UserName", user)
-                .post("/").then().statusCode(200);
-        XmlPath key = given().port(httpPort).header("Authorization", auth).contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateAccessKey").formParam("UserName", user)
-                .post("/").then().statusCode(200).extract().xmlPath();
-        return new String[]{key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"),
-                key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey")};
+    /** A new IAM user's access key in {@code account}, removed with the user after the test. */
+    private EnforcementFixtures.UserCredentials accessKey(String account) {
+        return EnforcementFixtures.createUser(cleanup, httpPort, EnforcementFixtures.auth(account, "iam"),
+                "dsql-" + System.nanoTime());
     }
 
     private Connection connect(String user, String password) throws SQLException {
