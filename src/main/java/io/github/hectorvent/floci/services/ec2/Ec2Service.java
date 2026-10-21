@@ -11687,7 +11687,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<Map<String, String>> offerings = new ArrayList<>();
         for (Map<String, Object> type : describeInstanceTypes(effectiveTypeNames)) {
             String instanceType = (String) type.get("instanceType");
-            if (!instanceTypeNames.contains(instanceType) && !everyFilterMatches(typeFilters, instanceType)) {
+            if (!instanceTypeNames.contains(instanceType) && !everyFilterAdmits(typeFilters, instanceType)) {
                 continue;
             }
             for (String location : locations) {

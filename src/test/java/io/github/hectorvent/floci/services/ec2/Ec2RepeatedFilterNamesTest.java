@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -24,6 +25,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -374,8 +376,8 @@ class Ec2RepeatedFilterNamesTest {
 
         assertEquals(Set.of(), names(describe("DescribeImages",
                 filter("name", "repeated-first-*"), filter("name", "repeated-second-*"))));
-        // Patterns that overlap but whose first wildcards each build a name the other rejects: no
-        // image is made up, as AWS returns only images that exist.
+        // Patterns that overlap, but the name built from either one breaks the other: no image is
+        // made up, as AWS returns only images that exist.
         assertEquals(Set.of(), names(describe("DescribeImages",
                 filter("name", "foo-*"), filter("name", "*-bar-*"))));
     }
@@ -511,6 +513,15 @@ class Ec2RepeatedFilterNamesTest {
         assertEquals(named, ids(describe("DescribeInstanceTypeOfferings",
                 List.of("LocationType", "region", "InstanceType.1", "m5.large"),
                 filter("instance-type", "t3.*")), "instanceType"));
+    }
+
+    /** A caller-supplied pattern of many stars is matched in linear time, not by a backtracking regex. */
+    @Test
+    void instanceTypeOfferingsMatchAPatternOfManyStarsQuickly() {
+        String pattern = "*".repeat(30) + "#";
+        assertEquals(Set.of(), assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> ids(describe("DescribeInstanceTypeOfferings", "LocationType", "region",
+                        filter("instance-type", pattern)), "instanceType")));
     }
 
     @Test
