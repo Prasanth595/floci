@@ -25,8 +25,8 @@ import static org.mockito.Mockito.doCallRealMethod;
 /**
  * A cluster whose CloudFormation {@code ClusterSettings} enable Container Insights publishes its
  * services' task counts to {@code ECS/ContainerInsights}, which is what an alarm on a stopped
- * service watches. The reconciler ticks every five seconds: one tick launches the task, the next
- * counts it and publishes.
+ * service watches. The test drives the reconciler itself, as the other ECS integration tests do,
+ * rather than waiting on its five-second ticks: one pass launches the task, the next counts it.
  */
 @QuarkusTest
 class EcsContainerInsightsIntegrationTest {
@@ -74,7 +74,10 @@ class EcsContainerInsightsIntegrationTest {
                 .post("/").then().statusCode(200)
                 .body("clusters[0].settings[0].value", equalTo("enabled"));
 
-        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> given()
+        ecsService.reconcileServices();
+        ecsService.reconcileServices();
+
+        given()
                 .contentType("application/x-amz-json-1.0")
                 .header("Authorization", CLOUDWATCH_AUTH)
                 .header("X-Amz-Target", "GraniteServiceVersion20100801.GetMetricStatistics")
@@ -85,7 +88,7 @@ class EcsContainerInsightsIntegrationTest {
                     """.formatted(cluster, Instant.now().minusSeconds(300).getEpochSecond(),
                         Instant.now().plusSeconds(60).getEpochSecond()))
                 .post("/").then().statusCode(200)
-                .body("Datapoints.Maximum", hasItem(1.0f)));
+                .body("Datapoints.Maximum", hasItem(1.0f));
     }
 
     /**
