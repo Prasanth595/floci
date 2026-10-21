@@ -492,7 +492,7 @@ aws dynamodb restore-table-to-point-in-time --source-table-name Users \
 
 Deleting a table with point-in-time recovery enabled leaves a `SYSTEM` backup named `<table>$DeletedTableBackup`. It holds the table as it was at deletion, cannot be deleted, and expires after 35 days. `ListBackups` shows it with `BackupType` `SYSTEM` or `ALL`, and `RestoreTableFromBackup` restores it.
 
-Deviations from AWS: enabling point-in-time recovery right after `CreateTable` is accepted at once. AWS sometimes refuses it for a few seconds with `ContinuousBackupsUnavailableException`.
+Deviations from AWS: enabling point-in-time recovery right after `CreateTable` is accepted at once. AWS sometimes refuses it for a few seconds with `ContinuousBackupsUnavailableException`. `EarliestRestorableDateTime` is rounded down to the second, as on AWS. A restore or an export at that time on AWS leaves out the writes made earlier in that second, before point-in-time recovery was enabled. Floci keeps changes only from the moment it is enabled, so it includes those writes.
 
 
 ## Kinesis change data capture (CDC)
