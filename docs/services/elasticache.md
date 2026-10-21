@@ -6,6 +6,31 @@
 
 Floci manages real Valkey/Redis Docker containers and proxies TCP connections to them. This means any Redis client works — including IAM authentication.
 
+## User access strings
+
+For non-cluster-mode Redis/Valkey replication groups and serverless caches, the auth
+proxy applies each associated user's `AccessString` to a private backend ACL identity.
+Valkey enforces command, key and Pub/Sub channel permissions. Authenticating a
+subscribe-only user does not grant `SET` or `FLUSHALL`. The backend default account
+is disabled once RBAC is used, so another `AUTH` or `HELLO AUTH` cannot regain its
+unrestricted permissions.
+
+Backend passwords are generated in memory separately from frontend passwords and IAM
+tokens. Even `+@all` users cannot manage ACLs or backend configuration, load modules,
+reconfigure replication, shut down the engine, or observe administrative commands through
+`MONITOR` or `SLOWLOG`. These restrictions protect the proxy's private credentials.
+
+Access-string changes are installed on the next successful authentication; reconnect to
+apply changes promptly. Re-authentication on an already relayed connection uses the
+backend protocol directly, so reconnect through the proxy with frontend credentials.
+Revoked members' existing sessions are not proactively disconnected by this change.
+
+**Draft limitation:** cluster-mode RBAC fails closed. Configuring replication credentials
+across all nodes is still required before disabling their default accounts. Such connections
+are rejected rather than being relayed with unrestricted permissions. Cluster-mode caches
+without user associations retain their existing behavior. This change does not add TLS;
+cache transport encryption is addressed separately.
+
 ## Supported Management Actions
 
 <!-- floci:actions:start -->

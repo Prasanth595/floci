@@ -1678,6 +1678,12 @@ public class ElastiCacheService implements ResourceProvider {
             }
 
             @Override
+            public String accessString(String username) {
+                ElastiCacheUser user = member(username);
+                return user == null ? null : user.getAccessString();
+            }
+
+            @Override
             public String ownerAccountId() {
                 return account;
             }
@@ -2300,6 +2306,23 @@ public class ElastiCacheService implements ResourceProvider {
             @Override
             public AuthMode authMode() {
                 return groups.getForAccount(accountId, groupId).map(ReplicationGroup::getAuthMode).orElse(null);
+            }
+
+            @Override
+            public String accessString(String username) {
+                ReplicationGroup group = groups.getForAccount(accountId, groupId).orElse(null);
+                if (group == null) {
+                    return null;
+                }
+                return effectiveUserIds(accountId, group).stream()
+                        .map(id -> users.getForAccount(accountId, id).orElse(null))
+                        .filter(user -> user != null && user.isEnabled() && username.equals(user.getUserName()))
+                        .map(ElastiCacheUser::getAccessString).findFirst().orElse(null);
+            }
+
+            @Override
+            public boolean clusterMode() {
+                return groups.getForAccount(accountId, groupId).map(ReplicationGroup::isClusterEnabled).orElse(false);
             }
 
             @Override

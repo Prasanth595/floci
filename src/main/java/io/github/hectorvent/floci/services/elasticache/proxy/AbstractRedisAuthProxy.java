@@ -93,12 +93,20 @@ public abstract class AbstractRedisAuthProxy {
     /** Closes a socket, tolerating errors. Implementations may add their own logging. */
     protected abstract void closeQuietly(Socket socket);
 
+    /** Applies the validated frontend identity to a newly connected backend. */
+    protected void initializeBackend(Socket backend, String username) throws IOException {
+    }
+
     public void start(int proxyPort) throws IOException {
         serverSocket = new ServerSocket(proxyPort);
         running = true;
         Thread.ofVirtual().name(threadPrefix + "-proxy-accept-" + resourceId).start(this::acceptLoop);
         log.infov("{0} proxy started for {1} on port {2} → {3}:{4}",
                 serviceName, resourceId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
+    }
+
+    int localPort() {
+        return serverSocket.getLocalPort();
     }
 
     public void stop() {
@@ -160,7 +168,7 @@ public abstract class AbstractRedisAuthProxy {
                         }
                         continue;
                     }
-                    bridgeCommand(client, cmd);
+                    bridgeCommand(client, cmd, null);
                     return;
                 }
                 if (authRequired()) {
@@ -169,7 +177,7 @@ public abstract class AbstractRedisAuthProxy {
                     return;
                 }
 
-                bridgeCommand(client, cmd);
+                bridgeCommand(client, cmd, null);
                 return;
             }
         } catch (Exception e) {
@@ -207,7 +215,7 @@ public abstract class AbstractRedisAuthProxy {
         }
 
         writeResponse(client, OK_RESPONSE);
-        bridgeCommand(client, null);
+        bridgeCommand(client, null, username);
     }
 
     private boolean handleHello(Socket client, String[] cmd) throws IOException {
@@ -272,7 +280,7 @@ public abstract class AbstractRedisAuthProxy {
             return false;
         }
 
-        bridgeCommand(client, forwarded.toArray(String[]::new));
+        bridgeCommand(client, forwarded.toArray(String[]::new), username);
         return true;
     }
 
@@ -293,10 +301,11 @@ public abstract class AbstractRedisAuthProxy {
         return true;
     }
 
-    private void bridgeCommand(Socket client, String[] command) throws IOException {
+    private void bridgeCommand(Socket client, String[] command, String username) throws IOException {
         Socket backend = new Socket(backendHost, backendPort);
         try {
             backend.setTcpNoDelay(true);
+            initializeBackend(backend, username);
             if (command != null) {
                 resendCommand(command, backend.getOutputStream());
             }
