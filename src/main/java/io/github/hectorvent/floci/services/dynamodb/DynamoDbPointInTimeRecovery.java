@@ -4,13 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
-import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeHistory;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -20,68 +20,93 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * The change history behind point-in-time recovery. A change keeps what it replaced, so a table at
- * a time is the live table with every later change undone.
+ * a time is the live table with every later change undone. Each change is stored on its own, under
+ * {@code <storage key>#<sequence>}.
  */
 final class DynamoDbPointInTimeRecovery {
 
     record RestoreWindow(Instant earliest, Instant latest) {}
 
-    private final StorageBackend<String, PointInTimeHistory> store;
+    /** The changes of one table, oldest first. */
+    private static final class Changes {
+        private final List<PointInTimeChange> list = new ArrayList<>();
+        private long nextSequence;
+        private boolean dropped;
+    }
+
+    private final StorageBackend<String, PointInTimeChange> store;
     private final Duration latestLag;
     // Keyed like DynamoDbService.itemsByTable: "<account>/<region>::<table>".
-    private final ConcurrentHashMap<String, PointInTimeHistory> histories = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Changes> changesByTable = new ConcurrentHashMap<>();
 
-    DynamoDbPointInTimeRecovery(StorageBackend<String, PointInTimeHistory> store, String defaultAccountId,
+    DynamoDbPointInTimeRecovery(StorageBackend<String, PointInTimeChange> store, String defaultAccountId,
                                 Duration latestLag) {
         this.store = store;
         this.latestLag = latestLag;
-        if (store instanceof AccountAwareStorageBackend<PointInTimeHistory> aware) {
-            aware.scanAllAccountsRaw().forEach((key, history) -> histories.put(key, history.copy()));
+        Map<String, PointInTimeChange> stored = new HashMap<>();
+        if (store instanceof AccountAwareStorageBackend<PointInTimeChange> aware) {
+            stored.putAll(aware.scanAllAccountsRaw());
         } else {
-            for (String storageKey : store.keys()) {
-                store.get(storageKey).ifPresent(history ->
-                        histories.put(key(defaultAccountId, storageKey), history.copy()));
+            for (String key : store.keys()) {
+                store.get(key).ifPresent(change -> stored.put(defaultAccountId + "/" + key, change));
             }
+        }
+        stored.forEach((key, change) -> changesByTable
+                .computeIfAbsent(key.substring(0, key.lastIndexOf('#')), ignored -> new Changes())
+                .list.add(change));
+        for (Changes changes : changesByTable.values()) {
+            changes.list.sort(Comparator.comparingLong(PointInTimeChange::getSequence));
+            changes.nextSequence = changes.list.getLast().getSequence() + 1;
         }
     }
 
     void clear() {
-        histories.clear();
+        changesByTable.clear();
     }
 
-    void start(String accountId, String storageKey) {
-        PointInTimeHistory history = new PointInTimeHistory(now().truncatedTo(ChronoUnit.SECONDS), new ArrayList<>());
-        histories.put(key(accountId, storageKey), history);
-        synchronized (history) {
-            persist(accountId, storageKey, history);
-        }
-    }
-
+    /** Call after point-in-time recovery of the table is turned off, so no writer records again. */
     void drop(String accountId, String storageKey) {
-        histories.remove(key(accountId, storageKey));
-        if (store instanceof AccountAwareStorageBackend<PointInTimeHistory> aware) {
-            aware.deleteForAccount(accountId, storageKey);
-        } else {
-            store.delete(storageKey);
+        Changes changes = changesByTable.remove(key(accountId, storageKey));
+        if (changes == null) {
+            return;
+        }
+        synchronized (changes) {
+            changes.dropped = true;
+            for (PointInTimeChange change : changes.list) {
+                delete(accountId, storageKey, change);
+            }
         }
     }
 
+    /** Call before the item is written. */
     void recordItem(String accountId, String storageKey, TableDefinition table, String itemKey, JsonNode oldItem) {
-        if (table.isPointInTimeRecoveryEnabled()) {
-            record(accountId, storageKey, table,
-                    new PointInTimeChange(now(), itemKey, oldItem != null ? oldItem.deepCopy() : null));
+        if (!table.isPointInTimeRecoveryEnabled()) {
+            return;
+        }
+        Changes changes = changesByTable.computeIfAbsent(key(accountId, storageKey), ignored -> new Changes());
+        synchronized (changes) {
+            if (changes.dropped || !table.isPointInTimeRecoveryEnabled()) {
+                return;
+            }
+            Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+            PointInTimeChange change = new PointInTimeChange(changes.nextSequence++, now, itemKey,
+                    oldItem != null ? oldItem.deepCopy() : null);
+            changes.list.add(change);
+            put(accountId, storageKey, change);
+            Instant cutoff = now.minus(recoveryPeriod(table));
+            int expired = 0;
+            while (expired < changes.list.size() && changes.list.get(expired).getTime().isBefore(cutoff)) {
+                delete(accountId, storageKey, changes.list.get(expired));
+                expired++;
+            }
+            changes.list.subList(0, expired).clear();
         }
     }
 
     /** AWS words an InvalidRestoreTimeException with the latest time to the nanosecond. */
-    RestoreWindow window(String accountId, String storageKey, TableDefinition table) {
+    RestoreWindow window(TableDefinition table) {
         Instant now = Instant.now();
-        PointInTimeHistory history = history(accountId, storageKey);
-        Instant start;
-        synchronized (history) {
-            start = history.getStart();
-        }
-        Instant earliest = later(start, now.minus(recoveryPeriod(table)));
+        Instant earliest = later(table.getPointInTimeRecoveryStartDateTime(), now.minus(recoveryPeriod(table)));
         return new RestoreWindow(earliest, later(earliest, now.minus(latestLag)));
     }
 
@@ -91,52 +116,41 @@ final class DynamoDbPointInTimeRecovery {
      */
     List<JsonNode> itemsAt(String accountId, String storageKey, Map<String, JsonNode> liveItems, Instant time) {
         Map<String, JsonNode> items = new HashMap<>(liveItems);
-        Set<String> undone = new HashSet<>();
-        PointInTimeHistory history = history(accountId, storageKey);
-        synchronized (history) {
-            for (PointInTimeChange change : history.getChanges()) {
-                String itemKey = change.getItemKey();
-                if (!change.getTime().isAfter(time) || !undone.add(itemKey)) {
-                    continue;
-                }
-                if (change.getOldItem() == null) {
-                    items.remove(itemKey);
-                } else {
-                    items.put(itemKey, change.getOldItem());
+        Changes changes = changesByTable.get(key(accountId, storageKey));
+        if (changes != null) {
+            Set<String> undone = new HashSet<>();
+            synchronized (changes) {
+                for (PointInTimeChange change : changes.list) {
+                    String itemKey = change.getItemKey();
+                    if (!change.getTime().isAfter(time) || !undone.add(itemKey)) {
+                        continue;
+                    }
+                    if (change.getOldItem() == null) {
+                        items.remove(itemKey);
+                    } else {
+                        items.put(itemKey, change.getOldItem());
+                    }
                 }
             }
         }
         return new ArrayList<>(items.values());
     }
 
-    private void record(String accountId, String storageKey, TableDefinition table, PointInTimeChange change) {
-        PointInTimeHistory history = history(accountId, storageKey);
-        synchronized (history) {
-            history.getChanges().add(change);
-            Instant cutoff = change.getTime().minus(recoveryPeriod(table));
-            List<PointInTimeChange> changes = history.getChanges();
-            int expired = 0;
-            while (expired < changes.size() && changes.get(expired).getTime().isBefore(cutoff)) {
-                expired++;
-            }
-            changes.subList(0, expired).clear();
-            history.setStart(later(history.getStart(), cutoff));
-            persist(accountId, storageKey, history);
+    private void put(String accountId, String storageKey, PointInTimeChange change) {
+        String key = storageKey + "#" + change.getSequence();
+        if (store instanceof AccountAwareStorageBackend<PointInTimeChange> aware) {
+            aware.putForAccount(accountId, key, change);
+        } else {
+            store.put(key, change);
         }
     }
 
-    /** A table that had point-in-time recovery enabled before Floci kept a history starts one now. */
-    private PointInTimeHistory history(String accountId, String storageKey) {
-        return histories.computeIfAbsent(key(accountId, storageKey), ignored ->
-                new PointInTimeHistory(now().truncatedTo(ChronoUnit.SECONDS), new ArrayList<>()));
-    }
-
-    // The store gets a copy, since this history keeps changing after the call.
-    private void persist(String accountId, String storageKey, PointInTimeHistory history) {
-        if (store instanceof AccountAwareStorageBackend<PointInTimeHistory> aware) {
-            aware.putForAccount(accountId, storageKey, history.copy());
+    private void delete(String accountId, String storageKey, PointInTimeChange change) {
+        String key = storageKey + "#" + change.getSequence();
+        if (store instanceof AccountAwareStorageBackend<PointInTimeChange> aware) {
+            aware.deleteForAccount(accountId, key);
         } else {
-            store.put(storageKey, history.copy());
+            store.delete(key);
         }
     }
 
@@ -146,10 +160,6 @@ final class DynamoDbPointInTimeRecovery {
 
     private static Instant later(Instant a, Instant b) {
         return a.isAfter(b) ? a : b;
-    }
-
-    private static Instant now() {
-        return Instant.now().truncatedTo(ChronoUnit.MILLIS);
     }
 
     private static String key(String accountId, String storageKey) {

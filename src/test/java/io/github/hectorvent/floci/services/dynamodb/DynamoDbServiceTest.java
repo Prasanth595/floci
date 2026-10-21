@@ -18,7 +18,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeHistory;
+import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
 import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -4647,7 +4647,7 @@ class DynamoDbServiceTest {
         StorageBackend<String, TableDefinition> tables = new InMemoryStorage<>();
         StorageBackend<String, Map<String, JsonNode>> items = new InMemoryStorage<>();
         Path historyFile = dir.resolve("dynamodb-point-in-time.json");
-        TypeReference<Map<String, PointInTimeHistory>> historyType = new TypeReference<>() {};
+        TypeReference<Map<String, PointInTimeChange>> historyType = new TypeReference<>() {};
         DynamoDbService before = new DynamoDbService(tables, items, null, null, new InMemoryStorage<>(),
                 new PersistentStorage<>(historyFile, historyType), resolver, null, null, null, mapper, 0, 0, 0);
         before.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
@@ -4658,7 +4658,7 @@ class DynamoDbServiceTest {
         before.putItem("Users", item("userId", "u2"), null, null, null, "us-east-1", null);
         Instant earliest = before.describeContinuousBackups("Users", "us-east-1").window().earliest();
 
-        PersistentStorage<String, PointInTimeHistory> reloaded = new PersistentStorage<>(historyFile, historyType);
+        PersistentStorage<String, PointInTimeChange> reloaded = new PersistentStorage<>(historyFile, historyType);
         reloaded.load();
         DynamoDbService restarted = new DynamoDbService(tables, items, null, null, new InMemoryStorage<>(), reloaded,
                 resolver, null, null, null, mapper, 0, 0, 0);
@@ -4688,6 +4688,55 @@ class DynamoDbServiceTest {
         AwsException future = assertThrows(AwsException.class, () ->
                 lagged.pointInTimeState("Users", region, region, false, Instant.now().plusSeconds(60)));
         assertEquals("InvalidRestoreTimeException", future.getErrorCode());
+    }
+
+    @Test
+    void pointInTimeChangesAreStoredOneByOneAndDroppedWithTheirTable() {
+        String region = "us-east-1";
+        StorageBackend<String, PointInTimeChange> changes = new InMemoryStorage<>();
+        DynamoDbService pitr = new DynamoDbService(new InMemoryStorage<>(), new InMemoryStorage<>(), null, null,
+                new InMemoryStorage<>(), changes, new RegionResolver(region, "000000000000"),
+                null, null, null, mapper, 0, 0, 0);
+        pitr.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, region);
+        pitr.updateContinuousBackups("Users", true, null, region);
+        pitr.putItem("Users", item("userId", "u1"), null, null, null, region, null);
+        pitr.putItem("Users", item("userId", "u1", "name", "one"), null, null, null, region, null);
+        pitr.deleteItem("Users", item("userId", "u1"), region);
+        assertEquals(3, changes.keys().size());
+
+        pitr.updateContinuousBackups("Users", false, null, region);
+        assertEquals(Set.of(), changes.keys());
+        pitr.updateContinuousBackups("Users", true, null, region);
+        pitr.putItem("Users", item("userId", "u2"), null, null, null, region, null);
+        assertEquals(1, changes.keys().size());
+        pitr.deleteTable("Users", region);
+        assertEquals(Set.of(), changes.keys());
+    }
+
+    @Test
+    void aTableEnabledBeforeTheHistoryExistedKeepsItsEarliestTimeAcrossARestart(@TempDir Path dir) throws Exception {
+        String region = "us-east-1";
+        RegionResolver resolver = new RegionResolver(region, "000000000000");
+        Path tableFile = dir.resolve("dynamodb-tables.json");
+        TypeReference<Map<String, TableDefinition>> tableType = new TypeReference<>() {};
+        PersistentStorage<String, TableDefinition> tables = new PersistentStorage<>(tableFile, tableType);
+        DynamoDbService before = new DynamoDbService(tables, new InMemoryStorage<>(), null, null,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), resolver, null, null, null, mapper, 0, 0, 0);
+        before.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, region);
+        TableDefinition legacy = tables.get(region + "::Users").orElseThrow();
+        legacy.setPointInTimeRecoveryEnabled(true);
+        tables.put(region + "::Users", legacy);
+        Instant earliest = before.describeContinuousBackups("Users", region).window().earliest();
+        Thread.sleep(1100);
+
+        PersistentStorage<String, TableDefinition> reloaded = new PersistentStorage<>(tableFile, tableType);
+        reloaded.load();
+        DynamoDbService restarted = new DynamoDbService(reloaded, new InMemoryStorage<>(), null, null,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), resolver, null, null, null, mapper, 0, 0, 0);
+
+        assertEquals(earliest, restarted.describeContinuousBackups("Users", region).window().earliest());
     }
 
     private static Instant pause() throws InterruptedException {

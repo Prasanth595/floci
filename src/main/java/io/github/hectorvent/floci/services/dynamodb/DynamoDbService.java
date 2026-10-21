@@ -29,7 +29,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
-import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeHistory;
+import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
@@ -174,7 +174,7 @@ public class DynamoDbService {
              storageFactory.create("dynamodb", "dynamodb-backups.json",
                 new TypeReference<Map<String, TableBackup>>() {}),
              storageFactory.create("dynamodb", "dynamodb-point-in-time.json",
-                new TypeReference<Map<String, PointInTimeHistory>>() {}),
+                new TypeReference<Map<String, PointInTimeChange>>() {}),
              regionResolver, streamService, kinesisForwarder, s3Service, objectMapper,
              config.services().dynamodb().vectorIndexAllocationSeconds(),
              config.services().dynamodb().vectorIndexBackfillSeconds(),
@@ -255,7 +255,7 @@ public class DynamoDbService {
                     StorageBackend<String, ExportDescription> exportStore,
                     StorageBackend<String, ImportTableDescription> importStore,
                     StorageBackend<String, TableBackup> backupStore,
-                    StorageBackend<String, PointInTimeHistory> pointInTimeStore,
+                    StorageBackend<String, PointInTimeChange> pointInTimeStore,
                     RegionResolver regionResolver,
                     DynamoDbStreamService streamService,
                     KinesisStreamingForwarder kinesisForwarder,
@@ -889,8 +889,10 @@ public class DynamoDbService {
         }
         if (table.isPointInTimeRecoveryEnabled()) {
             createSystemBackup(storageKey, table, region);
-            pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
         }
+        // A write still in flight on this table object stops recording once the flag is off.
+        table.setPointInTimeRecoveryEnabled(false);
+        pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
         tableStore.delete(storageKey);
         itemsByTable.remove(scopedItemsKey(storageKey));
         itemLocks.remove(scopedItemsKey(storageKey));
@@ -2750,12 +2752,19 @@ public class DynamoDbService {
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = requireBackupSource(storageKey, canonicalTableName);
         if (enabled && !table.isPointInTimeRecoveryEnabled()) {
-            pointInTimeRecovery.start(regionResolver.getAccountId(), storageKey);
-            table.setPointInTimeRecoveryRecoveryPeriodInDays(DEFAULT_RECOVERY_PERIOD_DAYS);
-        } else if (!enabled) {
             pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
+            table.setPointInTimeRecoveryStartDateTime(Instant.now().truncatedTo(ChronoUnit.SECONDS));
+            table.setPointInTimeRecoveryRecoveryPeriodInDays(DEFAULT_RECOVERY_PERIOD_DAYS);
+        } else if (enabled && recoveryPeriodInDays != null) {
+            // AWS keeps the earliest time when the period grows, until the longer period has passed.
+            table.setPointInTimeRecoveryStartDateTime(
+                    pointInTimeRecovery.window(withPointInTimeStart(storageKey, table)).earliest());
         }
         table.setPointInTimeRecoveryEnabled(enabled);
+        if (!enabled) {
+            table.setPointInTimeRecoveryStartDateTime(null);
+            pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
+        }
         if (recoveryPeriodInDays != null) {
             table.setPointInTimeRecoveryRecoveryPeriodInDays(recoveryPeriodInDays);
         }
@@ -2789,7 +2798,8 @@ public class DynamoDbService {
                     "Point in time recovery is not enabled for table '" + canonicalTableName + "'", 400);
         }
         String accountId = regionResolver.getAccountId();
-        DynamoDbPointInTimeRecovery.RestoreWindow window = pointInTimeRecovery.window(accountId, storageKey, table);
+        DynamoDbPointInTimeRecovery.RestoreWindow window =
+                pointInTimeRecovery.window(withPointInTimeStart(storageKey, table));
         Instant time = useLatestRestorableTime ? window.latest() : restoreDateTime;
         if (time.isBefore(window.earliest()) || Instant.now().isBefore(time)) {
             throw new AwsException("InvalidRestoreTimeException", "RestoreDateTime '" + time
@@ -2845,8 +2855,17 @@ public class DynamoDbService {
 
     private ContinuousBackups continuousBackups(String storageKey, TableDefinition table) {
         return new ContinuousBackups(table, table.isPointInTimeRecoveryEnabled()
-                ? pointInTimeRecovery.window(regionResolver.getAccountId(), storageKey, table)
+                ? pointInTimeRecovery.window(withPointInTimeStart(storageKey, table))
                 : null);
+    }
+
+    /** A table that had point-in-time recovery enabled before Floci kept a history starts one now. */
+    private TableDefinition withPointInTimeStart(String storageKey, TableDefinition table) {
+        if (table.getPointInTimeRecoveryStartDateTime() == null) {
+            table.setPointInTimeRecoveryStartDateTime(Instant.now().truncatedTo(ChronoUnit.SECONDS));
+            tableStore.put(storageKey, table);
+        }
+        return table;
     }
 
     /** The backup operations do not see a table that a restore is still creating. */

@@ -14,6 +14,7 @@ import java.time.Instant;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class PointInTimeChange {
 
+    private long sequence;
     private Instant time;
     private String itemKey;
     private JsonNode oldItem;
@@ -21,11 +22,15 @@ public class PointInTimeChange {
     public PointInTimeChange() {
     }
 
-    public PointInTimeChange(Instant time, String itemKey, JsonNode oldItem) {
+    public PointInTimeChange(long sequence, Instant time, String itemKey, JsonNode oldItem) {
+        this.sequence = sequence;
         this.time = time;
         this.itemKey = itemKey;
         this.oldItem = oldItem;
     }
+
+    public long getSequence() { return sequence; }
+    public void setSequence(long sequence) { this.sequence = sequence; }
 
     public Instant getTime() { return time; }
     public void setTime(Instant time) { this.time = time; }
