@@ -95,6 +95,13 @@ public final class CfnRollback {
      * {@code rollbackUpdate}.
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
+
+    /**
+     * Holds the configuration and tags a Route 53 health check carried before an in-place update
+     * changed them, so a failed stack update can put them back. Written by
+     * {@code Route53CfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String HEALTH_CHECK_UPDATE_SNAPSHOT_ATTR = "__FlociRoute53HealthCheckUpdateSnapshot";
     public static final String S3_BUCKET_UPDATE_SNAPSHOT_ATTR = "__FlociS3BucketUpdateSnapshot";
 
     /**
