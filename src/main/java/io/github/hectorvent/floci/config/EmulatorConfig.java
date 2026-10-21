@@ -2272,11 +2272,14 @@ public interface EmulatorConfig {
 
         /**
          * Publish {@code awsvpc} task ports on the Docker host so local host processes can
-         * reach them. This is an emulator-only escape hatch and can cause port collisions
-         * when more than one task exposes the same port.
+         * reach them. Docker allocates a free host port per task; DescribeTasks reports it.
          */
         @WithDefault("false")
         boolean publishAwsvpcPortsToHost();
+
+        /** Host interface for published awsvpc task ports, including firewall namespaces. */
+        @WithDefault("127.0.0.1")
+        String hostPortBindAddress();
 
         Optional<String> dockerNetwork();
 

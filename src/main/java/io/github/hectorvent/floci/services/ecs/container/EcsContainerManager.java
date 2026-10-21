@@ -446,30 +446,18 @@ public class EcsContainerManager {
                 EcsLinuxParameters.apply(specBuilder, def,
                         def.getMemory() != null ? def.getMemory() : parseTaskMemoryMb(task.getMemory()));
 
-                // Add port mappings. In bridge/host mode an explicit hostPort is
-                // published to the Docker host literally, matching AWS bridge mode
-                // (mirrors the ECR registry's fixed-port publishing). In awsvpc mode
-                // every AWS task gets its own ENI, so a literal hostPort carries no
-                // host-binding semantics and would collide across tasks on the single
-                // local Docker host (#1778) — awsvpc mappings always get a dynamic
-                // host port in native mode, or expose-only in Docker mode where ECS
-                // consumers reach containers via the docker network IP. The explicit
-                // emulator opt-in below publishes a stable port for host-side clients.
+                // Each awsvpc task has its own ENI on AWS. Host publishing must allocate
+                // a different Docker port per task, including during rolling deployments.
                 if (protectedNetwork == null && def.getPortMappings() != null) {
                     boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
-                    boolean publishAwsvpcPorts = awsvpc
-                            && config.services().ecs().publishAwsvpcPortsToHost();
-                    boolean publishDynamicPortsToHost = !containerDetector.isRunningInContainer();
+                    boolean publishToHost = !containerDetector.isRunningInContainer()
+                            || awsvpc && config.services().ecs().publishAwsvpcPortsToHost();
                     for (PortMapping pm : def.getPortMappings()) {
-                        if (publishAwsvpcPorts) {
-                            int hostPort = pm.hostPort() > 0 ? pm.hostPort() : pm.containerPort();
-                            LOG.warnv("Publishing ECS awsvpc container port {0} on host port {1}; "
-                                            + "multiple tasks cannot share this host port",
-                                    pm.containerPort(), hostPort);
-                            specBuilder.withPortBinding(pm.containerPort(), hostPort);
+                        if (awsvpc && publishToHost) {
+                            specBuilder.withPortBinding(pm.containerPort(), 0, hostPortBindAddress());
                         } else if (!awsvpc && pm.hostPort() > 0) {
                             specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
-                        } else if (publishDynamicPortsToHost) {
+                        } else if (publishToHost) {
                             specBuilder.withDynamicPort(pm.containerPort());
                         } else {
                             specBuilder.withExposedPort(pm.containerPort());
@@ -1344,7 +1332,8 @@ public class EcsContainerManager {
                     containerDetector.isRunningInContainer(),
                     config.services().ecs().publishAwsvpcPortsToHost());
             namespace = firewallManager.createNamespace("ecs", taskId, regionResolver.getAccountId(),
-                    region, config.services().ecs().dockerNetwork(), bindings, Map.of(RUN_LABEL, runId));
+                    region, config.services().ecs().dockerNetwork(), bindings, Map.of(RUN_LABEL, runId),
+                    hostPortBindAddress());
             List<String> groupIds = eni.getGroups().stream().map(g -> g.getGroupId()).toList();
             List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
             if (groups.size() != groupIds.size()) {
@@ -1376,6 +1365,11 @@ public class EcsContainerManager {
         }
     }
 
+    private String hostPortBindAddress() {
+        String address = config.services().ecs().hostPortBindAddress();
+        return address == null || address.isBlank() ? "127.0.0.1" : address;
+    }
+
     static Map<Integer, Integer> namespacePortBindings(
             TaskDefinition definition, boolean runningInContainer, boolean publishAwsvpcPortsToHost) {
         Map<Integer, Integer> bindings = new LinkedHashMap<>();
@@ -1387,10 +1381,7 @@ public class EcsContainerManager {
                 continue;
             }
             for (PortMapping port : container.getPortMappings()) {
-                int hostPort = publishAwsvpcPortsToHost
-                        ? (port.hostPort() > 0 ? port.hostPort() : port.containerPort())
-                        : 0;
-                bindings.put(port.containerPort(), hostPort);
+                bindings.put(port.containerPort(), 0);
             }
         }
         return bindings;
@@ -2204,7 +2195,7 @@ public class EcsContainerManager {
             int hostPort = pm.containerPort();
             String bindIp = "0.0.0.0";
 
-            if (!containerDetector.isRunningInContainer() && binding != null && binding.length > 0) {
+            if (binding != null && binding.length > 0) {
                 hostPort = Integer.parseInt(binding[0].getHostPortSpec());
                 if (binding[0].getHostIp() != null && !binding[0].getHostIp().isBlank()) {
                     bindIp = binding[0].getHostIp();

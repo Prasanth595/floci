@@ -1046,9 +1046,25 @@ services:
 
 ### Host access to awsvpc task ports
 
-By default, Floci preserves the isolation expected from `awsvpc`: native runs use a dynamic Docker host port, while Floci-in-Docker exposes the container port only on the configured Docker network. A process running directly on the Docker host therefore has no stable port for an `awsvpc` task.
+Native runs publish `awsvpc` task ports on dynamically allocated Docker host ports.
+When Floci runs in Docker, task ports remain private to the configured Docker network
+unless `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST=true` is set.
 
-Set `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST=true` to opt into stable host publishing. Floci binds each `containerPort` to the same host port, or uses an explicit non-zero `hostPort` when one is present. A host-side Terraform provider can then connect to `localhost:<port>`.
+Host publishing allocates a free port for each task, including tasks with an explicit
+`hostPort`. On AWS that port belongs to the task's ENI; reserving it literally on the
+single Docker host would prevent two tasks or rolling-deployment revisions from
+coexisting. Discover the allocated host address and port in `DescribeTasks`:
+
+```bash
+aws ecs describe-tasks --cluster my-cluster --tasks "$TASK_ARN" \
+  --query 'tasks[].containers[].networkBindings[]'
+```
+
+Published `awsvpc` ports bind to `127.0.0.1` by default. Set
+`floci.services.ecs.host-port-bind-address` (`FLOCI_SERVICES_ECS_HOST_PORT_BIND_ADDRESS`)
+to another Docker-host interface if clients need one. The same allocation and binding
+rules apply when security-group enforcement uses a task network-namespace helper.
+These are interfaces on the Docker daemon's host, which may differ from Floci's host.
 
 ```yaml
 services:
@@ -1058,9 +1074,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST: "true"
+      FLOCI_SERVICES_ECS_HOST_PORT_BIND_ADDRESS: "127.0.0.1"
 ```
 
-This setting is an emulator-specific networking convenience and defaults to `false`. Docker cannot bind the same host port twice, so use it only when at most one running task publishes each port.
+Host publishing is an emulator convenience and defaults to `false` in Docker mode.
+Applications that previously assumed `localhost:<containerPort>` must instead use
+that task's reported host port. Bridge/host-mode explicit bindings retain their
+existing fixed-port behavior.
 
 ## Examples
 
