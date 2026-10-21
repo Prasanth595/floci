@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.PublicAccessConditions;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
@@ -82,17 +83,11 @@ public class LambdaWebService implements Resettable {
             "AWS_LAMBDA_HTTP_ENDPOINT", "AWS_LAMBDA_RUNTIME_API", "AWS_LAMBDA_INITIALIZATION_TYPE",
             "AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "AWS_LAMBDA_METADATA_API", "AWS_LAMBDA_METADATA_TOKEN");
     /** A wildcard principal pinned by one of these condition keys does not make a policy public. */
-    static final Set<String> TRUSTED_CONDITION_KEYS = Set.of(
-            "aws:PrincipalAccount", "aws:PrincipalArn", "aws:PrincipalOrgID", "aws:PrincipalOrgPaths",
-            "aws:SourceAccount", "aws:SourceArn", "aws:SourceOrgID", "aws:SourceOrgPaths", "aws:SourceVpc",
-            "aws:SourceVpcArn", "aws:SourceVpce", "aws:VpceAccount", "aws:VpceOrgID", "aws:VpceOrgPaths",
-            "aws:Ec2InstanceSourceVpc", "aws:UserId", "aws:PrincipalServiceName", "aws:PrincipalServiceNamesList",
-            "aws:PrincipalIsAWSService", "lambda:SourceFunctionArn");
+    static final Set<String> TRUSTED_CONDITION_KEYS = with(PublicAccessConditions.TRUSTED_KEYS, "lambda:SourceFunctionArn");
     /** The operators whose match pins the caller. Negated and IfExists forms do not. */
     private static final Set<String> PINNING_OPERATORS = Set.of(
             "StringEquals", "StringEqualsIgnoreCase", "StringLike", "ArnEquals", "ArnLike", "Bool");
-    private static final Set<String> ARN_CONDITION_KEYS = Set.of(
-            "aws:PrincipalArn", "aws:SourceArn", "aws:SourceVpcArn", "lambda:SourceFunctionArn");
+    private static final Set<String> ARN_CONDITION_KEYS = with(PublicAccessConditions.ARN_KEYS, "lambda:SourceFunctionArn");
     private static final Set<String> STATEMENT_KEYS = Set.of(
             "Sid", "Effect", "Principal", "NotPrincipal", "Action", "NotAction", "Resource", "NotResource", "Condition");
     private static final Set<String> PRINCIPAL_KEYS = Set.of("AWS", "Service", "Federated", "CanonicalUser");
@@ -1334,19 +1329,19 @@ public class LambdaWebService implements Resettable {
             each.add(values.asText());
         }
         for (String value : each) {
-            String checked = value;
-            if (ARN_CONDITION_KEYS.contains(key)) {
-                String[] fields = value.split(":", 6);
-                if (fields.length < 6) {
-                    return false;
-                }
-                checked = fields[4];
-            }
-            if (checked.contains("*") || checked.contains("?")) {
+            boolean pins = ARN_CONDITION_KEYS.contains(key)
+                    ? PublicAccessConditions.pinsAccount(value) : !PublicAccessConditions.hasWildcard(value);
+            if (!pins) {
                 return false;
             }
         }
         return !each.isEmpty();
+    }
+
+    private static Set<String> with(Set<String> keys, String key) {
+        Set<String> all = new LinkedHashSet<>(keys);
+        all.add(key);
+        return Set.copyOf(all);
     }
 
     private static AwsException policySyntax() {
