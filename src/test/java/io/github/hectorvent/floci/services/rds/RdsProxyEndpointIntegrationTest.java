@@ -13,6 +13,7 @@ import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * DB proxy endpoints over the Query protocol: create, describe after the proxy's default endpoint,
@@ -83,7 +84,7 @@ class RdsProxyEndpointIntegrationTest {
                 .body(containsString("<CreatedDate>"))
                 .extract().path("CreateDBProxyEndpointResponse.CreateDBProxyEndpointResult.DBProxyEndpoint"
                         + ".DBProxyEndpointArn");
-        org.junit.jupiter.api.Assertions.assertTrue(
+        assertTrue(
                 endpointArn.startsWith("arn:aws:rds:" + REGION + ":000000000000:db-proxy-endpoint:prx-endpoint-"),
                 endpointArn);
     }

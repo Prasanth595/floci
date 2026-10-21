@@ -58,6 +58,7 @@ import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -10449,7 +10450,7 @@ class RdsServiceTest {
         proxyForEndpoints("app-proxy", "POSTGRESQL");
         addProxyEndpoint("app-proxy", "kept", null);
 
-        List<Map.Entry<String, org.junit.jupiter.api.function.Executable>> missing = List.of(
+        List<Map.Entry<String, Executable>> missing = List.of(
                 Map.entry("DBProxyName", () -> rdsService.createDbProxyEndpoint("us-east-1", null, "ep",
                         PROXY_SUBNET_IDS, List.of(), null, null, Map.of())),
                 Map.entry("DBProxyEndpointName", () -> rdsService.createDbProxyEndpoint("us-east-1", "app-proxy",
@@ -10462,7 +10463,7 @@ class RdsServiceTest {
                 Map.entry("DBProxyEndpointName", () -> rdsService.modifyDbProxyEndpoint("us-east-1", null,
                         "renamed", List.of("sg-x"))),
                 Map.entry("DBProxyEndpointName", () -> rdsService.deleteDbProxyEndpoint("us-east-1", " ")));
-        for (Map.Entry<String, org.junit.jupiter.api.function.Executable> c : missing) {
+        for (Map.Entry<String, Executable> c : missing) {
             AwsException e = assertThrows(AwsException.class, c.getValue(), c.getKey());
             assertEquals("MissingParameter", e.getErrorCode(), c.getKey());
             assertEquals("The request must contain the parameter " + c.getKey() + ".", e.getMessage());
@@ -10478,17 +10479,17 @@ class RdsServiceTest {
         proxyForEndpoints("mssql-proxy", "SQLSERVER");
         addProxyEndpoint("app-proxy", "taken", null);
 
-        Map<String, org.junit.jupiter.api.function.Executable> refused = new LinkedHashMap<>();
+        Map<String, Executable> refused = new LinkedHashMap<>();
         refused.put("DBProxyNotFoundFault", () -> addProxyEndpoint("absent", "ep", null));
         refused.put("InvalidParameterValue", () -> addProxyEndpoint("app-proxy", "1st", null));
         refused.put("DBProxyEndpointAlreadyExistsFault", () -> addProxyEndpoint("app-proxy", "taken", null));
         refused.put("InvalidParameterCombination", () -> addProxyEndpoint("mssql-proxy", "ro", "READ_ONLY"));
         refused.put("InvalidSubnet", () -> rdsService.createDbProxyEndpoint("us-east-1", "app-proxy", "ep",
                 List.of("subnet-missing"), List.of(), null, null, Map.of()));
-        for (Map.Entry<String, org.junit.jupiter.api.function.Executable> c : refused.entrySet()) {
+        for (Map.Entry<String, Executable> c : refused.entrySet()) {
             assertEquals(c.getKey(), assertThrows(AwsException.class, c.getValue()).getErrorCode(), c.getKey());
         }
-        for (org.junit.jupiter.api.function.Executable invalid : List.<org.junit.jupiter.api.function.Executable>of(
+        for (Executable invalid : List.<Executable>of(
                 () -> addProxyEndpoint("app-proxy", "a--b", null),
                 () -> addProxyEndpoint("app-proxy", "ends-", null),
                 () -> addProxyEndpoint("app-proxy", "e".repeat(64), null),
