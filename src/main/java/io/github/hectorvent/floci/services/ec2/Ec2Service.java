@@ -11658,18 +11658,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                             String locationType,
                                                             List<Map.Entry<String, List<String>>> filters) {
         // The first instance-type filter names the types to look up beside InstanceType.N, as a
-        // lone one always has, and each later one keeps only the filtered types it names too, so
-        // the answer is InstanceType.N plus the types every filter names. A filter without values
-        // names nothing and narrows nothing, as a lone one never added a type.
+        // lone one always has, or the whole catalog when one of its values holds a * or ?
+        // wildcard. Every filter must then match a looked-up type, so the answer is InstanceType.N
+        // plus the types every filter matches. A filter without values names nothing and narrows
+        // nothing, as a lone one never added a type.
         List<List<String>> typeFilters = filterValues(filters, "instance-type").stream()
                 .filter(values -> !values.isEmpty())
                 .toList();
         List<String> effectiveTypeNames = new ArrayList<>(new LinkedHashSet<>(instanceTypeNames));
         if (!typeFilters.isEmpty()) {
-            effectiveTypeNames.addAll(typeFilters.getFirst());
-            effectiveTypeNames = new ArrayList<>(new LinkedHashSet<>(effectiveTypeNames));
+            if (typeFilters.getFirst().stream().anyMatch(value -> value.contains("*") || value.contains("?"))) {
+                effectiveTypeNames = List.of();
+            } else {
+                effectiveTypeNames.addAll(typeFilters.getFirst());
+                effectiveTypeNames = new ArrayList<>(new LinkedHashSet<>(effectiveTypeNames));
+            }
         }
-        List<List<String>> laterTypeFilters = typeFilters.stream().skip(1).toList();
         String effectiveLocationType = locationType != null && !locationType.isBlank()
                 ? locationType
                 : "availability-zone";
@@ -11683,7 +11687,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<Map<String, String>> offerings = new ArrayList<>();
         for (Map<String, Object> type : describeInstanceTypes(effectiveTypeNames)) {
             String instanceType = (String) type.get("instanceType");
-            if (!instanceTypeNames.contains(instanceType) && !everyFilterContains(laterTypeFilters, instanceType)) {
+            if (!instanceTypeNames.contains(instanceType) && !everyFilterMatches(typeFilters, instanceType)) {
                 continue;
             }
             for (String location : locations) {

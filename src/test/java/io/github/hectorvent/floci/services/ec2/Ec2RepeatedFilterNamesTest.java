@@ -483,6 +483,32 @@ class Ec2RepeatedFilterNamesTest {
                 filter("instance-type", "t3.micro"), filter("instance-type")), "instanceType"));
     }
 
+    /** An instance-type value may hold * and ?, as AWS takes, whichever filter of the name it is in. */
+    @Test
+    void instanceTypeOfferingsMatchInstanceTypeWildcards() {
+        Set<String> t3 = ids(describe("DescribeInstanceTypeOfferings", "LocationType", "region",
+                filter("instance-type", "t3.*")), "instanceType");
+        assertTrue(t3.contains("t3.micro") && t3.stream().allMatch(type -> type.startsWith("t3.")), t3.toString());
+        Set<String> micro = ids(describe("DescribeInstanceTypeOfferings", "LocationType", "region",
+                filter("instance-type", "*.micro")), "instanceType");
+        assertTrue(micro.size() > 1 && micro.stream().allMatch(type -> type.endsWith(".micro")), micro.toString());
+
+        assertEquals(Set.of("t3.micro"), ids(describe("DescribeInstanceTypeOfferings", "LocationType", "region",
+                filter("instance-type", "t3.mi?ro")), "instanceType"));
+        assertEquals(Set.of("t3.micro"), ids(describe("DescribeInstanceTypeOfferings", "LocationType", "region",
+                filter("instance-type", "t3.*"), filter("instance-type", "t3.micro")), "instanceType"));
+        assertEquals(Set.of("t3.micro"), ids(describe("DescribeInstanceTypeOfferings", "LocationType", "region",
+                filter("instance-type", "t3.micro"), filter("instance-type", "t3.*")), "instanceType"));
+        assertEquals(Set.of("t3.micro"), ids(describe("DescribeInstanceTypeOfferings", "LocationType", "region",
+                filter("instance-type", "t3.*"), filter("instance-type", "*.micro")), "instanceType"));
+
+        Set<String> named = new LinkedHashSet<>(t3);
+        named.add("m5.large");
+        assertEquals(named, ids(describe("DescribeInstanceTypeOfferings",
+                List.of("LocationType", "region", "InstanceType.1", "m5.large"),
+                filter("instance-type", "t3.*")), "instanceType"));
+    }
+
     @Test
     void spotPriceHistoryMatchesEveryFilter() {
         assertEquals(Set.of("t3.micro"), ids(describe("DescribeSpotPriceHistory",

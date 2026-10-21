@@ -795,7 +795,7 @@ regions, for which AWS publishes no zone id, keep the whole region as the prefix
 | Action | Description |
 |--------|-------------|
 | DescribeInstanceTypes | Returns instance type metadata known to the local EC2 service, including `burstablePerformanceSupported` for the T families. |
-| DescribeInstanceTypeOfferings | Returns instance type offerings for the requested location filters. |
+| DescribeInstanceTypeOfferings | Returns instance type offerings for the requested location filters. An `instance-type` filter value may hold `*` and `?` wildcards, such as `t3.*`. |
 
 ### Launch Templates
 
