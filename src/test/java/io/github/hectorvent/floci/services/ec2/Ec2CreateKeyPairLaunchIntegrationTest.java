@@ -72,7 +72,8 @@ class Ec2CreateKeyPairLaunchIntegrationTest {
             verify(containerManager).launch(eq(instance), any(), injected.capture(), anyString(), any(), any(), any());
             assertEquals("ssh-ed25519 " + Base64.getEncoder().encodeToString(blob), injected.getValue());
         } finally {
-            // The application is shared with another class, so what this one made goes again.
+            // The application is shared with another class: the key pair goes, and the instance gives
+            // back its address and volume, though the mocked container manager leaves its record pending.
             if (instance != null) {
                 service.terminateInstances(REGION, List.of(instance.getInstanceId()));
             }
