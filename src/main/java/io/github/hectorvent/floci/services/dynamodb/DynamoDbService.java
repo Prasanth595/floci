@@ -4718,7 +4718,8 @@ public class DynamoDbService {
 
     // --- Export Operations ---
 
-    public ExportDescription exportTable(Map<String, Object> request, String region) {
+    /** As on AWS, an ExportTime after LatestRestorableDateTime is accepted up to now. */
+    public ExportDescription exportTable(Map<String, Object> request, Instant exportTime, String region) {
         String tableArn = (String) request.get("TableArn");
         String s3Bucket = (String) request.get("S3Bucket");
         String s3Prefix = request.containsKey("S3Prefix") ? (String) request.get("S3Prefix") : null;
@@ -4743,9 +4744,24 @@ public class DynamoDbService {
         String storageKey = regionKey(tableRegion, tableName);
 
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> new AwsException("TableNotFoundException", "Table not found: " + tableArn, 400));
+        Instant startTime = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        // Seconds, as CreationDateTime is shown, so an EarliestRestorableDateTime in the creation second passes.
+        if (exportTime != null && (exportTime.isBefore(table.getCreationDateTime().truncatedTo(ChronoUnit.SECONDS))
+                || startTime.isBefore(exportTime))) {
+            throw new AwsException("InvalidExportTimeException", "Export Time is invalid", 400);
+        }
+        if (!table.isPointInTimeRecoveryEnabled()) {
+            throw new AwsException("PointInTimeRecoveryUnavailableException",
+                    "Point in time recovery is not enabled for table '" + table.getTableName() + "'", 400);
+        }
+        if (exportTime != null
+                && exportTime.isBefore(pointInTimeRecovery.window(withPointInTimeStart(storageKey, table)).earliest())) {
+            throw new AwsException("InvalidExportTimeException",
+                    "Point in Time Recovery is not available for specified export time", 400);
+        }
+        Instant time = exportTime != null ? exportTime : startTime;
 
-        long now = Instant.now().getEpochSecond();
         var exportId = newJobId();
         String exportArn = AwsArnUtils.Arn.of("dynamodb", tableRegion, regionResolver.getAccountId(), "table/" + table.getTableName() + "/export/" + exportId).toString();
 
@@ -4758,8 +4774,8 @@ public class DynamoDbService {
         desc.setS3Prefix(s3Prefix);
         desc.setExportFormat(exportFormat);
         desc.setExportType("FULL_EXPORT");
-        desc.setExportTime(now);
-        desc.setStartTime(now);
+        desc.setExportTime(epochSeconds(time));
+        desc.setStartTime(epochSeconds(startTime));
         desc.setClientToken(clientToken);
         desc.setS3SseAlgorithm(s3SseAlgorithm);
         desc.setS3BucketOwner(s3BucketOwner);
@@ -4769,9 +4785,8 @@ public class DynamoDbService {
         }
 
         ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(scopedItemsKey(storageKey));
-        List<JsonNode> snapshot = tableItems != null
-                ? List.copyOf(tableItems.values())
-                : List.of();
+        List<JsonNode> snapshot = pointInTimeRecovery.itemsAt(regionResolver.getAccountId(), storageKey,
+                tableItems != null ? tableItems : Map.of(), time);
 
         // The worker gets its own copy so the object serialized into this response never
         // changes underneath the handler, and the request account so its writes land there.
@@ -4804,7 +4819,7 @@ public class DynamoDbService {
                     desc.setExportStatus("FAILED");
                     desc.setFailureCode("S3NoSuchBucket");
                     desc.setFailureMessage("The specified bucket does not exist: " + s3Bucket);
-                    desc.setEndTime(Instant.now().getEpochSecond());
+                    desc.setEndTime(epochSeconds(clock.instant()));
                     if (exportStore != null) {
                         exportStore.put(exportArn, desc);
                     }
@@ -4830,9 +4845,8 @@ public class DynamoDbService {
                     manifestSummaryContent.getBytes(StandardCharsets.UTF_8),
                     "application/json", Map.of());
 
-            long endTime = Instant.now().getEpochSecond();
             desc.setExportStatus("COMPLETED");
-            desc.setEndTime(endTime);
+            desc.setEndTime(epochSeconds(clock.instant()));
             desc.setItemCount(itemCount);
             desc.setBilledSizeBytes(billedSize);
             desc.setExportManifest(manifestSummaryKey);
@@ -4847,7 +4861,7 @@ public class DynamoDbService {
             desc.setExportStatus("FAILED");
             desc.setFailureCode("UNKNOWN");
             desc.setFailureMessage(e.getMessage());
-            desc.setEndTime(Instant.now().getEpochSecond());
+            desc.setEndTime(epochSeconds(clock.instant()));
             if (exportStore != null) {
                 exportStore.put(exportArn, desc);
             }
@@ -4885,11 +4899,11 @@ public class DynamoDbService {
             ObjectNode root = objectMapper.createObjectNode();
             root.put("version", "2020-06-30");
             root.put("exportArn", desc.getExportArn());
-            root.put("startTime", Instant.ofEpochSecond(desc.getStartTime()).toString());
+            root.put("startTime", instantOf(desc.getStartTime()).toString());
             root.put("endTime", Instant.now().toString());
             root.put("tableArn", desc.getTableArn());
             root.put("tableId", desc.getTableId());
-            root.put("exportTime", Instant.ofEpochSecond(desc.getExportTime()).toString());
+            root.put("exportTime", instantOf(desc.getExportTime()).toString());
             root.put("s3Bucket", desc.getS3Bucket());
             root.putNull("s3Prefix");
             if (desc.getS3Prefix() != null) {
@@ -4912,6 +4926,14 @@ public class DynamoDbService {
         } catch (JsonProcessingException e) {
             return "{}";
         }
+    }
+
+    private static BigDecimal epochSeconds(Instant instant) {
+        return BigDecimal.valueOf(instant.toEpochMilli(), 3);
+    }
+
+    private static Instant instantOf(BigDecimal epochSeconds) {
+        return Instant.ofEpochMilli(epochSeconds.movePointRight(3).longValue());
     }
 
     public ExportDescription describeExport(String exportArn) {
@@ -5379,7 +5401,7 @@ public class DynamoDbService {
                 desc.setExportStatus("FAILED");
                 desc.setFailureCode("InterruptedByRestart");
                 desc.setFailureMessage("The emulator restarted before the export finished");
-                desc.setEndTime(now);
+                desc.setEndTime(BigDecimal.valueOf(now));
                 exports.putForAccount(entry.accountId(), entry.key(), desc);
             }
         }

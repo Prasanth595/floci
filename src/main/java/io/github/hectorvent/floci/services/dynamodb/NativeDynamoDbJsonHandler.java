@@ -3384,7 +3384,7 @@ public class NativeDynamoDbJsonHandler {
                 ? e.getValue().asText() : e.getValue()));
 
         io.github.hectorvent.floci.services.dynamodb.model.ExportDescription desc =
-                dynamoDbService.exportTable(params, region);
+                dynamoDbService.exportTable(params, timestampOrNull(request, "ExportTime"), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("ExportDescription", objectMapper.valueToTree(desc));

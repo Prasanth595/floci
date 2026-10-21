@@ -393,11 +393,15 @@ Deviations from AWS:
 
 ## Export to S3
 
-Export table data to an S3 bucket as gzip-compressed NDJSON (DynamoDB JSON format):
+Export table data to an S3 bucket as gzip-compressed NDJSON (DynamoDB JSON format). As on AWS, the table needs point-in-time recovery:
 
 ```bash
 # Create a bucket to receive the export
 aws s3 mb s3://my-exports --endpoint-url $AWS_ENDPOINT_URL
+
+# Turn on point-in-time recovery
+aws dynamodb update-continuous-backups --table-name Users \
+  --point-in-time-recovery-specification PointInTimeRecoveryEnabled=true --endpoint-url $AWS_ENDPOINT_URL
 
 # Start an export
 EXPORT_ARN=$(aws dynamodb export-table-to-point-in-time \
@@ -421,6 +425,8 @@ aws dynamodb list-exports \
 ```
 
 The export writes to `s3://<bucket>/<prefix>/AWSDynamoDB/<exportId>/data/` as one or more `.json.gz` files, along with `manifest-summary.json` and `manifest-files.json`, the same layout as real AWS DynamoDB exports.
+
+The export holds the items as they were at `ExportTime`, or at the request time when `ExportTime` is not set. As on AWS, `ExportTime` must not be before `EarliestRestorableDateTime` or the table creation, and must not be in the future. A time after `LatestRestorableDateTime` is accepted.
 
 ## Import from S3
 

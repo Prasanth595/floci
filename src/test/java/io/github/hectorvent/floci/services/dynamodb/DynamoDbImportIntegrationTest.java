@@ -109,6 +109,9 @@ class DynamoDbImportIntegrationTest {
     @Test
     void importTable_gzip_roundTripsAnExport() {
         createCompositeTable("RoundTripSource");
+        dynamo("UpdateContinuousBackups", """
+                {"TableName": "RoundTripSource", "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": true}}
+                """).then().statusCode(200);
         for (int i = 1; i <= 3; i++) {
             dynamo("PutItem", "{\"TableName\": \"RoundTripSource\", \"Item\": {\"pk\": {\"S\": \"user-" + i
                     + "\"}, \"sk\": {\"S\": \"order-" + i + "\"}, \"total\": {\"N\": \"" + (i * 10) + "\"}}}")
