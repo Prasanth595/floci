@@ -2276,15 +2276,15 @@ class Ec2IntegrationTest {
             .body("DescribeAddressesResponse.addressesSet.item.size()", equalTo(1))
             .body("DescribeAddressesResponse.addressesSet.item.allocationId", equalTo(targetAllocationId));
 
-        // Negative, resource-specific field filter: floci's synthesized public IPs always
-        // start with "54." (Ec2Service.allocateAddress), so an RFC 5737 TEST-NET-3 address is
+        // Negative, resource-specific field filter: floci allocates Elastic IPs only from
+        // 203.0.113.0/24 (Ec2Service.allocateAddress), so an RFC 5737 TEST-NET-2 address is
         // guaranteed not to match anything this test (or any other) could have allocated.
         given()
             .formParam("Action", "DescribeAddresses")
             .formParam("Filter.1.Name", "tag:Suite")
             .formParam("Filter.1.Value.1", suiteTag)
             .formParam("Filter.2.Name", "public-ip")
-            .formParam("Filter.2.Value.1", "203.0.113.99")
+            .formParam("Filter.2.Value.1", "198.51.100.99")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -2540,7 +2540,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ImportKeyPair")
             .formParam("KeyName", importedKeyName)
-            .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
+            .formParam("PublicKeyMaterial", encodedPublicKey())
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -2556,7 +2556,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ImportKeyPair")
             .formParam("KeyName", importedKeyName)
-            .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
+            .formParam("PublicKeyMaterial", encodedPublicKey())
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -2597,6 +2597,12 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    /** A whole RSA public key, base64-encoded as ImportKeyPair takes it: EC2 refuses a partial one. */
+    private static String encodedPublicKey() {
+        return Base64.getEncoder().encodeToString(
+                Ec2KeyMaterial.generateRsa().openSshPublicKey().getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
@@ -5776,6 +5782,38 @@ class Ec2IntegrationTest {
             .statusCode(400)
             .body(containsString("<Code>InvalidParameterValue</Code>"))
             .body(containsString("Value (gp9) for parameter volumeType is invalid. Unknown volume type."));
+    }
+
+    @Test
+    @Order(335)
+    void runInstancesNoDeviceRootMappingFallsBackToAmiRootVolumeType() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-nodevice-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        // NoDevice removes the template's root mapping, so the AMI's gp2 root applies.
+        assertEquals("gp2", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.NoDevice", ""))));
+    }
+
+    @Test
+    @Order(336)
+    void runInstancesIgnoresVolumeTypeOnANoDeviceMapping() {
+        // The device is removed regardless of the assigned value, so gp9 is never validated.
+        assertEquals("gp2", rootVolumeType(launch(Map.of(
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.NoDevice", "",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "gp9"))));
     }
 
     private String launch(Map<String, String> params) {

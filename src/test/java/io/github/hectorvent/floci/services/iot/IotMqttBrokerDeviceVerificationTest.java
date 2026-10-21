@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.iot;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.Pem;
@@ -25,6 +27,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
@@ -35,6 +38,7 @@ import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -50,6 +54,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -93,10 +98,9 @@ class IotMqttBrokerDeviceVerificationTest {
 
     @BeforeEach
     void brokerWithTlsOn() throws IOException {
-        plainPort = FreePorts.anyInterfacePort();
-        do {
-            tlsPort = FreePorts.anyInterfacePort();
-        } while (tlsPort == plainPort);
+        int[] ports = FreePorts.anyInterfacePorts(2);
+        plainPort = ports[0];
+        tlsPort = ports[1];
         when(config.services().iot().enabled()).thenReturn(true);
         when(config.services().iot().mqtt().enabled()).thenReturn(true);
         when(config.services().iot().mqtt().host()).thenReturn("127.0.0.1");
@@ -188,6 +192,49 @@ class IotMqttBrokerDeviceVerificationTest {
     }
 
     @Test
+    void anAdmittedDevicesLifecycleEventsCarryItsCertificateIdAsPrincipal() throws Exception {
+        RegisteredDevice device = registered(deviceLeaf);
+        when(service.findRegisteredCertificate(certificate(deviceLeaf))).thenReturn(Optional.of(device));
+        when(service.isConnectAllowed(eq(device), eq("sensor-1"), eq("127.0.0.1"), isNull())).thenReturn(true);
+
+        MqttClient client = connectTls("sensor-1", deviceLeaf, null);
+        client.disconnect();
+        client.close();
+
+        JsonNode connected = publishedEvent("$aws/events/presence/connected/sensor-1");
+        JsonNode disconnected = publishedEvent("$aws/events/presence/disconnected/sensor-1");
+        assertEquals(List.of("clientId", "timestamp", "eventType", "sessionIdentifier", "principalIdentifier",
+                "versionNumber", "ipAddress"), fieldNames(connected));
+        assertEquals(device.certificate().getCertificateId(), connected.get("principalIdentifier").asText());
+        assertEquals(device.certificate().getCertificateId(), disconnected.get("principalIdentifier").asText());
+    }
+
+    /**
+     * A TLS session counts in its device certificate's account and region for fleet indexing, not
+     * in the default ones: connected there while live, then how it ended, and nothing elsewhere.
+     */
+    @Test
+    void aTlsSessionsConnectivityCountsInItsCertificatesAccountAndRegion() throws Exception {
+        when(config.defaultAccountId()).thenReturn("000000000000");
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        RegisteredDevice device = new RegisteredDevice("123456789012", "eu-west-1", registered(deviceLeaf).certificate());
+        when(service.findRegisteredCertificate(certificate(deviceLeaf))).thenReturn(Optional.of(device));
+        when(service.isConnectAllowed(eq(device), eq("sensor-1"), eq("127.0.0.1"), isNull())).thenReturn(true);
+
+        MqttClient client = connectTls("sensor-1", deviceLeaf, null);
+        assertTrue(broker.connectivity("123456789012", "eu-west-1", "sensor-1").orElseThrow().connected());
+        assertTrue(broker.connectivity("000000000000", "us-east-1", "sensor-1").isEmpty());
+        client.disconnect();
+        client.close();
+        publishedEvent("$aws/events/presence/disconnected/sensor-1");
+
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("123456789012", "eu-west-1", "sensor-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("000000000000", "us-east-1", "sensor-1").isEmpty());
+        assertTrue(broker.connectivity("123456789012", "us-east-1", "sensor-1").isEmpty());
+    }
+
+    @Test
     void aDeniedDeviceIsAnsweredWithConnackNotAuthorized() throws Exception {
         RegisteredDevice device = registered(deviceLeaf);
         when(service.findRegisteredCertificate(certificate(deviceLeaf))).thenReturn(Optional.of(device));
@@ -255,7 +302,8 @@ class IotMqttBrokerDeviceVerificationTest {
             client.connect();
 
             assertTrue(client.isConnected());
-            verifyNoInteractions(service);
+            verify(service, never()).findRegisteredCertificate(any());
+            verify(service, never()).isConnectAllowed(any(), anyString(), any(), any());
         } finally {
             client.disconnect();
             client.close();
@@ -305,6 +353,19 @@ class IotMqttBrokerDeviceVerificationTest {
         assertInstanceOf(MqttSecurityException.class, refused, "expected CONNACK not authorized, got: " + refused);
         assertEquals(MqttException.REASON_CODE_NOT_AUTHORIZED, refused.getReasonCode());
         assertFalse(refused.getMessage().isBlank());
+    }
+
+    /** The payload the broker handed the IoT service for the one publish on {@code topic}, an MQTT client's publish. */
+    private JsonNode publishedEvent(String topic) throws IOException {
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(service, timeout(10_000)).publish(eq(topic), payload.capture(), eq(false), eq(0), isNull(), eq("sensor-1"), any());
+        return new ObjectMapper().readTree(payload.getValue());
+    }
+
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
     }
 
     private static RegisteredDevice registered(CertificateGenerator.GeneratedCertificate leaf) {

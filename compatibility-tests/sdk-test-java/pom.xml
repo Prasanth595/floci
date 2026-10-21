@@ -74,6 +74,10 @@
     <dependencies>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>servicequotas</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>acm</artifactId>
         </dependency>
         <dependency>
@@ -194,6 +198,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>resourcegroups</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>resourcegroupstaggingapi</artifactId>
         </dependency>
         <dependency>
@@ -230,6 +238,10 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>rds</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dsql</artifactId>
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -489,6 +501,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>elasticloadbalancingv2</artifactId>
+        </dependency>
+        <!-- Route 53 Resolver client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>route53resolver</artifactId>
         </dependency>
         <!-- Global Accelerator client -->
         <dependency>

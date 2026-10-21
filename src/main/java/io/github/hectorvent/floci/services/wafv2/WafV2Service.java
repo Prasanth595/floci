@@ -549,16 +549,25 @@ public class WafV2Service {
     }
 
     /**
+     * The single IPV4/IPV6 rule for a set's {@code IPAddressVersion}, also called by
+     * {@code WafV2CfnProvisioner}: an in-place update never sends the member to
+     * {@code UpdateIPSet}, so the provisioner would otherwise accept a value WAFv2 never sees.
+     */
+    public static void requireIpAddressVersion(String ipAddressVersion) {
+        if (!"IPV4".equals(ipAddressVersion) && !"IPV6".equals(ipAddressVersion)) {
+            throw invalidParameter("IP_ADDRESS_VERSION", ipAddressVersion, "must be IPV4 or IPV6.");
+        }
+    }
+
+    /**
      * Validates that every entry in an IPSet's {@code Addresses} is a CIDR block matching
      * the declared {@code IPAddressVersion}, per the {@code CreateIPSet}/{@code UpdateIPSet}
      * contract: a bare IP address with no prefix is rejected, as is a prefix outside
      * 1-32 for IPv4 or 1-128 for IPv6 (AWS WAF supports all CIDR ranges except {@code /0}).
      */
     private void validateAddresses(List<String> addresses, String ipAddressVersion) {
+        requireIpAddressVersion(ipAddressVersion);
         boolean ipv6 = "IPV6".equals(ipAddressVersion);
-        if (!ipv6 && !"IPV4".equals(ipAddressVersion)) {
-            throw invalidParameter("IP_ADDRESS_VERSION", ipAddressVersion, "must be IPV4 or IPV6.");
-        }
         if (addresses == null || addresses.isEmpty()) {
             return;
         }
@@ -607,7 +616,7 @@ public class WafV2Service {
      * carried as structured extendedData, matching the real WAFV2 {@code ParameterExceptionField}
      * enum (e.g. {@code IP_ADDRESS}, {@code IP_ADDRESS_VERSION}) rather than a free-text message.
      */
-    private AwsException invalidParameter(String field, String parameter, String reason) {
+    private static AwsException invalidParameter(String field, String parameter, String reason) {
         Map<String, Object> extendedData = new LinkedHashMap<>();
         extendedData.put("Field", field);
         extendedData.put("Parameter", parameter);

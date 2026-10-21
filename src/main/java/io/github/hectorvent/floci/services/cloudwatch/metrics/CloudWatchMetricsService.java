@@ -30,22 +30,36 @@ public class CloudWatchMetricsService {
     private final StorageBackend<String, MetricDatum> metricStore;
     private final StorageBackend<String, MetricAlarm> alarmStore;
     private final RegionResolver regionResolver;
+    private final AlarmSnsNotifier alarmSnsNotifier;
+
+    public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver) {
+        this(storageFactory, regionResolver, null);
+    }
 
     @Inject
-    public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver) {
+    public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                    AlarmSnsNotifier alarmSnsNotifier) {
         this.metricStore = storageFactory.create("cloudwatchmetrics", "cwmetrics.json",
                 new TypeReference<Map<String, MetricDatum>>() {});
         this.alarmStore = storageFactory.create("cloudwatchmetrics", "cwalarms.json",
                 new TypeReference<Map<String, MetricAlarm>>() {});
         this.regionResolver = regionResolver;
+        this.alarmSnsNotifier = alarmSnsNotifier;
     }
 
     CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
                              StorageBackend<String, MetricAlarm> alarmStore,
                              RegionResolver regionResolver) {
+        this(metricStore, alarmStore, regionResolver, null);
+    }
+
+    CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
+                             StorageBackend<String, MetricAlarm> alarmStore,
+                             RegionResolver regionResolver, AlarmSnsNotifier alarmSnsNotifier) {
         this.metricStore = metricStore;
         this.alarmStore = alarmStore;
         this.regionResolver = regionResolver;
+        this.alarmSnsNotifier = alarmSnsNotifier;
     }
 
     public void putMetricData(String namespace, List<MetricDatum> datums, String region) {
@@ -323,6 +337,7 @@ public class CloudWatchMetricsService {
         MetricAlarm alarm = alarmStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFound", "Alarm not found: " + alarmName, 404));
 
+        String oldState = alarm.getStateValue();
         alarm.setStateValue(stateValue);
         alarm.setStateReason(stateReason);
         alarm.setStateReasonData(stateReasonData);
@@ -330,6 +345,9 @@ public class CloudWatchMetricsService {
 
         alarmStore.put(key, alarm);
         LOG.infov("SetAlarmState: {0} -> {1}", alarmName, stateValue);
+        if (alarmSnsNotifier != null) {
+            alarmSnsNotifier.notifyTransition(alarm, oldState);
+        }
     }
 
     /**

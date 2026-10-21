@@ -69,6 +69,19 @@ public final class ReplacementCleanup {
      */
     static void record(StackResource r, ProvisionContext ctx, Map<String, String> attributesBeforeProvision,
                        boolean replaced) {
+        record(r, ctx, attributesBeforeProvision, replaced, true);
+    }
+
+    /**
+     * Records a replacement the provisioner decided on, spelling out whether this update created the
+     * entity under the new physical id. {@code replacementCreated} is false when that entity already
+     * existed and the provision only took it over, the way us-east-1's idempotent {@code CreateBucket}
+     * answers for a bucket the account already owns. The prior entity is still displaced, so a
+     * committed update deletes it, but {@link #rollback} points the resource back without deleting an
+     * entity this update never created.
+     */
+    static void record(StackResource r, ProvisionContext ctx, Map<String, String> attributesBeforeProvision,
+                       boolean replaced, boolean replacementCreated) {
         ObjectNode cleanup = readOrEmpty(r);
         cleanup.remove("priorPhysicalId");
         cleanup.remove("undeletedReplacement");
@@ -80,13 +93,18 @@ public final class ReplacementCleanup {
             cleanup.put("priorPhysicalId", prior);
             ObjectNode priorAttributes = cleanup.putObject("priorAttributes");
             attributesBeforeProvision.forEach((key, value) -> {
-                if (!key.startsWith("__Floci") && value != null) {
+                if (restoredOnRevert(key) && value != null) {
                     priorAttributes.put(key, value);
                 }
             });
             if (!priorIsStub && !prior.equals(r.getPhysicalId())) {
                 addDisplaced(cleanup, prior, r.getResourceType(), ctx.region(), true);
             }
+        }
+        if (replaced && !replacementCreated) {
+            cleanup.put("replacementPreexisting", true);
+        } else {
+            cleanup.remove("replacementPreexisting");
         }
         write(r, cleanup);
     }
@@ -104,6 +122,10 @@ public final class ReplacementCleanup {
      * propagates so the stack reports it. A retry (CloudFormation {@code ContinueUpdateRollback})
      * re-attempts that failed delete. Returns false when this update replaced nothing, which
      * leaves the engine's handling of in-place updates unchanged.
+     *
+     * <p>A replacement this update did not create is left standing: the resource points back to the
+     * prior entity, and the entity under the new id, whether another resource created it or it was
+     * already owned, is never touched by a rollback this update did not make.
      */
     static boolean rollback(StackResource r, Deleter deleter) {
         ObjectNode cleanup = read(r);
@@ -131,20 +153,34 @@ public final class ReplacementCleanup {
         r.setPhysicalId(prior);
         Iterator<String> keys = r.getAttributes().keySet().iterator();
         while (keys.hasNext()) {
-            if (!keys.next().startsWith("__Floci")) {
+            if (restoredOnRevert(keys.next())) {
                 keys.remove();
             }
         }
         cleanup.path("priorAttributes").fields()
                 .forEachRemaining(e -> r.getAttributes().put(e.getKey(), e.getValue().asText()));
+        boolean replacementPreexisting = cleanup.path("replacementPreexisting").asBoolean(false);
         cleanup.remove("priorPhysicalId");
         cleanup.remove("priorAttributes");
+        cleanup.remove("replacementPreexisting");
         removeDisplaced(cleanup, prior);
         write(r, cleanup);
+        if (replacementPreexisting) {
+            return true;
+        }
         if (prior.equals(replacement) && !CfnResourceDispatcher.isStub(prior, r.getAttributes())) {
             return true;
         }
         return deleteReplacement(r, cleanup, deleter, r.getResourceType(), replacement);
+    }
+
+    /**
+     * Whether a revert puts back the prior value of an attribute: the public ones, and the hidden
+     * {@link CfnRollback#USES_ATTR_PREFIX} ones, which describe the entity as the public ones do.
+     * Other {@code __Floci} keys are rollback bookkeeping that outlives the revert.
+     */
+    private static boolean restoredOnRevert(String key) {
+        return !key.startsWith("__Floci") || key.startsWith(CfnRollback.USES_ATTR_PREFIX);
     }
 
     /** Deletes a rolled-back replacement; one whose delete throws stays owed and named for the retry. */

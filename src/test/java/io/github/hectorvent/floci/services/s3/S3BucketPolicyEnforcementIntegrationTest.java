@@ -520,6 +520,71 @@ class S3BucketPolicyEnforcementIntegrationTest {
     }
 
     @Test
+    void bucketOwnerPrivateMultipartCanBeCompletedByAuthorizedOtherAccount() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "cross-private-multipart-" + suffix;
+        String key = "object.txt";
+        String body = "completed by another account";
+
+        Credentials owner = createAccountAdmin("private-owner-" + suffix, ACCOUNT_A);
+        createBucketAs(bucket, owner.signer());
+        Credentials writer = createUser("private-writer-" + suffix, ACCOUNT_B);
+        putUserPolicy("private-writer-" + suffix, "WriteCrossBucket", """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Action": "s3:PutObject",
+                    "Resource": "arn:aws:s3:::%s/*"
+                  }]
+                }""".formatted(bucket), ACCOUNT_B);
+        putBucketPolicyAs(bucket, """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": "%s"},
+                    "Action": "s3:PutObject",
+                    "Resource": "arn:aws:s3:::%s/*"
+                  }]
+                }""".formatted(writer.userArn(), bucket), owner.signer());
+
+        String uploadId = given()
+                .filter(owner.signer())
+                .header("x-amz-acl", "private")
+        .when()
+                .post("/" + bucket + "/" + key + "?uploads")
+        .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String partETag = given()
+                .filter(owner.signer())
+                .body(body)
+        .when()
+                .put("/" + bucket + "/" + key + "?partNumber=1&uploadId=" + uploadId)
+        .then()
+                .statusCode(200)
+                .extract().header("ETag");
+
+        given()
+                .filter(writer.signer())
+                .contentType("application/xml")
+                .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"
+                        + partETag + "</ETag></Part></CompleteMultipartUpload>")
+        .when()
+                .post("/" + bucket + "/" + key + "?uploadId=" + uploadId)
+        .then()
+                .statusCode(200);
+        given()
+                .filter(owner.signer())
+        .when()
+                .get("/" + bucket + "/" + key)
+        .then()
+                .statusCode(200)
+                .body(equalTo(body));
+    }
+
+    @Test
     void sameAccountDirectUserBypassesBoundaryOnPrimaryRequest() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String bucket = "boundary-bucket-" + suffix;

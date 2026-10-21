@@ -93,6 +93,76 @@ class IamServiceTest {
     }
 
     @Test
+    void updateRoleDescriptionAnswersTheRoleAndMovesNothingElse() {
+        // "This operation performs the same function as the Description parameter in the UpdateRole
+        // operation", and UpdateRole answers no shape at all, so the role comes back from here.
+        iamService.createRole("R", "/", "{}", "before", 7200, null);
+
+        IamRole updated = iamService.updateRoleDescription("R", "after");
+
+        assertEquals("after", updated.getDescription());
+        assertEquals(7200, updated.getMaxSessionDuration());
+        assertEquals("{}", updated.getAssumeRolePolicyDocument());
+        assertEquals("after", iamService.getRole("R").getDescription());
+    }
+
+    @Test
+    void aRoleDescriptionIsHeldToItsShapeWhereverItIsTaken() {
+        iamService.createRole("R", "/", "{}", "fine", 3600, null);
+
+        AwsException tooLong = assertThrows(AwsException.class,
+                () -> iamService.updateRoleDescription("R", "d".repeat(1001)));
+        assertEquals("ValidationError", tooLong.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'description' failed to satisfy "
+                + "constraint: Member must have length less than or equal to 1000",
+                tooLong.getMessage());
+
+        AwsException outsideTheSet = assertThrows(AwsException.class,
+                () -> iamService.updateRoleDescription("R", "a" + (char) 1 + "b"));
+        assertEquals("ValidationError", outsideTheSet.getErrorCode());
+
+        // Neither refusal wrote, and the create path answers the same way without storing a role.
+        assertEquals("fine", iamService.getRole("R").getDescription());
+        assertEquals("ValidationError", assertThrows(AwsException.class,
+                () -> iamService.createRole("R2", "/", "{}", "d".repeat(1001), 3600, null))
+                .getErrorCode());
+        assertThrows(AwsException.class, () -> iamService.getRole("R2"));
+
+        // Tab, newline and carriage return are inside the set AWS publishes.
+        iamService.updateRoleDescription("R", "one\ntwo\tthree\r");
+        assertEquals("one\ntwo\tthree\r", iamService.getRole("R").getDescription());
+    }
+
+    @Test
+    void updateRoleDescriptionReadsTheRoleNameBeforeTheLookup() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.updateRoleDescription("role:with:colons", "whatever"));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void aServiceLinkedRoleTakesADescriptionEditAndRefusesADuration() {
+        // "You can edit the description of any role from the IAM console, API, or CLI", by either
+        // action, so the protection AWS publishes on both stands on the duration instead.
+        String roleName = iamService.createServiceLinkedRole("es.amazonaws.com", null, "created with")
+                .getRoleName();
+
+        assertEquals("edited", iamService.updateRoleDescription(roleName, "edited").getDescription());
+        assertEquals("edited again", iamService.updateRole(roleName, "edited again", 0).getDescription());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> iamService.updateRole(roleName, "hijacked", 7200));
+        assertEquals("UnmodifiableEntity", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+
+        // Refused whole: the description that came with the duration was not written either.
+        assertEquals("edited again", iamService.getRole(roleName).getDescription());
+        assertEquals(3600, iamService.getRole(roleName).getMaxSessionDuration());
+    }
+
+    @Test
     void roleInlinePolicyQuotaIgnoresWhitespaceAndPreservesRejectedReplacement() {
         iamService.createRole("R", "/", "{}", null, 0, null);
         String exactLimit = policyWithNonWhitespaceLength(10_240);
@@ -2028,6 +2098,52 @@ class IamServiceTest {
 
         iamService.deleteAccessKey("alice", key.getAccessKeyId());
         assertTrue(iamService.listAccessKeys("alice").isEmpty());
+    }
+
+    @Test
+    void anAccessKeyTakesEveryStatusTheModelPublishes() {
+        // statusType is Active, Inactive or Expired, which is what the reference's Valid Values
+        // line on UpdateAccessKey lists, so Expired is a value to store rather than to refuse.
+        iamService.createUser("alice", "/");
+        AccessKey key = iamService.createAccessKey("alice");
+
+        for (String status : List.of("Inactive", "Expired", "Active")) {
+            iamService.updateAccessKey("alice", key.getAccessKeyId(), status);
+            assertEquals(status, iamService.listAccessKeys("alice").getFirst().getStatus());
+        }
+    }
+
+    @Test
+    void anAccessKeyStatusIsReadBeforeTheKeyIsFound() {
+        // The key does not exist either, and the status is what answers: AWS reads a request's
+        // shape before it resolves anything, so the lookup's NoSuchEntity does not get there first.
+        iamService.createUser("alice", "/");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.updateAccessKey("alice", "AKIANOSUCHKEY00000", "Disabled"));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        // The rendering the three sibling operations already answer with, taken from a recording
+        // of UpdateServiceSpecificCredential: AWS names neither the value nor the permitted set.
+        assertEquals("1 validation error detected: Value at 'status' failed to satisfy "
+                + "constraint: Member must satisfy enum value set", error.getMessage());
+    }
+
+    @Test
+    void anAbsentAccessKeyStatusIsAnsweredLikeAnInvalidOne() {
+        // The shared helper reads a null as a value outside the enum, which is how the other three
+        // statusType operations answer one. Changing that would change all four, so it stays.
+        iamService.createUser("alice", "/");
+        AccessKey key = iamService.createAccessKey("alice");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> iamService.updateAccessKey("alice", key.getAccessKeyId(), null));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'status' failed to satisfy "
+                + "constraint: Member must satisfy enum value set", error.getMessage());
+        // And the key is as it was: the status is read before the lookup, so nothing is written.
+        assertEquals("Active", iamService.listAccessKeys("alice").getFirst().getStatus());
     }
 
     @Test

@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -139,6 +140,34 @@ class AutoScalingRefreshStorageTest {
         assertEquals("i-replacement", refresh.getReplacements().getFirst().getReplacementInstanceId());
         restart(mode);
         assertEquals("us-east-1b", group.getInstances().getFirst().getAvailabilityZone());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void suspensionDatesSurviveQuiescentStorageReload(String mode) throws IOException {
+        setUp(mode);
+        service.suspendProcesses(REGION, "suspended-group", List.of("Launch", "Terminate"));
+        Map<String, Instant> recorded = group.getSuspendedProcessTimes();
+        restart(mode);
+        assertEquals(List.of("Launch", "Terminate"), group.getSuspendedProcesses());
+        assertEquals(recorded, group.getSuspendedProcessTimes());
+        service.suspendProcesses(REGION, "suspended-group", List.of("Launch"));
+        assertEquals(recorded, group.getSuspendedProcessTimes());
+        service.resumeProcesses(REGION, "suspended-group", List.of("Launch"));
+        restart(mode);
+        assertEquals(Map.of("Terminate", recorded.get("Terminate")), group.getSuspendedProcessTimes());
+        service.resumeProcesses(REGION, "suspended-group", List.of());
+        restart(mode);
+        assertTrue(group.getSuspendedProcessTimes().isEmpty());
+        assertTrue(group.getSuspendedProcesses().isEmpty());
+        group.updateSuspensionState(List.of("Launch"), Map.of());
+        service.saveAutoScalingGroupIfPresent(group);
+        restart(mode);
+        service.suspendProcesses(REGION, "suspended-group", List.of("Launch"));
+        assertTrue(group.getSuspendedProcessTimes().isEmpty(), "legacy history remains unknown");
+        service.resumeProcesses(REGION, "suspended-group", List.of("Launch"));
+        service.suspendProcesses(REGION, "suspended-group", List.of("Launch"));
+        assertNotNull(group.getSuspendedProcessTimes().get("Launch"));
     }
 
     @AfterEach
@@ -389,6 +418,19 @@ class AutoScalingRefreshStorageTest {
                 any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any());
         reconciler.reconcile(group);
         assertEquals(1, group.getInstances().size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void terminatedInstanceDropsOutOfActiveRefresh(String mode) throws IOException {
+        setUp(mode);
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        service.terminateInstanceInAutoScalingGroup(REGION, "i-original", true);
+        restart(mode);
+        AutoScalingGroup restored = service.describeAutoScalingGroups(REGION, List.of("suspended-group")).getFirst();
+        InstanceRefresh refresh = service.activeInstanceRefresh(restored);
+        assertNotNull(refresh);
+        assertTrue(refresh.getReplacements().isEmpty(), "terminated instance must leave the refresh");
     }
 
     @ParameterizedTest

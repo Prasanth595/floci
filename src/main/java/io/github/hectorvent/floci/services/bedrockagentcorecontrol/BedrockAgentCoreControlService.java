@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntime;
@@ -216,10 +217,10 @@ public class BedrockAgentCoreControlService {
             throw new AwsException("ValidationException", member + " is required", 400);
         }
         if (!value.isTextual() || !allowed.contains(value.asText())) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + value.asText() + "' at '" + member
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + value.asText() + "' at '" + member
                             + "' failed to satisfy constraint: Member must satisfy enum value set: "
-                            + allowed, 400);
+                            + allowed);
         }
     }
 

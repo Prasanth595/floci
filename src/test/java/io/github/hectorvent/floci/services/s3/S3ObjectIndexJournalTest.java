@@ -144,6 +144,7 @@ class S3ObjectIndexJournalTest {
             S3Service s3 = newService(first, directory);
             s3.createBucket(VERSIONED_BUCKET, REGION);
             s3.putBucketVersioning(VERSIONED_BUCKET, "Enabled");
+            s3.setBucketObjectLockEnabled(VERSIONED_BUCKET);
             String current = s3.putObject(VERSIONED_BUCKET, key(0), body(0), "text/plain", Map.of()).getVersionId();
             s3.putObjectLegalHold(VERSIONED_BUCKET, key(0), current, "ON");
             copyAsLeftByAKill(directory, afterCrash);

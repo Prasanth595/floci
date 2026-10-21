@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -12,11 +13,19 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
+import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.core.common.SshPublicKeysTest.withTrailing;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_BLOB;
+import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -258,6 +267,76 @@ class Ec2QueryHandlerTest {
 
         assertTrue(xml.contains("<regionEndpoint>ec2.us-gov-west-1.amazonaws.com</regionEndpoint>"), xml);
         assertFalse(xml.contains("cn-north-1"), xml);
+    }
+
+    /**
+     * The key-pair name becomes the comment only when it can be one. A key pair stored before
+     * KeyName was required has no name, which would otherwise read {@code null}, and a name with a
+     * line break would split the key into lines an authorized_keys file reads as further keys (XML
+     * turns a carriage return into a line feed on the way), so a name holding any control
+     * character, a tab included, is left off.
+     */
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"two\nlines", "carriage\rreturn", "a\ttab"})
+    void describeKeyPairsGivesTheKeyNoCommentWhenTheNameCannotBeOne(String name) {
+        KeyPair keyPair = new KeyPair();
+        keyPair.setKeyPairId("key-0123456789abcdef0");
+        keyPair.setKeyName(name);
+        keyPair.setPublicKey(ED25519_KEY + " imported-comment");
+
+        String xml = describeKeyPairWithItsPublicKey(keyPair);
+
+        assertTrue(xml.contains("<publicKey>" + ED25519_KEY + "</publicKey>"), xml);
+    }
+
+    /**
+     * ImportKeyPair now refuses material that is not exactly one whole key, but a key pair saved by
+     * an earlier version kept what it was given, so its description must still leave out a public
+     * key it does not hold: an ssh-rsa type with no exponent or modulus, an ed25519 key one byte
+     * short, an ed25519 blob followed by an extra field or by stray bytes, an RSA blob labelled
+     * ssh-ed25519, two key lines, RFC 4716 text, and a UTF-16 file read as text.
+     */
+    @ParameterizedTest
+    @MethodSource("storedMaterialThatIsNotOneWholeKey")
+    void aKeyPairSavedWithMaterialThatIsNotOneWholeKeyIsDescribedWithoutAPublicKey(String material) {
+        KeyPair keyPair = new KeyPair();
+        keyPair.setKeyPairId("key-0123456789abcdef0");
+        keyPair.setKeyName("saved-earlier");
+        keyPair.setPublicKey(material);
+
+        String xml = describeKeyPairWithItsPublicKey(keyPair);
+
+        assertTrue(xml.contains("<keyName>saved-earlier</keyName>"), xml);
+        assertFalse(xml.contains("<publicKey>"), xml);
+    }
+
+    static Stream<String> storedMaterialThatIsNotOneWholeKey() {
+        byte[] ed25519 = Base64.getDecoder().decode(ED25519_BLOB);
+        String rsaBlob = Ec2KeyMaterial.generateRsa().openSshPublicKey().split(" ")[1];
+        return Stream.of(
+                "ssh-rsa AAAAB3NzaC1yc2E= saved-earlier",
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= saved-earlier",
+                "ssh-ed25519 " + Base64.getEncoder().encodeToString(withTrailing(ed25519, new byte[] {0, 0, 0, 5, 'e', 'x', 't', 'r', 'a'})),
+                "ssh-ed25519 " + Base64.getEncoder().encodeToString(withTrailing(ed25519, new byte[] {1, 2, 3})),
+                "ssh-ed25519 " + rsaBlob + " saved-earlier",
+                "ssh-ed25519 " + ED25519_BLOB + " first\n" + Ec2KeyMaterial.generateRsa().openSshPublicKey() + " second\n",
+                "---- BEGIN SSH2 PUBLIC KEY ----\nComment: \"saved-earlier\"\n" + rsaBlob + "\n---- END SSH2 PUBLIC KEY ----\n",
+                new String(("ssh-ed25519 " + ED25519_BLOB + " saved-earlier").getBytes(StandardCharsets.UTF_16LE),
+                        StandardCharsets.UTF_8));
+    }
+
+    /** DescribeKeyPairs with IncludePublicKey=true over a service that holds only this key pair. */
+    private String describeKeyPairWithItsPublicKey(KeyPair keyPair) {
+        Ec2Service service = mock(Ec2Service.class);
+        when(service.describeKeyPairs(eq("us-east-1"), anyList(), anyList(), anyList())).thenReturn(List.of(keyPair));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("IncludePublicKey", "true");
+
+        Response response = handler(service).handle("DescribeKeyPairs", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        return (String) response.getEntity();
     }
 
     private String describeRegions(RegionResolver regionResolver, String region) {

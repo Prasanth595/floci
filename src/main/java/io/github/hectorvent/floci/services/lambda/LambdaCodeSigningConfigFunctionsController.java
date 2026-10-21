@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.model.CodeSigningConfig;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -177,10 +178,10 @@ public class LambdaCodeSigningConfigFunctionsController {
         if (arn == null || arn.isBlank()
                 || arn.length() > ARN_MAX_LENGTH
                 || !CODE_SIGNING_CONFIG_ARN.matcher(arn).matches()) {
-            throw new AwsException("InvalidParameterValueException",
-                    "1 validation error detected: Value '" + arn + "' at 'codeSigningConfigArn' "
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value '" + arn + "' at 'codeSigningConfigArn' "
                             + "failed to satisfy constraint: Member must satisfy regular expression pattern: "
-                            + CODE_SIGNING_CONFIG_ARN.pattern(), 400);
+                            + CODE_SIGNING_CONFIG_ARN.pattern());
         }
     }
 

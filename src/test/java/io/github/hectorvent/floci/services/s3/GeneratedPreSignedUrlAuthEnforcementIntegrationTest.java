@@ -199,6 +199,45 @@ class GeneratedPreSignedUrlAuthEnforcementIntegrationTest {
     }
 
     @Test
+    void aGeneratedUrlCannotBeTurnedToAnotherVersion() {
+        // A generated URL is scoped to its object's own action and signs only its X-Amz-*
+        // parameters, so a versionId appended to it breaks the signature: it never reaches the
+        // scope check as a request for a version.
+        String bucket = "generated-presign-version-" + UUID.randomUUID().toString().substring(0, 8);
+        given().filter(OWNER).when().put("/" + bucket).then().statusCode(200);
+        given().filter(OWNER).body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        String older = given().filter(OWNER).body("older").when().put("/" + bucket + "/object.txt")
+                .then().statusCode(200).extract().header("x-amz-version-id");
+        given().filter(OWNER).body("current").when().put("/" + bucket + "/object.txt").then().statusCode(200);
+
+        URI uri = URI.create(presignGenerator.generatePresignedUrl(
+                "http://localhost:" + RestAssured.port, bucket, "object.txt", "GET", 60));
+        String pathAndQuery = uri.getRawPath() + "?" + uri.getRawQuery();
+
+        given().urlEncodingEnabled(false).when().get(pathAndQuery)
+                .then().statusCode(200).body(equalTo("current"));
+        given().urlEncodingEnabled(false).when().get(pathAndQuery + "&versionId=" + older)
+                .then().statusCode(403).body("Error.Code", equalTo("SignatureDoesNotMatch"));
+    }
+
+    @Test
+    void generatedPutUrlCannotSetAnAclWithoutAclPermission() {
+        String bucket = "generated-presign-acl-" + UUID.randomUUID().toString().substring(0, 8);
+        given().filter(OWNER).when().put("/" + bucket).then().statusCode(200);
+
+        URI uri = URI.create(presignGenerator.generatePresignedUrl(
+                "http://localhost:" + RestAssured.port, bucket, "object.txt", "PUT", 60));
+        String pathAndQuery = uri.getRawPath() + "?" + uri.getRawQuery();
+
+        given().urlEncodingEnabled(false).header("x-amz-acl", "bucket-owner-full-control").body("with acl")
+                .when().put(pathAndQuery)
+                .then().statusCode(403).body("Error.Code", equalTo("AccessDenied"));
+        given().urlEncodingEnabled(false).body("without acl")
+                .when().put(pathAndQuery).then().statusCode(200);
+    }
+
+    @Test
     void generatedUrlsKeepLeadingSlashKeysDistinctUnderEnforcedIam() throws Exception {
         String bucket = "generated-presign-slash-" + UUID.randomUUID().toString().substring(0, 8);
         String baseUrl = "http://localhost:" + RestAssured.port;

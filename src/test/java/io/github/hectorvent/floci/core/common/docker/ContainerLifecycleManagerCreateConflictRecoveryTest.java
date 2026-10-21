@@ -46,9 +46,6 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
     ContainerDetector containerDetector;
 
     @Mock
-    PortAllocator portAllocator;
-
-    @Mock
     EmulatorConfig config;
 
     @Mock
@@ -221,6 +218,6 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
 
     private ContainerLifecycleManager manager() {
         return new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, portAllocator, config);
+                dockerClient, imageCacheService, containerDetector, config);
     }
 }

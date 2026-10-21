@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 
 import java.security.SecureRandom;
@@ -88,8 +89,36 @@ final class Ec2InstanceCredentials {
     }
 
     synchronized Optional<IamRole> role(Instance instance) {
+        return attachedProfile(instance).map(AttachedProfile::role);
+    }
+
+    synchronized Optional<InstanceProfile> profile(Instance instance) {
+        return attachedProfile(instance).map(AttachedProfile::profile);
+    }
+
+    /** Whether IAM holds a profile at the instance's attached ARN, whether or not it carries a role. */
+    synchronized boolean holdsProfile(Instance instance) {
+        return heldProfile(instance.getIamInstanceProfileArn()).isPresent();
+    }
+
+    private Optional<AttachedProfile> attachedProfile(Instance instance) {
         String arn = instance.getIamInstanceProfileArn();
-        if (!sessions.containsKey(instance) || arn == null) {
+        if (!sessions.containsKey(instance)) {
+            return Optional.empty();
+        }
+        return heldProfile(arn)
+                .filter(profile -> profile.getRoleNames() != null && profile.getRoleNames().size() == 1)
+                .flatMap(profile -> {
+                    String[] parts = arn.split(":", 6);
+                    return iam.findRole(parts[4], profile.getRoleNames().getFirst())
+                            .filter(role -> role.getArn() != null && role.getArn().startsWith(
+                                    "arn:" + parts[1] + ":iam::" + parts[4] + ":role/"))
+                            .map(role -> new AttachedProfile(profile, role));
+                });
+    }
+
+    private Optional<InstanceProfile> heldProfile(String arn) {
+        if (arn == null) {
             return Optional.empty();
         }
         String[] parts = arn.split(":", 6);
@@ -99,12 +128,7 @@ final class Ec2InstanceCredentials {
             return Optional.empty();
         }
         String name = arn.substring(arn.lastIndexOf('/') + 1);
-        return iam.findInstanceProfile(parts[4], name)
-                .filter(profile -> arn.equals(profile.getArn()))
-                .filter(profile -> profile.getRoleNames() != null && profile.getRoleNames().size() == 1)
-                .flatMap(profile -> iam.findRole(parts[4], profile.getRoleNames().getFirst()))
-                .filter(role -> role.getArn() != null && role.getArn().startsWith(
-                        "arn:" + parts[1] + ":iam::" + parts[4] + ":role/"));
+        return iam.findInstanceProfile(parts[4], name).filter(profile -> arn.equals(profile.getArn()));
     }
 
     synchronized Optional<SessionCredential> get(Instance instance, String roleName, Instant now) {
@@ -165,4 +189,6 @@ final class Ec2InstanceCredentials {
     }
 
     private record Issued(SessionCredential session, String roleId, String profileArn) {}
+
+    private record AttachedProfile(InstanceProfile profile, IamRole role) {}
 }

@@ -46,6 +46,7 @@ class RdsIamAuthLambdaSessionIntegrationTest {
 
     private static final String ACCOUNT_ID = "000000000000";
     private static final String MASTER_USER = "master";
+    private static final String IAM_USER = "iam_user";
     private static final String MASTER_PASSWORD = "Master123!";
     private static final String DATABASE = "appdb";
     private static final String SESSION_SECRET = "lambda+session/secret=key";
@@ -89,13 +90,14 @@ class RdsIamAuthLambdaSessionIntegrationTest {
             iamService.registerLambdaExecutionRoleSession(ACCOUNT_ID, accessKeyId, SESSION_SECRET, SESSION_TOKEN,
                     "arn:aws:iam::" + ACCOUNT_ID + ":role/connect-with-iam");
             awaitPasswordReady(port);
+            createIamRole(port);
 
             assertIamAuthentication(port, accessKeyId, true);
 
-            String anotherSession = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
+            String anotherSession = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, IAM_USER,
                     accessKeyId, SESSION_SECRET, Instant.now().minusSeconds(60), 900,
                     SESSION_TOKEN.replace('+', ' '));
-            SQLException refused = assertThrows(SQLException.class, () -> connect(port, anotherSession).close());
+            SQLException refused = assertThrows(SQLException.class, () -> connect(port, IAM_USER, anotherSession).close());
             assertTrue(refused.getMessage().contains("password authentication failed"), refused.getMessage());
         } finally {
             iamService.unregisterSession(ACCOUNT_ID, accessKeyId);
@@ -135,6 +137,9 @@ class RdsIamAuthLambdaSessionIntegrationTest {
                     .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
             iamService.registerLambdaExecutionRoleSession(ACCOUNT_ID, accessKeyId, SESSION_SECRET, SESSION_TOKEN,
                     "arn:aws:iam::" + ACCOUNT_ID + ":role/cluster-connect-with-iam");
+            // The cluster and member endpoints share the same PostgreSQL backend.
+            awaitPasswordReady(clusterPort);
+            createIamRole(clusterPort);
             for (int port : new int[]{clusterPort, memberPort}) {
                 awaitPasswordReady(port);
                 assertIamAuthentication(port, accessKeyId, false);
@@ -189,6 +194,7 @@ class RdsIamAuthLambdaSessionIntegrationTest {
             iamService.registerLambdaExecutionRoleSession(ACCOUNT_ID, accessKeyId, SESSION_SECRET, SESSION_TOKEN,
                     "arn:aws:iam::" + ACCOUNT_ID + ":role/member-connect-with-iam");
             awaitPasswordReady(port);
+            createIamRole(port);
             assertIamAuthentication(port, accessKeyId, enabled);
         } finally {
             iamService.unregisterSession(ACCOUNT_ID, accessKeyId);
@@ -233,15 +239,16 @@ class RdsIamAuthLambdaSessionIntegrationTest {
             iamService.registerLambdaExecutionRoleSession(ACCOUNT_ID, accessKeyId, SESSION_SECRET, SESSION_TOKEN,
                     "arn:aws:iam::" + ACCOUNT_ID + ":role/connect-with-iam");
             awaitPasswordReady(port);
-            String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
+            createIamRole(port);
+            String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, IAM_USER,
                     accessKeyId, SESSION_SECRET, Instant.now().minusSeconds(60), 900, SESSION_TOKEN);
-            assertCurrentUser(port, token);
+            assertCurrentUser(port, IAM_USER, token);
             rds("DescribeDBInstances").formParam("DBInstanceIdentifier", memberId)
                     .when().post("/").then().statusCode(200)
                     .body(containsString("<MasterUsername>" + MASTER_USER + "</MasterUsername>"));
             rds("RebootDBInstance").formParam("DBInstanceIdentifier", memberId)
                     .when().post("/").then().statusCode(200);
-            assertCurrentUser(port, token);
+            assertCurrentUser(port, IAM_USER, token);
         } finally {
             iamService.unregisterSession(ACCOUNT_ID, accessKeyId);
             rds("DeleteDBInstance").formParam("DBInstanceIdentifier", memberId)
@@ -271,20 +278,21 @@ class RdsIamAuthLambdaSessionIntegrationTest {
             iamService.registerLambdaExecutionRoleSession(ACCOUNT_ID, accessKey, SESSION_SECRET, SESSION_TOKEN,
                     "arn:aws:iam::" + ACCOUNT_ID + ":role/connect-with-iam");
             awaitPasswordReady(port);
-            String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
+            createIamRole(port);
+            String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, IAM_USER,
                     accessKey, SESSION_SECRET, Instant.now().minusSeconds(60), 900, SESSION_TOKEN);
-            assertCurrentUser(port, token);
+            assertCurrentUser(port, IAM_USER, token);
             rds("ModifyDBInstance").formParam("DBInstanceIdentifier", member)
                     .formParam("MasterUserPassword", "MemberOnlyPassword!")
                     .formParam("PubliclyAccessible", "true").when().post("/").then().statusCode(200)
                     .body(containsString("<PubliclyAccessible>true</PubliclyAccessible>"));
             assertCurrentUser(port, MASTER_PASSWORD);
-            assertCurrentUser(port, token);
+            assertCurrentUser(port, IAM_USER, token);
             assertThrows(SQLException.class, () -> connect(port, "MemberOnlyPassword!").close());
             rds("RebootDBInstance").formParam("DBInstanceIdentifier", member)
                     .when().post("/").then().statusCode(200);
             assertCurrentUser(port, MASTER_PASSWORD);
-            assertCurrentUser(port, token);
+            assertCurrentUser(port, IAM_USER, token);
             assertThrows(SQLException.class, () -> connect(port, "MemberOnlyPassword!").close());
         } finally {
             iamService.unregisterSession(ACCOUNT_ID, accessKey);
@@ -337,6 +345,14 @@ class RdsIamAuthLambdaSessionIntegrationTest {
         awaitPasswordReady(port, MASTER_PASSWORD);
     }
 
+    private static void createIamRole(int port) throws SQLException {
+        try (Connection connection = connect(port, MASTER_PASSWORD);
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE ROLE " + IAM_USER + " LOGIN");
+            statement.execute("GRANT rds_iam TO " + IAM_USER);
+        }
+    }
+
     private static void awaitPasswordReady(int port, String password) {
         await().atMost(Duration.ofSeconds(60)).ignoreExceptions().until(() -> {
             try (Connection connection = connect(port, password)) {
@@ -346,27 +362,35 @@ class RdsIamAuthLambdaSessionIntegrationTest {
     }
 
     private static void assertIamAuthentication(int port, String accessKeyId, boolean enabled) throws Exception {
-        String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, MASTER_USER,
+        String token = SigV4TokenTestHelper.createRdsToken("127.0.0.1", port, IAM_USER,
                 accessKeyId, SESSION_SECRET, Instant.now().minusSeconds(60), 900, SESSION_TOKEN);
         if (enabled) {
-            assertCurrentUser(port, token);
+            assertCurrentUser(port, IAM_USER, token);
         } else {
-            assertThrows(SQLException.class, () -> connect(port, token).close());
+            assertThrows(SQLException.class, () -> connect(port, IAM_USER, token).close());
         }
     }
 
     private static void assertCurrentUser(int port, String password) throws SQLException {
-        try (Connection connection = connect(port, password);
+        assertCurrentUser(port, MASTER_USER, password);
+    }
+
+    private static void assertCurrentUser(int port, String user, String password) throws SQLException {
+        try (Connection connection = connect(port, user, password);
              Statement statement = connection.createStatement();
              ResultSet rows = statement.executeQuery("SELECT current_user")) {
             assertTrue(rows.next());
-            assertEquals(MASTER_USER, rows.getString(1));
+            assertEquals(user, rows.getString(1));
         }
     }
 
     private static Connection connect(int port, String password) throws SQLException {
+        return connect(port, MASTER_USER, password);
+    }
+
+    private static Connection connect(int port, String user, String password) throws SQLException {
         Properties properties = new Properties();
-        properties.setProperty("user", MASTER_USER);
+        properties.setProperty("user", user);
         properties.setProperty("password", password);
         properties.setProperty("sslmode", "disable");
         properties.setProperty("connectTimeout", "5");

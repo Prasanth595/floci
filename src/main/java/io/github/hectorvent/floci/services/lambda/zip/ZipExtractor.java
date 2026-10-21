@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda.zip;
 
+import io.github.hectorvent.floci.core.common.FileTrees;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
@@ -10,10 +11,8 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.UUID;
-import java.util.stream.Stream;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
@@ -30,7 +29,7 @@ public class ZipExtractor {
 
     private static final char BACKSLASH = '\\';
     public static final long DIRECT_UPLOAD_MAX_COMPRESSED_BYTES = 50L * 1024 * 1024;
-    private static final long S3_MAX_COMPRESSED_BYTES = 250L * 1024 * 1024;
+    static final long S3_MAX_COMPRESSED_BYTES = 250L * 1024 * 1024;
     static final long MAX_EXPANDED_BYTES = 250L * 1024 * 1024;
     static final long MAX_ENTRY_BYTES = 250L * 1024 * 1024;
     public static final int DEFAULT_MAX_ENTRIES = 100_000;
@@ -40,18 +39,54 @@ public class ZipExtractor {
     }
 
     public void extractTo(byte[] zipBytes, Path targetDir, int maxEntries) throws IOException {
-        if (maxEntries < 1) {
-            throw new IOException("ZIP archive entry limit must be at least 1: " + maxEntries);
-        }
-        if (zipBytes.length > S3_MAX_COMPRESSED_BYTES) {
-            throw new IOException("ZIP archive exceeds the " + S3_MAX_COMPRESSED_BYTES
-                    + " byte compressed limit: " + zipBytes.length);
-        }
+        extractTo(zipBytes, targetDir, maxEntries, null);
+    }
+
+    public void extractTo(byte[] zipBytes, Path targetDir, int maxEntries, Runnable beforeInstall) throws IOException {
+        checkLimits(maxEntries, zipBytes.length);
 
         // Resolve to absolute path so that normalize() on entry paths stays comparable
         Path absTarget = targetDir.toAbsolutePath().normalize();
         Files.createDirectories(absTarget.getParent());
 
+        // ZipFile needs a seekable file, so the bytes are staged on disk. Stage inside the code
+        // store rather than java.io.tmpdir: the shared temp filesystem must not become a new
+        // unbounded consumer that concurrent deployments can exhaust and that unrelated
+        // services would then fail on. The code store already has to hold this package's
+        // *uncompressed* contents — always at least as large as the archive — so it is already
+        // provisioned for the size, and the staged copy is released as soon as extraction ends.
+        Path staged = Files.createTempFile(absTarget.getParent(), ".floci-staging-", ".zip");
+        try {
+            Files.write(staged, zipBytes);
+            extract(staged, absTarget, maxEntries, beforeInstall);
+        } finally {
+            Files.deleteIfExists(staged);
+        }
+    }
+
+    /** For an archive already on disk, which is opened in place instead of read into the heap and staged. */
+    public void extractTo(Path zipFile, Path targetDir, int maxEntries) throws IOException {
+        extractTo(zipFile, targetDir, maxEntries, null);
+    }
+
+    public void extractTo(Path zipFile, Path targetDir, int maxEntries, Runnable beforeInstall) throws IOException {
+        checkLimits(maxEntries, Files.size(zipFile));
+        Path absTarget = targetDir.toAbsolutePath().normalize();
+        Files.createDirectories(absTarget.getParent());
+        extract(zipFile, absTarget, maxEntries, beforeInstall);
+    }
+
+    static void checkLimits(int maxEntries, long compressedBytes) throws IOException {
+        if (maxEntries < 1) {
+            throw new IOException("ZIP archive entry limit must be at least 1: " + maxEntries);
+        }
+        if (compressedBytes > S3_MAX_COMPRESSED_BYTES) {
+            throw new IOException("ZIP archive exceeds the " + S3_MAX_COMPRESSED_BYTES
+                    + " byte compressed limit: " + compressedBytes);
+        }
+    }
+
+    private void extract(Path archive, Path absTarget, int maxEntries, Runnable beforeInstall) throws IOException {
         // Extract into a staging directory and swap it in, rather than writing over the target
         // in place. A deployment package is the complete contents of the function, so a file
         // dropped between two deploys has to disappear — writing in place only ever adds and
@@ -72,17 +107,8 @@ public class ZipExtractor {
         // CRC and sizes regardless of the flag, so reading it accepts the same archives real
         // AWS Lambda does — e.g. a Serverless Framework package bundling node_modules
         // (issue #2593).
-        //
-        // ZipFile needs a seekable file, so the bytes are staged on disk. Stage inside the code
-        // store rather than java.io.tmpdir: the shared temp filesystem must not become a new
-        // unbounded consumer that concurrent deployments can exhaust and that unrelated
-        // services would then fail on. The code store already has to hold this package's
-        // *uncompressed* contents — always at least as large as the archive — so it is already
-        // provisioned for the size, and the staged copy is released as soon as extraction ends.
-        Path staged = Files.createTempFile(absTarget.getParent(), ".floci-staging-", ".zip");
         try {
-            Files.write(staged, zipBytes);
-            try (ZipFile zip = new ZipFile(staged.toFile())) {
+            try (ZipFile zip = new ZipFile(archive.toFile())) {
                 Enumeration<? extends ZipEntry> entries = zip.entries();
                 int entryCount = 0;
                 long expandedBytes = 0;
@@ -142,12 +168,14 @@ public class ZipExtractor {
                 }
             }
             // Extraction succeeded in full: install the new tree.
+            if (beforeInstall != null) {
+                beforeInstall.run();
+            }
             install(staging, absTarget);
         } finally {
-            Files.deleteIfExists(staged);
             // A no-op once install() moved it; on failure this discards the partial staging tree
             // and leaves the previous extraction untouched.
-            deleteRecursively(staging);
+            FileTrees.delete(staging);
         }
 
         LOG.debugv("Extracted ZIP to: {0}", absTarget);
@@ -205,7 +233,7 @@ public class ZipExtractor {
             // its metadata and warm pool updates while the new code is already serving. Leaving
             // the tree behind costs disk and is recoverable; lying about the outcome is not.
             try {
-                deleteRecursively(previous);
+                FileTrees.delete(previous);
             } catch (IOException e) {
                 LOG.warnv("Installed {0} but could not remove the superseded package at {1}: {2}",
                         absTarget, previous, e.getMessage());
@@ -219,17 +247,6 @@ public class ZipExtractor {
         } catch (AtomicMoveNotSupportedException e) {
             // Some filesystems (and bind mounts inside containers) cannot rename atomically.
             Files.move(source, destination);
-        }
-    }
-
-    private static void deleteRecursively(Path root) throws IOException {
-        if (!Files.exists(root)) {
-            return;
-        }
-        try (Stream<Path> paths = Files.walk(root)) {
-            for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) {
-                Files.deleteIfExists(p);
-            }
         }
     }
 

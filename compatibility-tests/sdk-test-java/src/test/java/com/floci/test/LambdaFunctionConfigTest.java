@@ -328,4 +328,35 @@ class LambdaFunctionConfigTest {
             }
         }
     }
+
+    @Test
+    @Order(8)
+    @DisplayName("a log level under Text is refused on create and on update, as Lambda refuses it")
+    void logLevelUnderTextIsRefused() {
+        // Measured on Lambda (eu-west-1, 2026-10-18), with the format named or left to its default.
+        String refused = "LogLevel is not supported when LogFormat is set to \"Text\". Remove LogLevel from your "
+                + "request or change the LogFormat to \"JSON\" and try again.";
+        assertThatThrownBy(() -> lambda.createFunction(CreateFunctionRequest.builder()
+                .functionName(TestFixtures.uniqueName("fn-text-level"))
+                .runtime(Runtime.NODEJS20_X)
+                .role(ROLE)
+                .handler("index.handler")
+                .code(FunctionCode.builder()
+                        .zipFile(SdkBytes.fromByteArray(LambdaUtils.minimalZip()))
+                        .build())
+                .loggingConfig(LoggingConfig.builder()
+                        .logFormat(LogFormat.TEXT)
+                        .applicationLogLevel(ApplicationLogLevel.WARN)
+                        .build())
+                .build()))
+                .isInstanceOf(InvalidParameterValueException.class)
+                .hasMessageContaining(refused);
+
+        assertThatThrownBy(() -> lambda.updateFunctionConfiguration(UpdateFunctionConfigurationRequest.builder()
+                .functionName(FN)
+                .loggingConfig(LoggingConfig.builder().systemLogLevel(SystemLogLevel.WARN).build())
+                .build()))
+                .isInstanceOf(InvalidParameterValueException.class)
+                .hasMessageContaining(refused);
+    }
 }

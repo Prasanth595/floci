@@ -37,7 +37,8 @@ class Route53ResolverReplayFallbackTest {
     void setUp() {
         endpointIpRequests = new InMemoryStorage<>();
         service = new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), endpointIpRequests, objectMapper);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), endpointIpRequests, new InMemoryStorage<>(),
+                objectMapper);
     }
 
     private JsonNode createRequest(String token, String ip) {
@@ -84,6 +85,21 @@ class Route53ResolverReplayFallbackTest {
         AwsException conflict = assertThrows(AwsException.class,
                 () -> service.createResolverEndpoint(createRequest(token, "10.0.0.5"), REGION, ACCOUNT));
         assertEquals("ResourceExistsException", conflict.jsonType());
+    }
+
+    @Test
+    void listingIpAddressesWithoutARecordFailsInsteadOfReturningEmpty() {
+        // An empty list beside IpAddressCount=2 would be a silent wrong answer; the modeled
+        // InternalServiceErrorException says the state is broken.
+        ObjectNode created = service.createResolverEndpoint(createRequest("tok-list", "10.0.0.5"), REGION, ACCOUNT);
+        String id = created.get("Id").asText();
+        assertEquals(2, service.listResolverEndpointIpAddresses(id).size());
+
+        endpointIpRequests.delete(id);
+        AwsException broken = assertThrows(AwsException.class,
+                () -> service.listResolverEndpointIpAddresses(id));
+        assertEquals("InternalServiceErrorException", broken.jsonType());
+        assertEquals(400, broken.getHttpStatus());
     }
 
     @Test

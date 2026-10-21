@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.services.acm.AcmService;
+import io.github.hectorvent.floci.services.acm.model.Certificate;
+import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -9,6 +11,7 @@ import org.jboss.logging.Logger;
 
 import java.util.Collection;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * Whether a certificate another service names exists, and the lock that keeps the answer true for
@@ -55,23 +58,95 @@ public class CertificateReferenceResolver {
         };
     }
 
+    /** Detached TLS material for a reference already recorded by a certificate consumer. */
+    public record CertificateMaterial(String arn, String certificateBody, String privateKey, String certificateChain) {}
+
     /**
-     * Runs a write that records an IAM server certificate while IAM holds the lock
-     * {@code DeleteServerCertificate} takes, so the certificate cannot be deleted between the
-     * check and the write. A caller re-checks inside the action: a check made before the lock
-     * says nothing about the moment of the write, while one made outside it keeps the error
-     * precedence AWS has.
-     *
-     * <p>Only for a write that names an IAM certificate. One naming no certificate, or an ACM
-     * certificate, cannot leave a referrer holding a deleted IAM certificate, and taking the lock
-     * for every write would make a certificate delete wait on writes that cannot affect it.
+     * Reads a published reference in its owner's account. IAM retains former ARNs after a rename,
+     * so an existing reference keeps its certificate while new references still pass through
+     * {@link #exists}. The returned strings are snapshots; background socket callbacks must not
+     * repeat an account-sensitive lookup after the request context has ended.
      */
-    public void runWhileHeld(Collection<String> certificateArns, Runnable action) {
-        if (iamService == null || !namesIamCertificate(certificateArns)) {
-            action.run();
-            return;
+    public CertificateMaterial publishedMaterial(String ownerArn, String region, String certificateArn) {
+        AwsArnUtils.Arn owner = AwsArnUtils.parse(ownerArn);
+        AwsArnUtils.Arn certificate = AwsArnUtils.parse(certificateArn);
+        if (owner.accountId().isBlank() || !owner.accountId().equals(certificate.accountId())
+                || !owner.partition().equals(certificate.partition())) {
+            throw missingCertificate();
         }
-        iamService.runWithServerCertificatesHeld(action);
+        return RequestScopes.callAs(owner.accountId(), region, () -> {
+            if ("iam".equals(certificate.service()) && iamService != null) {
+                return iamService.supplyWithServerCertificatesHeld(() -> {
+                    ServerCertificate stored = iamServerCertificate(certificate, certificateArn)
+                            .orElseGet(() -> iamService.listServerCertificates(null).stream()
+                                    .filter(value -> value.getFormerArns().contains(certificateArn))
+                                    .findFirst().orElseThrow(CertificateReferenceResolver::missingCertificate));
+                    return new CertificateMaterial(certificateArn, stored.getCertificateBody(),
+                            stored.getPrivateKey(), stored.getCertificateChain());
+                });
+            }
+            if ("acm".equals(certificate.service()) && acmService != null && region.equals(certificate.region())) {
+                return acmService.supplyWithCertificatesHeld(() -> {
+                    try {
+                        Certificate stored = acmService.getCertificate(certificateArn, region);
+                        if (!certificateArn.equals(stored.getArn()) || stored.getStatus() != CertificateStatus.ISSUED) {
+                            throw missingCertificate();
+                        }
+                        return new CertificateMaterial(certificateArn, stored.getCertificateBody(),
+                                stored.getPrivateKey(), stored.getCertificateChain());
+                    } catch (AwsException failure) {
+                        if ("ResourceNotFoundException".equals(failure.getErrorCode())) {
+                            throw missingCertificate();
+                        }
+                        throw failure;
+                    }
+                });
+            }
+            throw missingCertificate();
+        });
+    }
+
+    private static AwsException missingCertificate() {
+        return new AwsException("CertificateNotFound", "The specified certificate does not exist.", 400);
+    }
+
+    /** Runs reference publication under IAM then ACM guards for the complete effective list. */
+    public void runWhileHeld(Collection<String> certificateArns, Runnable action) {
+        supplyWhileHeld(certificateArns, () -> {
+            action.run();
+            return null;
+        });
+    }
+
+    public <T> T supplyWhileHeld(Collection<String> certificateArns, Supplier<T> action) {
+        Supplier<T> acmGuard = () -> acmService != null && namesCertificateService(certificateArns, "acm")
+                ? acmService.supplyWithCertificatesHeld(action) : action.get();
+        return iamService != null && namesIamCertificate(certificateArns)
+                ? iamService.supplyWithServerCertificatesHeld(acmGuard) : acmGuard.get();
+    }
+
+    /** ELB usability is narrower than existence, which other consumers also query. */
+    public boolean isUsableAcmCertificate(String region, String certificateArn) {
+        if (certificateArn == null || !AwsArnUtils.isArn(certificateArn)
+                || !"acm".equals(AwsArnUtils.parse(certificateArn).service()) || acmService == null) {
+            return true;
+        }
+        try {
+            return acmService.supplyWithCertificatesHeld(() -> {
+                Certificate certificate = acmService.getCertificate(certificateArn, region);
+                return certificateArn.equals(certificate.getArn()) && certificate.getStatus() == CertificateStatus.ISSUED;
+            });
+        } catch (AwsException failure) {
+            if ("ResourceNotFoundException".equals(failure.getErrorCode())) {
+                return false;
+            }
+            throw failure;
+        }
+    }
+
+    private boolean namesCertificateService(Collection<String> arns, String service) {
+        return arns != null && arns.stream().anyMatch(arn -> arn != null && AwsArnUtils.isArn(arn)
+                && service.equals(AwsArnUtils.parse(arn).service()));
     }
 
     /** Whether any of these ARNs names a certificate IAM serves, rather than ACM. */

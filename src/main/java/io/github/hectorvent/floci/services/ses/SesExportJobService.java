@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -38,7 +39,6 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
  * SES V2 export jobs. A job reads the timelines already stored at send time, renders them through
@@ -125,27 +125,27 @@ public class SesExportJobService implements Resettable {
 
     /**
      * The request's already-parsed {@code ExportDataSource} and {@code ExportDestination}. The
-     * controller keeps the JSON shape checks; the service owns the order the service-level rules
-     * fire in.
+     * controller has checked their JSON types against the SES v2 shapes; the service owns the order
+     * the service-level rules fire in.
      */
     public ExportJob createExportJob(String region, String accountId, JsonNode exportDataSource,
                                      JsonNode exportDestination, Runnable vdmGate) {
-        JsonNode metrics = objectMemberOrAbsent(exportDataSource, "MetricsDataSource");
-        JsonNode insights = objectMemberOrAbsent(exportDataSource, "MessageInsightsDataSource");
+        JsonNode metrics = exportDataSource.path("MetricsDataSource");
+        JsonNode insights = exportDataSource.path("MessageInsightsDataSource");
         if (metrics.isObject() == insights.isObject()) {
             throw new AwsException("BadRequestException", "One data source must be provided", 400);
         }
         if (!exportDestination.isObject()) {
             throw notNull("exportDestination");
         }
-        String dataFormat = stringMemberOrAbsent(exportDestination, "DataFormat");
+        String dataFormat = exportDestination.path("DataFormat").textValue();
         if (dataFormat == null) {
             throw notNull("exportDestination.dataFormat");
         }
         if (!DATA_FORMATS.contains(dataFormat)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'exportDestination.dataFormat' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: [CSV, JSON]", 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'exportDestination.dataFormat' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: [CSV, JSON]");
         }
         // Probe-confirmed order: the data source and the destination's own constraints are checked
         // first, then the refusal of a caller-chosen destination, then the VDM gate.
@@ -388,16 +388,16 @@ public class SesExportJobService implements Resettable {
     /** Newest first, as SES lists them; the paged list resumes on the same order. */
     public List<ExportJob> listExportJobs(String region, String sourceType, String jobStatus) {
         if (sourceType != null && !SOURCE_TYPES.contains(sourceType)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'exportSourceType' failed to satisfy "
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'exportSourceType' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + "[METRICS_DATA, MESSAGE_INSIGHTS]", 400);
+                            + "[METRICS_DATA, MESSAGE_INSIGHTS]");
         }
         if (jobStatus != null && !JOB_STATUSES.contains(jobStatus)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'jobStatus' failed to satisfy "
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'jobStatus' failed to satisfy "
                             + "constraint: Member must satisfy enum value set: "
-                            + "[CREATED, PROCESSING, COMPLETED, FAILED, CANCELLED]", 400);
+                            + "[CREATED, PROCESSING, COMPLETED, FAILED, CANCELLED]");
         }
         return exportJobStore.scan(k -> k.startsWith(keyPrefix(region))).stream()
                 .filter(job -> sourceType == null || sourceType.equals(job.getExportSourceType()))
@@ -540,21 +540,8 @@ public class SesExportJobService implements Resettable {
     }
 
     private static AwsException notNull(String member) {
-        return new AwsException("BadRequestException",
-                "1 validation error detected: Value at '" + member
-                        + "' failed to satisfy constraint: Member must not be null", 400);
-    }
-
-    /**
-     * A union member of the wrong JSON type read as absent, so a request carrying a valid source
-     * plus a malformed one passed the exactly-one check and silently exported the valid half.
-     */
-    private static JsonNode objectMemberOrAbsent(JsonNode parent, String field) {
-        JsonNode member = parent.path(field);
-        if (!member.isMissingNode() && !member.isNull() && !member.isObject()) {
-            throw new AwsException("SerializationException", null, 400);
-        }
-        return member;
+        return SmithyValidationErrors.badRequest(
+                "Value at '" + member + "' failed to satisfy constraint: Member must not be null");
     }
 
     /**
@@ -569,21 +556,21 @@ public class SesExportJobService implements Resettable {
             return;
         }
         if (maxResults < 1 || maxResults > MAX_RESULTS) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at "
+            throw SmithyValidationErrors.badRequest(
+                    "Value at "
                             + "'exportDataSource.messageInsightsDataSource.maxResults' failed to "
                             + "satisfy constraint: Member must be between 1 and " + MAX_RESULTS
-                            + ", inclusive", 400);
+                            + ", inclusive");
         }
     }
 
     private static Instant requireDate(JsonNode source, String field) {
         Instant value = date(source, field);
         if (value == null) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at '" + field.substring(0, 1).toLowerCase(Locale.ROOT)
+            throw SmithyValidationErrors.badRequest(
+                    "Value at '" + field.substring(0, 1).toLowerCase(Locale.ROOT)
                             + field.substring(1) + "' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+                            + "Member must not be null");
         }
         return value;
     }

@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
-import io.github.hectorvent.floci.testing.DockerAvailability;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -29,8 +28,17 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Creates, updates and deletes serverless caches, and checks that a Valkey or Memcached cache keeps
+ * its data across metadata changes and authenticates the current members of its user group.
+ *
+ * <p>The cache containers are namespaced by {@link SidecarContainersProfile}, which this class
+ * shares with the other classes whose managers start real containers. The profile it used before
+ * also mocked RDS and DocumentDB; this class calls neither, and ElastiCache does not reach them, so
+ * the shared profile leaves both at the test default.
+ */
 @QuarkusTest
-@TestProfile(ServerlessTestProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class ElastiCacheServerlessIntegrationTest {
     @TestHTTPResource
     URI endpoint;
@@ -100,7 +108,7 @@ class ElastiCacheServerlessIntegrationTest {
 
     @Test
     void dockerValkeyPreservesDataAndAuthenticatesCurrentGroupMembers() throws Exception {
-        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the serverless data plane");
+        SidecarContainersProfile.requireDocker();
         try (ElastiCacheClient client = client()) {
             client.createUser(request -> request.userId("serverless-alice").userName("alice").engine("valkey")
                     .accessString("on ~* +@all").passwords("alice-password-123"));
@@ -164,7 +172,7 @@ class ElastiCacheServerlessIntegrationTest {
 
     @Test
     void dockerMemcachedPreservesValuesAcrossMetadataChanges() throws Exception {
-        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the serverless Memcached data plane");
+        SidecarContainersProfile.requireDocker();
         try (ElastiCacheClient client = client()) {
             try {
                 ServerlessCache cache = client.createServerlessCache(request -> request.serverlessCacheName("serverless-memcached")

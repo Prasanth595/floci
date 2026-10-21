@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
 import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
@@ -36,6 +37,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+
+import static io.github.hectorvent.floci.services.ssm.SsmJsonDeserialization.serializationException;
 
 @ApplicationScoped
 public class SsmJsonHandler {
@@ -315,10 +318,10 @@ public class SsmJsonHandler {
 
         Integer maxResults = request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
         if (maxResults != null && (maxResults < 1 || maxResults > DESCRIBE_PARAMETERS_MAX_RESULTS)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + maxResults + "' at 'maxResults' failed to "
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + maxResults + "' at 'maxResults' failed to "
                             + "satisfy constraint: Member must have value between 1 and "
-                            + DESCRIBE_PARAMETERS_MAX_RESULTS, 400);
+                            + DESCRIBE_PARAMETERS_MAX_RESULTS);
         }
         PaginatedResult<Parameter> page = Pagination.paginate(
                 ssmService.describeParameters(filters, region), Parameter::getName,
@@ -450,10 +453,9 @@ public class SsmJsonHandler {
         JsonNode nameNode = request.path("Name");
         String name = nameNode.asText();
         if (!nameNode.isTextual() || !pattern.matcher(name).matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + name + "' at 'name' failed to satisfy constraint: "
-                            + "Member must satisfy regular expression pattern: " + pattern.pattern(),
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + name + "' at 'name' failed to satisfy constraint: "
+                            + "Member must satisfy regular expression pattern: " + pattern.pattern());
         }
         return name;
     }
@@ -468,10 +470,9 @@ public class SsmJsonHandler {
     private void requireSharePermissionType(JsonNode request) {
         String permissionType = request.path("PermissionType").asText();
         if (permissionType == null || permissionType.isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'permissionType' failed to satisfy "
-                            + "constraint: Member must not be null",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'permissionType' failed to satisfy "
+                            + "constraint: Member must not be null");
         }
         if (!"Share".equals(permissionType)) {
             throw new AwsException("InvalidPermissionType",
@@ -506,10 +507,9 @@ public class SsmJsonHandler {
     private String requireDocumentType(JsonNode request) {
         String documentType = request.path("DocumentType").asText("Command");
         if (!DOCUMENT_TYPES.contains(documentType)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + documentType + "' at 'documentType' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: " + DOCUMENT_TYPES,
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + documentType + "' at 'documentType' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: " + DOCUMENT_TYPES);
         }
         return documentType;
     }
@@ -522,26 +522,23 @@ public class SsmJsonHandler {
     private List<String> accountIds(JsonNode request, String field) {
         JsonNode fieldNode = request.path(field);
         if (!fieldNode.isMissingNode() && !fieldNode.isNull() && !fieldNode.isArray()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + decapitalize(field) + "' failed to satisfy "
-                            + "constraint: Member must be a list",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at '" + decapitalize(field) + "' failed to satisfy "
+                            + "constraint: Member must be a list");
         }
         List<String> accountIds = new ArrayList<>();
         fieldNode.forEach(node -> accountIds.add(node.asText()));
         if (accountIds.size() > MAX_ACCOUNT_IDS) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at '" + decapitalize(field) + "' failed to satisfy "
-                            + "constraint: Member must have length less than or equal to " + MAX_ACCOUNT_IDS,
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value at '" + decapitalize(field) + "' failed to satisfy "
+                            + "constraint: Member must have length less than or equal to " + MAX_ACCOUNT_IDS);
         }
         for (String accountId : accountIds) {
             if (!ACCOUNT_ID.matcher(accountId).matches()) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + accountId + "' at '" + decapitalize(field)
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + accountId + "' at '" + decapitalize(field)
                                 + "' failed to satisfy constraint: Member must satisfy regular expression "
-                                + "pattern: (?i)all|[0-9]{12}",
-                        400);
+                                + "pattern: (?i)all|[0-9]{12}");
             }
         }
         return accountIds;
@@ -598,10 +595,9 @@ public class SsmJsonHandler {
     private String requireDocumentContent(JsonNode request) {
         JsonNode contentNode = request.path("Content");
         if (!contentNode.isTextual() || contentNode.asText().isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'content' failed to satisfy "
-                            + "constraint: Member must not be null",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'content' failed to satisfy "
+                            + "constraint: Member must not be null");
         }
         return contentNode.asText();
     }
@@ -633,11 +629,10 @@ public class SsmJsonHandler {
         List<String> accountIdsToAdd = accountIds(request, "AccountIdsToAdd");
         List<String> accountIdsToRemove = accountIds(request, "AccountIdsToRemove");
         if (accountIdsToAdd.isEmpty() && accountIdsToRemove.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'accountIdsToAdd' failed to satisfy "
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'accountIdsToAdd' failed to satisfy "
                             + "constraint: Member must not be null, or a value must be specified for "
-                            + "'accountIdsToRemove'",
-                    400);
+                            + "'accountIdsToRemove'");
         }
 
         ssmService.modifyDocumentPermission(name, accountIdsToAdd, accountIdsToRemove, region);
@@ -767,9 +762,8 @@ public class SsmJsonHandler {
     private Response handleCreateAssociation(JsonNode request, String region) {
         JsonNode nameNode = request.path("Name");
         if (!nameNode.isTextual() || nameNode.asText().isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'name' failed to satisfy constraint: Member must not be null",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'name' failed to satisfy constraint: Member must not be null");
         }
         String name = nameNode.asText();
 
@@ -801,9 +795,8 @@ public class SsmJsonHandler {
     private Response handleUpdateAssociation(JsonNode request, String region) {
         String associationId = request.hasNonNull("AssociationId") ? request.path("AssociationId").asText() : null;
         if (associationId == null || associationId.isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'associationId' failed to satisfy constraint: Member must not be null",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'associationId' failed to satisfy constraint: Member must not be null");
         }
 
         String associationName = request.hasNonNull("AssociationName") ? request.path("AssociationName").asText() : null;
@@ -1048,7 +1041,7 @@ public class SsmJsonHandler {
             } else if (l.isTextual()) {
                 labels.add(l.textValue());
             } else {
-                throw serializationException(l, "String");
+                throw serializationException(l, "a String");
             }
         }
         return labels;
@@ -1060,7 +1053,7 @@ public class SsmJsonHandler {
             return null;
         }
         if (!node.isTextual()) {
-            throw serializationException(node, "String");
+            throw serializationException(node, "a String");
         }
         return node.textValue();
     }
@@ -1072,19 +1065,9 @@ public class SsmJsonHandler {
             return null;
         }
         if (!node.isNumber()) {
-            throw serializationException(node, "Long");
+            throw serializationException(node, "a Long");
         }
         return node.decimalValue().max(LONG_MIN).min(LONG_MAX).longValue();
-    }
-
-    private static AwsException serializationException(JsonNode node, String targetType) {
-        String token = switch (node.getNodeType()) {
-            case STRING -> "STRING_VALUE";
-            case NUMBER -> "NUMBER_VALUE";
-            case BOOLEAN -> node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE";
-            default -> node.getNodeType().name();
-        };
-        return new AwsException("SerializationException", token + " can not be converted to a " + targetType, 400);
     }
 
     private Response handleLabelParameterVersion(JsonNode request, String region) {
@@ -1209,10 +1192,9 @@ public class SsmJsonHandler {
     private String requireSettingId(JsonNode request) {
         String settingId = request.path("SettingId").asText();
         if (settingId == null || settingId.isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'settingId' failed to satisfy "
-                            + "constraint: Member must not be null",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'settingId' failed to satisfy "
+                            + "constraint: Member must not be null");
         }
         return settingId;
     }
@@ -1229,17 +1211,15 @@ public class SsmJsonHandler {
         JsonNode valueNode = request.path("SettingValue");
         String settingValue = valueNode.asText();
         if (!valueNode.isTextual() || settingValue.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'settingValue' failed to satisfy "
-                            + "constraint: Member must not be null",
-                    400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'settingValue' failed to satisfy "
+                            + "constraint: Member must not be null");
         }
         if (settingValue.length() > MAX_SETTING_VALUE_LENGTH) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value at 'settingValue' failed to satisfy "
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'settingValue' failed to satisfy "
                             + "constraint: Member must have length less than or equal to "
-                            + MAX_SETTING_VALUE_LENGTH,
-                    400);
+                            + MAX_SETTING_VALUE_LENGTH);
         }
         return settingValue;
     }

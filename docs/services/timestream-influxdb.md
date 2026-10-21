@@ -81,6 +81,8 @@ write and query data against it.
 - `RestoreFromDbBackup` with `NEW_RESOURCE` starts a new container and runs `influx restore --full`, so the
   restored resource has the users, tokens, organizations and buckets of the source. `REPLACE_EXISTING`
   restores into the existing container and requires `name` to match the existing resource.
+  Data and CLI configuration archive uploads retry transient Docker I/O failures for up to six attempts,
+  reopening the original archive for each attempt. The `influx restore` command itself is not retried.
 - `restoreToTime` is rejected with `ValidationException`. Point-in-time restore is only available for
   continuous backups, and Floci models on-demand backups only, so accepting the parameter would silently
   restore the on-demand contents instead of the requested moment.

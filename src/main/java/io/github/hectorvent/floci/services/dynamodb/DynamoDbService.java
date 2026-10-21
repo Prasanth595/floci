@@ -7,14 +7,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
@@ -26,7 +29,9 @@ import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -43,8 +48,10 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -97,6 +104,9 @@ public class DynamoDbService {
     private final StorageBackend<String, Map<String, JsonNode>> itemStore;
     private final StorageBackend<String, ExportDescription> exportStore;
     private final StorageBackend<String, ImportTableDescription> importStore;
+    private final StorageBackend<String, TableBackup> backupStore;
+    private final DynamoDbPointInTimeRecovery pointInTimeRecovery;
+    private final Clock clock;
     // Items stored per table: storageKey -> Map<itemKey, item>
     // itemKey is "pk" or "pk#sk" depending on table schema
     private final ConcurrentHashMap<String, ConcurrentSkipListMap<String, JsonNode>> itemsByTable = new ConcurrentHashMap<>();
@@ -162,9 +172,14 @@ public class DynamoDbService {
                 new TypeReference<Map<String, ExportDescription>>() {}),
              storageFactory.create("dynamodb", "dynamodb-imports.json",
                 new TypeReference<Map<String, ImportTableDescription>>() {}),
+             storageFactory.create("dynamodb", "dynamodb-backups.json",
+                new TypeReference<Map<String, TableBackup>>() {}),
+             storageFactory.create("dynamodb", "dynamodb-point-in-time.json",
+                new TypeReference<Map<String, PointInTimeChange>>() {}),
              regionResolver, streamService, kinesisForwarder, s3Service, objectMapper,
              config.services().dynamodb().vectorIndexAllocationSeconds(),
-             config.services().dynamodb().vectorIndexBackfillSeconds());
+             config.services().dynamodb().vectorIndexBackfillSeconds(),
+             config.services().dynamodb().latestRestorableLagSeconds(), Clock.systemUTC());
     }
 
     /** Package-private constructor for testing. */
@@ -214,10 +229,51 @@ public class DynamoDbService {
                     ObjectMapper objectMapper,
                     int vectorIndexAllocationSeconds,
                     int vectorIndexBackfillSeconds) {
+        this(tableStore, itemStore, exportStore, importStore, new InMemoryStorage<>(), regionResolver,
+             streamService, kinesisForwarder, s3Service, objectMapper,
+             vectorIndexAllocationSeconds, vectorIndexBackfillSeconds);
+    }
+
+    DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
+                    StorageBackend<String, Map<String, JsonNode>> itemStore,
+                    StorageBackend<String, ExportDescription> exportStore,
+                    StorageBackend<String, ImportTableDescription> importStore,
+                    StorageBackend<String, TableBackup> backupStore,
+                    RegionResolver regionResolver,
+                    DynamoDbStreamService streamService,
+                    KinesisStreamingForwarder kinesisForwarder,
+                    S3Service s3Service,
+                    ObjectMapper objectMapper,
+                    int vectorIndexAllocationSeconds,
+                    int vectorIndexBackfillSeconds) {
+        this(tableStore, itemStore, exportStore, importStore, backupStore, new InMemoryStorage<>(), regionResolver,
+             streamService, kinesisForwarder, s3Service, objectMapper,
+             vectorIndexAllocationSeconds, vectorIndexBackfillSeconds, 0, Clock.systemUTC());
+    }
+
+    DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
+                    StorageBackend<String, Map<String, JsonNode>> itemStore,
+                    StorageBackend<String, ExportDescription> exportStore,
+                    StorageBackend<String, ImportTableDescription> importStore,
+                    StorageBackend<String, TableBackup> backupStore,
+                    StorageBackend<String, PointInTimeChange> pointInTimeStore,
+                    RegionResolver regionResolver,
+                    DynamoDbStreamService streamService,
+                    KinesisStreamingForwarder kinesisForwarder,
+                    S3Service s3Service,
+                    ObjectMapper objectMapper,
+                    int vectorIndexAllocationSeconds,
+                    int vectorIndexBackfillSeconds,
+                    int latestRestorableLagSeconds,
+                    Clock clock) {
         this.tableStore = tableStore;
         this.itemStore = itemStore;
         this.exportStore = exportStore;
         this.importStore = importStore;
+        this.backupStore = backupStore;
+        this.pointInTimeRecovery = new DynamoDbPointInTimeRecovery(pointInTimeStore, regionResolver.getAccountId(),
+                Duration.ofSeconds(latestRestorableLagSeconds), clock);
+        this.clock = clock;
         this.regionResolver = regionResolver;
         this.streamService = streamService;
         this.kinesisForwarder = kinesisForwarder;
@@ -234,6 +290,7 @@ public class DynamoDbService {
         itemsByTable.clear();
         itemLocks.clear();
         txIdempotency.clear();
+        pointInTimeRecovery.clear();
         if (streamService != null) {
             streamService.clear();
         }
@@ -358,10 +415,10 @@ public class DynamoDbService {
         for (int i = 0; i < keySchema.size(); i++) {
             String keyType = keySchema.get(i).getKeyType();
             if (!"HASH".equals(keyType) && !"RANGE".equals(keyType)) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + keyType
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + keyType
                         + "' at 'keySchema." + (i + 1) + ".member.keyType' failed to satisfy constraint: "
-                        + "Member must satisfy enum value set: [HASH, RANGE]", 400);
+                        + "Member must satisfy enum value set: [HASH, RANGE]");
             }
         }
 
@@ -370,9 +427,9 @@ public class DynamoDbService {
             String repr = "[" + keySchema.stream()
                     .map(k -> "KeySchemaElement(attributeName=" + k.getAttributeName() + ", keyType=" + k.getKeyType() + ")")
                     .collect(Collectors.joining(", ")) + "]";
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + repr + "' at 'keySchema' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 2", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + repr + "' at 'keySchema' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 2");
         }
 
         // Validate no duplicate attribute names in keySchema
@@ -389,10 +446,10 @@ public class DynamoDbService {
             for (int i = 0; i < attributeDefinitions.size(); i++) {
                 String attrType = attributeDefinitions.get(i).getAttributeType();
                 if (!"B".equals(attrType) && !"N".equals(attrType) && !"S".equals(attrType)) {
-                    throw new AwsException("ValidationException",
-                            "1 validation error detected: Value '" + attrType
+                    throw SmithyValidationErrors.validationException(
+                            "Value '" + attrType
                             + "' at 'attributeDefinitions." + (i + 1) + ".member.attributeType' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [B, N, S]", 400);
+                            + "Member must satisfy enum value set: [B, N, S]");
                 }
             }
         }
@@ -552,24 +609,24 @@ public class DynamoDbService {
             requireVectorIndexMember(index.getDistanceFunction(), memberPath + ".distanceFunction");
             String indexName = index.getIndexName();
             if (indexName == null || indexName.length() < MIN_VECTOR_INDEX_NAME_LENGTH) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + indexName + "' at '"
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + indexName + "' at '"
                         + memberPath + ".indexName' failed to satisfy constraint: "
-                        + "Member must have length greater than or equal to " + MIN_VECTOR_INDEX_NAME_LENGTH, 400);
+                        + "Member must have length greater than or equal to " + MIN_VECTOR_INDEX_NAME_LENGTH);
             }
             String distanceFunction = index.getDistanceFunction();
             if (!VECTOR_DISTANCE_FUNCTIONS.contains(distanceFunction)) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + distanceFunction + "' at '"
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + distanceFunction + "' at '"
                         + memberPath + ".distanceFunction' failed to satisfy constraint: "
-                        + "Member must satisfy enum value set: " + VECTOR_DISTANCE_FUNCTIONS, 400);
+                        + "Member must satisfy enum value set: " + VECTOR_DISTANCE_FUNCTIONS);
             }
             Long dimensions = index.getDimensions();
             if (dimensions < 1) {
-                throw new AwsException("ValidationException",
-                        "1 validation error detected: Value '" + dimensions + "' at '"
+                throw SmithyValidationErrors.validationException(
+                        "Value '" + dimensions + "' at '"
                         + memberPath + ".dimensions' failed to satisfy constraint: "
-                        + "Member must have value greater than or equal to 1", 400);
+                        + "Member must have value greater than or equal to 1");
             }
         }
     }
@@ -644,9 +701,9 @@ public class DynamoDbService {
 
     private static void requireVectorIndexMember(Object value, String memberPath) {
         if (value == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at '" + memberPath
-                    + "' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at '" + memberPath
+                    + "' failed to satisfy constraint: Member must not be null");
         }
     }
 
@@ -833,6 +890,12 @@ public class DynamoDbService {
                     "Attempt to change a resource which is still in use: Cannot delete table while "
                     + "indexes are being created, updated, or deleted.", 400);
         }
+        if (table.isPointInTimeRecoveryEnabled()) {
+            createSystemBackup(storageKey, table, region);
+        }
+        // A write still in flight on this table object stops recording once the flag is off.
+        table.setPointInTimeRecoveryEnabled(false);
+        pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
         tableStore.delete(storageKey);
         itemsByTable.remove(scopedItemsKey(storageKey));
         itemLocks.remove(scopedItemsKey(storageKey));
@@ -954,6 +1017,9 @@ public class DynamoDbService {
             }
             requireItemNestingWithinLimit(normalizedItem);
 
+            if (stagedItems == null) {
+                pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, existing);
+            }
             tableItems.put(itemKey, normalizedItem);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -1052,6 +1118,10 @@ public class DynamoDbService {
                 evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
             }
 
+            JsonNode current = items.get(itemKey);
+            if (stagedItems == null && current != null) {
+                pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, current);
+            }
             JsonNode removed = items.remove(itemKey);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -1258,16 +1328,16 @@ public class DynamoDbService {
             // AWS validates index key values against the item the update produces.
             validateIndexKeyTypes(table, item, true);
 
-            if (sizeRule == UpdateSizeRule.UPDATE_ITEM) {
-                requireUpdateItemWithinSizeLimit(item,
-                        writtenAttributes(touchedPaths, updateExpression, expressionAttrNames),
-                        updateExpression != null
-                                ? DynamoDbItemSize.updateExpressionCost(updateExpression)
-                                : DynamoDbItemSize.attributeUpdatesCost(attributeUpdates));
+            if (sizeRule == UpdateSizeRule.UPDATE_ITEM && updateExpression != null) {
+                requireUpdateItemWithinSizeLimit(item, DynamoDbItemSize.updateStatementSize(updateExpression,
+                        path -> parsePath(path, expressionAttrNames), expressionAttrValues));
             } else {
                 requireUpdatedItemWithinSizeLimit(item);
             }
 
+            if (stagedItems == null) {
+                pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, existing);
+            }
             items.put(itemKey, item);
             if (shouldPersist) {
                 persistItems(storageKey);
@@ -1305,18 +1375,6 @@ public class DynamoDbService {
 
     private List<Object> pathTokens(String path, String updateExpression, JsonNode expressionAttrNames) {
         return updateExpression != null ? parsePath(path, expressionAttrNames) : List.<Object>of(path);
-    }
-
-    private Set<String> writtenAttributes(List<String> touchedPaths, String updateExpression,
-                                           JsonNode expressionAttrNames) {
-        Set<String> names = new LinkedHashSet<>();
-        for (String path : touchedPaths) {
-            List<Object> tokens = pathTokens(path, updateExpression, expressionAttrNames);
-            if (!tokens.isEmpty() && tokens.get(0) instanceof String name) {
-                names.add(name);
-            }
-        }
-        return names;
     }
 
     public QueryResult query(String tableName, JsonNode keyConditions,
@@ -1870,6 +1928,12 @@ public class DynamoDbService {
                         scopedItemsKey(participant.storageKey()), ignored -> new ConcurrentSkipListMap<>());
                 ConcurrentSkipListMap<String, JsonNode> stagedTable = staged.get(participant.storageKey());
                 JsonNode value = stagedTable.get(participant.itemKey());
+                JsonNode before = live.get(participant.itemKey());
+                if (value != before) {
+                    tableStore.get(participant.storageKey()).ifPresent(participantTable -> pointInTimeRecovery.recordItem(
+                            regionResolver.getAccountId(), participant.storageKey(), participantTable,
+                            participant.itemKey(), before));
+                }
                 if (value == null) {
                     live.remove(participant.itemKey());
                 } else {
@@ -2082,7 +2146,10 @@ public class DynamoDbService {
         String pkName = table.getPartitionKeyName();
         JsonNode origPk = key.get(pkName);
         JsonNode newPk = item.get(pkName);
-        if (origPk != null && newPk != null && !origPk.equals(newPk)) {
+        if (newPk != null) {
+            validateAttributeValueShape(newPk);
+        }
+        if (origPk != null && newPk != null && !attributeValuesEqual(origPk, newPk)) {
             throw new AwsException("ValidationException",
                     "One or more parameter values were invalid: Cannot update attribute " + pkName
                     + ". This attribute is part of the key", 400);
@@ -2091,7 +2158,10 @@ public class DynamoDbService {
         if (skName != null) {
             JsonNode origSk = key.get(skName);
             JsonNode newSk = item.get(skName);
-            if (origSk != null && newSk != null && !origSk.equals(newSk)) {
+            if (newSk != null) {
+                validateAttributeValueShape(newSk);
+            }
+            if (origSk != null && newSk != null && !attributeValuesEqual(origSk, newSk)) {
                 throw new AwsException("ValidationException",
                         "One or more parameter values were invalid: Cannot update attribute " + skName
                         + ". This attribute is part of the key", 400);
@@ -2162,9 +2232,8 @@ public class DynamoDbService {
         }
     }
 
-    private static void requireUpdateItemWithinSizeLimit(JsonNode item, Set<String> writtenAttributes,
-                                                          int actionCost) {
-        if (!DynamoDbItemSize.updateItemWithinLimit(item, writtenAttributes, actionCost)) {
+    private static void requireUpdateItemWithinSizeLimit(JsonNode item, int statementSize) {
+        if (!DynamoDbItemSize.updateItemWithinLimit(item, statementSize)) {
             throw new UpdatedItemTooLargeException();
         }
     }
@@ -2667,19 +2736,147 @@ public class DynamoDbService {
         LOG.infov("Updated TTL for table {0}: enabled={1}, attr={2}", canonicalTableName, enabled, ttlAttributeName);
     }
 
-    public TableDefinition updateContinuousBackups(String tableName, boolean enabled,
-                                                   Integer recoveryPeriodInDays, String region) {
+    /** The restore window is null while point-in-time recovery is disabled. */
+    public record ContinuousBackups(TableDefinition table, DynamoDbPointInTimeRecovery.RestoreWindow window) {}
+
+    /** The items of a source table as they were at {@code restoreDateTime}, with its current settings, as on AWS. */
+    public record PointInTimeState(TableDefinition table, List<JsonNode> items, Instant restoreDateTime) {}
+
+    public ContinuousBackups describeContinuousBackups(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
-        TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        return continuousBackups(storageKey, requireBackupSource(storageKey, canonicalTableName));
+    }
+
+    /** Enabling a disabled table starts the restore window over, as on AWS. */
+    public ContinuousBackups updateContinuousBackups(String tableName, boolean enabled,
+                                                     Integer recoveryPeriodInDays, String region) {
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = requireBackupSource(storageKey, canonicalTableName);
+        if (enabled && !table.isPointInTimeRecoveryEnabled()) {
+            pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
+            table.setPointInTimeRecoveryStartDateTime(clock.instant().truncatedTo(ChronoUnit.SECONDS));
+            table.setPointInTimeRecoveryRecoveryPeriodInDays(DEFAULT_RECOVERY_PERIOD_DAYS);
+        } else if (enabled && recoveryPeriodInDays != null) {
+            // AWS keeps the earliest time when the period grows, until the longer period has passed.
+            table.setPointInTimeRecoveryStartDateTime(
+                    pointInTimeRecovery.window(withPointInTimeStart(storageKey, table)).earliest());
+        }
         table.setPointInTimeRecoveryEnabled(enabled);
-        table.setPointInTimeRecoveryRecoveryPeriodInDays(
-                recoveryPeriodInDays != null ? recoveryPeriodInDays : table.getPointInTimeRecoveryRecoveryPeriodInDays());
+        if (!enabled) {
+            table.setPointInTimeRecoveryStartDateTime(null);
+            pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
+        }
+        if (recoveryPeriodInDays != null) {
+            table.setPointInTimeRecoveryRecoveryPeriodInDays(recoveryPeriodInDays);
+        }
         tableStore.put(storageKey, table);
         LOG.infov("Updated PITR for table {0}: enabled={1}, recoveryPeriodInDays={2}",
                 canonicalTableName, enabled, table.getPointInTimeRecoveryRecoveryPeriodInDays());
+        return continuousBackups(storageKey, table);
+    }
+
+    /**
+     * The checks run in the AWS order: the source table, the presence of a restore time, point-in-time
+     * recovery on the source, then the restore time. AWS restores any time up to now, although it
+     * reports a LatestRestorableDateTime minutes earlier and names only that one in the error.
+     */
+    public PointInTimeState pointInTimeState(String sourceTableName, String sourceRegion, String region,
+                                             boolean useLatestRestorableTime, Instant restoreDateTime) {
+        String canonicalTableName = canonicalTableName(sourceRegion, sourceTableName);
+        String storageKey = regionKey(sourceRegion, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("TableNotFoundException", sourceRegion.equals(region)
+                        ? "Table not found: " + canonicalTableName : "Table not found", 400));
+        if ("CREATING".equals(table.getTableStatus())) {
+            throw new AwsException("TableNotFoundException", "Table not found", 400);
+        }
+        if (!useLatestRestorableTime && restoreDateTime == null) {
+            throw new AwsException("ValidationException", "Invalid Request: Either one of RestoreDateTime or "
+                    + "UseLatestRestorableTime must be specified, but not both", 400);
+        }
+        if (!table.isPointInTimeRecoveryEnabled()) {
+            throw new AwsException("PointInTimeRecoveryUnavailableException",
+                    "Point in time recovery is not enabled for table '" + canonicalTableName + "'", 400);
+        }
+        String accountId = regionResolver.getAccountId();
+        DynamoDbPointInTimeRecovery.RestoreWindow window =
+                pointInTimeRecovery.window(withPointInTimeStart(storageKey, table));
+        Instant time = useLatestRestorableTime ? window.latest() : restoreDateTime;
+        if (time.isBefore(window.earliest()) || clock.instant().isBefore(time)) {
+            throw new AwsException("InvalidRestoreTimeException", "RestoreDateTime '" + time
+                    + "' must be within EarliestRestorableDateTime '" + window.earliest()
+                    + "' and LatestRestorableDateTime '" + window.latest() + "' for table '"
+                    + canonicalTableName + "'", 400);
+        }
+        ConcurrentSkipListMap<String, JsonNode> liveItems = itemsByTable.get(scopedItemsKey(storageKey));
+        List<JsonNode> items = pointInTimeRecovery.itemsAt(accountId, storageKey,
+                liveItems != null ? liveItems : Map.of(), time);
+        return new PointInTimeState(snapshotOf(table), items, time);
+    }
+
+    /**
+     * The table a SourceTableArn names. AWS restores across regions only with an
+     * SSESpecificationOverride, and treats an unknown region as another region.
+     */
+    public DynamoDbTableNames.ResolvedTableRef pointInTimeSourceArn(String sourceTableArn, String region,
+                                                                 boolean sseOverride) {
+        if (!sourceTableArn.startsWith("arn:")) {
+            throw invalidParameter("ARNs must start with 'arn:': " + sourceTableArn);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(sourceTableArn);
+        } catch (IllegalArgumentException e) {
+            throw invalidParameter("sourceTableArn is not a valid ARN");
+        }
+        if (!"dynamodb".equals(arn.service())) {
+            throw invalidParameter("Invalid resource Arn: " + sourceTableArn);
+        }
+        if (!arn.resource().startsWith("table/")) {
+            throw invalidParameter("sourceTableArn is not a valid ARN");
+        }
+        String tableName = arn.resource().substring("table/".length());
+        if (tableName.length() < 3 || 255 < tableName.length()
+                || !DynamoDbTableNames.TABLE_NAME_CHARS.matcher(tableName).matches()) {
+            throw new AwsException("ValidationException", "Invalid Request: Invalid TableArn: Invalid Table ARN", 400);
+        }
+        if (!arn.accountId().equals(regionResolver.getAccountId())) {
+            throw new AwsException("ValidationException",
+                    "This action is only supported by accounts that match the resource owner’s account.", 400);
+        }
+        if (!arn.region().equals(region) && !sseOverride) {
+            throw new AwsException("ValidationException",
+                    "Invalid Request: sseSpecificationOverride must be provided for cross-region restores", 400);
+        }
+        return new DynamoDbTableNames.ResolvedTableRef(tableName, arn.region());
+    }
+
+    private static AwsException invalidParameter(String message) {
+        return new AwsException("ValidationException", "One or more parameter values were invalid: " + message, 400);
+    }
+
+    private ContinuousBackups continuousBackups(String storageKey, TableDefinition table) {
+        return new ContinuousBackups(table, table.isPointInTimeRecoveryEnabled()
+                ? pointInTimeRecovery.window(withPointInTimeStart(storageKey, table))
+                : null);
+    }
+
+    /** A table that had point-in-time recovery enabled before Floci kept a history starts one now. */
+    private TableDefinition withPointInTimeStart(String storageKey, TableDefinition table) {
+        if (table.getPointInTimeRecoveryStartDateTime() == null) {
+            table.setPointInTimeRecoveryStartDateTime(clock.instant().truncatedTo(ChronoUnit.SECONDS));
+            tableStore.put(storageKey, table);
+        }
         return table;
+    }
+
+    /** The backup operations do not see a table that a restore is still creating. */
+    private TableDefinition requireBackupSource(String storageKey, String tableName) {
+        return tableStore.get(storageKey)
+                .filter(t -> !"CREATING".equals(t.getTableStatus()))
+                .orElseThrow(() -> new AwsException("TableNotFoundException", "Table not found: " + tableName, 400));
     }
 
     static boolean isExpired(JsonNode item, TableDefinition table) {
@@ -2697,8 +2894,10 @@ public class DynamoDbService {
                              TableDefinition table, List<String> itemKeys,
                              ConcurrentSkipListMap<String, JsonNode> items) {}
 
+    /** The TTL sweep also removes the system backups past their expiry. */
     void deleteExpiredItems() {
         deleteScannedItems(scanExpiredItems());
+        deleteExpiredBackups();
     }
 
     List<ExpiredTableScan> scanExpiredItems() {
@@ -2755,6 +2954,7 @@ public class DynamoDbService {
                     if (current == null || !isExpired(current, scan.table())) {
                         return null;
                     }
+                    pointInTimeRecovery.recordItem(scan.accountId(), scan.storageKey(), scan.table(), itemKey, current);
                     return items.remove(itemKey);
                 });
                 if (removed == null) {
@@ -2922,6 +3122,7 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
+        requireClosedParentheses(expression, "");
         // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
         // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
         // comma-separated action parsing below work regardless of formatting. Normalize
@@ -3125,7 +3326,7 @@ public class DynamoDbService {
      * unwrapped form. Rejects forms like "(a) - (b)" where the outer parens do
      * not actually enclose the whole expression.
      */
-    private static String stripOuterParens(String expr) {
+    static String stripOuterParens(String expr) {
         String s = expr.trim();
         while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')') {
             int depth = 0;
@@ -3506,13 +3707,11 @@ public class DynamoDbService {
                     }
 
                     if (index < 0 || index > MAX_DYNAMODB_LIST_INDEX) {
-                        throw new AwsException(
-                                "ValidationException",
-                                "1 validation error detected: Invalid UpdateExpression: "
+                        throw SmithyValidationErrors.validationException(
+                                "Invalid UpdateExpression: "
                                         + "List index is not within the allowable range; index: ["
                                         + indexText
-                                        + "]. The maximum allowed index is 4294967294",
-                                400);
+                                        + "]. The maximum allowed index is 4294967294");
                     }
 
                     tokens.add(index);
@@ -3787,6 +3986,41 @@ public class DynamoDbService {
         }
     }
 
+    // DynamoDB reads an unclosed call or group to the end of the expression and reports the
+    // raw text from its last token on, trailing whitespace included. UpdateItem wraps the
+    // error in the validation envelope, TransactWriteItems does not.
+    static void requireClosedParentheses(String expression, String envelope) {
+        int depth = 0;
+        int lastToken = 0;
+        for (int i = 0; i < expression.length(); i++) {
+            char c = expression.charAt(i);
+            if (Character.isWhitespace(c)) {
+                continue;
+            }
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+                if (depth < 0) {
+                    return;
+                }
+            }
+            if (i == 0 || isUpdatePunctuation(c) || isUpdatePunctuation(expression.charAt(i - 1))
+                    || Character.isWhitespace(expression.charAt(i - 1))) {
+                lastToken = i;
+            }
+        }
+        if (depth > 0) {
+            throw new AwsException("ValidationException",
+                    envelope + "Invalid UpdateExpression: Syntax error; token: \"<EOF>\", near: \""
+                            + expression.substring(lastToken) + "\"", 400);
+        }
+    }
+
+    private static boolean isUpdatePunctuation(char c) {
+        return "()[],.=+-".indexOf(c) >= 0;
+    }
+
     static int findNextComma(String s) {
         // Find next comma that is not inside a function call
         int depth = 0;
@@ -3869,7 +4103,7 @@ public class DynamoDbService {
      * Finds the index of an arithmetic operator (+ or -) that is outside
      * function parentheses. Returns -1 if none found.
      */
-    private int findArithmeticOperator(String expr) {
+    static int findArithmeticOperator(String expr) {
         int depth = 0;
         for (int i = 0; i < expr.length(); i++) {
             char c = expr.charAt(i);
@@ -3894,7 +4128,7 @@ public class DynamoDbService {
      * spaced form (e.g. PynamoDB always generates {@code "list_append (x, y)"}), which a plain
      * {@code startsWith(functionName + "(")} rejects.
      */
-    private static boolean startsWithFunctionCall(String value, String functionName) {
+    static boolean startsWithFunctionCall(String value, String functionName) {
         return value.startsWith(functionName)
                 && value.substring(functionName.length()).stripLeading().startsWith("(");
     }
@@ -4089,16 +4323,10 @@ public class DynamoDbService {
             throw new KeySchemaMismatchException("The provided key element does not match the schema");
         }
         if (attr.has("S") && attr.get("S").asText().isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "One or more parameter values are not valid. "
-                    + "The AttributeValue for a key attribute cannot contain an empty string value. Key: "
-                    + keyName, 400);
+            throw DynamoDbKeyValueErrors.emptyKeyValue("S", keyName);
         }
         if (attr.has("B") && attr.get("B").asText().isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "One or more parameter values are not valid. "
-                    + "The AttributeValue for a key attribute cannot contain an empty binary value. Key: "
-                    + keyName, 400);
+            throw DynamoDbKeyValueErrors.emptyKeyValue("B", keyName);
         }
     }
 
@@ -4193,33 +4421,29 @@ public class DynamoDbService {
             validateAttributeValueShape(attr);
             String expectedType = keyAttributeType(table, attrName);
             if (expectedType != null && !attr.has(expectedType)) {
-                throw new KeySchemaMismatchException(
-                        "One or more parameter values were invalid: Type mismatch for Index Key " + attrName
-                        + " Expected: " + expectedType + " Actual: " + attr.fieldNames().next()
-                        + " IndexName: " + indexName);
+                throw DynamoDbKeyValueErrors.indexKeyTypeMismatch(attrName, expectedType,
+                        attr.fieldNames().next(), indexName);
             }
             if (attr.has("S") && attr.get("S").asText().isEmpty()) {
-                throw emptyIndexKeyValue("empty string value", indexName, attrName, isUpdate);
+                throw emptyIndexKeyValue("S", indexName, attrName, isUpdate);
             }
             if (attr.has("B") && attr.get("B").asText().isEmpty()) {
-                throw emptyIndexKeyValue("empty binary value", indexName, attrName, isUpdate);
+                throw emptyIndexKeyValue("B", indexName, attrName, isUpdate);
             }
         }
     }
 
     // AWS uses different wording for UpdateItem than for writes of a whole item.
-    private static AwsException emptyIndexKeyValue(String what, String indexName, String attrName,
+    private static AwsException emptyIndexKeyValue(String type, String indexName, String attrName,
                                                    boolean isUpdate) {
         if (isUpdate) {
             return new AwsException("ValidationException",
                     "One or more parameter values are not valid. The update expression attempted to "
                     + "update a secondary index key to a value that is not supported. "
-                    + "The AttributeValue for a key attribute cannot contain an " + what + ".", 400);
+                    + "The AttributeValue for a key attribute cannot contain an "
+                    + DynamoDbKeyValueErrors.emptyValueKind(type) + ".", 400);
         }
-        return new AwsException("ValidationException",
-                "One or more parameter values are not valid. A value specified for a secondary "
-                + "index key is not supported. The AttributeValue for a key attribute cannot "
-                + "contain an " + what + ". IndexName: " + indexName + ", IndexKey: " + attrName, 400);
+        return DynamoDbKeyValueErrors.emptyIndexKeyValue(type, indexName, attrName);
     }
 
     private String buildItemKeyFromNode(JsonNode item, String pkName, String skName) {
@@ -4733,15 +4957,15 @@ public class DynamoDbService {
             return;
         }
         if (pageSize < 1) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + pageSize + "' at '" + field
-                    + "' failed to satisfy constraint: Member must have value greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + pageSize + "' at '" + field
+                    + "' failed to satisfy constraint: Member must have value greater than or equal to 1");
         }
         if (MAX_JOB_PAGE_SIZE < pageSize) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + pageSize + "' at '" + field
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + pageSize + "' at '" + field
                     + "' failed to satisfy constraint: Member must have value less than or equal to "
-                    + MAX_JOB_PAGE_SIZE, 400);
+                    + MAX_JOB_PAGE_SIZE);
         }
     }
 
@@ -4766,6 +4990,166 @@ public class DynamoDbService {
         return System.currentTimeMillis() + "-" + UUID.randomUUID().toString().replace("-", "");
     }
 
+    // --- Backup Operations ---
+
+    // The live table object is shared and later mutated in place, so a backup keeps its own copy.
+    private static final ObjectMapper SNAPSHOT_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
+
+    private static final int DEFAULT_RECOVERY_PERIOD_DAYS = 35;
+    private static final int SYSTEM_BACKUP_RETENTION_DAYS = 35;
+
+    private static final Comparator<TableBackup> BACKUP_ORDER = Comparator
+            .comparing(TableBackup::getCreationDateTime)
+            .thenComparing(TableBackup::getBackupArn);
+
+    public record ListBackupsResult(List<TableBackup> backups, String lastEvaluatedBackupArn) {}
+
+    public TableBackup createBackup(String tableName, String backupName, String region) {
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .filter(t -> !"CREATING".equals(t.getTableStatus()))
+                .orElseThrow(() -> new AwsException("TableNotFoundException",
+                        "Table not found: " + canonicalTableName, 400));
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        TableBackup backup = backupOf(storageKey, table, DynamoDbBackupArns.mint(table.getTableArn(), now), now);
+        backup.setBackupName(backupName);
+        backup.setBackupType("USER");
+        backup.setRegion(region);
+        backupStore.put(backup.getBackupArn(), backup);
+        LOG.infov("Created backup {0} of table {1}", backup.getBackupArn(), canonicalTableName);
+        return backup;
+    }
+
+    /** AWS keeps the backup it takes of a deleted table with point-in-time recovery for 35 days. */
+    private void createSystemBackup(String storageKey, TableDefinition table, String region) {
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        TableBackup backup = backupOf(storageKey, table, DynamoDbBackupArns.mintSystem(table.getTableArn(), now), now);
+        backup.setBackupName(table.getTableName() + "$DeletedTableBackup");
+        backup.setBackupType("SYSTEM");
+        backup.setExpiryDateTime(now.plus(Duration.ofDays(SYSTEM_BACKUP_RETENTION_DAYS)));
+        backup.setRegion(region);
+        backupStore.put(backup.getBackupArn(), backup);
+        LOG.infov("Created system backup {0} of deleted table {1}", backup.getBackupArn(), table.getTableName());
+    }
+
+    private TableBackup backupOf(String storageKey, TableDefinition table, String backupArn, Instant now) {
+        ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedItemsKey(storageKey));
+        List<JsonNode> snapshot = new ArrayList<>();
+        if (items != null) {
+            items.values().forEach(item -> snapshot.add(item.deepCopy()));
+        }
+        TableDefinition source = snapshotOf(table);
+        source.setItemCount(snapshot.size());
+
+        TableBackup backup = new TableBackup();
+        backup.setBackupArn(backupArn);
+        backup.setCreationDateTime(now);
+        backup.setSizeBytes(source.getTableSizeBytes());
+        backup.setTable(source);
+        backup.setItems(snapshot);
+        return backup;
+    }
+
+    public TableBackup describeBackup(String backupArn, String region) {
+        DynamoDbBackupArns.BackupArn arn = DynamoDbBackupArns.parse(backupArn);
+        if (!arn.accountId().equals(regionResolver.getAccountId())) {
+            throw new AwsException("AccessDeniedException", "Access is denied", 400);
+        }
+        return backupStore.get(backupArn)
+                .filter(backup -> backup.getRegion().equals(region))
+                .filter(this::isUnexpired)
+                .orElseThrow(() -> new AwsException("BackupNotFoundException",
+                        "Backup not found: " + backupArn, 400));
+    }
+
+    public TableBackup deleteBackup(String backupArn, String region) {
+        TableBackup backup = describeBackup(backupArn, region);
+        if ("SYSTEM".equals(backup.getBackupType())) {
+            throw new AwsException("ValidationException", "Invalid Request: User is not allowed to delete the "
+                    + "system backup with arn " + backupArn + ". It will automatically expire on "
+                    + backup.getExpiryDateTime(), 400);
+        }
+        backupStore.delete(backupArn);
+        LOG.infov("Deleted backup {0}", backupArn);
+        return backup;
+    }
+
+    /**
+     * Backups in creation order. AWS resumes after the position an ExclusiveStartBackupArn names,
+     * even when no such backup exists, so the position comes from the ARN itself.
+     */
+    public ListBackupsResult listBackups(String tableName, Integer limit, Instant lowerBound, Instant upperBound,
+                                         String exclusiveStartBackupArn, String backupType, String region) {
+        DynamoDbBackupArns.BackupArn start = exclusiveStartBackupArn != null
+                ? DynamoDbBackupArns.parse(exclusiveStartBackupArn) : null;
+        Set<String> types = "ALL".equals(backupType) ? Set.of("USER", "SYSTEM") : Set.of(backupType);
+        List<TableBackup> matching = backupStore.scan(key -> true).stream()
+                .filter(backup -> backup.getRegion().equals(region))
+                .filter(this::isUnexpired)
+                .filter(backup -> tableName == null || tableName.equals(backup.getTable().getTableName()))
+                .filter(backup -> types.contains(backup.getBackupType()))
+                .filter(backup -> lowerBound == null || !backup.getCreationDateTime().isBefore(lowerBound))
+                .filter(backup -> upperBound == null || backup.getCreationDateTime().isBefore(upperBound))
+                .filter(backup -> start == null || isAfter(backup, start))
+                .sorted(BACKUP_ORDER)
+                .toList();
+        if (limit == null || matching.size() <= limit) {
+            return new ListBackupsResult(matching, null);
+        }
+        List<TableBackup> page = matching.subList(0, limit);
+        return new ListBackupsResult(page, page.getLast().getBackupArn());
+    }
+
+    static TableDefinition snapshotOf(TableDefinition table) {
+        return SNAPSHOT_MAPPER.convertValue(table, TableDefinition.class);
+    }
+
+    void requireRestoreTarget(String tableName, String region) {
+        tableStore.get(regionKey(region, tableName)).ifPresent(table -> {
+            if ("CREATING".equals(table.getTableStatus())) {
+                throw new AwsException("TableInUseException",
+                        "Table is in the process of being created: " + tableName, 400);
+            }
+            throw new AwsException("TableAlreadyExistsException", "Table already exists: " + tableName, 400);
+        });
+    }
+
+    /** Loads the restored items into the table a restore created and makes it ACTIVE. */
+    public void finishRestore(String tableName, List<JsonNode> items, String region) {
+        String storageKey = regionKey(region, tableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> resourceNotFoundException(tableName));
+        ConcurrentSkipListMap<String, JsonNode> restored = new ConcurrentSkipListMap<>();
+        for (JsonNode item : items) {
+            restored.put(buildItemKey(table, item), item.deepCopy());
+        }
+        itemsByTable.put(scopedItemsKey(storageKey), restored);
+        persistItems(storageKey);
+        activateTable(tableName, region);
+        LOG.infov("Restored {0} items into table {1}", items.size(), tableName);
+    }
+
+    private void deleteExpiredBackups() {
+        if (backupStore instanceof AccountAwareStorageBackend<TableBackup> aware) {
+            aware.deleteAllAccountsMatching(backup -> !isUnexpired(backup));
+            return;
+        }
+        for (String backupArn : new ArrayList<>(backupStore.keys())) {
+            backupStore.get(backupArn).filter(backup -> !isUnexpired(backup))
+                    .ifPresent(backup -> backupStore.delete(backupArn));
+        }
+    }
+
+    private boolean isUnexpired(TableBackup backup) {
+        return backup.getExpiryDateTime() == null || clock.instant().isBefore(backup.getExpiryDateTime());
+    }
+
+    private static boolean isAfter(TableBackup backup, DynamoDbBackupArns.BackupArn start) {
+        int byTime = Long.compare(backup.getCreationDateTime().toEpochMilli(), start.creationMillis());
+        return 0 < byTime || (byTime == 0 && 0 < backup.getBackupArn().compareTo(start.arn()));
+    }
+
     // --- Import Operations ---
 
     /**
@@ -4776,10 +5160,10 @@ public class DynamoDbService {
     static void validateBillingMode(JsonNode request, String memberPrefix) {
         JsonNode billingMode = request.path("BillingMode");
         if (billingMode.isTextual() && !VALID_BILLING_MODES.contains(billingMode.asText())) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + billingMode.asText() + "' at '" + memberPrefix
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + billingMode.asText() + "' at '" + memberPrefix
                     + "billingMode' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]", 400);
+                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]");
         }
     }
 
@@ -4798,26 +5182,26 @@ public class DynamoDbService {
             case "" -> throw new AwsException("ValidationException", "InputFormat is required", 400);
             case "CSV", "ION" -> throw new AwsException("ValidationException",
                     "Unsupported InputFormat: " + inputFormat + ". Floci imports DYNAMODB_JSON only", 400);
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + inputFormat
-                    + "' at 'inputFormat' failed to satisfy constraint: Member must satisfy enum value set: [ION, CSV, DYNAMODB_JSON]", 400);
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + inputFormat
+                    + "' at 'inputFormat' failed to satisfy constraint: Member must satisfy enum value set: [ION, CSV, DYNAMODB_JSON]");
         }
         var compression = request.path("InputCompressionType").asText("NONE");
         switch (compression) {
             case "NONE", "GZIP" -> { }
             case "ZSTD" -> throw new AwsException("ValidationException",
                     "Unsupported InputCompressionType: ZSTD. Floci accepts NONE or GZIP", 400);
-            default -> throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + compression
-                    + "' at 'inputCompressionType' failed to satisfy constraint: Member must satisfy enum value set: [GZIP, ZSTD, NONE]", 400);
+            default -> throw SmithyValidationErrors.validationException(
+                    "Value '" + compression
+                    + "' at 'inputCompressionType' failed to satisfy constraint: Member must satisfy enum value set: [GZIP, ZSTD, NONE]");
         }
         DynamoDbTableNames.requireShortName(request.path("TableCreationParameters").path("TableName").asText(null));
         validateBillingMode(request.path("TableCreationParameters"), "tableCreationParameters.");
         var clientToken = request.path("ClientToken").asText(null);
         if (clientToken != null && clientToken.isBlank()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + clientToken
-                    + "' at 'clientToken' failed to satisfy constraint: Member must have length greater than or equal to 1", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + clientToken
+                    + "' at 'clientToken' failed to satisfy constraint: Member must have length greater than or equal to 1");
         }
         if (clientToken == null || importStore == null) {
             return null;

@@ -38,6 +38,7 @@ InvokeModel bodies are passed through as opaque bytes; neither backend parses re
 | `FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_DEFAULT_MODEL` | _(none)_ | Fallback OpenAI-side model id when no mapping matches and passthrough is disabled |
 | `FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_MODEL_MAPPING` | _(none)_ | Comma-separated `bedrockModelId=openaiModelId` pairs, e.g. `anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet` |
 | `FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_PASSTHROUGH` | `false` | When true, forward the raw Bedrock model id as-is if no mapping matches |
+| `FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_ERROR_BODY_TIMEOUT_MILLIS` | `1000` | How long to collect an upstream error body before returning the error without its details. Must be positive. |
 
 ## Proxy Backend
 
@@ -60,7 +61,10 @@ that stall between tokens. The model server controls how it reacts to that signa
 
 Operational HTTP-error warnings retain the upstream status code and omit the
 backend response body. A connected caller receives `ModelErrorException` with a
-bounded backend error description. Streaming error-body reads are limited to 8 KiB.
+bounded backend error description. Error-body reads, for both `Converse` and
+`ConverseStream`, are limited to 8 KiB with a one-second collection deadline
+(`FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_ERROR_BODY_TIMEOUT_MILLIS`). If the body
+stalls, the proxy closes it and returns the known model error without body details.
 
 ## Examples
 

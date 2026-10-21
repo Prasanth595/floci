@@ -2,10 +2,10 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.github.hectorvent.floci.testing.SignedIamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.StsRequests;
 import io.github.hectorvent.floci.testutil.StsRequests.Credentials;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
@@ -22,22 +22,28 @@ import java.util.UUID;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+/**
+ * Verifies that STS refuses {@code GetFederationToken} to a caller with temporary credentials, only
+ * once the request is authenticated, and that a long-term caller is still decided by its IAM
+ * policies.
+ *
+ * <p>Signature validation and IAM enforcement come from {@link SignedIamEnforcementProfile}, which
+ * this class shares with the other classes that test signed requests under IAM enforcement.
+ */
 @QuarkusTest
-@TestProfile(StsFederationCallerEnforcementIntegrationTest.SignedEnforcement.class)
+@TestProfile(SignedIamEnforcementProfile.class)
 class StsFederationCallerEnforcementIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ALLOW_STS = "{\"Version\":\"2012-10-17\",\"Statement\":["
             + "{\"Effect\":\"Allow\",\"Action\":\"sts:*\",\"Resource\":\"*\"}]}";
+    private static final String DENY_SESSION_TOKEN = "{\"Version\":\"2012-10-17\",\"Statement\":["
+            + "{\"Effect\":\"Deny\",\"Action\":\"sts:GetSessionToken\",\"Resource\":\"*\"}]}";
+    private static final String ALLOW_STS_DENY_FEDERATION_TOKEN = "{\"Version\":\"2012-10-17\",\"Statement\":["
+            + "{\"Effect\":\"Allow\",\"Action\":\"sts:*\",\"Resource\":\"*\"},"
+            + "{\"Effect\":\"Deny\",\"Action\":\"sts:GetFederationToken\",\"Resource\":\"*\"}]}";
 
     @Inject IamService iam;
     @RegisterExtension final PartitionCleanup cleanup = new PartitionCleanup();
-
-    public static class SignedEnforcement implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.auth.validate-signatures", "true", "floci.services.iam.enforcement-enabled", "true");
-        }
-    }
 
     @ParameterizedTest
     @ValueSource(strings = {"GetFederationToken", "GetSessionToken", "AssumeRole"})
@@ -90,6 +96,27 @@ class StsFederationCallerEnforcementIntegrationTest {
     }
 
     @Test
+    void getSessionTokenIsIssuedEvenWhenAPolicyExplicitlyDeniesIt() throws Exception {
+        Credentials user = userWithPolicy(DENY_SESSION_TOKEN);
+        remember(request(user, "GetSessionToken", Map.of()), "GetSessionToken");
+    }
+
+    @Test
+    void getSessionTokenIsIssuedWithoutAPolicyThatAllowsIt() throws Exception {
+        Credentials user = user(false);
+        remember(request(user, "GetSessionToken", Map.of()), "GetSessionToken");
+    }
+
+    @Test
+    void otherStsActionsStayDecidedByPolicies() throws Exception {
+        Credentials user = userWithPolicy(ALLOW_STS_DENY_FEDERATION_TOKEN);
+        request(user, "GetFederationToken", Map.of("Name", "still-denied")).then().statusCode(403)
+                .body("ErrorResponse.Error.Code", equalTo("AccessDenied"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("User is not authorized to perform: sts:GetFederationToken"));
+    }
+
+    @Test
     void federationSessionKeepsOtherIamAndStsRestrictions() throws Exception {
         Credentials issued = issue("GetFederationToken");
         request(issued, "ListUsers", Map.of()).then().statusCode(403)
@@ -117,13 +144,17 @@ class StsFederationCallerEnforcementIntegrationTest {
     }
 
     private Credentials user(boolean allowed) {
+        return userWithPolicy(allowed ? ALLOW_STS : null);
+    }
+
+    private Credentials userWithPolicy(String policyDocument) {
         String name = "fed-enforced-" + UUID.randomUUID();
         iam.createUser(name, "/");
         cleanup.register(() -> iam.deleteUser(name));
         AccessKey key = iam.createAccessKey(name);
         cleanup.register(() -> iam.deleteAccessKey(name, key.getAccessKeyId()));
-        if (allowed) {
-            iam.putUserPolicy(name, "sts", ALLOW_STS);
+        if (policyDocument != null) {
+            iam.putUserPolicy(name, "sts", policyDocument);
             cleanup.register(() -> iam.deleteUserPolicy(name, "sts"));
         }
         return new Credentials(key.getAccessKeyId(), key.getSecretAccessKey(), null);

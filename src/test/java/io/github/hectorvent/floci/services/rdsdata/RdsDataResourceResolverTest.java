@@ -150,7 +150,8 @@ class RdsDataResourceResolverTest {
         instances.put("stopped-member", stoppedMember);
         doThrow(new IllegalStateException("temporary member relay error")).doNothing()
                 .when(proxies).startProxy(eq("rds-resource:" + retryMember.getDbInstanceArn()),
-                        any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+                        eq(cluster.getDbClusterArn()), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                        any(), any(), any(), any(), any(), any());
         RdsDataResourceResolver resolver = new RdsDataResourceResolver(rdsService);
 
         RdsDataResourceResolver.DatabaseTarget firstTarget = resolver.resolve(cluster.getDbClusterArn(), "us-west-2");
@@ -170,13 +171,15 @@ class RdsDataResourceResolverTest {
         assertEquals(DbInstanceStatus.STOPPED, stoppedMember.getStatus());
         verify(rdsService, times(2)).ensureClusterBackend("cluster1", "us-west-2");
         verify(proxies, times(2)).startProxy(eq("rds-resource:" + retryMember.getDbInstanceArn()),
-                any(), anyBoolean(), eq(7002), eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any(), any());
+                eq(cluster.getDbClusterArn()), any(), anyBoolean(), eq(7002), eq("127.0.0.1"),
+                eq(15432), any(), any(), any(), any(), any(), any());
         verify(proxies).startProxy(eq("rds-resource:" + otherMember.getDbInstanceArn()),
-                any(), anyBoolean(), eq(7003), eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any(), any());
+                eq(cluster.getDbClusterArn()), any(), anyBoolean(), eq(7003), eq("127.0.0.1"),
+                eq(15432), any(), any(), any(), any(), any(), any());
         verify(proxies, never()).startProxy(eq("rds-resource:" + stoppedMember.getDbInstanceArn()),
-                any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+                any(), any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
         verify(proxies, never()).startProxy(eq("rds-resource:" + cluster.getDbClusterArn()),
-                any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+                any(), any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
         verifyNoInteractions(fixture.containers());
     }
 
@@ -226,7 +229,8 @@ class RdsDataResourceResolverTest {
         assertEquals(15432, member.getContainerPort());
         verify(fixture.service()).ensureClusterBackend("cluster1", "us-west-2");
         verify(fixture.proxies()).startProxy(eq("rds-resource:" + member.getDbInstanceArn()),
-                any(), anyBoolean(), eq(7002), eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any(), any());
+                eq(fixture.cluster().getDbClusterArn()), any(), anyBoolean(), eq(7002),
+                eq("127.0.0.1"), eq(15432), any(), any(), any(), any(), any(), any());
         verifyNoInteractions(fixture.containers());
     }
 

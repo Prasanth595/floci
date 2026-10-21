@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.controltower.ControlTowerControlContr
 import io.github.hectorvent.floci.services.controltower.ControlTowerController;
 import io.github.hectorvent.floci.services.detective.DetectiveController;
 import io.github.hectorvent.floci.services.dlm.DlmController;
+import io.github.hectorvent.floci.services.dsql.DsqlController;
 import io.github.hectorvent.floci.services.efs.EfsController;
 import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.fis.FisController;
@@ -58,12 +59,14 @@ import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
 import io.github.hectorvent.floci.services.resourceexplorer2.ResourceExplorer2Controller;
+import io.github.hectorvent.floci.services.resourcegroups.ResourceGroupsController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.rum.RumController;
 import io.github.hectorvent.floci.services.s3.S3Controller;
 import io.github.hectorvent.floci.services.s3tables.S3TablesController;
 import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
 import io.github.hectorvent.floci.services.sagemaker.SageMakerRuntimeController;
+import io.github.hectorvent.floci.services.scheduler.SchedulerController;
 import io.github.hectorvent.floci.services.securityhub.SecurityHubController;
 import io.github.hectorvent.floci.services.ses.SesAccountController;
 import io.github.hectorvent.floci.services.ses.SesConfigurationSetController;
@@ -82,11 +85,13 @@ import io.github.hectorvent.floci.services.ses.SesTemplateController;
 import io.github.hectorvent.floci.services.ses.SesTenantController;
 import io.github.hectorvent.floci.services.ssooidc.SsoOidcController;
 import io.github.hectorvent.floci.services.ssoportal.SsoPortalController;
+import io.github.hectorvent.floci.services.swf.model.SwfConstants;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -134,7 +139,8 @@ public class ResolvedServiceCatalog {
                         config.storage().services().dynamodb().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("DynamoDB_20120810.", "DynamoDBStreams_20120810."),
-                        Set.of("dynamodb"), Set.of("DynamoDB", "DynamoDB Streams"), Set.of()),
+                        Set.of("dynamodb"), Set.of("DynamoDB", "DynamoDB Streams"), Set.of(),
+                        "DynamoDB_20111205."),
                 descriptor("sns", "sns", config.services().sns().enabled(), true,
                         "sns", storageMode(config.storage().services().sns().mode(), config.storage().mode()),
                         config.storage().services().sns().flushIntervalMs(), AwsNamespaces.SNS, ServiceProtocol.QUERY,
@@ -196,6 +202,10 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("rds-data"), Set.of(), Set.of(RdsDataController.class)),
+                descriptor("dsql", "dsql", config.services().dsql().enabled(), true,
+                        "dsql", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("dsql"), Set.of(), Set.of(DsqlController.class)),
                 descriptor("neptune", "neptune", config.services().neptune().enabled(), true,
                         "neptune", storageMode(config.storage().services().neptune().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
@@ -247,7 +257,7 @@ public class ResolvedServiceCatalog {
                 descriptor("scheduler", "scheduler", config.services().scheduler().enabled(), true,
                         "scheduler", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of(), Set.of("scheduler"), Set.of(), Set.of()),
+                        Set.of(), Set.of("scheduler"), Set.of(), Set.of(SchedulerController.class)),
                 descriptor("logs", "cloudwatchlogs", config.services().cloudwatchlogs().enabled(), true,
                         "cloudwatchlogs", storageMode(config.storage().services().cloudwatchlogs().mode(), config.storage().mode()),
                         config.storage().services().cloudwatchlogs().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -294,8 +304,9 @@ public class ResolvedServiceCatalog {
                         Set.of("AWSStepFunctions."), Set.of("states"), Set.of("SFN"), Set.of()),
                 descriptor("swf", "swf", config.services().swf().enabled(), true,
                         "swf", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
-                        protocols(ServiceProtocol.JSON),
-                        Set.of("SimpleWorkflowService."), Set.of("swf"), Set.of(), Set.of()),
+                        protocols(ServiceProtocol.JSON, ServiceProtocol.PLAIN_JSON),
+                        Set.of(SwfConstants.TARGET_PREFIX, SwfConstants.LEGACY_TARGET_PREFIX),
+                        Set.of("swf"), Set.of(), Set.of()),
                 descriptor("cloudformation", "cloudformation", config.services().cloudformation().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
@@ -361,6 +372,11 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AmazonEC2ContainerRegistry_V20150921."), Set.of("ecr"), Set.of(), Set.of()),
+                descriptor("resource-groups", "resource-groups", config.services().resourceGroups().enabled(), true,
+                        "resource-groups", storageMode(config.storage().services().resourceGroups().mode(), config.storage().mode()),
+                        config.storage().services().resourceGroups().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("resource-groups"), Set.of(),
+                        Set.of(ResourceGroupsController.class)),
                 descriptor("tagging", "tagging", config.services().tagging().enabled(), true,
                         "tagging", storageMode(config.storage().services().tagging().mode(), config.storage().mode()),
                         config.storage().services().tagging().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -793,6 +809,10 @@ public class ResolvedServiceCatalog {
         return catalog.matchTarget(target);
     }
 
+    public Optional<ServiceCatalog.TargetMatch> matchPlainJsonTarget(String target) {
+        return catalog.matchPlainJsonTarget(target);
+    }
+
     public Optional<ServiceDescriptor> byCredentialScope(String credentialScope) {
         return catalog.byCredentialScope(credentialScope);
     }
@@ -844,8 +864,11 @@ public class ResolvedServiceCatalog {
             Set<String> targetPrefixes,
             Set<String> credentialScopes,
             Set<String> cborSdkServiceIds,
-            Set<Class<?>> resourceClasses
+            Set<Class<?>> resourceClasses,
+            String... jsonOnlyTargetPrefixes
     ) {
+        Set<String> resolvedTargetPrefixes = new HashSet<>(targetPrefixes);
+        resolvedTargetPrefixes.addAll(Set.of(jsonOnlyTargetPrefixes));
         return new ServiceDescriptor(
                 externalKey,
                 configKey,
@@ -857,10 +880,11 @@ public class ResolvedServiceCatalog {
                 xmlNamespace,
                 defaultProtocol,
                 Set.copyOf(supportedProtocols),
-                Set.copyOf(targetPrefixes),
+                Set.copyOf(resolvedTargetPrefixes),
                 Set.copyOf(credentialScopes),
                 Set.copyOf(cborSdkServiceIds),
-                Set.copyOf(resourceClasses)
+                Set.copyOf(resourceClasses),
+                Set.of(jsonOnlyTargetPrefixes)
         );
     }
 

@@ -6,9 +6,11 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
@@ -61,6 +63,8 @@ public class Ec2MetadataServer {
     private final Map<String, SessionToken> tokens = new ConcurrentHashMap<>();
     /** IMDSv1 fallback: container bridge IP → Instance */
     private final Map<String, Instance> containerIpToInstance = new ConcurrentHashMap<>();
+    /** Cluster nodes whose instance-profile identity their registrar synthesizes rather than IAM holding it. */
+    private final Set<Instance> synthesizedProfiles = ConcurrentHashMap.newKeySet();
 
     private volatile HttpServer httpServer;
 
@@ -101,8 +105,19 @@ public class Ec2MetadataServer {
                 entry.getValue() == instance && !addresses.contains(entry.getKey()));
     }
 
+    /**
+     * Registers a cluster node that another service synthesizes instead of EC2 launching it. Its
+     * instance-profile ARN and ID are the registrar's own, so {@code iam/info} reports them while IAM
+     * holds no such profile.
+     */
+    public void reconcileClusterNodeAddresses(Set<String> addresses, Instance instance) {
+        synthesizedProfiles.add(instance);
+        reconcileContainerAddresses(addresses, instance);
+    }
+
     public void unregisterInstance(Instance instance) {
         if (instance != null) {
+            synthesizedProfiles.remove(instance);
             credentials.unregister(instance);
             tokens.values().removeIf(token -> token.instance() == instance);
             containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
@@ -122,6 +137,10 @@ public class Ec2MetadataServer {
 
         Router router = Router.router(vertx);
         router.route().handler(BodyHandler.create());
+        // Ahead of every route, so a path IMDS does not serve also answers 401 when the instance
+        // requires tokens, as on AWS. A method-free route, so methods IMDS does not serve keep the
+        // router's own answers rather than all becoming 405.
+        router.route().handler(this::refuseTokenlessReadsWhenTokensAreRequired);
 
         // IMDSv2 token endpoint
         router.put("/latest/api/token").handler(this::handleToken);
@@ -179,6 +198,7 @@ public class Ec2MetadataServer {
         credentials.clear();
         tokens.clear();
         containerIpToInstance.clear();
+        synthesizedProfiles.clear();
         if (httpServer != null) {
             httpServer.close();
             httpServer = null;
@@ -290,18 +310,25 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
-        String profileArn = inst.getIamInstanceProfileArn();
-        if (profileArn == null) {
+        Optional<InstanceProfile> resolved = credentials.profile(inst);
+        String profileArn;
+        String profileId;
+        if (resolved.isPresent()) {
+            profileArn = resolved.get().getArn();
+            profileId = resolved.get().getInstanceProfileId();
+        } else if (synthesizedProfiles.contains(inst) && inst.getIamInstanceProfileArn() != null
+                && !credentials.holdsProfile(inst)) {
+            profileArn = inst.getIamInstanceProfileArn();
+            profileId = inst.getIamInstanceProfileId();
+        } else {
             ctx.response().setStatusCode(404).end("{}");
             return;
         }
-        String profileId = "AIPA" + inst.getInstanceId().toUpperCase().substring(2, 16);
-        String body = "{\"Code\":\"Success\",\"LastUpdated\":\"" + now() + "\","
-                + "\"InstanceProfileArn\":\"" + profileArn + "\","
-                + "\"InstanceProfileId\":\"" + profileId + "\"}";
         ctx.response().setStatusCode(200)
                 .putHeader("content-type", "application/json")
-                .end(body);
+                .end(new JsonObject().put("Code", "Success").put("LastUpdated", now())
+                        .put("InstanceProfileArn", profileArn)
+                        .put("InstanceProfileId", profileId).encode());
     }
 
     private void handleCredentialsList(RoutingContext ctx) {
@@ -474,6 +501,24 @@ public class Ec2MetadataServer {
         return containerIpToInstance.get(remoteIp);
     }
 
+    /**
+     * An instance whose HttpTokens is required refuses IMDSv1: as AWS does, a GET or HEAD without a
+     * token gets 401 before any data is looked up, whatever the path. (No route serves HEAD, so one
+     * with a token gets the router's answer: 405 on a path a GET route serves, 404 elsewhere.)
+     */
+    private void refuseTokenlessReadsWhenTokensAreRequired(RoutingContext ctx) {
+        HttpMethod method = ctx.request().method();
+        String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
+        if ((HttpMethod.GET.equals(method) || HttpMethod.HEAD.equals(method)) && (token == null || token.isBlank())) {
+            Instance inst = resolveInstanceByIp(ctx);
+            if (inst != null && "required".equals(inst.effectiveMetadataOptions().getHttpTokens())) {
+                ctx.response().setStatusCode(401).end();
+                return;
+            }
+        }
+        ctx.next();
+    }
+
     private Instance resolveInstance(RoutingContext ctx) {
         String remoteIp = ctx.request().remoteAddress().host();
         Instance inst = containerIpToInstance.get(remoteIp);
@@ -481,7 +526,8 @@ public class Ec2MetadataServer {
         // IMDSv2: a presented token must be valid; an invalid or expired one gets 401 so the
         // caller fetches a new token. A token is not valid on another instance, so a caller whose
         // IP maps to a different instance also gets 401; an unregistered IP defers to the token.
-        // Requests without a token fall back to IMDSv1.
+        // Requests without a token fall back to IMDSv1; one whose instance requires tokens has
+        // already been refused before routing.
         String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
         if (token != null && !token.isBlank()) {
             SessionToken session = tokens.get(token);

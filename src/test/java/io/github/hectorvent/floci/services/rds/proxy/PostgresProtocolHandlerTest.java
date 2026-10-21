@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -31,6 +34,7 @@ import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -38,15 +42,16 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.LogRecord;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PostgresProtocolHandlerTest {
 
@@ -447,14 +452,32 @@ class PostgresProtocolHandlerTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"172.17.0.5, true", "never-registered.example.com, false"})
-    void hostnameVerificationRequiresRegisteredAdvertisedHost(String advertisedHost, boolean registered) throws Exception {
+    @CsvSource({"172.17.0.5, true, false", "never-registered.example.com, false, false",
+            "host.docker.internal, true, true", "never-registered.example.com, false, true"})
+    void hostnameVerificationRequiresRegisteredAdvertisedHost(String advertisedHost, boolean registered,
+                                                              boolean legacyCa) throws Exception {
         try (ServerSocket clientServer = new ServerSocket(0);
              Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
              Socket proxyClient = clientServer.accept()) {
 
             RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
+            Path caCertFile = tempDir.resolve("tls/rds-ca.crt");
+            if (legacyCa) {
+                CertificateGenerator.GeneratedCertificate legacy = new CertificateGenerator()
+                        .generateSelfSignedCertificate("localhost", List.of("localhost", "172.17.0.5"),
+                                KeyAlgorithm.RSA_2048);
+                Files.writeString(caCertFile.resolveSibling("rds-ca.crt"), legacy.certificatePem());
+                Files.writeString(caCertFile.resolveSibling("rds-ca.key"), legacy.privateKeyPem());
+                Files.writeString(caCertFile.resolveSibling("rds-ca.metadata.json"),
+                        "{\"hostnames\":[\"localhost\",\"172.17.0.5\"]}");
+            }
             tlsCertificates.ensureHost("172.17.0.5");
+            Path trustedCaFile = Files.copy(caCertFile, tempDir.resolve("trusted-ca.crt"));
+            if (legacyCa) {
+                tlsCertificates.ensureHost("host.docker.internal");
+                tlsCertificates = testTlsCertificates();
+            }
+            RdsProxyTlsCertificates serverCertificates = tlsCertificates;
 
             AtomicReference<Throwable> authFailure = new AtomicReference<>();
             Thread authThread = Thread.ofVirtual()
@@ -464,7 +487,7 @@ class PostgresProtocolHandlerTest {
                             PostgresProtocolHandler.authenticate(
                                     proxyClient, NEVER_CONNECT,
                                     "dbadmin", "adminpass", "postgres",
-                                    false, testSigV4Validator(), testBinding(), tlsCertificates,
+                                    false, testSigV4Validator(), testBinding(), serverCertificates,
                                     (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                         } catch (IOException expected) {
                             // Closing or rejecting TLS ends authentication before PostgreSQL startup.
@@ -478,10 +501,19 @@ class PostgresProtocolHandlerTest {
                 writeSslRequest(clientOut);
                 assertEquals('S', clientIn.readUnsignedByte());
 
-                Path caCertFile = tempDir.resolve("tls").resolve("rds-ca.crt");
-                try (SSLSocket sslClient = verifyingClientSocket(ourClient, caCertFile, advertisedHost)) {
+                try (SSLSocket sslClient = verifyingClientSocket(ourClient, trustedCaFile, advertisedHost)) {
                     if (registered) {
                         sslClient.startHandshake();
+                        X509Certificate serverCertificate = (X509Certificate)
+                                sslClient.getSession().getPeerCertificates()[0];
+                        assertEquals(-1, serverCertificate.getBasicConstraints(),
+                                "strict TLS clients require an end-entity server certificate, not the trusted CA");
+                        assertTrue(serverCertificate.getExtendedKeyUsage().contains("1.3.6.1.5.5.7.3.1"));
+                        assertEquals(2, sslClient.getSession().getPeerCertificates().length);
+                        try (InputStream trustedCa = Files.newInputStream(trustedCaFile)) {
+                            assertEquals(CertificateFactory.getInstance("X.509").generateCertificate(trustedCa),
+                                    sslClient.getSession().getPeerCertificates()[1]);
+                        }
                     } else {
                         assertThrows(SSLHandshakeException.class, sslClient::startHandshake);
                     }
@@ -616,6 +648,7 @@ class PostgresProtocolHandlerTest {
                                 writeParameterStatus(out, "application_name", "svc");
                                 writeCommandComplete(out, "SELECT 1");
                                 writeReadyForQuery(out);
+                                answerRoleAdmission(in, out, "approle", true, true);
                             });
                 } catch (IOException e) {
                     throw new RuntimeException(e);
@@ -856,7 +889,8 @@ class PostgresProtocolHandlerTest {
                             writeCommandComplete(out, "SELECT 1");
                             writeReadyForQuery(out);
                         }
-                    });
+                        answerRoleAdmission(in, out, "approle", true, true);
+                    }, false);
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
@@ -917,7 +951,7 @@ class PostgresProtocolHandlerTest {
                         "SELECT pg_catalog.set_config(E'role', E'reader', false)",
                         "SELECT pg_catalog.set_config(E'application_name', E'svc', false)",
                         "SELECT pg_catalog.set_config(E'client_encoding', E'LATIN1', false)"),
-                afterHandover, "role as the role, then the client's settings, then the role's encoding once no proxy SQL follows");
+                afterHandover, "role as the role, then the client's settings, then the role's encoding before the ASCII identity check");
     }
 
     @Test
@@ -1166,8 +1200,8 @@ class PostgresProtocolHandlerTest {
 
                 Map<Character, String> error = readErrorResponse(clientIn);
                 assertEquals("FATAL", error.get('S'));
-                assertEquals("28000", error.get('C'));
-                assertEquals("role \"nosuchrole\" does not exist", error.get('M'));
+                assertEquals("28P01", error.get('C'));
+                assertEquals("password authentication failed for user \"nosuchrole\"", error.get('M'));
 
                 authThread.join(5_000);
                 backendThread.join(5_000);
@@ -1175,7 +1209,7 @@ class PostgresProtocolHandlerTest {
                 assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
             }
 
-            assertEquals("SET SESSION AUTHORIZATION \"nosuchrole\"", backendQuery.get());
+            assertEquals(PostgresProtocolHandler.databaseRoleQuery("nosuchrole", true, false), backendQuery.get());
         }
     }
 
@@ -1213,7 +1247,8 @@ class PostgresProtocolHandlerTest {
             int backendPort = backendServer.getLocalPort();
             Thread backendThread = Thread.ofVirtual().start(() -> {
                 try {
-                    mockBackendStartup(backendServer, backendDatabase, false);
+                    mockBackendMasterSession(backendServer, (in, out) ->
+                            answerRoleAdmission(in, out, "dbadmin", true, false));
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
@@ -1233,8 +1268,8 @@ class PostgresProtocolHandlerTest {
                 writeStartup(clientOut, "dbadmin", "postgres");
                 readCleartextPasswordChallenge(clientIn);
                 writePassword(clientOut, rdsToken("dbadmin"));
-                // The mock backend answers no query, so reaching ReadyForQuery proves no
-                // SET SESSION AUTHORIZATION was issued for the master user.
+                // The backend answers only admission, so reaching ReadyForQuery proves
+                // no SET SESSION AUTHORIZATION was issued for the master user.
                 readAuthenticationOk(clientIn);
                 readReadyForQuery(clientIn);
 
@@ -1260,6 +1295,7 @@ class PostgresProtocolHandlerTest {
                 try {
                     mockBackendRoleSwitch(backendServer, new AtomicReference<>(), backendQuery,
                             "approle", true, (in, out) -> {
+                                answerRoleAdmission(in, out, "approle", true, true);
                                 readSimpleQuery(in);
                                 // What PostgreSQL reports after RESET SESSION AUTHORIZATION and
                                 // friends hand the session back to the connection's master role.
@@ -1318,6 +1354,7 @@ class PostgresProtocolHandlerTest {
                 try {
                     mockBackendRoleSwitch(backendServer, new AtomicReference<>(),
                             new AtomicReference<>(), "approle", true, (in, out) -> {
+                                answerRoleAdmission(in, out, "approle", true, true);
                                 readSimpleQuery(in);
                                 writeParameterStatus(out, "session_authorization", "approle");
                                 writeMessage(out, 'D', wideRow);
@@ -1375,6 +1412,7 @@ class PostgresProtocolHandlerTest {
             Thread backendThread = Thread.ofVirtual().start(() -> {
                 try {
                     mockBackendMasterSession(backendServer, (in, out) -> {
+                        answerRoleAdmission(in, out, "dbadmin", false, false);
                         readSimpleQuery(in);
                         writeParameterStatus(out, "session_authorization", "approle");
                         writeCommandComplete(out, "SET");
@@ -1462,6 +1500,147 @@ class PostgresProtocolHandlerTest {
 
                 ourClient.close();
                 proxyClient.close();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,replaced", "true,revoked", "true,missing", "true,malformed", "true,error",
+            "false,replaced", "false,revoked", "false,missing", "false,malformed", "false,error"})
+    void finalRoleAdmissionRefusesChangedOrUnverifiableSessionIdentity(boolean databaseIam, String fault) throws Exception {
+        assertAdmissionRefused(true, databaseIam, "approle", (in, out) -> {
+            assertEquals(PostgresProtocolHandler.databaseRoleQuery("approle", true, false, databaseIam), readSimpleQuery(in));
+            writeDataRow(out, "100", "t");
+            writeCommandComplete(out, "SELECT 1");
+            writeReadyForQuery(out);
+            assertEquals(true, readSimpleQuery(in).contains("pg_db_role_setting"));
+            writeCommandComplete(out, "SELECT 0");
+            writeReadyForQuery(out);
+            assertEquals("SET SESSION AUTHORIZATION \"approle\"", readSimpleQuery(in));
+            writeParameterStatus(out, "session_authorization", "approle");
+            writeCommandComplete(out, "SET");
+            writeReadyForQuery(out);
+            assertEquals(PostgresProtocolHandler.databaseRoleQuery("approle", true, true, databaseIam), readSimpleQuery(in));
+            switch (fault) {
+                case "replaced" -> writeDataRow(out, "101", "t");
+                case "revoked" -> writeDataRow(out, "100", "f");
+                case "malformed" -> writeDataRow(out, "not-an-oid", "t");
+                case "error" -> writeErrorResponse(out, "ERROR", "XX000", "catalog unavailable");
+                case "missing" -> { /* A role no longer present has no row. */ }
+                default -> throw new AssertionError(fault);
+            }
+            if (!fault.equals("error")) {
+                writeCommandComplete(out, fault.equals("missing") ? "SELECT 0" : "SELECT 1");
+            }
+            writeReadyForQuery(out);
+            assertEquals(-1, in.read(), "refusal must close the backend before any further query");
+        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void initialRoleRefusalPrecedesDefaultsAndHandover(boolean iam) throws Exception {
+        assertAdmissionRefused(iam, (in, out) -> {
+            assertEquals(PostgresProtocolHandler.databaseRoleQuery("approle", iam, false), readSimpleQuery(in));
+            writeDataRow(out, "100", "f");
+            writeCommandComplete(out, "SELECT 1");
+            writeReadyForQuery(out);
+            assertEquals(-1, in.read(), "no default, handover or startup query may follow initial refusal");
+        });
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,true,pam,28000", "true,true,pam,28P01", "false,false,pam,28P01",
+            "false,true,f,28P01", "false,true,unexpected,28P01"})
+    void pamRefusalIsConfinedToNativePasswordMembership(boolean iam, boolean databaseIam,
+                                                        String admission, String code) throws Exception {
+        runAdmissionRefused(iam, databaseIam, "approle", (in, out) -> {
+            assertEquals(PostgresProtocolHandler.databaseRoleQuery("approle", iam, false, databaseIam), readSimpleQuery(in));
+            writeDataRow(out, "100", admission);
+            writeCommandComplete(out, "SELECT 1");
+            writeReadyForQuery(out);
+            assertEquals(-1, in.read(), "no defaults or handover may follow refusal");
+        }, code);
+    }
+
+    @Test
+    void roleRefusalLogsSanitizedIdentityWithoutBackendSecrets() throws Exception {
+        String user = "app\nrole\r";
+        List<LogRecord> records = LogCapture.capture(PostgresProtocolHandler.class, () ->
+                assertDoesNotThrow(() -> runAdmissionRefused(true, false, user, (in, out) -> {
+                    assertEquals(PostgresProtocolHandler.databaseRoleQuery(user, true, false, false), readSimpleQuery(in));
+                    writeErrorResponse(out, "ERROR", "XX000", "SECRET_SQL X-Amz-Credential=SECRET_TOKEN");
+                    writeReadyForQuery(out);
+                    assertEquals(-1, in.read());
+                })));
+        List<String> logs = records.stream().map(record -> MessageFormat.format(record.getMessage(), record.getParameters())).toList();
+        assertTrue(logs.stream().anyMatch(line -> line.contains("user approle: catalog query returned an error")));
+        assertFalse(logs.stream().anyMatch(line -> line.contains("SECRET_") || line.contains("X-Amz-")
+                || line.contains("\n") || line.contains("\r")));
+    }
+
+    private void assertAdmissionRefused(boolean iam, BackendScript script) throws Exception {
+        assertAdmissionRefused(iam, true, "approle", script);
+    }
+
+    private void assertAdmissionRefused(boolean iam, boolean databaseIam, String user, BackendScript script) {
+        List<LogRecord> records = LogCapture.capture(PostgresProtocolHandler.class, () ->
+                assertDoesNotThrow(() -> runAdmissionRefused(iam, databaseIam, user, script)));
+        assertTrue(records.stream().anyMatch(record -> record.getMessage().contains("PostgreSQL role admission refused")));
+    }
+
+    private void runAdmissionRefused(boolean iam, boolean databaseIam, String user, BackendScript script) throws Exception {
+        runAdmissionRefused(iam, databaseIam, user, script, "28P01");
+    }
+
+    private void runAdmissionRefused(boolean iam, boolean databaseIam, String user, BackendScript script,
+                                     String code) throws Exception {
+        AtomicReference<Throwable> backendFailure = new AtomicReference<>();
+        AtomicReference<Throwable> authFailure = new AtomicReference<>();
+        AtomicReference<PostgresProtocolHandler.AuthenticatedSession> result = new AtomicReference<>();
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendMasterSession(backendServer, script);
+                } catch (Throwable failure) {
+                    backendFailure.set(failure);
+                }
+            });
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
+                 Socket proxyClient = clientServer.accept();
+                 Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                Thread authThread = Thread.ofVirtual().start(() -> {
+                    try {
+                        result.set(PostgresProtocolHandler.authenticate(proxyClient, () -> backend,
+                                "dbadmin", "adminpass", "postgres", true, testSigV4Validator(),
+                                testBinding(), testTlsCertificates(),
+                                (loginUser, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5_000, true, databaseIam));
+                    } catch (Throwable failure) {
+                        authFailure.set(failure);
+                    }
+                });
+                DataOutputStream out = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream in = new DataInputStream(ourClient.getInputStream());
+                writeStartup(out, user, "postgres");
+                readCleartextPasswordChallenge(in);
+                writePassword(out, iam ? rdsToken(user) : "adminpass");
+                Map<Character, String> refusal = readErrorResponse(in);
+                assertEquals("FATAL", refusal.get('S'));
+                assertEquals(code, refusal.get('C'));
+                assertEquals((code.equals("28000") ? "PAM" : "password")
+                        + " authentication failed for user \"" + user + "\"", refusal.get('M'));
+                assertEquals(-1, in.read(), "neither AuthenticationOK nor ReadyForQuery may follow refusal");
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertFalse(authThread.isAlive());
+                assertFalse(backendThread.isAlive());
+                assertNull(authFailure.get());
+                assertNull(backendFailure.get());
+                assertNull(result.get());
+                assertTrue(proxyClient.isClosed());
+                assertTrue(backend.isClosed());
             }
         }
     }
@@ -1578,6 +1757,14 @@ class PostgresProtocolHandlerTest {
                                               AtomicReference<String> backendQuery,
                                               String role, boolean roleExists,
                                               BackendScript afterHandover) throws IOException {
+        mockBackendRoleSwitch(server, backendStartup, backendQuery, role, roleExists, afterHandover, true);
+    }
+
+    private static void mockBackendRoleSwitch(ServerSocket server,
+                                              AtomicReference<Map<String, String>> backendStartup,
+                                              AtomicReference<String> backendQuery,
+                                              String role, boolean roleExists,
+                                              BackendScript afterHandover, boolean initialAdmission) throws IOException {
         try (Socket socket = server.accept()) {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
@@ -1585,7 +1772,7 @@ class PostgresProtocolHandlerTest {
             int length = in.readInt();
             assertEquals(STARTUP_PROTOCOL_VERSION, in.readInt());
             byte[] payload = in.readNBytes(length - 8);
-            backendStartup.set(PostgresProtocolHandler.parseStartupParams(payload));
+            backendStartup.set(PostgresWire.startupParameters(payload));
 
             out.writeByte('R');
             out.writeInt(8);
@@ -1603,6 +1790,19 @@ class PostgresProtocolHandlerTest {
             writeBackendKeyData(out);
             writeReadyForQuery(out);
 
+            if (initialAdmission) {
+                String admission = readSimpleQuery(in);
+                assertEquals(PostgresProtocolHandler.databaseRoleQuery(role, true, false), admission);
+                if (!roleExists) {
+                    backendQuery.set(admission);
+                    writeCommandComplete(out, "SELECT 0");
+                    writeReadyForQuery(out);
+                    return;
+                }
+                writeDataRow(out, "100", "t");
+                writeCommandComplete(out, "SELECT 1");
+                writeReadyForQuery(out);
+            }
             String query = readSimpleQuery(in);
             if (query.contains("pg_db_role_setting")) {
                 // A role with no defaults: the proxy carries on with this session.
@@ -1625,6 +1825,8 @@ class PostgresProtocolHandlerTest {
 
             if (afterHandover != null) {
                 afterHandover.run(in, out);
+            } else {
+                answerRoleAdmission(in, out, role, true, true);
             }
         }
     }
@@ -1657,6 +1859,7 @@ class PostgresProtocolHandlerTest {
             writeBackendKeyData(out);
             writeReadyForQuery(out);
 
+            answerRoleAdmission(in, out, "approle", true, false);
             assertEquals(true, readSimpleQuery(in).contains("pg_db_role_setting"));
             for (String[] setting : roleDefaults) {
                 writeDataRow(out, setting[0], setting[1]);
@@ -1756,6 +1959,14 @@ class PostgresProtocolHandlerTest {
 
             script.run(in, out);
         }
+    }
+
+    private static void answerRoleAdmission(DataInputStream in, DataOutputStream out, String role,
+                                            boolean iam, boolean sessionRole) throws IOException {
+        assertEquals(PostgresProtocolHandler.databaseRoleQuery(role, iam, sessionRole), readSimpleQuery(in));
+        writeDataRow(out, "100", "t");
+        writeCommandComplete(out, "SELECT 1");
+        writeReadyForQuery(out);
     }
 
     private static String readSimpleQuery(DataInputStream in) throws IOException {
@@ -1877,11 +2088,8 @@ class PostgresProtocolHandlerTest {
     }
 
     private RdsProxyTlsCertificates testTlsCertificates() {
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
-        when(storage.persistentPath()).thenReturn(tempDir.toString());
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.storage()).thenReturn(storage);
-        return new RdsProxyTlsCertificates(config, new CertificateGenerator());
+        return new RdsProxyTlsCertificates(FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")),
+                new CertificateGenerator());
     }
 
     /**
@@ -1930,7 +2138,7 @@ class PostgresProtocolHandlerTest {
             int proto = in.readInt();
             assertEquals(STARTUP_PROTOCOL_VERSION, proto);
             byte[] payload = in.readNBytes(length - 8);
-            backendStartup.set(PostgresProtocolHandler.parseStartupParams(payload));
+            backendStartup.set(PostgresWire.startupParameters(payload));
             backendDatabase.set(backendStartup.get().get("database"));
 
             out.writeByte('R');

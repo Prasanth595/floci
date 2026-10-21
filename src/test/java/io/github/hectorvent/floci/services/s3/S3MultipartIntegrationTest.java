@@ -25,7 +25,7 @@ class S3MultipartIntegrationTest {
     private static final String SSE_CUSTOMER_KEY_MD5 = customerKeyMd5(SSE_CUSTOMER_KEY);
     private static final String WRONG_SSE_CUSTOMER_KEY = Base64.getEncoder().encodeToString("abcdef0123456789abcdef0123456789".getBytes(StandardCharsets.UTF_8));
     private static final String WRONG_SSE_CUSTOMER_KEY_MD5 = customerKeyMd5(WRONG_SSE_CUSTOMER_KEY);
-    private static final String PART_1 = "Part1Data-Hello";
+    private static final String PART_1 = "a".repeat(5 * 1024 * 1024);
     private static final String PART_2 = "Part2Data-World";
     private static final String COMPOSITE_SHA256 = compositeSha256(PART_1, PART_2);
     private static String uploadId;
@@ -116,6 +116,70 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .body(containsString("<UploadId>" + uploadId + "</UploadId>"))
             .body(containsString("<Key>" + KEY + "</Key>"));
+    }
+
+    @Test
+    @Order(7)
+    void completeMultipartUploadWithoutPartsIsInvalidRequest() {
+        String key = "no-parts-complete.bin";
+        String newUploadId = given()
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        // The CLI omits --multipart-upload and sends an empty body; the SDKs send an empty
+        // element. AWS answers both with InvalidRequest, while non-XML stays MalformedXML.
+        given()
+            .contentType("application/xml")
+            .body("")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidRequest"))
+            .body("Error.Message", equalTo("You must specify at least one part"));
+
+        given()
+            .contentType("application/xml")
+            .body("<CompleteMultipartUpload/>")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidRequest"))
+            .body("Error.Message", equalTo("You must specify at least one part"));
+
+        given()
+            .contentType("application/xml")
+            .body("<CompleteMultipartUpload></CompleteMultipartUpload>")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidRequest"))
+            .body("Error.Message", equalTo("You must specify at least one part"));
+
+        given()
+            .contentType("application/xml")
+            .body("   \n  ")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("MalformedXML"));
+
+        given()
+            .contentType("application/xml")
+            .body("<CompleteMultipartUpload><Part></CompleteMultipartUpload>")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("MalformedXML"));
+
+        given().when().delete("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId).then().statusCode(204);
     }
 
     @Test
@@ -258,9 +322,10 @@ class S3MultipartIntegrationTest {
     @Test
     @Order(13)
     void uploadPartCopy() {
+        String source = "ABCDEFGHIJ" + "a".repeat(5 * 1024 * 1024);
         // Put a source object
         given()
-            .body("ABCDEFGHIJ")
+            .body(source)
         .when()
             .put("/" + BUCKET + "/source-for-copy.bin")
         .then()
@@ -285,10 +350,10 @@ class S3MultipartIntegrationTest {
             .body(containsString("<ETag>"))
             .extract().xmlPath().getString("CopyPartResult.ETag");
 
-        // UploadPartCopy with range (bytes 2-5 → "CDEF")
+        // Copy a 5 MiB range so this non-final part meets the multipart minimum.
         String copyPart2ETag = given()
             .header("x-amz-copy-source", "/" + BUCKET + "/source-for-copy.bin")
-            .header("x-amz-copy-source-range", "bytes=2-5")
+            .header("x-amz-copy-source-range", "bytes=2-" + (5 * 1024 * 1024 + 1))
         .when()
             .put("/" + BUCKET + "/copy-dest.bin?uploadId=" + copyUploadId + "&partNumber=2")
         .then()
@@ -333,7 +398,7 @@ class S3MultipartIntegrationTest {
             .get("/" + BUCKET + "/copy-dest.bin")
         .then()
             .statusCode(200)
-            .body(equalTo("ABCDEFGHIJCDEFCDEF"));
+            .body(equalTo(source + source.substring(2, 5 * 1024 * 1024 + 2) + "CDEF"));
     }
 
     @Test
@@ -1220,7 +1285,7 @@ class S3MultipartIntegrationTest {
         .then().statusCode(200)
             .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
 
-        String firstETag = given().body("first").when()
+        String firstETag = given().body(new byte[5 * 1024 * 1024]).when()
             .put("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId + "&partNumber=1")
         .then().statusCode(200).extract().header("ETag");
         String thirdETag = given().body("third").when()

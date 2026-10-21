@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.backup.model.BackupJob;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -27,12 +28,13 @@ class BackupJobRecoveryIntegrationTest {
     @Inject EmulatorConfig config;
     @Inject RegionResolver resolver;
     @Inject ObjectMapper mapper;
+    @Inject SnsService sns;
 
     @Test
     void restartRestoresJobsInEveryAccountAndTheirOriginalRegion() {
         String vaultName = "restart-" + UUID.randomUUID();
         List<String> accounts = List.of("811111111111", "822222222222");
-        BackupService first = new BackupService(storage, config, resolver, mapper);
+        BackupService first = new BackupService(storage, config, resolver, mapper, sns);
         AccountAwareStorageBackend<BackupJob> jobs = storage.create("backup", "backup-jobs.json",
                 new TypeReference<Map<String, BackupJob>>() {});
         try {
@@ -47,7 +49,7 @@ class BackupJobRecoveryIntegrationTest {
         } finally {
             first.shutdown();
         }
-        BackupService restarted = new BackupService(storage, config, resolver, mapper);
+        BackupService restarted = new BackupService(storage, config, resolver, mapper, sns);
         try {
             restarted.resumeJobs();
             for (String account : accounts) {
@@ -58,6 +60,8 @@ class BackupJobRecoveryIntegrationTest {
                             .getFirst().getRecoveryPointArn();
                     assertTrue(arn.contains(":eu-west-1:" + account + ":"));
                     assertEquals(1, restarted.describeBackupVault(vaultName, "eu-west-1").getNumberOfRecoveryPoints());
+                    assertEquals(restarted.describeBackupVault(vaultName, "eu-west-1").getVaultId(),
+                            restarted.listBackupJobs(vaultName, null, null, null).getFirst().getVaultId());
                 }));
             }
         } finally {

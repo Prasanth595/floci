@@ -1,17 +1,33 @@
 package io.github.hectorvent.floci.services.backup;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.backup.model.BackupJob;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
+import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Integration tests for AWS Backup via REST JSON protocol.
@@ -19,6 +35,9 @@ import static org.hamcrest.Matchers.*;
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class BackupIntegrationTest {
+
+    @Inject BackupService backupService;
+    @Inject ObjectMapper mapper;
 
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/backup/aws4_request";
     private static final String VAULT_NAME = "test-vault";
@@ -523,6 +542,83 @@ class BackupIntegrationTest {
             .body("Tags.env", equalTo("test"));
     }
 
+    // ── ResourceNotFoundException is HTTP 400 on every lookup ──────────────────
+
+    @Test
+    @Order(63)
+    void missingSelectionReturns400() {
+        given().header("Authorization", AUTH)
+        .when().get("/backup/plans/" + planId + "/selections/no-such-selection")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup/plans/" + planId + "/selections/no-such-selection")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(64)
+    void selectionLookedUpUnderAnotherPlanReturns400() {
+        String otherPlanId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "BackupPlan": {
+                    "BackupPlanName": "other-plan",
+                    "Rules": [{
+                      "RuleName": "daily",
+                      "TargetBackupVaultName": "%s",
+                      "ScheduleExpression": "cron(0 12 * * ? *)"
+                    }]
+                  }
+                }
+                """.formatted(VAULT_NAME))
+        .when().put("/backup/plans/")
+        .then().statusCode(200).extract().path("BackupPlanId");
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup/plans/" + otherPlanId + "/selections/" + selectionId)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup/plans/" + otherPlanId)
+        .then().statusCode(204);
+    }
+
+    @Test
+    @Order(65)
+    void missingRecoveryPointReturns400() {
+        // The vault exists; the recovery point was deleted at Order(54).
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + VAULT_NAME + "/recovery-points/" + recoveryPointArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + VAULT_NAME + "/recovery-points/" + recoveryPointArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(66)
+    void tagOperationsOnAMissingResourceReturn400() {
+        String missingArn = "arn:aws:backup:us-east-1:000000000000:backup-vault:no-such-vault";
+
+        given().header("Authorization", AUTH)
+        .when().get("/tags/" + missingArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"Tags\":{\"team\":\"platform\"}}")
+        .when().post("/tags/" + missingArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"TagKeyList\":[\"team\"]}")
+        .when().post("/untag/" + missingArn)
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     // ── Supported Resource Types ───────────────────────────────────────────────
 
     @Test
@@ -576,13 +672,27 @@ class BackupIntegrationTest {
 
     @Test
     @Order(83)
-    void describeDeletedVaultReturns404() {
+    void describeDeletedVaultReturns400() {
+        // AWS Backup documents ResourceNotFoundException as HTTP 400, not 404.
         given()
             .header("Authorization", AUTH)
         .when()
             .get("/backup-vaults/" + VAULT_NAME)
         .then()
-            .statusCode(404);
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(84)
+    void missingPlanAndJobReturn400() {
+        given().header("Authorization", AUTH)
+        .when().get("/backup/plans/no-such-plan/")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/no-such-job")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     // ── Vault sub-resources: access policy, notifications, lock ────────────────
@@ -617,7 +727,9 @@ class BackupIntegrationTest {
         .when().get("/backup-vaults/" + SUB_VAULT)
         .then().statusCode(200)
             .body("Locked", equalTo(false))
-            .body("$", not(hasKey("LockDate")));
+            .body("$", not(hasKey("LockDate")))
+            // A standard vault is stored with VaultType unset; AWS reports it as BACKUP_VAULT.
+            .body("VaultType", equalTo("BACKUP_VAULT"));
     }
 
     @Test
@@ -659,7 +771,7 @@ class BackupIntegrationTest {
         given().header("Authorization", AUTH).contentType("application/json")
             .body("{\"Policy\":\"{}\"}")
         .when().put("/backup-vaults/no-such-vault/access-policy")
-        .then().statusCode(404).body("message", containsString("no-such-vault"));
+        .then().statusCode(400).body("message", containsString("no-such-vault"));
     }
 
     @Test
@@ -1421,4 +1533,465 @@ class BackupIntegrationTest {
         awaitJobState(OTHER_ACCOUNT_AUTH, jid, "ABORTED");
     }
 
+
+    // ── Vault notifications: delivery ──────────────────────────────────────────
+
+    private static String createQueue(String name) {
+        return given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue").formParam("QueueName", name)
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+    }
+
+    /** A topic with {@code queueUrl} subscribed, so what SNS delivers can be read back from SQS. */
+    private static String topicDeliveringTo(String name, String queueUrl) {
+        return topicDeliveringTo(name, queueUrl, null);
+    }
+
+    /** As above, with the subscription filtered by {@code filterPolicy} when it is non-null. */
+    private static String topicDeliveringTo(String name, String queueUrl, String filterPolicy) {
+        String topicArn = given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic").formParam("Name", name)
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+        RequestSpecification subscribe = given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe").formParam("TopicArn", topicArn)
+            .formParam("Protocol", "sqs").formParam("Endpoint", queueUrl);
+        if (filterPolicy != null) {
+            subscribe = subscribe.formParam("Attributes.entry.1.key", "FilterPolicy")
+                .formParam("Attributes.entry.1.value", filterPolicy);
+        }
+        subscribe.when().post("/").then().statusCode(200);
+        return topicArn;
+    }
+
+    private static String receiveBody(String queueUrl) {
+        return given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage").formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.Body");
+    }
+
+    private static String startJobInNotifiedVault(String vault, String topicArn, String event) {
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"%s\",\"BackupVaultEvents\":[\"%s\"]}".formatted(topicArn, event))
+        .when().put("/backup-vaults/" + vault + "/notification-configuration").then().statusCode(204);
+        return given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s"
+                }
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+    }
+
+    @Test
+    @Order(170)
+    void aCompletedJobIsPublishedOnlyToAVaultThatAskedForBackupJobCompleted() {
+        String quietQueue = createQueue("backup-notify-quiet-queue");
+        String quietTopic = topicDeliveringTo("backup-notify-quiet-topic", quietQueue);
+        String notifiedQueue = createQueue("backup-notify-queue");
+        // Filtered on the attributes AWS's "Backup job completed" example carries: a publish
+        // without them is dropped by SNS and never reaches the queue.
+        String notifiedTopic = topicDeliveringTo("backup-notify-topic", notifiedQueue,
+            "{\"EventType\":[\"BACKUP_JOB\"],\"State\":[\"COMPLETED\"]}");
+
+        // The quiet vault's job is started first. Completions run on one scheduler thread in
+        // start order, so by the time the notified vault's message has arrived, any publish
+        // the quiet vault's completion was going to make has already been made.
+        String quietJob = startJobInNotifiedVault("notify-quiet-vault", quietTopic, "BACKUP_JOB_FAILED");
+        String jid = startJobInNotifiedVault("notify-vault", notifiedTopic, "BACKUP_JOB_COMPLETED");
+
+        String[] body = new String[1];
+        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100))
+            .until(() -> (body[0] = receiveBody(notifiedQueue)) != null && !body[0].isEmpty());
+
+        awaitJobCompleted(jid);
+        String rpArn = given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + jid).then().statusCode(200)
+            .extract().path("RecoveryPointArn");
+
+        JsonPath envelope = new JsonPath(body[0]);
+        assertEquals(notifiedTopic, envelope.getString("TopicArn"));
+        assertEquals("Notification from AWS Backup", envelope.getString("Subject"));
+        // AWS's documented body, which ends at the job ID and does not name the vault.
+        assertEquals("An AWS Backup job was completed successfully. Recovery point ARN: " + rpArn
+            + ". Resource ARN : " + RESOURCE_ARN + ". BackupJob ID : " + jid, envelope.getString("Message"));
+        long created = given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + jid).then().statusCode(200)
+            .extract().jsonPath().getLong("CreationDate");
+        assertEquals(Map.of(
+            "EventType", Map.of("Type", "String", "Value", "BACKUP_JOB"),
+            "State", Map.of("Type", "String", "Value", "COMPLETED"),
+            "AccountId", Map.of("Type", "String", "Value", "000000000000"),
+            "Id", Map.of("Type", "String", "Value", jid),
+            "StartTime", Map.of("Type", "String", "Value", Instant.ofEpochSecond(created).toString())),
+            envelope.getMap("MessageAttributes"));
+
+        awaitJobCompleted(quietJob);
+        assertThat(receiveBody(quietQueue), anyOf(nullValue(), emptyString()));
+    }
+
+    @Test
+    @Order(171)
+    void aFailedPublishIsLoggedWithItsStackTraceAndDoesNotUndoTheJob() {
+        List<LogRecord> records = new CopyOnWriteArrayList<>();
+        Handler capture = new Handler() {
+            @Override public void publish(LogRecord r) { records.add(r); }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        Logger log = Logger.getLogger(BackupService.class.getName());
+        log.addHandler(capture);
+        try {
+            String missingTopic = "arn:aws:sns:us-east-1:000000000000:backup-notify-no-such-topic";
+            String jid = startJobInNotifiedVault("notify-broken-vault", missingTopic, "BACKUP_JOB_COMPLETED");
+            awaitJobCompleted(jid);
+            await().atMost(Duration.ofSeconds(10)).until(() -> records.stream()
+                .anyMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()
+                    && String.valueOf(r.getMessage()).contains("BACKUP_JOB_COMPLETED")));
+            assertThat("the warning carries the exception, not just its message",
+                records.stream().filter(r -> String.valueOf(r.getMessage()).contains("BACKUP_JOB_COMPLETED"))
+                    .allMatch(r -> r.getThrown() != null));
+        } finally {
+            log.removeHandler(capture);
+        }
+    }
+
+    @Test
+    @Order(172)
+    void aJobWhoseVaultWasReplacedDoesNotNotifyTheReplacement() {
+        String replacementQueue = createQueue("backup-notify-replacement-queue");
+        String replacementTopic = topicDeliveringTo("backup-notify-replacement-topic", replacementQueue);
+        String sentinelQueue = createQueue("backup-notify-sentinel-queue");
+        String sentinelTopic = topicDeliveringTo("backup-notify-sentinel-topic", sentinelQueue);
+        String vault = "notify-replaced-vault";
+
+        // No waiting for the clock: the original and its replacement are normally created in
+        // the same second, and must still be told apart.
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+        // The incarnation id is Floci-internal and must not leak into the AWS response.
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault).then().statusCode(200)
+            .body("$", not(hasKey("FlociVaultId")));
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/").then().statusCode(200)
+            .body(not(containsString("FlociVaultId")));
+
+        String oldJob = given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {"BackupVaultName": "%s", "ResourceArn": "%s", "IamRoleArn": "%s"}
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault).then().statusCode(204);
+        // Recreates the name and points it at a topic the old job must never reach.
+        startJobInNotifiedVault(vault, replacementTopic, "BACKUP_JOB_COMPLETED");
+        // Completions run in start order on one thread: once this one is delivered, the
+        // old job's completion, and any publish it was going to make, has already happened.
+        startJobInNotifiedVault("notify-sentinel-vault", sentinelTopic, "BACKUP_JOB_COMPLETED");
+
+        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100))
+            .until(() -> { String b = receiveBody(sentinelQueue); return b != null && !b.isEmpty(); });
+        // Its vault is gone, so the old job fails rather than completing into the replacement.
+        awaitJobState(AUTH, oldJob, "FAILED");
+
+        // The replacement's own job does publish; the old job must not have published too.
+        String first = receiveBody(replacementQueue);
+        assertThat(first, not(containsString("BackupJob ID : " + oldJob)));
+        String second = receiveBody(replacementQueue);
+        assertThat(second == null ? "" : second, not(containsString("BackupJob ID : " + oldJob)));
+    }
+
+    // ── Logically air-gapped vault ─────────────────────────────────────────────
+
+    private static final String AIR_GAPPED_VAULT = "air-gapped-vault";
+
+    @Test
+    @Order(190)
+    void createLogicallyAirGappedBackupVault() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30,"
+                    + "\"CreatorRequestId\":\"req-1\",\"BackupVaultTags\":{\"env\":\"airgap\"}}")
+        .when()
+            .put("/logically-air-gapped-backup-vaults/" + AIR_GAPPED_VAULT)
+        .then()
+            .statusCode(200)
+            .body("BackupVaultName", equalTo(AIR_GAPPED_VAULT))
+            .body("BackupVaultArn", endsWith(":backup-vault:" + AIR_GAPPED_VAULT))
+            .body("CreationDate", notNullValue())
+            .body("VaultState", equalTo("AVAILABLE"));
+    }
+
+    @Test
+    @Order(191)
+    void describeBackupVaultReportsTheAirGappedVaultTypeAndRetention() {
+        // AWS creates the vault with a compliance-mode lock: LockDate equals CreationDate.
+        long creationDate = given().header("Authorization", AUTH)
+            .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+            .then().statusCode(200).extract().jsonPath().getLong("CreationDate");
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then()
+            .statusCode(200)
+            .body("Locked", equalTo(true))
+            .body("LockDate", equalTo((int) creationDate))
+            .body("BackupVaultName", equalTo(AIR_GAPPED_VAULT))
+            .body("VaultType", equalTo("LOGICALLY_AIR_GAPPED_BACKUP_VAULT"))
+            .body("VaultState", equalTo("AVAILABLE"))
+            .body("MinRetentionDays", equalTo(7))
+            .body("MaxRetentionDays", equalTo(30))
+            .body("CreatorRequestId", equalTo("req-1"));
+    }
+
+    @Test
+    @Order(192)
+    void airGappedVaultTagsAreReadableThroughListTags() {
+        String arn = given().header("Authorization", AUTH)
+            .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+            .then().statusCode(200).extract().path("BackupVaultArn");
+
+        given().header("Authorization", AUTH)
+        .when().get("/tags/" + arn)
+        .then().statusCode(200).body("Tags.env", equalTo("airgap"));
+    }
+
+    @Test
+    @Order(193)
+    void createLogicallyAirGappedBackupVaultTwiceReturnsAlreadyExists() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().statusCode(400).body("__type", equalTo("AlreadyExistsException"));
+    }
+
+    @Test
+    @Order(194)
+    void createLogicallyAirGappedBackupVaultValidatesRetention() {
+        // Both retention values are "Required: Yes", and MinRetentionDays has a documented
+        // floor: "The minimum value accepted is 7 days."
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/airgap-missing-min")
+        .then().statusCode(400).body("__type", equalTo("MissingParameterValueException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7}")
+        .when().put("/logically-air-gapped-backup-vaults/airgap-missing-max")
+        .then().statusCode(400).body("__type", equalTo("MissingParameterValueException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":6,\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/airgap-min-too-low")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":30,\"MaxRetentionDays\":7}")
+        .when().put("/logically-air-gapped-backup-vaults/airgap-max-below-min")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/airgap-missing-min")
+        .then().statusCode(not(200));
+    }
+
+    @Test
+    @Order(195)
+    void airGappedVaultIsLockedSoRetentionEnforcementApplies() {
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().statusCode(200).body("Locked", equalTo(true));
+    }
+
+    @Test
+    @Order(196)
+    void vaultLockCallsCannotChangeOrRemoveAirGappedRetention() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":1,\"MaxRetentionDays\":2}")
+        .when().put("/backup-vaults/" + AIR_GAPPED_VAULT + "/vault-lock")
+        .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + AIR_GAPPED_VAULT + "/vault-lock")
+        .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().body("MinRetentionDays", equalTo(7)).body("MaxRetentionDays", equalTo(30));
+    }
+
+    @Test
+    @Order(197)
+    void listBackupVaultsFiltersByVaultType() {
+        given().header("Authorization", AUTH).queryParam("vaultType", "LOGICALLY_AIR_GAPPED_BACKUP_VAULT")
+        .when().get("/backup-vaults/")
+        .then().statusCode(200)
+            .body("BackupVaultList.BackupVaultName", hasItem(AIR_GAPPED_VAULT))
+            .body("BackupVaultList.BackupVaultName", not(hasItem("lock-enforcement-vault")));
+
+        given().header("Authorization", AUTH).queryParam("vaultType", "BACKUP_VAULT")
+        .when().get("/backup-vaults/")
+        .then().statusCode(200)
+            .body("BackupVaultList.BackupVaultName", hasItem("lock-enforcement-vault"))
+            .body("BackupVaultList.BackupVaultName", not(hasItem(AIR_GAPPED_VAULT)));
+
+        // The list members carry VaultType and the air-gapped LockDate too, not just Describe.
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/")
+        .then().statusCode(200)
+            .body("BackupVaultList.find { it.BackupVaultName == 'lock-enforcement-vault' }.VaultType",
+                    equalTo("BACKUP_VAULT"))
+            .body("BackupVaultList.find { it.BackupVaultName == '" + AIR_GAPPED_VAULT + "' }.VaultType",
+                    equalTo("LOGICALLY_AIR_GAPPED_BACKUP_VAULT"))
+            .body("BackupVaultList.find { it.BackupVaultName == '" + AIR_GAPPED_VAULT + "' }.LockDate",
+                    notNullValue());
+    }
+
+    @Test
+    @Order(198)
+    void deleteBackupVaultRemovesTheAirGappedVault() {
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(199)
+    void anAirGappedVaultRefusesToDeleteARecoveryPointInsideMinRetention() {
+        // Same mechanism as aLockedVaultRefusesToDeleteARecoveryPointInsideMinRetention, but
+        // the lock comes from creation alone: no PutBackupVaultLockConfiguration call. Asserting
+        // Locked=true is not enough; this is the behaviour Locked is supposed to buy.
+        String vault = "air-gapped-retention-vault";
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/" + vault).then().statusCode(200);
+
+        String jid = given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s",
+                  "Lifecycle": {"DeleteAfterDays": 14}
+                }
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+
+        awaitJobCompleted(jid);
+        String rpArn = given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + jid).then().statusCode(200)
+            .body("State", equalTo("COMPLETED"))
+            .extract().path("RecoveryPointArn");
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault + "/recovery-points/" + rpArn)
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", containsString("7"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/recovery-points/" + rpArn)
+        .then().statusCode(200);
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault)
+        .then().statusCode(200).body("NumberOfRecoveryPoints", equalTo(1));
+    }
+
+    @Test
+    @Order(200)
+    void aJobWhoseAirGappedVaultWasReplacedDoesNotLandInTheReplacement() {
+        // Delete is allowed mid-job (the vault holds no recovery point yet). If the job then
+        // completed by NAME, its recovery point would land in an unlocked vault recreated under
+        // that name and could be deleted inside the original vault's minimum retention.
+        String vault = "air-gapped-replaced-vault";
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+        .when().put("/logically-air-gapped-backup-vaults/" + vault).then().statusCode(200);
+        String oldJob = given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {"BackupVaultName": "%s", "ResourceArn": "%s", "IamRoleArn": "%s", "Lifecycle": {"DeleteAfterDays": 14}}
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault).then().statusCode(204);
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(25))
+            .until(() -> {
+                String state = given().header("Authorization", AUTH)
+                .when().get("/backup-jobs/" + oldJob).then().statusCode(200).extract().path("State");
+                return "FAILED".equals(state) || "COMPLETED".equals(state);
+            });
+        given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + oldJob).then().statusCode(200)
+            .body("State", equalTo("FAILED"))
+            .body("$", not(hasKey("RecoveryPointArn")));
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/recovery-points/").then().statusCode(200)
+            .body("RecoveryPoints", empty());
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault).then().statusCode(200)
+            .body("NumberOfRecoveryPoints", equalTo(0));
+    }
+
+    @Test
+    @Order(201)
+    void describeAndListJobsHideCapturedIdentityWithoutRemovingStoredOrPublicFields() {
+        String vault = "job-api-identity-vault";
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+                .when().put("/backup-vaults/" + vault).then().statusCode(200);
+        String jid = given().header("Authorization", AUTH).contentType("application/json")
+                .body("""
+                    {"BackupVaultName":"%s","ResourceArn":"%s","IamRoleArn":"%s"}
+                    """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+                .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+        BackupJob stored = backupService.describeBackupJob(jid);
+        String capturedId = backupService.describeBackupVault(vault, "us-east-1").getVaultId();
+        assertEquals(capturedId, stored.getVaultId());
+        JsonNode before = mapper.valueToTree(stored);
+        assertEquals(capturedId, before.path("FlociVaultId").asText());
+        assertTrue(before.has("BackupVaultCreationDate"));
+        given().header("Authorization", AUTH)
+                .when().get("/backup-jobs/" + jid).then().statusCode(200)
+                .body("$", not(hasKey("FlociVaultId")))
+                .body("$", not(hasKey("BackupVaultCreationDate")))
+                .body("BackupJobId", equalTo(jid))
+                .body("BackupVaultName", equalTo(vault))
+                .body("BackupVaultArn", equalTo(stored.getBackupVaultArn()))
+                .body("ResourceArn", equalTo(RESOURCE_ARN))
+                .body("CreationDate", notNullValue())
+                .body("State", notNullValue());
+        given().header("Authorization", AUTH).queryParam("byBackupVaultName", vault)
+                .when().get("/backup-jobs/").then().statusCode(200)
+                .body("BackupJobs", hasSize(1))
+                .body("BackupJobs[0]", not(hasKey("FlociVaultId")))
+                .body("BackupJobs[0]", not(hasKey("BackupVaultCreationDate")))
+                .body("BackupJobs[0].BackupJobId", equalTo(jid))
+                .body("BackupJobs[0].BackupVaultName", equalTo(vault))
+                .body("BackupJobs[0].ResourceArn", equalTo(RESOURCE_ARN))
+                .body("BackupJobs[0].CreationDate", notNullValue())
+                .body("BackupJobs[0].State", notNullValue());
+        JsonNode after = mapper.valueToTree(backupService.describeBackupJob(jid));
+        assertEquals(before.path("FlociVaultId"), after.path("FlociVaultId"));
+        assertEquals(before.path("BackupVaultCreationDate"), after.path("BackupVaultCreationDate"));
+        awaitJobCompleted(jid);
+        String point = backupService.describeBackupJob(jid).getRecoveryPointArn();
+        backupService.deleteRecoveryPoint(vault, point, "us-east-1");
+        backupService.deleteBackupVault(vault, "us-east-1");
+    }
 }

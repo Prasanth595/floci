@@ -65,6 +65,7 @@ AWS::Cognito::UserPoolResourceServer	CognitoResourceServerCfnProvisioner
 AWS::Cognito::UserPoolUser	CognitoUserPoolUserCfnProvisioner
 AWS::Cognito::UserPoolUserToGroupAttachment	CognitoUserPoolUserToGroupAttachmentCfnProvisioner
 AWS::Config::ConfigRule	ConfigCfnProvisioner
+AWS::DSQL::Cluster	DsqlCfnProvisioner
 AWS::DynamoDB::GlobalTable	DynamoDbCfnProvisioner
 AWS::DynamoDB::Table	DynamoDbCfnProvisioner
 AWS::EC2::EIP	Ec2NetworkCfnProvisioner
@@ -134,6 +135,9 @@ AWS::Lambda::NetworkConnector	LambdaMicrovmsCfnProvisioner
 AWS::Lambda::Permission	LambdaAddressingCfnProvisioner
 AWS::Lambda::Url	LambdaAddressingCfnProvisioner
 AWS::Lambda::Version	LambdaVersionAliasCfnProvisioner
+AWS::Lambda::WebFunction	LambdaWebCfnProvisioner
+AWS::Lambda::WebFunctionEndpoint	LambdaWebCfnProvisioner
+AWS::Lambda::WebFunctionRevision	LambdaWebCfnProvisioner
 AWS::Logs::LogGroup	LogsCfnProvisioner
 AWS::Logs::LogStream	LogsLogStreamCfnProvisioner
 AWS::Logs::MetricFilter	LogsMetricFilterCfnProvisioner
@@ -160,6 +164,9 @@ AWS::Route53::HostedZone	Route53CfnProvisioner
 AWS::Route53::RecordSet	Route53CfnProvisioner
 AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
+AWS::S3Vectors::Index	S3VectorsCfnProvisioner
+AWS::S3Vectors::VectorBucket	S3VectorsCfnProvisioner
+AWS::SES::EmailIdentity	SesCfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner
 AWS::SNS::Topic	SnsCfnProvisioner
 AWS::SNS::TopicPolicy	SnsCfnProvisioner
@@ -177,6 +184,7 @@ AWS::ServiceDiscovery::Service	CloudMapCfnProvisioner
 AWS::StepFunctions::StateMachine	StepFunctionsCfnProvisioner
 AWS::Transfer::Server	TransferCfnProvisioner
 AWS::Transfer::User	TransferCfnProvisioner
+AWS::WAFv2::IPSet	WafV2CfnProvisioner
 AWS::WAFv2::WebACL	WafV2CfnProvisioner
 AWS::WAFv2::WebACLAssociation	WafV2CfnProvisioner
 Custom::DynamoDBReplica	DynamoDbCfnProvisioner

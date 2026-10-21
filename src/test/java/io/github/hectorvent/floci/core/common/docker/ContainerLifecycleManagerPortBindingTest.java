@@ -74,6 +74,32 @@ class ContainerLifecycleManagerPortBindingTest {
     }
 
     @Test
+    void aDynamicPortLeavesTheHostPortToTheDaemon() {
+        Ports.Binding binding = bindingFor(builder -> builder.withDynamicPort(5432), 5432);
+
+        assertNull(binding.getHostIp());
+        assertNull(binding.getHostPortSpec(), "Floci must not pick a port the daemon cannot see");
+    }
+
+    @Test
+    void aDynamicLoopbackPortStaysOnLoopback() {
+        Ports.Binding binding = bindingFor(
+                builder -> builder.withLoopbackPortBinding(5050, 0), 5050);
+
+        assertEquals("127.0.0.1", binding.getHostIp());
+        assertNull(binding.getHostPortSpec());
+    }
+
+    @Test
+    void aDynamicPortKeepsAnExplicitHostIp() {
+        Ports.Binding binding = bindingFor(
+                builder -> builder.withPortBinding(4500, 0, "127.0.0.1"), 4500);
+
+        assertEquals("127.0.0.1", binding.getHostIp());
+        assertNull(binding.getHostPortSpec());
+    }
+
+    @Test
     void oneBoundInterfaceDoesNotLeakOntoTheOtherPorts() {
         ContainerSpec spec = specFor(builder -> builder
                 .withPortBinding(4500, 4500, "127.0.0.1")
@@ -114,9 +140,8 @@ class ContainerLifecycleManagerPortBindingTest {
         when(createCmd.exec()).thenReturn(response);
         ImageCacheService imageCacheService = mock(ImageCacheService.class);
         when(imageCacheService.ensureImageExists(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        PortAllocator portAllocator = mock(PortAllocator.class);
         ContainerLifecycleManager manager = new ContainerLifecycleManager(
-                dockerClient, imageCacheService, mock(ContainerDetector.class), portAllocator, config);
+                dockerClient, imageCacheService, mock(ContainerDetector.class), config);
 
         manager.create(spec);
 

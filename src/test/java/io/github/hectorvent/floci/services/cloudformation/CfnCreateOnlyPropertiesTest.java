@@ -4,10 +4,24 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CfnCreateOnlyPropertiesTest {
+
+    @Test
+    void s3VectorsCreateOnlyPropertiesMatchTheRegistrySchemas() {
+        assertEquals(Set.of("DataType", "Dimension", "DistanceMetric", "EncryptionConfiguration", "IndexName",
+                        "MetadataConfiguration", "VectorBucketArn", "VectorBucketName"),
+                CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::S3Vectors::Index"));
+        assertEquals(Set.of("VectorBucketName", "EncryptionConfiguration"),
+                CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::S3Vectors::VectorBucket"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::S3Vectors::Index", "Dimension"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::S3Vectors::VectorBucket", "EncryptionConfiguration"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::S3Vectors::Index", "Tags"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::S3Vectors::VectorBucket", "Tags"));
+    }
 
     @Test
     void isCreateOnly_matchesSchemaDefinedProperties() {
@@ -48,6 +62,17 @@ class CfnCreateOnlyPropertiesTest {
         assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "NetworkType"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "SecurityGroupIds"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Description"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Tags"));
+    }
+
+    @Test
+    void isCreateOnly_ipSetReplacesOnlyForNameAndScope() {
+        String type = "AWS::WAFv2::IPSet";
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "Name"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "Scope"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Addresses"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Description"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "IPAddressVersion"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Tags"));
     }
 

@@ -1,14 +1,14 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.jwtPayload;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
@@ -18,12 +18,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * With {@code floci.services.cognito.enforce-token-validity-limits=false}, an app client keeps tokens
  * shorter than AWS allows, as tests of what happens when a token expires want.
+ *
+ * <p>The setting comes from {@link IndependentServiceSettingsProfile}, which this class shares
+ * with other classes that each call a different service.
  */
 @QuarkusTest
-@TestProfile(CognitoTokenValidityLimitsOffIntegrationTest.TokenValidityLimitsOffProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class CognitoTokenValidityLimitsOffIntegrationTest {
 
     private static final String PASSWORD = "Perm1234!";
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -35,6 +41,9 @@ class CognitoTokenValidityLimitsOffIntegrationTest {
         String poolId = cognitoJson("CreateUserPool", """
                 {"PoolName": "ShortTokensPool"}
                 """).path("UserPool").path("Id").asText();
+        cleanup.register(() -> cognitoAction("DeleteUserPool", """
+                {"UserPoolId": "%s"}
+                """.formatted(poolId)).then().statusCode(200));
         JsonNode client = cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId": "%s", "ClientName": "short-tokens",
                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
@@ -58,12 +67,5 @@ class CognitoTokenValidityLimitsOffIntegrationTest {
         assertEquals(60, result.path("ExpiresIn").asInt());
         JsonNode idToken = jwtPayload(result.path("IdToken").asText());
         assertEquals(60, idToken.path("exp").asLong() - idToken.path("iat").asLong());
-    }
-
-    public static final class TokenValidityLimitsOffProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.cognito.enforce-token-validity-limits", "false");
-        }
     }
 }

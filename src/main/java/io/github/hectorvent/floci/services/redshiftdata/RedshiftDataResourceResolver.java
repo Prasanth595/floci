@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.DatabaseSecretCredentials;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
@@ -79,12 +80,12 @@ class RedshiftDataResourceResolver {
             return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
                     workgroup.masterUsername(), workgroup.masterPassword(), spectrum);
         }
-        Credentials creds = secretCredentials(request.get("SecretArn").asText(), region);
+        DatabaseSecretCredentials creds = secretCredentials(request.get("SecretArn").asText(), region);
         return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
                 creds.username(), creds.password(), spectrum);
     }
 
-    private Credentials secretCredentials(String secretArn, String region) {
+    private DatabaseSecretCredentials secretCredentials(String secretArn, String region) {
         validateSecretRegion(secretArn, region);
         SecretVersion secret;
         try {
@@ -92,11 +93,8 @@ class RedshiftDataResourceResolver {
         } catch (AwsException e) {
             throw validation("SecretArn does not resolve to a local secret: " + secretArn);
         }
-        Credentials creds = parseCredentials(secret.getSecretString());
-        if (creds == null) {
-            throw validation("Secret " + secretArn + " does not contain username and password fields.");
-        }
-        return creds;
+        return DatabaseSecretCredentials.parse(objectMapper, secret.getSecretString())
+                .orElseThrow(() -> validation("Secret " + secretArn + " does not contain username and password fields."));
     }
 
     private static void validateSecretRegion(String secretArn, String region) {
@@ -115,7 +113,7 @@ class RedshiftDataResourceResolver {
         validateSecretRegion(secretArn, region);
         String clusterId = requiredText(request, "ClusterIdentifier");
         Cluster cluster = cluster(clusterId);
-        Credentials creds = secretCredentials(secretArn, region);
+        DatabaseSecretCredentials creds = secretCredentials(secretArn, region);
         return target(clusterArn(clusterId, region), cluster, database, creds.username(), creds.password());
     }
 
@@ -158,26 +156,6 @@ class RedshiftDataResourceResolver {
         return new DatabaseTarget(arn, host, port, database, user, password, spectrum);
     }
 
-    private Credentials parseCredentials(String secretString) {
-        if (secretString == null || secretString.isBlank()) {
-            return null;
-        }
-        try {
-            JsonNode node = objectMapper.readTree(secretString);
-            String username = text(node, "username");
-            if (username == null) {
-                username = text(node, "user");
-            }
-            String password = text(node, "password");
-            if (username != null && password != null) {
-                return new Credentials(username, password);
-            }
-        } catch (Exception e) {
-            LOG.debugv("Could not parse Redshift Data API secret: {0}", e.getMessage());
-        }
-        return null;
-    }
-
     private String clusterArn(String clusterId, String region) {
         String r = (region == null || region.isBlank()) ? regionResolver.getDefaultRegion() : region;
         return AwsArnUtils.Arn.of("redshift", r, regionResolver.getAccountId(), "cluster:" + clusterId).toString();
@@ -212,6 +190,4 @@ class RedshiftDataResourceResolver {
         }
     }
 
-    private record Credentials(String username, String password) {
-    }
 }

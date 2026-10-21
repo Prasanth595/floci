@@ -123,6 +123,75 @@ Delivered objects are named `<evaluated prefix><streamName>-<versionId>-<yyyy-MM
 
 Known deviations from AWS: timestamps are evaluated at flush time instead of the oldest buffered record's arrival time; expressions AWS would reject at create time (unknown namespaces, `!{partitionKeyFromQuery:...}`/`!{partitionKeyFromLambda:...}` dynamic partitioning keys, invalid patterns) are kept literally in the key; `FileExtension` is accepted on the legacy `S3DestinationConfiguration` shape too, where AWS only defines it on the extended one.
 
+## Redshift destination
+
+`CreateDeliveryStream` accepts `RedshiftDestinationConfiguration` and `UpdateDestination` accepts
+`RedshiftDestinationUpdate`. A stream has either an S3 destination or a Redshift destination, never both.
+`DescribeDeliveryStream` returns `RedshiftDestinationDescription`, which never includes `Password`.
+
+Supported members: `RoleARN`, `ClusterJDBCURL`, `Username`, `Password`, `CopyCommand`
+(`DataTableName`, `CopyOptions`, `DataTableColumns`), `S3Configuration` (the intermediate S3 location),
+`RetryOptions`, `S3BackupMode` with `S3BackupConfiguration`, `SecretsManagerConfiguration`,
+`ProcessingConfiguration` and `CloudWatchLoggingOptions`. Members are validated against the Firehose API
+model: required members, length and pattern limits, and the rule that `SNAPPY` and `ZIP` are refused on the
+intermediate S3 location. `S3BackupMode` can be switched on after creation but not off again.
+
+`DataTableName` and `DataTableColumns` must be identifiers Redshift would read as such: a table name with an optional
+schema, and a comma-separated list of column names. `CopyOptions` must not carry a second statement, so outside a
+quoted value a `;`, a `$` (dollar quoting is never needed) and the comment markers `--` and `/*` are refused, as is an
+unterminated quote. One closing `;` at the very end is the exception (the API reference's own example,
+`delimiter '\t' lzop;`, is accepted). Create and update reject anything else.
+
+### Delivery
+
+A flush writes the batch to the intermediate S3 location, then runs
+`COPY <DataTableName> [(<DataTableColumns>)] FROM 's3://<bucket>/<key>' <CopyOptions>` against the cluster. A single
+closing `;` in `CopyOptions` is dropped from the statement. The `COPY` names no `IAM_ROLE`: AWS gives the cluster
+temporary credentials of the stream's `RoleARN`, and Floci instead lets the proxy read the staged object from its own
+S3, so `RoleARN` is validated and stored but not used for the load (an `IAM_ROLE` would have to exist in IAM and be
+associated with the cluster). The `COPY` goes through the cluster's wire proxy, so it behaves like a `COPY` sent by any
+other client (see [Redshift COPY from S3](redshift.md#copy-from-s3)). Credentials come from `Username` and `Password`,
+or from the secret in `SecretsManagerConfiguration` when `Enabled` is true (the secret JSON needs `username` and
+`password`). An empty `DataTableColumns` omits the column list, so the proxy discovers the table columns.
+
+`DataTableName` and `DataTableColumns` are passed to the `COPY` as written, so Redshift's identifier rules apply
+(an unquoted name is lowercased, a quoted one is kept).
+
+A batch is staged in S3 once, and the `COPY` runs on its own thread so that a slow or hanging query does not hold the
+buffer flusher thread or `PutRecord`. If its `COPY` fails (missing table or cluster, bad data), the failure is logged
+and the staged object stays in S3; retrying failed loads will follow in a separate change. With `S3BackupMode` set to
+`Enabled`, which needs an `S3BackupConfiguration`, each batch is also written once to that bucket under its own prefix
+and compression. The backup is written after the batch is staged, and a failed backup write is logged without holding
+the load back or re-staging the batch, so that batch then has no backup copy.
+
+A JDBC connection that stops answering is dropped after 150 seconds.
+
+Compression of the intermediate objects is not added to the `COPY` for you: as on AWS, put `GZIP` in `CopyOptions`
+when the intermediate `CompressionFormat` is `GZIP`.
+
+Floci does not write the `redshift_failed` manifest objects that AWS creates after a failed `COPY`.
+
+### Known deviations from AWS
+
+- `ClusterJDBCURL` must match the AWS pattern, so it needs a host such as
+  `mycluster.abc123.us-east-1.redshift.amazonaws.com`. Floci treats the URL as a logical address: the first
+  host label is the cluster identifier, and the host suffix and port are ignored. The database name is ignored
+  too, because the emulated database is always `dev`. The cluster is looked up at delivery time, so a stream can
+  be created before its cluster.
+- `ProcessingConfiguration` on a Redshift destination is accepted and returned but not executed.
+- A `ClusterJDBCURL` with a `redshift-serverless` host is accepted, but delivery looks the name up as a provisioned
+  cluster, so a serverless workgroup is not a delivery target yet.
+- The `COPY` carries no credentials, so the proxy reads the staged object as an anonymous client. With S3
+  authorization enforced and a private intermediate bucket the load fails and the staged object stays in S3; use a
+  bucket the anonymous principal can read, or leave enforcement off.
+- `CopyOptions` are validated for shape only. The `COPY` emulation does not implement every Redshift option
+  (`LZOP`, `BZIP2`, `ZSTD`, `PARQUET` and others): such a statement is forwarded to PostgreSQL and fails, and the staged
+  object stays in S3; retrying failed loads will follow in a separate change. Firehose never writes an `LZOP` object,
+  so the API reference's `lzop` example would fail on AWS too.
+- The intermediate `Prefix` must not contain whitespace or quotes, because the `COPY` emulation cannot read such
+  object keys. `DataFormatConversionConfiguration` is ignored on the Redshift `S3Configuration`, which AWS does not
+  define.
+
 ## Configuration
 
 | Variable | Default | Description |

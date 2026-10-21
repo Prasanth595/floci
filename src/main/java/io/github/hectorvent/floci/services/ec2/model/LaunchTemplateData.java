@@ -350,6 +350,21 @@ public class LaunchTemplateData {
         return fromInterfaces;
     }
 
+    /** The interface a launch from this template attaches at device index 0, or null when it names none. */
+    @JsonIgnore
+    public NetworkInterface primaryNetworkInterface() {
+        return networkInterfaces.stream()
+                .filter(networkInterface -> Integer.valueOf(0).equals(networkInterface.getDeviceIndex()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    @JsonIgnore
+    public Boolean effectiveAssociatePublicIpAddress() {
+        NetworkInterface primary = primaryNetworkInterface();
+        return primary == null ? null : primary.getAssociatePublicIpAddress();
+    }
+
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class IamInstanceProfile {

@@ -3,8 +3,6 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -25,14 +23,15 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  * Covers CreateUserPoolDomain/DescribeUserPoolDomain/UpdateUserPoolDomain/DeleteUserPoolDomain (lex00/floci#63)
  * for both an Amazon Cognito prefix domain and a custom domain fronted by an ACM certificate, including
  * the certificate's InUseBy bookkeeping in ACM.
+ *
+ * <p>The last test posts {@code /_floci/state/reset}, which clears every service. The class runs on
+ * the shared default application all the same, as other classes that post the reset do: test
+ * classes run one at a time, so the reset only clears what this class and the ones before it
+ * created, and each service restores its bootstrap state as it clears.
  */
 @QuarkusTest
-@TestProfile(CognitoUserPoolDomainIntegrationTest.DomainResetIsolationProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CognitoUserPoolDomainIntegrationTest {
-
-    /** HTTP state reset clears every service, so isolate this suite from other Quarkus tests. */
-    public static class DomainResetIsolationProfile implements QuarkusTestProfile {}
 
     private static String poolId;
     private static String prefixDomain;

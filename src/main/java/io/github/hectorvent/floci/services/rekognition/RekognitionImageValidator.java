@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rekognition;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -145,9 +146,7 @@ public class RekognitionImageValidator {
             }
         }
         if (!violations.isEmpty()) {
-            String count = violations.size() == 1 ? "1 validation error" : violations.size() + " validation errors";
-            throw new AwsException("ValidationException",
-                    count + " detected: " + String.join("; ", violations), 400);
+            throw SmithyValidationErrors.validationException(violations);
         }
     }
 

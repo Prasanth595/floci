@@ -23,9 +23,8 @@ import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.List;
-import java.util.Set;
-import java.util.TreeSet;
 
+import static io.github.hectorvent.floci.config.TlsTestSupport.dnsSans;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.github.hectorvent.floci.testing.RestAssuredJsonUtils.awsActionJson;
 import static io.restassured.RestAssured.given;
@@ -87,7 +86,7 @@ class CustomDomainTlsIntegrationTest {
 
         for (String domain : List.of(API_DOMAIN, IOT_DOMAIN, AUTH_DOMAIN)) {
             X509Certificate served = handshake(chain, domain, true);
-            assertTrue(sans(served).contains(domain), domain + " not in " + sans(served));
+            assertTrue(dnsSans(served).contains(domain), domain + " not in " + dnsSans(served));
             assertEquals(parse(chain).get(0).getSubjectX500Principal(), served.getIssuerX500Principal(),
                     "the served leaf is issued by the CA in the ACM chain");
         }
@@ -98,7 +97,7 @@ class CustomDomainTlsIntegrationTest {
             assertThrows(SSLHandshakeException.class, () -> handshake(chain, domain, true),
                     "reset drops " + domain);
         }
-        assertFalse(sans(handshake(chain, API_DOMAIN, false)).contains(API_DOMAIN));
+        assertFalse(dnsSans(handshake(chain, API_DOMAIN, false)).contains(API_DOMAIN));
     }
 
     /**
@@ -133,13 +132,5 @@ class CustomDomainTlsIntegrationTest {
         return CertificateFactory.getInstance("X.509")
                 .generateCertificates(new ByteArrayInputStream(pem.getBytes(StandardCharsets.UTF_8)))
                 .stream().map(X509Certificate.class::cast).toList();
-    }
-
-    private static Set<String> sans(X509Certificate leaf) throws Exception {
-        Set<String> sans = new TreeSet<>();
-        for (List<?> entry : leaf.getSubjectAlternativeNames()) {
-            sans.add(String.valueOf(entry.get(1)));
-        }
-        return sans;
     }
 }

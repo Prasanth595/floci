@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -23,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /**
  * Route 53 Resolver: DNS Firewall (managed + custom domain lists), resolver
@@ -83,9 +86,15 @@ public class Route53ResolverService {
      * Kept beside the endpoint rather than on it: the modeled {@code ResolverEndpoint} shape
      * carries {@code IpAddressCount} and no IP list, and the handlers return the stored node
      * verbatim, so holding the addresses on the resource would put an unmodeled member on the
-     * wire. Only the CreatorRequestId conflict check reads this.
+     * wire. Read by the CreatorRequestId conflict check and ListResolverEndpointIpAddresses.
      */
     private final StorageBackend<String, ObjectNode> endpointIpRequestStore;
+    /**
+     * Tags keyed by resource ARN, each an object of key to value. Kept apart from the resources
+     * for the same reason as {@link #endpointIpRequestStore}: none of the modeled resource
+     * shapes carries {@code Tags}, and the handlers return stored nodes verbatim.
+     */
+    private final StorageBackend<String, ObjectNode> tagStore;
     private final ObjectMapper objectMapper;
 
     @Inject
@@ -101,6 +110,8 @@ public class Route53ResolverService {
         this.endpointIpRequestStore = storageFactory.create("route53resolver",
                 "route53resolver-endpoint-ip-requests.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
+        this.tagStore = storageFactory.create("route53resolver", "route53resolver-tags.json",
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.objectMapper = objectMapper;
     }
 
@@ -112,12 +123,14 @@ public class Route53ResolverService {
                            StorageBackend<String, ObjectNode> ruleStore,
                            StorageBackend<String, ObjectNode> ruleAssociationStore,
                            StorageBackend<String, ObjectNode> endpointIpRequestStore,
+                           StorageBackend<String, ObjectNode> tagStore,
                            ObjectMapper objectMapper) {
         this.domainListStore = domainListStore;
         this.endpointStore = endpointStore;
         this.ruleStore = ruleStore;
         this.ruleAssociationStore = ruleAssociationStore;
         this.endpointIpRequestStore = endpointIpRequestStore;
+        this.tagStore = tagStore;
         this.objectMapper = objectMapper;
     }
 
@@ -140,6 +153,7 @@ public class Route53ResolverService {
 
     public synchronized ObjectNode createFirewallDomainList(JsonNode request, String region, String accountId) {
         String name = requireText(request, "Name", VALIDATION);
+        JsonNode tags = validatedTags(request.get("Tags"), VALIDATION);
         Optional<ObjectNode> replay = replayOf(domainListStore, request, region);
         if (replay.isPresent()) {
             return replay.get();
@@ -156,12 +170,14 @@ public class Route53ResolverService {
         list.put("CreationTime", Instant.now().toString());
         list.put("ModificationTime", Instant.now().toString());
         domainListStore.put(id, list);
+        putTags(list, tags);
         return list.deepCopy();
     }
 
     public ObjectNode deleteFirewallDomainList(String id) {
         ObjectNode list = require(domainListStore, id, "firewall domain list");
         domainListStore.delete(id);
+        tagStore.delete(text(list, "Arn"));
         ObjectNode result = list.deepCopy();
         result.put("Status", "DELETING");
         return result;
@@ -182,6 +198,7 @@ public class Route53ResolverService {
         String direction = requireText(request, "Direction", INVALID_PARAMETER);
         String idPrefix = endpointIdPrefix(direction);
         JsonNode ipAddresses = ipAddressesOf(request);
+        JsonNode tags = validatedTags(request.get("Tags"), INVALID_PARAMETER);
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
             throw new AwsException(INVALID_PARAMETER, "IpAddresses is required", 400);
         }
@@ -219,6 +236,7 @@ public class Route53ResolverService {
         endpointStore.put(id, endpoint);
         endpointIpRequestStore.put(id,
                 objectMapper.createObjectNode().set("IpAddressRequests", normalizedIpRequests(ipAddresses)));
+        putTags(endpoint, tags);
         return endpoint.deepCopy();
     }
 
@@ -226,6 +244,7 @@ public class Route53ResolverService {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
         endpointStore.delete(id);
         endpointIpRequestStore.delete(id);
+        tagStore.delete(text(endpoint, "Arn"));
         ObjectNode result = endpoint.deepCopy();
         result.put("Status", "DELETING");
         return result;
@@ -237,6 +256,39 @@ public class Route53ResolverService {
 
     public List<ObjectNode> listResolverEndpoints() {
         return endpointStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * The endpoint's addresses as AWS {@code IpAddressResponse} entries, built from the
+     * {@code IpAddresses} recorded at create time. {@code IpId} is derived from the endpoint,
+     * the entry and its position in the recorded list, so it is stable across calls. An
+     * address the request left for AWS to pick has no {@code Ip}: Floci does not allocate
+     * from the subnet.
+     */
+    public List<ObjectNode> listResolverEndpointIpAddresses(String id) {
+        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+        // A missing record would otherwise read as an empty list beside a nonzero
+        // IpAddressCount; fail loudly with the modeled InternalServiceErrorException instead.
+        JsonNode recorded = endpointIpRequestStore.get(id)
+                .map(node -> node.get("IpAddressRequests"))
+                .filter(JsonNode::isArray)
+                .orElseThrow(() -> new AwsException("InternalServiceErrorException",
+                        "No IP addresses recorded for resolver endpoint: " + id, 400));
+        List<ObjectNode> addresses = new ArrayList<>();
+        for (int i = 0; i < recorded.size(); i++) {
+            JsonNode request = recorded.get(i);
+            ObjectNode address = objectMapper.createObjectNode();
+            // The index keeps repeated entries (two addresses in one subnet, both left for AWS
+            // to pick) distinct; the stored list is normalised once at create, so it is stable.
+            address.put("IpId", "rni-" + deterministicHex(id + "|" + i + "|" + canonicalKey(request), 17));
+            copyIfPresent(request, address, "SubnetId", "Ip", "Ipv6");
+            address.put("Status", "ATTACHED");
+            address.put("StatusMessage", "This IP address is operational.");
+            address.set("CreationTime", endpoint.get("CreationTime"));
+            address.set("ModificationTime", endpoint.get("CreationTime"));
+            addresses.add(address);
+        }
+        return addresses;
     }
 
     public ObjectNode updateResolverEndpoint(String id, JsonNode request) {
@@ -264,6 +316,7 @@ public class Route53ResolverService {
                     "TargetIps must contain at least one target address.", 400);
         }
         String domainName = text(request, "DomainName");
+        JsonNode tags = validatedTags(request.get("Tags"), INVALID_PARAMETER);
         Optional<ObjectNode> replay = replayOf(ruleStore, request, region);
         if (replay.isPresent()) {
             requireReplayMatches(replay.get(), request,
@@ -286,12 +339,14 @@ public class Route53ResolverService {
         rule.put("CreationTime", Instant.now().toString());
         rule.put("ModificationTime", Instant.now().toString());
         ruleStore.put(id, rule);
+        putTags(rule, tags);
         return rule.deepCopy();
     }
 
     public ObjectNode deleteResolverRule(String id) {
         ObjectNode rule = require(ruleStore, id, "resolver rule");
         ruleStore.delete(id);
+        tagStore.delete(text(rule, "Arn"));
         ObjectNode result = rule.deepCopy();
         result.put("Status", "DELETING");
         return result;
@@ -419,6 +474,174 @@ public class Route53ResolverService {
             return accountAware.getForAccount(accountId, ruleId);
         }
         return ruleStore.get(ruleId);
+    }
+
+    // ---------- Tagging ----------
+
+    public synchronized void tagResource(String arn, JsonNode tags, String region, String accountId) {
+        if (tags == null || tags.isNull()) {
+            throw new AwsException(INVALID_PARAMETER, "Tags is required", 400);
+        }
+        requireAtMostPerRequest(tags, "Tags", INVALID_PARAMETER);
+        JsonNode validated = validatedTags(tags, "InvalidTagException");
+        putTags(requireTaggable(arn, region, accountId), validated);
+    }
+
+    public synchronized void untagResource(String arn, JsonNode tagKeys, String region, String accountId) {
+        if (tagKeys == null || !tagKeys.isArray()) {
+            throw new AwsException(INVALID_PARAMETER, "TagKeys is required", 400);
+        }
+        requireAtMostPerRequest(tagKeys, "TagKeys", INVALID_PARAMETER);
+        for (JsonNode key : tagKeys) {
+            if (!key.isTextual()) {
+                throw new AwsException(INVALID_PARAMETER, "TagKeys must be a list of strings", 400);
+            }
+        }
+        requireTaggable(arn, region, accountId);
+        ObjectNode stored = tagStore.get(arn).orElse(null);
+        if (stored == null) {
+            return;
+        }
+        tagKeys.forEach(key -> stored.remove(key.asText()));
+        tagStore.put(arn, stored);
+    }
+
+    /**
+     * One page of a resource's tags as modeled {@code Tag} entries, paged by
+     * {@link Pagination#paginate} on the tag key; {@code MaxResults} defaults to the modeled 100.
+     * {@code MaxResults} arrives as a JSON value, so it is type-checked here rather than parsed
+     * from a string: {@code 1.5}, {@code true} and {@code "1"} are not the modeled integer.
+     *
+     * <p>The stored tag node is copied under the monitor {@link #tagResource} and
+     * {@link #untagResource} mutate it under, so a concurrent tag change can neither break the
+     * iteration nor show a half-applied page.</p>
+     */
+    public ObjectNode listTagsForResource(String arn, JsonNode maxResults, String nextToken,
+                                          String region, String accountId) {
+        boolean absent = maxResults == null || maxResults.isNull();
+        if (!absent && (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt()
+                || maxResults.intValue() < 1 || maxResults.intValue() > 100)) {
+            throw new AwsException(INVALID_PARAMETER, "MaxResults must be an integer between 1 and 100", 400);
+        }
+        ObjectNode snapshot;
+        synchronized (this) {
+            requireTaggable(arn, region, accountId);
+            snapshot = tagStore.get(arn).map(ObjectNode::deepCopy).orElse(null);
+        }
+        List<Map.Entry<String, JsonNode>> all = new ArrayList<>();
+        if (snapshot != null) {
+            snapshot.fields().forEachRemaining(all::add);
+        }
+        PaginatedResult<Map.Entry<String, JsonNode>> paged = Pagination.paginate(all, Map.Entry::getKey,
+                absent ? 100 : maxResults.intValue(), nextToken, "tags",
+                token -> new AwsException("InvalidNextTokenException", "Invalid NextToken: " + token, 400));
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode page = result.putArray("Tags");
+        for (Map.Entry<String, JsonNode> tag : paged.items()) {
+            page.addObject().put("Key", tag.getKey()).set("Value", tag.getValue());
+        }
+        if (paged.nextToken() != null) {
+            result.put("NextToken", paged.nextToken());
+        }
+        return result;
+    }
+
+    /**
+     * The stored resource an ARN names. The ARN must name the caller's own partition, region and
+     * account before anything is read, the id is looked up in the caller's account partition,
+     * and the stored resource's ARN must match the request exactly; anything else is not found
+     * rather than resolved to a resource that happens to share its id. A pre-multi-account
+     * (unprefixed) entry is migrated into the caller's partition only once its own ARN proves
+     * the caller owns it, so another account cannot claim it by naming its ARN. AWS-managed
+     * firewall domain lists are not stored and so are not taggable here.
+     */
+    private ObjectNode requireTaggable(String arn, String region, String accountId) {
+        if (arn == null || arn.isBlank()) {
+            throw new AwsException(INVALID_PARAMETER, "ResourceArn is required", 400);
+        }
+        String callerPrefix = "arn:" + AwsRegions.partitionFor(region) + ":route53resolver:" + region + ":"
+                + accountId + ":";
+        String resource = arn.startsWith(callerPrefix)
+                ? AwsArnUtils.resourceIfArnFor(arn, "route53resolver").orElse("") : "";
+        int slash = resource.indexOf('/');
+        StorageBackend<String, ObjectNode> store = slash < 0 ? null : switch (resource.substring(0, slash)) {
+            case "resolver-endpoint" -> endpointStore;
+            case "resolver-rule" -> ruleStore;
+            case "firewall-domain-list" -> domainListStore;
+            default -> null;
+        };
+        return Optional.ofNullable(store)
+                .flatMap(s -> ownedBy(s, accountId, resource.substring(slash + 1),
+                        stored -> arn.equals(text(stored, "Arn"))))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Resource not found: " + arn, 400));
+    }
+
+    /**
+     * The caller's resource by id. Unlike {@link StorageBackend#get}, which migrates an unprefixed
+     * legacy entry into whichever account reads it first, a legacy entry moves only when
+     * {@code owner} accepts it.
+     */
+    private static Optional<ObjectNode> ownedBy(StorageBackend<String, ObjectNode> store, String accountId,
+                                                String id, Predicate<ObjectNode> owner) {
+        if (store instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<ObjectNode> accountAware =
+                    (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
+            return accountAware.getForAccountMigratingLegacy(accountId, id, owner);
+        }
+        return store.get(id).filter(owner);
+    }
+
+    /**
+     * Checks a modeled {@code TagList}: each {@code Tag} requires {@code Key} (1-128 chars) and
+     * {@code Value} (0-256 chars). Returns {@code null} for an absent list. Called before a
+     * create allocates anything, so an invalid tag never leaves a resource behind.
+     *
+     * <p>{@code InvalidTagException} is modeled only on {@code TagResource}; the create
+     * operations reject with their own parameter error (see {@link #INVALID_PARAMETER}).</p>
+     */
+    private JsonNode validatedTags(JsonNode tags, String errorCode) {
+        if (tags == null || tags.isNull()) {
+            return null;
+        }
+        if (!tags.isArray()) {
+            throw new AwsException(errorCode, "Tags must be a list", 400);
+        }
+        requireAtMostPerRequest(tags, "Tags", errorCode);
+        for (JsonNode tag : tags) {
+            if (!tag.path("Key").isTextual() || !tag.path("Value").isTextual()) {
+                throw new AwsException(errorCode, "Each tag needs a string Key and a string Value.", 400);
+            }
+            String key = text(tag, "Key");
+            String value = text(tag, "Value");
+            if (key == null || key.isEmpty() || key.length() > 128 || value == null || value.length() > 256) {
+                throw new AwsException(errorCode,
+                        "Each tag needs a Key of 1-128 characters and a Value of at most 256 characters.", 400);
+            }
+        }
+        return tags;
+    }
+
+    /**
+     * The model caps {@code TagList} and {@code TagKeyList} at 200 entries per request. That is
+     * the only tag-count limit the model states; a per-resource total is not modeled, so none
+     * is enforced.
+     */
+    private static void requireAtMostPerRequest(JsonNode list, String name, String errorCode) {
+        if (list.isArray() && list.size() > 200) {
+            throw new AwsException(errorCode, name + " must contain at most 200 entries", 400);
+        }
+    }
+
+    private void putTags(ObjectNode resource, JsonNode tags) {
+        if (tags == null || tags.isEmpty()) {
+            return;
+        }
+        String arn = text(resource, "Arn");
+        ObjectNode stored = tagStore.get(arn).orElseGet(objectMapper::createObjectNode);
+        tags.forEach(tag -> stored.put(text(tag, "Key"), text(tag, "Value")));
+        tagStore.put(arn, stored);
     }
 
     /**

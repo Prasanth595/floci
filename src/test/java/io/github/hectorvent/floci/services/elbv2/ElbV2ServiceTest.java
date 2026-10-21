@@ -4,41 +4,53 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
-import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
+import io.github.hectorvent.floci.services.elbv2.model.AvailabilityZone;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
+import io.github.hectorvent.floci.services.elbv2.model.LoadBalancer;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
 import io.github.hectorvent.floci.services.elbv2.model.RuleCondition;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
+import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.allowPublications;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -48,10 +60,10 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -83,11 +95,186 @@ class ElbV2ServiceTest {
     @BeforeEach
     void setUp() {
         service = new ElbV2Service();
+        allowPublications(dataPlane);
         service.dataPlane = dataPlane;
         service.healthChecker = healthChecker;
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.ec2Service = ec2Service;
         stubAlbSubnets(ec2Service);
+    }
+
+    /**
+     * Every type takes Subnets or SubnetMappings, so a balancer with neither is refused before a
+     * subnet is looked up or anything is stored. The messages are the ones AWS gives an Application
+     * or a Network Load Balancer; a Gateway Load Balancer gets the Network one.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', nullValues = "NONE", value = {
+        "NONE|At least two subnets in two different Availability Zones must be specified",
+        "application|At least two subnets in two different Availability Zones must be specified",
+        "network|At least one subnet must be specified",
+        "gateway|At least one subnet must be specified"
+    })
+    void createLoadBalancerWithoutSubnetsIsRefused(String type, String message) {
+        for (List<String> subnets : Arrays.<List<String>>asList(null, List.of())) {
+            AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
+                    "no-subnets", null, type, null, subnets, List.of(), Map.of()));
+            assertEquals("ValidationError", refusal.getErrorCode());
+            assertEquals(message, refusal.getMessage());
+            assertEquals(400, refusal.getHttpStatus());
+        }
+        assertTrue(service.describeLoadBalancers(REGION, null, null, null, null).isEmpty());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
+    }
+
+    /**
+     * An Application Load Balancer takes subnets in at least two Availability Zones, so one subnet gets
+     * the refusal a balancer with none gets. AWS counts before it looks the subnet up, so the subnet is
+     * not looked up here either, and nothing is stored.
+     */
+    @ParameterizedTest
+    @CsvSource(nullValues = "NONE", value = {"NONE", "application"})
+    void anApplicationLoadBalancerOnOneSubnetIsRefusedBeforeTheSubnetIsLookedUp(String type) {
+        // Stubbed so that a lookup before the count would reach the zone check, not a SubnetNotFound from the mock.
+        lenient().when(ec2Service.describeSubnets(REGION, List.of("subnet-a"), Map.of()))
+                .thenReturn(List.of(subnet("subnet-a", REGION + "a")));
+        AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
+                "one-subnet", null, type, null, List.of("subnet-a"), List.of(), Map.of()));
+        assertEquals("ValidationError", refusal.getErrorCode());
+        assertEquals("At least two subnets in two different Availability Zones must be specified",
+                refusal.getMessage());
+        assertEquals(400, refusal.getHttpStatus());
+        assertTrue(service.describeLoadBalancers(REGION, null, null, null, null).isEmpty());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
+    }
+
+    /** A Network or Gateway Load Balancer can be in a single Availability Zone. */
+    @ParameterizedTest
+    @ValueSource(strings = {"network", "gateway"})
+    void aNetworkOrGatewayLoadBalancerCanBeOnOneSubnet(String type) {
+        when(ec2Service.describeSubnets(REGION, List.of("subnet-a"), Map.of()))
+                .thenReturn(List.of(subnet("subnet-a", REGION + "a")));
+        LoadBalancer created = service.createLoadBalancer(REGION, "one-subnet", null, type, null,
+                List.of("subnet-a"), List.of(), Map.of());
+        assertEquals("vpc-a", created.getVpcId());
+        assertEquals(List.of("subnet-a"),
+                created.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+    }
+
+    /**
+     * The API handler and the CloudFormation provisioner both take a request's subnets from here: one
+     * side as given, an empty list for neither, and a refusal for both.
+     */
+    @Test
+    void requestedSubnetsAreTheSubnetsOrTheMappingsNotBoth() {
+        assertEquals(List.of("subnet-a"), ElbV2Service.requestedSubnets(List.of("subnet-a"), List.of()));
+        assertEquals(List.of("subnet-b"), ElbV2Service.requestedSubnets(List.of(), List.of("subnet-b")));
+        assertEquals(List.of(), ElbV2Service.requestedSubnets(List.of(), List.of()));
+        AwsException both = assertThrows(AwsException.class,
+                () -> ElbV2Service.requestedSubnets(List.of("subnet-a"), List.of("subnet-b")));
+        assertEquals("ValidationError", both.getErrorCode());
+        assertEquals("You can specify either subnets or subnet mappings, not both", both.getMessage());
+        assertEquals(400, both.getHttpStatus());
+    }
+
+    /**
+     * SetSubnets with neither Subnets nor SubnetMappings, left out or sent as empty lists, is refused
+     * before any subnet is looked up, and the balancer keeps its zones and its VPC. A Network Load
+     * Balancer gets the message AWS gives it; an Application Load Balancer gets the one
+     * CreateLoadBalancer gives it, and a Gateway Load Balancer the Network one.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "application|At least two subnets in two different Availability Zones must be specified",
+        "network|At least one subnet must be specified",
+        "gateway|At least one subnet must be specified"
+    })
+    void setSubnetsWithNeitherSubnetsNorSubnetMappingsIsRefused(String type, String message) {
+        LoadBalancer lb = service.createLoadBalancer(REGION, "set-none-" + type, "internal", type, "ipv4",
+                ALB_SUBNETS, List.of(), Map.of());
+        ElbV2QueryHandler handler = new ElbV2QueryHandler(service);
+        clearInvocations(ec2Service);
+        for (boolean emptyLists : new boolean[] {false, true}) {
+            MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+            params.add("LoadBalancerArn", lb.getLoadBalancerArn());
+            if (emptyLists) {
+                params.add("Subnets", "");
+                params.add("SubnetMappings", "");
+            }
+            Response response = handler.handle("SetSubnets", params, REGION);
+            String xml = (String) response.getEntity();
+            assertEquals(400, response.getStatus(), xml);
+            assertTrue(xml.contains("<Code>ValidationError</Code>"), xml);
+            assertTrue(xml.contains("<Message>" + message + "</Message>"), xml);
+        }
+        LoadBalancer kept = service.describeLoadBalancers(REGION, List.of(lb.getLoadBalancerArn()), null, null,
+                null).getFirst();
+        assertEquals(ALB_SUBNETS, kept.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+        assertEquals("vpc-a", kept.getVpcId());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
+    }
+
+    /**
+     * Through the SetSubnets action with neither form: the message depends on the balancer's type, so a
+     * balancer that does not exist is reported first.
+     */
+    @Test
+    void setSubnetsForAMissingBalancerReportsItBeforeMissingSubnets() {
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("LoadBalancerArn",
+                "arn:aws:elasticloadbalancing:" + REGION + ":000000000000:loadbalancer/net/missing/0123456789abcdef");
+
+        Response response = new ElbV2QueryHandler(service).handle("SetSubnets", params, REGION);
+
+        String xml = (String) response.getEntity();
+        assertEquals(400, response.getStatus(), xml);
+        assertTrue(xml.contains("<Code>LoadBalancerNotFound</Code>"), xml);
+    }
+
+    /**
+     * A taken name is reported before missing subnets: a CloudFormation stack update finds the
+     * balancer it keeps through DuplicateLoadBalancerName, whatever subnets its template names.
+     */
+    @Test
+    void aTakenNameIsReportedBeforeMissingSubnets() {
+        service.createLoadBalancer(REGION, "taken", "internal", "application", "ipv4", ALB_SUBNETS, List.of(),
+                Map.of());
+        AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
+                "taken", "internal", "application", "ipv4", List.of(), List.of(), Map.of()));
+        assertEquals("DuplicateLoadBalancerName", refusal.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void httpsCreateNeedsADefaultBeforeAllocatingAListener(List<String> certificates) {
+        String lb = service.createLoadBalancer(REGION, "https-default", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        AwsException refusal = assertThrows(AwsException.class, () -> service.createListener(REGION, lb,
+                "HTTPS", 9443, null, certificates, List.of(), List.of(), Map.of("scope", "refused")));
+        assertEquals("InvalidConfigurationRequest", refusal.getErrorCode());
+        assertTrue(service.describeListeners(REGION, lb, List.of()).isEmpty());
+        assertTrue(service.describeRules(REGION, null, List.of()).isEmpty());
+        Listener retry = service.createListener(REGION, lb, "HTTPS", 9443, null,
+                List.of(HELD_CERTIFICATE), List.of(), List.of(), Map.of());
+        assertEquals(List.of(HELD_CERTIFICATE), retry.getCertificates());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void httpsModifyNeedsAnEffectiveDefaultBeforeChangingTheListener(List<String> certificates) {
+        String lb = service.createLoadBalancer(REGION, "https-change", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        Listener listener = service.createListener(REGION, lb, "HTTP", 9080, null, List.of(), List.of(), List.of(), Map.of());
+        AwsException refusal = assertThrows(AwsException.class, () -> service.modifyListener(REGION,
+                listener.getListenerArn(), "HTTPS", 9443, "ELBSecurityPolicy-2016-08", certificates, null, null));
+        assertEquals("InvalidConfigurationRequest", refusal.getErrorCode());
+        assertEquals("HTTP", listener.getProtocol());
+        assertEquals(9080, listener.getPort());
+        assertEquals(List.of(), listener.getCertificates());
+        service.modifyListener(REGION, listener.getListenerArn(), "HTTPS", 9443, null,
+                List.of(HELD_CERTIFICATE), null, null);
+        assertEquals("HTTPS", listener.getProtocol());
+        assertEquals(List.of(HELD_CERTIFICATE), listener.getCertificates());
     }
 
     @ParameterizedTest
@@ -113,6 +300,37 @@ class ElbV2ServiceTest {
         assertThrows(AwsException.class,
                 () -> service.removeListenerCertificates(REGION, listenerArn, List.of(first)));
         assertEquals(List.of(first), service.describeListenerCertificates(REGION, listenerArn));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void missingHttpsDefaultIsRefusedEvenWithoutACertificateResolver(List<String> certificates) {
+        String lbArn = service.createLoadBalancer(REGION, "missing-create", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        clearInvocations(dataPlane);
+        AwsException rejected = assertThrows(AwsException.class, () -> service.createListener(
+                REGION, lbArn, "HTTPS", 9443, null, certificates, List.of(), List.of(), Map.of()));
+        assertEquals("InvalidConfigurationRequest", rejected.getErrorCode());
+        assertTrue(service.describeListeners(REGION, lbArn, List.of()).isEmpty());
+        assertTrue(service.describeRules(REGION, null, List.of()).isEmpty());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void missingEffectiveDefaultCannotChangeAnHttpListener(List<String> certificates) {
+        String lbArn = service.createLoadBalancer(REGION, "missing-modify", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        Listener listener = service.createListener(REGION, lbArn, "HTTP", 8080, null,
+                List.of(), List.of(), List.of(), Map.of());
+        clearInvocations(dataPlane);
+        AwsException rejected = assertThrows(AwsException.class, () -> service.modifyListener(
+                REGION, listener.getListenerArn(), "HTTPS", 9443, "unchanged", certificates, null, null));
+        assertEquals("InvalidConfigurationRequest", rejected.getErrorCode());
+        assertEquals("HTTP", listener.getProtocol());
+        assertEquals(8080, listener.getPort());
+        assertTrue(listener.getCertificates().isEmpty());
+        verifyNoInteractions(dataPlane);
     }
 
     @Test
@@ -146,7 +364,9 @@ class ElbV2ServiceTest {
             service.modifyListener(REGION, listener, null, null, null, List.of(additional), null, null);
             assertEquals(List.of(additional), service.describeListenerCertificates(REGION, listener));
             releaseRemoval.countDown();
-            removal.get(5, TimeUnit.SECONDS);
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> removal.get(5, TimeUnit.SECONDS));
+            assertEquals("OperationNotPermitted", ((AwsException) refused.getCause()).getErrorCode());
             assertEquals(List.of(additional), service.describeListenerCertificates(REGION, listener));
             AwsException rejected = assertThrows(AwsException.class,
                     () -> service.removeListenerCertificates(REGION, listener, List.of(additional)));
@@ -171,6 +391,114 @@ class ElbV2ServiceTest {
     }
 
     @Test
+    void modifyListenerProtocolAndCertificateRestartsListener() {
+        String lbArn = service.createLoadBalancer(
+                REGION, "tls-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String listenerArn = service.createListener(
+                REGION, lbArn, "HTTP", 9443, null, List.of(),
+                List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+
+        service.modifyListener(
+                REGION, listenerArn, "HTTPS", null, "ELBSecurityPolicy-TLS13-1-2-2021-06",
+                List.of("arn:aws:acm:us-west-2:000000000000:certificate/first"), null, null);
+
+        ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
+        verify(dataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
+        assertEquals("HTTPS", listenerCaptor.getValue().getProtocol());
+        assertEquals(List.of("arn:aws:acm:us-west-2:000000000000:certificate/first"),
+                listenerCaptor.getValue().getCertificates());
+        verify(dataPlane, never()).recompileRules(anyString(), any());
+    }
+
+    @Test
+    void identicalExplicitTlsModificationReappliesTheDataPlane() {
+        String lbArn = service.createLoadBalancer(
+                REGION, "tls-retry-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String first = "arn:aws:acm:us-west-2:000000000000:certificate/first";
+        String replacement = "arn:aws:acm:us-west-2:000000000000:certificate/replacement";
+        String listenerArn = service.createListener(REGION, lbArn, "HTTPS", 9443, null,
+                List.of(first), List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+
+        service.modifyListener(REGION, listenerArn, null, null, null, List.of(replacement), null, null);
+        assertEquals(List.of(replacement), service.describeListenerCertificates(REGION, listenerArn));
+        verify(dataPlane).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+        service.modifyListener(REGION, listenerArn, null, null, null, List.of(replacement), null, null);
+
+        verify(dataPlane, times(2)).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+        assertEquals(List.of(replacement), service.describeListenerCertificates(REGION, listenerArn));
+        verify(dataPlane, never()).recompileRules(anyString(), any());
+    }
+
+    @Test
+    void listenerCertificateLifecycleRefreshesDataPlane() {
+        String lbArn = service.createLoadBalancer(
+                REGION, "certificate-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String firstCertificate = "arn:aws:acm:us-west-2:000000000000:certificate/first";
+        String secondCertificate = "arn:aws:acm:us-west-2:000000000000:certificate/second";
+        String listenerArn = service.createListener(
+                REGION, lbArn, "HTTPS", 9443, null, List.of(firstCertificate),
+                List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+
+        service.addListenerCertificates(REGION, listenerArn, List.of(secondCertificate));
+        service.removeListenerCertificates(REGION, listenerArn, List.of(secondCertificate));
+
+        verify(dataPlane, times(2))
+                .publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+        assertEquals(List.of(firstCertificate),
+                service.describeListenerCertificates(REGION, listenerArn));
+    }
+
+    @Test
+    void defaultRemovalWithAdditionalCertificateDoesNotRefreshAndCanRemoveAdditional() {
+        String lbArn = service.createLoadBalancer(
+                REGION, "default-certificate-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String first = "arn:aws:acm:us-west-2:000000000000:certificate/default";
+        String additional = "arn:aws:acm:us-west-2:000000000000:certificate/additional";
+        String listener = service.createListener(REGION, lbArn, "HTTPS", 9443, null,
+                List.of(first, additional), List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> service.removeListenerCertificates(REGION, listener, List.of(first)));
+        assertEquals("OperationNotPermitted", rejected.getErrorCode());
+        assertEquals(List.of(first, additional), service.describeListenerCertificates(REGION, listener));
+        verifyNoInteractions(dataPlane);
+        service.removeListenerCertificates(REGION, listener, List.of(additional));
+        assertEquals(List.of(first), service.describeListenerCertificates(REGION, listener));
+        verify(dataPlane).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+    }
+
+    @Test
+    void initializeStorageRestoresHttpsListenerCertificate() {
+        SharedStorageFactory storageFactory = new SharedStorageFactory();
+        ElbV2Service first = serviceWithStorage(
+                storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
+        String lbArn = first.createLoadBalancer(
+                REGION, "persisted-https-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String certificateArn = "arn:aws:acm:us-west-2:000000000000:certificate/persisted";
+        String listenerArn = first.createListener(
+                REGION, lbArn, "HTTPS", 9443, "ELBSecurityPolicy-TLS13-1-2-2021-06",
+                List.of(certificateArn), List.of(), List.of(), Map.of()).getListenerArn();
+
+        ElbV2DataPlane reloadedDataPlane = mock(ElbV2DataPlane.class);
+        ElbV2Service reloaded = serviceWithStorage(storageFactory, reloadedDataPlane, mock(ElbV2HealthChecker.class));
+        reloaded.restorePersistedRuntime();
+
+        ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
+        verify(reloadedDataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
+        assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
+        assertEquals("HTTPS", listenerCaptor.getValue().getProtocol());
+        assertEquals(List.of(certificateArn), listenerCaptor.getValue().getCertificates());
+    }
+
+    @Test
     void modifyListenerDefaultActionsRecompilesRulesWithoutRestartingListener() {
         String lbArn = service.createLoadBalancer(
                 REGION, "sample-lb", "internal", "application", "ipv4",
@@ -186,13 +514,12 @@ class ElbV2ServiceTest {
                 REGION, listenerArn, null, null, null, null,
                 List.of(forwardAction(newTgArn)), null);
 
-        ArgumentCaptor<List<Rule>> rulesCaptor = ArgumentCaptor.captor();
+        ArgumentCaptor<Supplier<List<Rule>>> rulesCaptor = ArgumentCaptor.captor();
         verify(dataPlane).recompileRules(eq(listenerArn), rulesCaptor.capture());
-        verify(dataPlane, never()).stopListener(anyString());
-        verify(dataPlane, never()).startListener(any(Listener.class), anyString(), anyList());
-        verify(dataPlane, never()).restartListener(any(Listener.class), anyString(), anyList());
+        verify(dataPlane, never()).removeListener(anyString(), any(), any());
+        verify(dataPlane, never()).publishListener(any(Listener.class), anyString(), any(), any(), any(), any());
 
-        Rule defaultRule = rulesCaptor.getValue().stream()
+        Rule defaultRule = rulesCaptor.getValue().get().stream()
                 .filter(Rule::isDefault)
                 .findFirst()
                 .orElseThrow();
@@ -217,69 +544,8 @@ class ElbV2ServiceTest {
 
         service.modifyListener(REGION, listenerArn, null, 10000, null, null, null, null);
 
-        verify(dataPlane).restartListener(any(Listener.class), eq(REGION), anyList());
-        verify(dataPlane, never()).stopListener(anyString());
-        verify(dataPlane, never()).startListener(any(Listener.class), anyString(), anyList());
-    }
-
-    @Test
-    void modifyListenerRefusedUnderTheCertificateGuardLeavesTheListenerWhereItWas() {
-        String lbArn = service.createLoadBalancer(
-                REGION, "sample-lb", "internal", "application", "ipv4",
-                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
-        String tgArn = createTargetGroup("sample-tg");
-        String listenerArn = service.createListener(
-                REGION, lbArn, "HTTPS", 443, "ELBSecurityPolicy-2016-08", List.of(HELD_CERTIFICATE),
-                List.of(forwardAction(tgArn)), List.of(), Map.of()).getListenerArn();
-        clearInvocations(dataPlane);
-        service.certificateResolver = deletedOnTheSecondLook();
-
-        AwsException e = assertThrows(AwsException.class, () -> service.modifyListener(
-                REGION, listenerArn, "TLS", 8443, "ELBSecurityPolicy-TLS13-1-2-2021-06",
-                List.of(OTHER_CERTIFICATE), null, null));
-
-        assertEquals("CertificateNotFound", e.getErrorCode());
-        Listener listener = service.describeListeners(REGION, lbArn, List.of(listenerArn)).getFirst();
-        assertEquals(Integer.valueOf(443), listener.getPort());
-        assertEquals("HTTPS", listener.getProtocol());
-        assertEquals("ELBSecurityPolicy-2016-08", listener.getSslPolicy());
-        assertEquals(List.of(HELD_CERTIFICATE), listener.getCertificates());
-        verify(dataPlane, never()).restartListener(any(Listener.class), anyString(), anyList());
-    }
-
-    @Test
-    void modifyListenerProtocolAloneTakesTheGuardForTheCertificatesItPutsIntoService() {
-        String lbArn = service.createLoadBalancer(
-                REGION, "sample-lb", "internal", "application", "ipv4",
-                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
-        String tgArn = createTargetGroup("sample-tg");
-        String listenerArn = service.createListener(
-                REGION, lbArn, "HTTP", 80, null, List.of(HELD_CERTIFICATE),
-                List.of(forwardAction(tgArn)), List.of(), Map.of()).getListenerArn();
-        clearInvocations(dataPlane);
-        service.certificateResolver = deletedOnTheSecondLook();
-
-        AwsException e = assertThrows(AwsException.class, () -> service.modifyListener(
-                REGION, listenerArn, "HTTPS", null, null, null, null, null));
-
-        assertEquals("CertificateNotFound", e.getErrorCode());
-        assertEquals("HTTP", service.describeListeners(REGION, lbArn, List.of(listenerArn))
-                .getFirst().getProtocol());
-    }
-
-    /**
-     * A resolver that finds the certificate once and not again, which is what a
-     * {@code DeleteServerCertificate} landing between the check outside the guard and the one
-     * under it looks like from inside the call.
-     */
-    private static CertificateReferenceResolver deletedOnTheSecondLook() {
-        CertificateReferenceResolver resolver = mock(CertificateReferenceResolver.class);
-        when(resolver.exists(anyString(), anyString())).thenReturn(true, false);
-        doAnswer(invocation -> {
-            invocation.getArgument(1, Runnable.class).run();
-            return null;
-        }).when(resolver).runWhileHeld(any(), any());
-        return resolver;
+        verify(dataPlane).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
+        verify(dataPlane, never()).removeListener(anyString(), any(), any());
     }
 
     @Test
@@ -427,7 +693,7 @@ class ElbV2ServiceTest {
         verify(reloadedHealthChecker).addTargets(eq(tgArn), targetsCaptor.capture(), any(TargetGroup.class));
         assertEquals("i-1234567890abcdef0", targetsCaptor.getValue().getFirst().getId());
         assertEquals(8080, targetsCaptor.getValue().getFirst().getPort());
-        verify(reloadedDataPlane).startListener(any(Listener.class), eq(REGION), anyList());
+        verify(reloadedDataPlane).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
 
         reloaded.removeTags(List.of(rule.getRuleArn()), List.of("env"));
         ElbV2Service updatedReload = serviceWithStorage(storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
@@ -464,7 +730,7 @@ class ElbV2ServiceTest {
         reloaded.restorePersistedRuntime();
 
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
-        verify(reloadedDataPlane).startListener(listenerCaptor.capture(), eq(REGION), anyList());
+        verify(reloadedDataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
         assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
         verify(reloadedHealthChecker).startMonitoring(any(TargetGroup.class));
     }
@@ -485,7 +751,7 @@ class ElbV2ServiceTest {
         reloaded.restorePersistedRuntime();
 
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
-        verify(reloadedDataPlane).startListener(listenerCaptor.capture(), eq(REGION), anyList());
+        verify(reloadedDataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
         assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
     }
 
@@ -583,7 +849,11 @@ class ElbV2ServiceTest {
         return condition;
     }
 
-    private static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
+    static StorageFactory sharedStorageFactory() {
+        return new SharedStorageFactory();
+    }
+
+    static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
                                                    ElbV2DataPlane dataPlane,
                                                    ElbV2HealthChecker healthChecker) {
         Ec2Service ec2Service = mock(Ec2Service.class);
@@ -591,11 +861,12 @@ class ElbV2ServiceTest {
         return serviceWithStorage(storageFactory, dataPlane, healthChecker, ec2Service);
     }
 
-    private static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
+    static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
                                                    ElbV2DataPlane dataPlane,
                                                    ElbV2HealthChecker healthChecker,
                                                    Ec2Service ec2Service) {
         ElbV2Service service = new ElbV2Service();
+        allowPublications(dataPlane);
         service.dataPlane = dataPlane;
         service.healthChecker = healthChecker;
         service.regionResolver = new RegionResolver(REGION, "000000000000");
@@ -606,6 +877,12 @@ class ElbV2ServiceTest {
     }
 
     private static void stubAlbSubnets(Ec2Service ec2Service) {
+        lenient().when(ec2Service.supplyWithSubnetReferencesHeld(anyString(), any()))
+                .thenAnswer(invocation -> invocation.<Supplier<?>>getArgument(1).get());
+        lenient().doAnswer(invocation -> {
+            invocation.<Runnable>getArgument(1).run();
+            return null;
+        }).when(ec2Service).runWithSubnetReferencesHeld(anyString(), any());
         Subnet subnetA = subnet("subnet-a", REGION + "a");
         Subnet subnetB = subnet("subnet-b", REGION + "b");
         lenient().when(ec2Service.requireSubnet(REGION, "subnet-a")).thenReturn(subnetA);
@@ -620,6 +897,25 @@ class ElbV2ServiceTest {
         subnet.setAvailabilityZone(availabilityZone);
         subnet.setVpcId("vpc-a");
         return subnet;
+    }
+
+    /** Files in a directory, so a second service reads back what the first wrote as JSON. */
+    private static final class PersistentStorageFactory extends StorageFactory {
+        private final Path dir;
+
+        private PersistentStorageFactory(Path dir) {
+            super(null, null);
+            this.dir = dir;
+        }
+
+        @Override
+        public <V> AccountAwareStorageBackend<V> create(String serviceName,
+                                                     String fileName,
+                                                     TypeReference<Map<String, V>> typeReference) {
+            PersistentStorage<String, V> files = new PersistentStorage<>(dir.resolve(fileName), typeReference);
+            files.load();
+            return new AccountAwareStorageBackend<>(files, null, "000000000000");
+        }
     }
 
     private static final class SharedStorageFactory extends StorageFactory {
@@ -662,5 +958,134 @@ class ElbV2ServiceTest {
         assertEquals(AwsRegionFacts.nlbHostedZoneId(REGION).orElseThrow(),
                 reloaded.describeLoadBalancers(REGION, null, List.of("stored-nlb"), null, null)
                         .getFirst().getCanonicalHostedZoneId());
+    }
+
+    @Test
+    void subnetAndVpcDependenciesComeFromPersistedLoadBalancersOnly(@TempDir Path dir) {
+        ElbV2Service first = serviceWithStorage(new PersistentStorageFactory(dir), dataPlane, healthChecker);
+        String arn = first.createLoadBalancer(REGION, "stored-dependency", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        String targetGroup = first.createTargetGroup(REGION, "independent-group", "HTTP", "HTTP1", 80,
+                "vpc-a", "instance", "HTTP", "traffic-port", true, "/", 30, 5, 5, 2, "200",
+                "ipv4", Map.of()).getTargetGroupArn();
+        ElbV2Service restored = serviceWithStorage(new PersistentStorageFactory(dir), dataPlane, healthChecker);
+        assertTrue(restored.hasSubnetDependency(REGION, "subnet-a"));
+        assertTrue(restored.hasSubnetDependency(REGION, "subnet-b"));
+        assertTrue(restored.hasVpcDependency(REGION, "vpc-a"));
+        assertFalse(restored.hasSubnetDependency("us-east-1", "subnet-a"));
+        assertFalse(restored.hasVpcDependency("us-east-1", "vpc-a"));
+        assertFalse(restored.hasSubnetDependency(REGION, "subnet-unrelated"));
+        restored.deleteLoadBalancer(REGION, arn);
+        ElbV2Service afterDelete = serviceWithStorage(new PersistentStorageFactory(dir), dataPlane, healthChecker);
+        assertFalse(afterDelete.hasSubnetDependency(REGION, "subnet-a"));
+        assertFalse(afterDelete.hasVpcDependency(REGION, "vpc-a"));
+        assertEquals(targetGroup, afterDelete.describeTargetGroups(REGION, null,
+                List.of(targetGroup), null).getFirst().getTargetGroupArn());
+    }
+
+    /**
+     * A balancer saved before CreateLoadBalancer required subnets has no zones and no VPC. Its first
+     * SetSubnets gives it both, taking the VPC of those subnets, since it has none of its own to keep.
+     */
+    @Test
+    void aBalancerSavedWithoutSubnetsTakesTheVpcOfItsFirstSetSubnets() {
+        LoadBalancer saved = service.createLoadBalancer(REGION, "saved-subnetless", "internal", "application",
+                "ipv4", ALB_SUBNETS, List.of(), Map.of());
+        saved.setAvailabilityZones(new ArrayList<>());
+        saved.setVpcId(null);
+        Subnet subnetC = subnet("subnet-c", REGION + "a");
+        subnetC.setVpcId("vpc-b");
+        Subnet subnetD = subnet("subnet-d", REGION + "b");
+        subnetD.setVpcId("vpc-b");
+        when(ec2Service.describeSubnets(REGION, List.of("subnet-c", "subnet-d"), Map.of()))
+                .thenReturn(List.of(subnetC, subnetD));
+
+        service.setSubnets(REGION, saved.getLoadBalancerArn(), List.of("subnet-c", "subnet-d"));
+
+        LoadBalancer moved = service.describeLoadBalancers(REGION, List.of(saved.getLoadBalancerArn()), null,
+                null, null).getFirst();
+        assertEquals("vpc-b", moved.getVpcId());
+        assertEquals(List.of("subnet-c", "subnet-d"),
+                moved.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+    }
+
+    /**
+     * SetSubnets counts the subnets the way CreateLoadBalancer does: one subnet for an Application Load
+     * Balancer gets the refusal CreateLoadBalancer gives it, before the subnet is looked up, and the
+     * balancer keeps its zones and its VPC.
+     */
+    @Test
+    void anApplicationLoadBalancerMovedOntoOneSubnetIsRefusedBeforeTheSubnetIsLookedUp() {
+        LoadBalancer lb = service.createLoadBalancer(REGION, "set-one-subnet", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of());
+        // Stubbed so that a lookup before the count would reach the zone check, not a SubnetNotFound from the mock.
+        lenient().when(ec2Service.describeSubnets(REGION, List.of("subnet-a"), Map.of()))
+                .thenReturn(List.of(subnet("subnet-a", REGION + "a")));
+        clearInvocations(ec2Service);
+
+        AwsException refusal = assertThrows(AwsException.class,
+                () -> service.setSubnets(REGION, lb.getLoadBalancerArn(), List.of("subnet-a")));
+
+        assertEquals("ValidationError", refusal.getErrorCode());
+        assertEquals("At least two subnets in two different Availability Zones must be specified",
+                refusal.getMessage());
+        assertEquals(400, refusal.getHttpStatus());
+        LoadBalancer kept = service.describeLoadBalancers(REGION, List.of(lb.getLoadBalancerArn()), null, null,
+                null).getFirst();
+        assertEquals(ALB_SUBNETS, kept.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+        assertEquals("vpc-a", kept.getVpcId());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
+    }
+
+    /**
+     * A Network or Gateway Load Balancer can be in a single Availability Zone, so SetSubnets onto one
+     * subnet is taken: the Network Load Balancer leaves one of its two subnets, and the Gateway Load
+     * Balancer, which AWS lets add subnets but not drop them, is set onto the one it is on.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"network|subnet-a,subnet-b", "gateway|subnet-a"})
+    void aNetworkOrGatewayLoadBalancerCanBeSetOntoOneSubnet(String type, String createdOn) {
+        when(ec2Service.describeSubnets(REGION, List.of("subnet-a"), Map.of()))
+                .thenReturn(List.of(subnet("subnet-a", REGION + "a")));
+        LoadBalancer lb = service.createLoadBalancer(REGION, "set-one-" + type, "internal", type, "ipv4",
+                List.of(createdOn.split(",")), List.of(), Map.of());
+
+        service.setSubnets(REGION, lb.getLoadBalancerArn(), List.of("subnet-a"));
+
+        assertEquals(List.of("subnet-a"), service.describeLoadBalancers(REGION, List.of(lb.getLoadBalancerArn()),
+                null, null, null).getFirst().getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+    }
+
+    /**
+     * setSubnets counts only a list that names subnets; the SetSubnets action refuses an empty one before
+     * it gets here. A CloudFormation update moves a balancer an earlier Floci version saved without
+     * subnets onto the template's subnets, and when the update rolls back, the move back onto none is taken.
+     */
+    @Test
+    void aRollbackOntoNoSubnetsIsNotCounted() {
+        LoadBalancer saved = service.createLoadBalancer(REGION, "saved-without-subnets", "internal", "application",
+                "ipv4", ALB_SUBNETS, List.of(), Map.of());
+        saved.setAvailabilityZones(new ArrayList<>());
+        saved.setVpcId(null);
+        service.setSubnets(REGION, saved.getLoadBalancerArn(), ALB_SUBNETS);
+
+        service.setSubnets(REGION, saved.getLoadBalancerArn(), List.of());
+
+        assertTrue(service.describeLoadBalancers(REGION, List.of(saved.getLoadBalancerArn()), null, null, null)
+                .getFirst().getAvailabilityZones().isEmpty());
+    }
+
+    /**
+     * Through setSubnets with one subnet: the count depends on the balancer's type, so a balancer that
+     * does not exist is reported first.
+     */
+    @Test
+    void setSubnetsOntoOneSubnetReportsAMissingBalancerFirst() {
+        AwsException refusal = assertThrows(AwsException.class, () -> service.setSubnets(REGION,
+                "arn:aws:elasticloadbalancing:" + REGION + ":000000000000:loadbalancer/app/missing/0123456789abcdef",
+                List.of("subnet-a")));
+
+        assertEquals("LoadBalancerNotFound", refusal.getErrorCode());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
     }
 }

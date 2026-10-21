@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -327,7 +328,8 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
                 }
                 """.formatted(suffix, ltName));
 
-        assertThat(describeStacks(stackName),
+        assertThat(describeStacks(stackName), containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+        assertThat(CfnStackWaits.failedResourceReason(stackName, CFN_AUTH),
                 containsString("Value of property OnDemandBaseCapacity must be an integer."));
     }
 

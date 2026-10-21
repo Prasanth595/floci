@@ -1,8 +1,14 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.path.json.JsonPath;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -12,6 +18,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -23,6 +31,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -34,13 +43,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * is already covered by its own unit tests and by {@code CodeArtifactPypiControllerTest}, so what
  * this class needs to prove is the real container's behavior, not the parser's fidelity to one
  * exact client's byte-for-byte output.
+ *
+ * <p>The containers are namespaced by {@link SidecarContainersProfile}, which this class shares
+ * with the other sidecar classes, so its last test deletes the repositories and domains it created.
  */
 @QuarkusTest
-@TestProfile(CodeArtifactPypiSidecarProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CodeArtifactPypiDockerIntegrationTest {
 
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260904/us-east-1/codeartifact/aws4_request";
+    private static final String NON_DEFAULT_REGION_AUTH =
+            "AWS4-HMAC-SHA256 Credential=AKID/20260904/us-west-2/codeartifact/aws4_request";
+    private static final String OTHER_ACCOUNT_AUTH =
+            "AWS4-HMAC-SHA256 Credential=111122223333/20260904/us-east-1/codeartifact/aws4_request";
     private static final String DOMAIN = "pypi-sidecar-domain";
     private static final String REPO = "pypi-sidecar-repo";
     private static final String PACKAGE_NAME = "floci-pypiserver-spike";
@@ -51,9 +67,12 @@ class CodeArtifactPypiDockerIntegrationTest {
 
     private static String bearerToken;
 
+    @Inject
+    EmulatorConfig config;
+
     @BeforeAll
     static void setUp() {
-        CodeArtifactPypiSidecarProfile.requireDockerAndTheSidecarImage();
+        SidecarContainersProfile.requireDockerAndImage("floci.services.codeartifact.pypi-image");
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
@@ -290,17 +309,15 @@ class CodeArtifactPypiDockerIntegrationTest {
     @Test
     @Order(10)
     void aDomainCreatedInANonDefaultRegionIsServedThroughTheTokensOwnRegion() {
-        String nonDefaultRegionAuth =
-                "AWS4-HMAC-SHA256 Credential=AKID/20260904/us-west-2/codeartifact/aws4_request";
         String domain = "pypi-sidecar-non-default-region-domain";
 
-        given().contentType("application/json").header("Authorization", nonDefaultRegionAuth).body("{}")
+        given().contentType("application/json").header("Authorization", NON_DEFAULT_REGION_AUTH).body("{}")
                 .post("/v1/domain?domain=" + domain)
                 .then().statusCode(200);
-        given().contentType("application/json").header("Authorization", nonDefaultRegionAuth).body("{}")
+        given().contentType("application/json").header("Authorization", NON_DEFAULT_REGION_AUTH).body("{}")
                 .post("/v1/repository?domain=" + domain + "&repository=" + REPO)
                 .then().statusCode(200);
-        String token = given().header("Authorization", nonDefaultRegionAuth)
+        String token = given().header("Authorization", NON_DEFAULT_REGION_AUTH)
                 .post("/v1/authorization-token?domain=" + domain)
                 .then().statusCode(200)
                 .extract().jsonPath().getString("authorizationToken");
@@ -319,16 +336,15 @@ class CodeArtifactPypiDockerIntegrationTest {
     @Test
     @Order(11)
     void aDomainCreatedUnderANonDefaultAccountIsServedThroughTheTokensOwnAccount() {
-        String otherAccountAuth = "AWS4-HMAC-SHA256 Credential=111122223333/20260904/us-east-1/codeartifact/aws4_request";
         String domain = "pypi-sidecar-cross-account-domain";
 
-        given().contentType("application/json").header("Authorization", otherAccountAuth).body("{}")
+        given().contentType("application/json").header("Authorization", OTHER_ACCOUNT_AUTH).body("{}")
                 .post("/v1/domain?domain=" + domain)
                 .then().statusCode(200);
-        given().contentType("application/json").header("Authorization", otherAccountAuth).body("{}")
+        given().contentType("application/json").header("Authorization", OTHER_ACCOUNT_AUTH).body("{}")
                 .post("/v1/repository?domain=" + domain + "&repository=" + REPO)
                 .then().statusCode(200);
-        String token = given().header("Authorization", otherAccountAuth)
+        String token = given().header("Authorization", OTHER_ACCOUNT_AUTH)
                 .post("/v1/authorization-token?domain=" + domain)
                 .then().statusCode(200)
                 .extract().jsonPath().getString("authorizationToken");
@@ -370,6 +386,29 @@ class CodeArtifactPypiDockerIntegrationTest {
         given().header("Authorization", AUTH)
                 .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
                         + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=does-not-exist.tar.gz")
+                .then().statusCode(404);
+    }
+
+    /**
+     * The real-world gap this closes: {@code DescribePackageVersion} used to 404 for every
+     * pypi-uploaded version the same reason {@code GetPackageVersionAsset} did. Confirms the
+     * bridge reads the real pypiserver container's own per-project JSON listing (not a mock) to
+     * confirm the version exists, and 404s for one that was never uploaded.
+     */
+    @Test
+    @Order(12)
+    void describePackageVersionBridgesToTheRealPypiserverSidecar() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("packageVersion.status", equalTo("Published"))
+                .body("packageVersion.packageName", equalTo(PACKAGE_NAME))
+                .body("packageVersion.version", equalTo("1.0.0"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=9.9.9")
                 .then().statusCode(404);
     }
 
@@ -435,6 +474,184 @@ class CodeArtifactPypiDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this closes: {@code CopyPackageVersions} used to support only generic
+     * and maven; pypi keeps its uploaded files straight on pypiserver's own flat storage rather
+     * than a {@code packageVersions} record. Confirms the bridge reads the file from the real
+     * sidecar (not a mock) and republishes it to the destination repository's own pypiserver
+     * instance, byte for byte. {@code other-repo} is the empty repository {@link
+     * #repositoriesAreIsolatedFromEachOther} already created.
+     */
+    @Test
+    @Order(15)
+    void copyPackageVersionsBridgesToTheRealPypiserverSidecar() {
+        String packageName = "copyme-pypi-pkg";
+        String filename = "copyme_pypi_pkg-1.0.0.tar.gz";
+        byte[] content = "copy-me-pypi-sdist-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, content, "Copy me description"))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=pypi&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copied = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/other-repo/packages/" + filename)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("copy-me-pypi-sdist-bytes", new String(copied, StandardCharsets.UTF_8));
+
+        // The real-world gap this proves closed: pypiserver parses only a distribution's
+        // filename, never its embedded description (see GetPackageVersionReadme's own javadoc),
+        // so this bridge has no way to read it from the destination sidecar after copying the
+        // file; it must be propagated from this service's own captured-at-upload-time record.
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=other-repo&format=pypi&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(200).body("readme", equalTo("Copy me description"));
+    }
+
+    /**
+     * The real-world bug this would otherwise hit: pypiserver rejects a plain republish of an
+     * already-uploaded filename with a real {@code 409} (confirmed live, this container is
+     * started without pypiserver's own {@code --overwrite} flag, same as production), even though
+     * {@code reuploadingTheSameFileIsRejectedAndTheOriginalContentSurvives} already proves that
+     * for the native upload path; this confirms the bridge's own delete-then-republish ({@code
+     * remove_pkg}, then re-upload, both confirmed live) actually clears the way.
+     */
+    @Test
+    @Order(16)
+    void copyPackageVersionsOverwritesAnExistingPypiFileWithDifferentContentAtTheRealSidecar() {
+        String packageName = "copyover-pypi-pkg";
+        String filename = "copyover_pypi_pkg-1.0.0.tar.gz";
+        byte[] oldContent = "old-overwrite-pypi-sdist".getBytes(StandardCharsets.UTF_8);
+        byte[] newContent = "new-overwrite-pypi-sdist".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, oldContent))
+                .post("/codeartifact/pypi/" + DOMAIN + "/other-repo/")
+                .then().statusCode(200);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, newContent))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"allowOverwrite\":true}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=pypi&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copied = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/other-repo/packages/" + filename)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("new-overwrite-pypi-sdist", new String(copied, StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The real-world bug this would otherwise hit: pypiserver's own {@code remove_pkg} management
+     * call (confirmed live) deletes every file sharing a release's exact name and version, not just
+     * the one filename it was asked to delete, so a copy that deletes-then-rewrites one asset at a
+     * time mid-loop would wipe a sibling asset of the same release already rewritten earlier in
+     * that same loop — losing it even though the copy as a whole reported success. A real pypi
+     * release commonly carries both an sdist and a wheel for the exact same version, so this is not
+     * a contrived edge case.
+     */
+    @Test
+    @Order(17)
+    void copyPackageVersionsOverwriteKeepsEveryAssetWhenAPypiReleaseHasBothAnSdistAndAWheel() {
+        String packageName = "copyover-multi-pypi-pkg";
+        String sdistFilename = "copyover_multi_pypi_pkg-1.0.0.tar.gz";
+        String wheelFilename = "copyover_multi_pypi_pkg-1.0.0-py3-none-any.whl";
+        byte[] oldSdist = "old-multi-pypi-sdist".getBytes(StandardCharsets.UTF_8);
+        byte[] newSdist = "new-multi-pypi-sdist".getBytes(StandardCharsets.UTF_8);
+        byte[] newWheel = "new-multi-pypi-wheel".getBytes(StandardCharsets.UTF_8);
+
+        // The destination already holds this version (just the sdist, enough to make this a real
+        // overwrite rather than a fresh publish) so the copy below has to delete-and-replace it.
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, sdistFilename, oldSdist))
+                .post("/codeartifact/pypi/" + DOMAIN + "/other-repo/")
+                .then().statusCode(200);
+
+        // The source carries both files for this same release, exactly as a real `twine upload
+        // dist/*` would have left it.
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, sdistFilename, newSdist))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, wheelFilename, newWheel))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"allowOverwrite\":true}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=pypi&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copiedSdist = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/other-repo/packages/" + sdistFilename)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("new-multi-pypi-sdist", new String(copiedSdist, StandardCharsets.UTF_8));
+        byte[] copiedWheel = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/other-repo/packages/" + wheelFilename)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("new-multi-pypi-wheel", new String(copiedWheel, StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The real-world gap this closes: {@code ListPackageVersionAssets} used to not exist at all.
+     * Confirms the bridge enumerates pypi's one-asset-per-version simple index entry against the
+     * real pypiserver sidecar (not a mock) and reports the exact byte size and hash of a freshly
+     * uploaded file. A throwaway package, not {@link #PACKAGE_NAME}: {@link
+     * #deletePackageRemovesTheFileFromTheRealPypiserverSidecar} deletes that fixture for good with
+     * no republish afterward, unlike this format's sibling test classes.
+     */
+    @Test
+    @Order(18)
+    void listPackageVersionAssetsBridgesToTheRealPypiserverSidecar() {
+        String packageName = "list-assets-pypi-pkg";
+        String filename = "list_assets_pypi_pkg-1.0.0.tar.gz";
+        byte[] content = "list-assets-sdist-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, content))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/package/version/assets?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("package", equalTo(packageName))
+                .body("assets.size()", equalTo(1))
+                .body("assets[0].name", equalTo(filename))
+                .body("assets[0].size", equalTo(content.length))
+                .extract().jsonPath();
+        Map<String, String> hashes = body.getMap("assets[0].hashes");
+        assertEquals(Digests.sha256Hex(content), hashes.get("SHA-256"));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code PypiserverSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container.
@@ -474,9 +691,34 @@ class CodeArtifactPypiDockerIntegrationTest {
                 "state reset must stop reset-repo's pypiserver container");
     }
 
-    private static int runningPypiserverTestContainerCount() throws IOException, InterruptedException {
+    /**
+     * Last, since the class shares {@link SidecarContainersProfile}'s application with the other
+     * sidecar classes: deletes the repositories and domains the tests above created, which also stops
+     * their pypiserver containers.
+     */
+    @Test
+    @Order(99)
+    void cleanupDeletesTheRepositoriesAndDomainsItCreated() {
+        deleteDomain(AUTH, DOMAIN, REPO, "other-repo", "concurrent-repo", "reused-name");
+        deleteDomain(AUTH, "other-pypi-token-domain");
+        deleteDomain(NON_DEFAULT_REGION_AUTH, "pypi-sidecar-non-default-region-domain", REPO);
+        deleteDomain(OTHER_ACCOUNT_AUTH, "pypi-sidecar-cross-account-domain", REPO);
+    }
+
+    private static void deleteDomain(String auth, String domain, String... repositories) {
+        for (String repository : repositories) {
+            given().header("Authorization", auth)
+                    .delete("/v1/repository?domain=" + domain + "&repository=" + repository);
+        }
+        given().header("Authorization", auth).delete("/v1/domain?domain=" + domain);
+        List<String> domains = given().contentType("application/json").header("Authorization", auth).body("{}")
+                .post("/v1/domains").then().statusCode(200).extract().jsonPath().getList("domains.name");
+        assertFalse(domains.contains(domain), domain + " is still there");
+    }
+
+    private int runningPypiserverTestContainerCount() throws IOException, InterruptedException {
         Process process = new ProcessBuilder("docker", "ps", "-q",
-                "--filter", "name=floci-aws-codeartifact-pypi-test-pypiserver-")
+                "--filter", "name=" + ContainerStorageHelper.dockerName(config, "floci-pypiserver-"))
                 .redirectErrorStream(true).start();
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         process.waitFor();

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
@@ -11,12 +12,15 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicy
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.IamService.PresignedScope;
+import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -63,6 +67,8 @@ import java.util.regex.Pattern;
  *   <li>The action cannot be resolved (unknown mapping → permissive)</li>
  *   <li>The action is {@code sts:GetCallerIdentity}, which AWS allows without permissions. The
  *       key itself is still checked.</li>
+ *   <li>The action is {@code sts:GetSessionToken}, which AWS also allows without permissions:
+ *       policies cannot control authentication operations. The key itself is still checked.</li>
  * </ul>
  *
  * <p>Authenticated temporary callers of {@code sts:GetFederationToken} are refused here with
@@ -201,6 +207,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final Instance<ScpProvider> scpProvider;
     private final SessionAccountLookup sessionAccountLookup;
     private final Instance<ResourcePolicyProvider> resourcePolicyProviders;
+    private final Instance<PassedRoleLookup> passedRoleLookups;
     /** The clock {@link IamService} measures session expiry on, so both read the same time. */
     private final Clock clock;
     private final ResourceInfo resourceInfo;
@@ -221,6 +228,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 Instance<ScpProvider> scpProvider,
                                 SessionAccountLookup sessionAccountLookup,
                                 Instance<ResourcePolicyProvider> resourcePolicyProviders,
+                                Instance<PassedRoleLookup> passedRoleLookups,
                                 Clock clock,
                                 @Context ResourceInfo resourceInfo) {
         this.config = config;
@@ -238,6 +246,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.scpProvider = scpProvider;
         this.sessionAccountLookup = sessionAccountLookup;
         this.resourcePolicyProviders = resourcePolicyProviders;
+        this.passedRoleLookups = passedRoleLookups;
         this.clock = clock;
         this.resourceInfo = resourceInfo;
     }
@@ -260,7 +269,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, resourcePolicyProviders, Clock.systemUTC(), null);
+                scpProvider, sessionAccountLookup, resourcePolicyProviders, null, Clock.systemUTC(), null);
     }
 
     /** Package-private constructor for callers predating resourcePolicyProviders. */
@@ -280,7 +289,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, null, Clock.systemUTC(), null);
+                scpProvider, sessionAccountLookup, null, null, Clock.systemUTC(), null);
     }
 
     @Override
@@ -376,6 +385,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("sts:GetCallerIdentity".equals(action)) {
             return; // AWS returns caller identity even when an identity policy explicitly denies it
         }
+        if ("sts:GetSessionToken".equals(action)) {
+            // AWS: "No permissions are required for users to perform this operation... You cannot
+            // use policies to control authentication operations." An explicit deny does not stop it.
+            return;
+        }
 
         if ("sts:GetFederationToken".equals(action) && IamService.isTemporaryAccessKey(akid)) {
             ctx.abortWith(queryXmlAccessDenied(IamService.FEDERATION_TOKEN_SESSION_MESSAGE));
@@ -416,9 +430,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         List<String> resources = resolveResourceArns(credentialScope,
-                "logs".equals(credentialScope)
-                        ? arnBuilder.buildLogStreamResources(action, ctx, region, accountId, requestPartition())
-                        : arnBuilder.buildResources(credentialScope, ctx, region, accountId));
+                targetResources(credentialScope, action, ctx, region, accountId));
 
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
@@ -446,20 +458,27 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         "s3", "", decodedPath.substring(1)).toString());
             }
             // IAM's resource glob treats * and ? in object keys as patterns. An internal URL
-            // credential is narrower: it may authorize only its literal object and action.
+            // credential is narrower: it may authorize only its literal object and action. That
+            // action is never a version action: a generated URL signs only its X-Amz-* parameters,
+            // so it names no versionId, and PreSignedUrlFilter refuses one appended to it as a
+            // signature mismatch before this check.
             if (!scope.action().equals(action) || resources.isEmpty()
                     || resources.stream().anyMatch(resource -> !scope.resourceArn().equals(resource))) {
                 ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx));
                 return;
             }
-            // A tagged PutObject additionally requires s3:PutObjectTagging. Generated URLs
-            // grant only their object operation (and GetObject for conditional writes), so
-            // an unsigned tagging header must not add permissions to the scoped session.
-            if ("s3:PutObject".equals(action)
-                    && (ctx.getHeaderString("x-amz-tagging") != null
-                    || ctx.getUriInfo().getQueryParameters().containsKey("x-amz-tagging"))) {
-                ctx.abortWith(accessDeniedForRequest("s3:PutObjectTagging", credentialScope, ctx));
-                return;
+            // An object created with an ACL, tags, a retention period or a legal hold also needs
+            // that setting's own action. Generated URLs grant only their object operation (and
+            // GetObject for conditional writes), so such an unsigned header must not add
+            // permissions to the scoped session.
+            if ("s3:PutObject".equals(action) && isObjectCreation(ctx)) {
+                List<String> creationActions =
+                        S3ObjectActions.objectCreationActions(ctx::getHeaderString, requestTagging(ctx),
+                                S3ObjectActions.isCopy(ctx.getMethod(), ctx::getHeaderString));
+                if (!creationActions.isEmpty()) {
+                    ctx.abortWith(accessDeniedForRequest(creationActions.getFirst(), credentialScope, ctx));
+                    return;
+                }
             }
         }
 
@@ -514,31 +533,174 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 region, accountId, akid)) {
             return;
         }
+        if (abortIfRolePassDenied(ctx, caller, principal, callerArns.orElse(null), action, credentialScope,
+                region, accountId, akid)) {
+            return;
+        }
+
+        // Tagged group creation requires either tagging permission, using the same resolved
+        // caller (including session, boundary and SCP ceilings) as the primary operation.
+        if ("logs:CreateLogGroup".equals(action) && conditionContext != null
+                && !conditionContext.getOrDefault("aws:TagKeys", List.of()).isEmpty()) {
+            String groupResource = resources.getFirst();
+            String taggingResource = groupResource.substring(0, groupResource.length() - 2);
+            Map<String, List<String>> taggingContext = IamConditionContextResolver.withGlobalContext(
+                    conditionContext, taggingResource, region, accountId, accountId);
+            Map<String, List<String>> groupContext = IamConditionContextResolver.withGlobalContext(
+                    conditionContext, groupResource, region, accountId, accountId);
+            if (evaluator.evaluate(caller, null, "logs:TagResource", taggingResource, taggingContext) == Decision.DENY
+                    && evaluator.evaluate(caller, null, "logs:TagLogGroup", groupResource, groupContext) == Decision.DENY) {
+                LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}",
+                        akid, "logs:TagResource", taggingResource);
+                ctx.abortWith(accessDeniedForRequest("logs:TagResource", credentialScope, ctx, taggingResource));
+                return;
+            }
+        }
+
+        // PutAccountPolicy also needs the action for the type of policy it creates, and
+        // DescribeAccountPolicies the one for the type it lists, as their API references say. An
+        // unknown type needs nothing more: the handler refuses it.
+        if ("logs:PutAccountPolicy".equals(action) || "logs:DescribeAccountPolicies".equals(action)) {
+            String typeAction = accountPolicyTypeAction(action, arnBuilder.readJsonBody(ctx));
+            if (typeAction != null && abortIfDenied(ctx, caller, principal, typeAction, action, credentialScope,
+                    resources, targetContexts, region, accountId, akid)) {
+                return;
+            }
+        }
 
         // A PutObject carrying If-Match compares against the object it replaces, and S3 authorizes
         // that read as s3:GetObject, WITHOUT the object's tags in the request context. Measured
         // against real AWS: under a GetObject allow conditioned on s3:ExistingObjectTag the
         // conditional write is AccessDenied, under a GetObject allow scoped by prefix alone it
         // succeeds, and with no GetObject at all it is denied. If-None-Match needs no such
-        // permission.
-        if ("s3:PutObject".equals(action) && ctx.getHeaderString("If-Match") != null) {
-            abortIfDenied(ctx, caller, principal, "s3:GetObject", credentialScope, resources,
-                    withoutObjectTags(targetContexts), region, accountId, akid);
+        // permission. The user guide's conditional writes page lists PutObject, CopyObject and
+        // CompleteMultipartUpload as the operations that take If-Match; CreateMultipartUpload and
+        // UploadPart, also checked as s3:PutObject, ignore it, so it adds nothing to them.
+        if ("s3:PutObject".equals(action) && evaluatesIfMatch(ctx) && ctx.getHeaderString("If-Match") != null
+                && abortIfDenied(ctx, caller, principal, "s3:GetObject", action, credentialScope, resources,
+                        withoutObjectTags(targetContexts), region, accountId, akid)) {
+            return;
         }
         // A DeleteObject conditioned on an ETag reveals whether the object still has it, and the
         // conditional-deletes guide requires s3:GetObject for it; If-Match: * (existence only)
-        // needs just s3:DeleteObject. The read is checked the way the PutObject case above is.
-        if ("s3:DeleteObject".equals(action) && isPlainDeleteObject(ctx)
-                && isETagCondition(ctx.getHeaderString("If-Match"))) {
-            abortIfDenied(ctx, caller, principal, "s3:GetObject", credentialScope, resources,
-                    withoutObjectTags(targetContexts), region, accountId, akid);
+        // needs just the delete. A delete naming a version, checked as s3:DeleteObjectVersion, is
+        // checked the same way: the guide says the condition is evaluated against the current
+        // version only, so the read is of that one, s3:GetObject. The read is checked the way the
+        // PutObject case above is.
+        if (("s3:DeleteObject".equals(action) || "s3:DeleteObjectVersion".equals(action))
+                && isPlainDeleteObject(ctx)
+                && isETagCondition(ctx.getHeaderString("If-Match"))
+                && abortIfDenied(ctx, caller, principal, "s3:GetObject", action, credentialScope, resources,
+                        withoutObjectTags(targetContexts), region, accountId, akid)) {
+            return;
+        }
+        // A retention change or a delete that overrides governance-mode retention takes
+        // s3:BypassGovernanceRetention as well. The user guide's permissions table requires it "if you
+        // want to delete an object that's protected by governance mode" and to "bypass the governance
+        // mode of an Object Lock retention configuration", so the header on a request that overrides
+        // no lock asks for nothing more. The user guide says the permission does not apply to
+        // annotation operations. The decision is recorded for S3Controller, which lets the operation
+        // bypass a lock only when this approved it, so a lock set after this check is not bypassed.
+        if (GOVERNANCE_BYPASS_ACTIONS.contains(action)
+                && "true".equalsIgnoreCase(ctx.getHeaderString("x-amz-bypass-governance-retention"))) {
+            boolean overrides = conditionContextResolver.s3OverridesGovernanceRetention(action, ctx);
+            if (overrides && abortIfDenied(ctx, caller, principal, "s3:BypassGovernanceRetention", action,
+                    credentialScope, resources, targetContexts, region, accountId, akid)) {
+                return;
+            }
+            requestContext.setIamGovernanceBypass(overrides);
+        }
+        // An object created with an ACL, tags, a retention period or a legal hold also needs that
+        // setting's own action, as the permissions table says for PutObject, CopyObject and
+        // CreateMultipartUpload. Each is checked with the PutObject context, which carries the
+        // request's tags and Object Lock settings.
+        if ("s3:PutObject".equals(action) && isObjectCreation(ctx)) {
+            for (String creationAction
+                    : S3ObjectActions.objectCreationActions(ctx::getHeaderString, requestTagging(ctx),
+                                S3ObjectActions.isCopy(ctx.getMethod(), ctx::getHeaderString))) {
+                if (abortIfDenied(ctx, caller, principal, creationAction, action, credentialScope, resources,
+                        targetContexts, region, accountId, akid)) {
+                    return;
+                }
+            }
+        }
+        // GetObjectAttributes needs s3:GetObjectAttributes beside s3:GetObject, and for a version
+        // s3:GetObjectVersionAttributes beside s3:GetObjectVersion, as its API reference says. Both
+        // carry the object's tags and the version id, so the read's context serves for either. A
+        // denial is recorded as GetObjectAttributes, the operation it refuses.
+        if (("s3:GetObject".equals(action) || "s3:GetObjectVersion".equals(action))
+                && "GET".equalsIgnoreCase(ctx.getMethod())
+                && ctx.getUriInfo().getQueryParameters().containsKey("attributes")) {
+            String attributesAction = S3ObjectActions.forVersion("s3:GetObjectAttributes",
+                    ctx.getUriInfo().getQueryParameters().getFirst("versionId"));
+            abortIfDenied(ctx, caller, principal, attributesAction, attributesAction, credentialScope, resources,
+                    targetContexts, region, accountId, akid);
         }
     }
 
     // The DELETE subresources S3Controller.deleteObject routes away from DeleteObject (?uploadId= is
-    // AbortMultipartUpload, which the action registry also files under s3:DeleteObject). Everything
-    // else, including the x-id and X-Amz-* parameters SDKs and presigned URLs add, is a DeleteObject.
+    // AbortMultipartUpload). Everything else, including the x-id and X-Amz-* parameters SDKs and
+    // presigned URLs add, is a DeleteObject.
     private static final Set<String> NON_DELETE_OBJECT_SUBRESOURCES = Set.of("uploadId", "tagging", "annotation");
+
+    private static final Set<String> GOVERNANCE_BYPASS_ACTIONS =
+            Set.of("s3:PutObjectRetention", "s3:DeleteObject", "s3:DeleteObjectVersion");
+
+    private static String accountPolicyTypeAction(String action, JsonNode body) {
+        if (body == null) {
+            return null;
+        }
+        String policyType = body.path("policyType").asText();
+        if ("logs:DescribeAccountPolicies".equals(action)) {
+            // The reference names no read action for metric extraction policies.
+            return switch (policyType) {
+                case "DATA_PROTECTION_POLICY" -> "logs:GetDataProtectionPolicy";
+                case "SUBSCRIPTION_FILTER_POLICY" -> "logs:DescribeSubscriptionFilters";
+                case "TRANSFORMER_POLICY" -> "logs:GetTransformer";
+                case "FIELD_INDEX_POLICY" -> "logs:DescribeIndexPolicies";
+                default -> null;
+            };
+        }
+        return switch (policyType) {
+            case "DATA_PROTECTION_POLICY" -> "logs:PutDataProtectionPolicy";
+            case "SUBSCRIPTION_FILTER_POLICY" -> "logs:PutSubscriptionFilter";
+            case "TRANSFORMER_POLICY" -> "logs:PutTransformer";
+            case "FIELD_INDEX_POLICY" -> "logs:PutIndexPolicy";
+            case "METRIC_EXTRACTION_POLICY" -> "logs:PutMetricExtractionPolicy";
+            default -> null;
+        };
+    }
+
+    // PutObject and CopyObject are any PUT S3Controller does not run as UploadPart or UploadPartCopy,
+    // which name both an uploadId and a partNumber; CompleteMultipartUpload is a POST naming its
+    // upload, without ?uploads.
+    private static boolean evaluatesIfMatch(ContainerRequestContext ctx) {
+        MultivaluedMap<String, String> params = ctx.getUriInfo().getQueryParameters();
+        boolean namesUpload = params.containsKey("uploadId");
+        if ("PUT".equalsIgnoreCase(ctx.getMethod())) {
+            return !(namesUpload && params.containsKey("partNumber"));
+        }
+        return "POST".equalsIgnoreCase(ctx.getMethod()) && namesUpload && !params.containsKey("uploads");
+    }
+
+    /**
+     * PutObject and CopyObject (a PUT naming no uploadId, which would make it UploadPart) and
+     * CreateMultipartUpload (a POST naming {@code uploads}): the operations checked as
+     * {@code s3:PutObject} that build a new object from the request's headers.
+     */
+    private static boolean isObjectCreation(ContainerRequestContext ctx) {
+        MultivaluedMap<String, String> params = ctx.getUriInfo().getQueryParameters();
+        if ("PUT".equalsIgnoreCase(ctx.getMethod())) {
+            return !params.containsKey("uploadId");
+        }
+        return "POST".equalsIgnoreCase(ctx.getMethod()) && params.containsKey("uploads");
+    }
+
+    /** The request's {@code x-amz-tagging}: the header, or the query parameter a presigner may place it in. */
+    private static String requestTagging(ContainerRequestContext ctx) {
+        String header = ctx.getHeaderString("x-amz-tagging");
+        return header != null ? header : ctx.getUriInfo().getQueryParameters().getFirst("x-amz-tagging");
+    }
 
     private static boolean isPlainDeleteObject(ContainerRequestContext ctx) {
         return "DELETE".equalsIgnoreCase(ctx.getMethod())
@@ -631,8 +793,34 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 || resourceInfo == null || resourceInfo.getResourceClass() == null) {
             return null;
         }
-        return catalog.byResourceClass(resourceInfo.getResourceClass())
+        Class<?> resourceClass = resourceInfo.getResourceClass();
+        if (SharedTagsController.class.equals(resourceClass) || V1TagsController.class.equals(resourceClass)) {
+            return taggedServiceAuthorization(ctx);
+        }
+        return catalog.byResourceClass(resourceClass)
                 .map(descriptor -> resolveRestAuthorization(descriptor, ctx))
+                .orElse(null);
+    }
+
+    /**
+     * A shared tagging route hands the request to the service its ARN names, so it is checked as that
+     * service whatever scope it is signed with. A service with no rule for the route leaves it unchecked, as
+     * any route no rule maps; an ARN naming no service Floci serves, which the controller refuses, is left
+     * to the signing scope.
+     */
+    private ResolvedAuthorization taggedServiceAuthorization(ContainerRequestContext ctx) {
+        String arn = arnBuilder.taggedArn(ctx);
+        if (!AwsArnUtils.isArn(arn)) {
+            return null;
+        }
+        String service = AwsArnUtils.parse(arn).service();
+        return catalog.byCredentialScope(service)
+                .map(descriptor -> {
+                    ResolvedAuthorization authorization = resolveRestAuthorization(descriptor, ctx);
+                    return authorization != null
+                            ? authorization
+                            : new ResolvedAuthorization(catalog.canonicalCredentialScope(service), null);
+                })
                 .orElse(null);
     }
 
@@ -724,7 +912,83 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /** Floci's account-root principal, which is both the caller and the request's aws:PrincipalArn. */
     private CallerArns accountRootArns(String accountId) {
         String rootArn = AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString();
-        return new CallerArns(rootArn, rootArn, CallerArns.TYPE_ACCOUNT, accountId, null);
+        return CallerArns.accountRoot(rootArn, accountId);
+    }
+
+    /**
+     * A request that passes a role to a service also needs {@code iam:PassRole} on that role (see
+     * {@link PassedRoles}), checked as the caller with {@code iam:PassedToService} naming the
+     * service and the keys that say who is calling, which {@code callerArns} writes when it is known.
+     * What a request names that holds roles, an instance profile or a task definition, is looked up
+     * in the request's account, as the service resolves it; one that does not exist passes nothing,
+     * and the operation reports it. Returns true when the request was aborted.
+     */
+    private boolean abortIfRolePassDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
+                                          CallerArns callerArns, String action, String credentialScope,
+                                          String region, String accountId, String akid) {
+        for (PassedRoles.PassedRole passed : PassedRoles.of(action, ctx, lookupsFor(accountId, region))) {
+            Map<String, List<String>> context = new HashMap<>();
+            if (callerArns != null) {
+                callerArns.putPrincipalKeys(context);
+            }
+            context.put("iam:PassedToService", List.of(passed.passedToService()));
+            if (abortIfDenied(ctx, caller, principal, "iam:PassRole", action, credentialScope,
+                    List.of(passed.roleArn()), List.of(context), region, accountId, akid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** What {@link PassedRoles} looks up, in the request's account and Region. */
+    private PassedRoles.Lookups lookupsFor(String accountId, String region) {
+        return new PassedRoles.Lookups() {
+            @Override
+            public List<String> instanceProfileRoleArns(String profileName, String profileArn) {
+                return IamEnforcementFilter.this.instanceProfileRoleArns(accountId, profileName, profileArn);
+            }
+
+            @Override
+            public List<String> taskDefinitionRoles(String reference) {
+                List<String> roles = new ArrayList<>();
+                for (PassedRoleLookup lookup : roleLookups()) {
+                    roles.addAll(lookup.taskDefinitionRoles(reference, region));
+                }
+                return roles;
+            }
+
+            @Override
+            public Optional<String> stackSetPermissionModel(String stackSetName) {
+                for (PassedRoleLookup lookup : roleLookups()) {
+                    Optional<String> model = lookup.stackSetPermissionModel(stackSetName);
+                    if (model.isPresent()) {
+                        return model;
+                    }
+                }
+                return Optional.empty();
+            }
+
+            @Override
+            public String roleArn(String roleName) {
+                return AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "role/" + roleName).toString();
+            }
+        };
+    }
+
+    private Iterable<PassedRoleLookup> roleLookups() {
+        return passedRoleLookups == null || passedRoleLookups.isUnsatisfied() ? List.of() : passedRoleLookups;
+    }
+
+    /** The ARNs of the roles the instance profile, named by {@code name} or {@code arn}, holds. */
+    private List<String> instanceProfileRoleArns(String accountId, String name, String arn) {
+        String profileName = arn != null ? arn.substring(arn.lastIndexOf('/') + 1) : name;
+        return iamService.findInstanceProfile(accountId, profileName)
+                .filter(profile -> arn == null || arn.equals(profile.getArn()))
+                .map(profile -> profile.getRoleNames().stream()
+                        .flatMap(roleName -> iamService.findRole(accountId, roleName).stream())
+                        .map(IamRole::getArn)
+                        .toList())
+                .orElse(List.of());
     }
 
     /**
@@ -734,6 +998,19 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private boolean abortIfDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
                                   String action, String credentialScope, List<String> resources,
                                   List<Map<String, List<String>>> targetContexts,
+                                  String region, String accountId, String akid) {
+        return abortIfDenied(ctx, caller, principal, action, action, credentialScope, resources, targetContexts,
+                region, accountId, akid);
+    }
+
+    /**
+     * Checks {@code action}, which may be one the operation needs besides its own. A denial names
+     * {@code action}, the permission that is missing, while the CloudTrail event records
+     * {@code operationAction}, the operation that was refused.
+     */
+    private boolean abortIfDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
+                                  String action, String operationAction, String credentialScope,
+                                  List<String> resources, List<Map<String, List<String>>> targetContexts,
                                   String region, String accountId, String akid) {
         for (String resource : resources) {
             List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies = resolveResourcePolicies(credentialScope, resource);
@@ -752,10 +1029,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             for (Map<String, List<String>> targetContext : targetContexts) {
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
                         targetContext, resource, region, accountId, resourceOwnerAccountId);
-                if ("logs".equals(credentialScope)
-                        && ("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
-                    effectiveContext.put("aws:ResourceAccount", List.of(accountId));
-                }
                 if ("dynamodb".equals(credentialScope)) {
                     Map<String, List<String>> batchContext =
                             conditionContextResolver.dynamoDbBatchConditionContext(action, ctx, resource);
@@ -778,7 +1051,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         + " is not authorized to perform: " + action
                         + " on resource: \"" + resource + "\""
                         + " because no identity-based policy allows the " + action + " action";
-                emitS3DenialIfApplicable(akid, action, resource, ctx, region, denyMessage);
+                emitS3DenialIfApplicable(akid, operationAction, resource, ctx, region, denyMessage);
                 ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx, resource));
                 return true;
             }
@@ -918,6 +1191,36 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String resource,
             ResourcePolicyDecision resourcePolicyDecision,
             String resourceOwnerAccountId) {
+        authorizeAdditionalResource(authorizationHeader, action, resource, resourcePolicyDecision,
+                resourceOwnerAccountId, null);
+    }
+
+    /**
+     * Authorizes a browser POST upload, a PostObject, as {@code s3:PutObject} on {@code resource}.
+     * Its credential is only in the form body, so {@link #filter} never sees it, and a denial is
+     * recorded in CloudTrail here, under {@code PostObject}, as the denials {@link #filter} refuses
+     * are recorded under their operation. AWS's S3 developer guide lists PostObject among "the
+     * object-level API actions that are logged as CloudTrail events". The denial is recorded in
+     * {@code region}, the one the form's credential names, as a presigned URL's is in the one its
+     * query credential names.
+     */
+    public void authorizePostObject(String authorizationHeader, String resource, String region) {
+        authorizeAdditionalResource(authorizationHeader, "s3:PutObject", resource, null, null,
+                new DeniedEvent("PostObject", region));
+    }
+
+    /** A CloudTrail record to write when IAM refuses a request: its event name and its Region. */
+    private record DeniedEvent(String name, String region) {
+    }
+
+    /** As the public overload; a denial is also recorded in CloudTrail when {@code deniedEvent} is given. */
+    private void authorizeAdditionalResource(
+            String authorizationHeader,
+            String action,
+            String resource,
+            ResourcePolicyDecision resourcePolicyDecision,
+            String resourceOwnerAccountId,
+            DeniedEvent deniedEvent) {
         if (!config.services().iam().enforcementEnabled()) {
             return;
         }
@@ -1032,12 +1335,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 return;
             }
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
-            throw new AwsException("AccessDenied",
-                    "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
-                            + " is not authorized to perform: " + action
-                            + " on resource: \"" + resource + "\""
-                            + " because no identity-based policy allows the " + action + " action",
-                    403);
+            String denyMessage = "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
+                    + " is not authorized to perform: " + action
+                    + " on resource: \"" + resource + "\""
+                    + " because no identity-based policy allows the " + action + " action";
+            if (deniedEvent != null) {
+                emitS3Denial(akid, deniedEvent.name(), resource, deniedEvent.region(), denyMessage);
+            }
+            throw new AwsException("AccessDenied", denyMessage, 403);
         } finally {
             requestContext.setAccountId(previousAccountId);
         }
@@ -1074,10 +1379,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             if (action == null || !action.startsWith("s3:")) {
                 return;
             }
-            String eventName = mapS3ActionToEventName(action, ctx.getMethod());
-            if (eventName == null) {
-                return;
+            String eventName = mapS3ActionToEventName(action, ctx.getMethod(),
+                    ctx.getUriInfo().getQueryParameters().keySet());
+            if (eventName != null) {
+                emitS3Denial(akid, eventName, resource, region, denyMessage);
             }
+        } catch (RuntimeException e) {
+            // The request is refused either way; a record that could not be written is logged, not raised.
+            LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", action, resource);
+        }
+    }
+
+    /** Records an S3 request IAM refused as a CloudTrail data event named {@code eventName}. */
+    private void emitS3Denial(String akid, String eventName, String resource, String region, String denyMessage) {
+        try {
             String[] bk = parseS3Resource(resource);
             String bucket = bk[0];
             String key = bk[1];
@@ -1100,7 +1415,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     }
                 }
             } catch (Exception e) {
-                LOG.tracev(e, "CloudTrail: could not extract request context for IAM denial {0} on {1}", action, resource);
+                LOG.tracev(e, "CloudTrail: could not extract request context for IAM denial {0} on {1}", eventName, resource);
             }
 
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
@@ -1116,29 +1431,76 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     .eventTimeMillis(System.currentTimeMillis())
                     .build());
         } catch (RuntimeException e) {
-            LOG.tracev(e, "CloudTrail denial emission failed for {0} on {1}", action, resource);
+            LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", eventName, resource);
         }
     }
 
     // Package-private for unit testing.
-    static String mapS3ActionToEventName(String action, String httpMethod) {
+    static String mapS3ActionToEventName(String action, String httpMethod, Set<String> queryParameters) {
         if (action == null) return null;
         // Action set sourced from IamActionRegistry — see that file for any
         // additions. HEAD on an object is bucketed under s3:GetObject by the
-        // registry, so we distinguish via httpMethod.
+        // registry, so we distinguish via httpMethod. The GetObjectAttributes actions
+        // are the operation its own check refuses.
+        if ("POST".equalsIgnoreCase(httpMethod)) {
+            return postObjectEventName(action, queryParameters);
+        }
         return switch (action) {
-            case "s3:GetObject" -> "HEAD".equalsIgnoreCase(httpMethod) ? "HeadObject" : "GetObject";
+            case "s3:GetObject", "s3:GetObjectVersion" ->
+                    "HEAD".equalsIgnoreCase(httpMethod) ? "HeadObject" : "GetObject";
             case "s3:PutObject" -> "PutObject";
-            case "s3:DeleteObject" -> "DeleteObject";
+            case "s3:PutObjectRetention" -> "PutObjectRetention";
+            case "s3:GetObjectAttributes", "s3:GetObjectVersionAttributes" -> "GetObjectAttributes";
+            case "s3:DeleteObject", "s3:DeleteObjectVersion" -> "DeleteObject";
             case "s3:ListBucket" -> "ListObjects";
             case "s3:ListAllMyBuckets" -> "ListBuckets";
-            case "s3:GetObjectAcl" -> "GetObjectAcl";
-            case "s3:PutObjectAcl" -> "PutObjectAcl";
-            case "s3:GetObjectTagging" -> "GetObjectTagging";
-            case "s3:PutObjectTagging" -> "PutObjectTagging";
-            case "s3:DeleteObjectTagging" -> "DeleteObjectTagging";
+            case "s3:GetObjectAcl", "s3:GetObjectVersionAcl" -> "GetObjectAcl";
+            case "s3:PutObjectAcl", "s3:PutObjectVersionAcl" -> "PutObjectAcl";
+            case "s3:GetObjectTagging", "s3:GetObjectVersionTagging" -> "GetObjectTagging";
+            case "s3:PutObjectTagging", "s3:PutObjectVersionTagging" -> "PutObjectTagging";
+            case "s3:DeleteObjectTagging", "s3:DeleteObjectVersionTagging" -> "DeleteObjectTagging";
             default -> null;
         };
+    }
+
+    /**
+     * The operation a denied POST on an object names. Its action alone is not enough: CreateMultipartUpload
+     * and CompleteMultipartUpload are both checked as {@code s3:PutObject}, and SelectObjectContent as
+     * {@code s3:GetObject}. The sub-resource that chose the action in {@code IamActionRegistry} names the
+     * operation, and {@code ?uploads}, which S3Controller runs ahead of an {@code uploadId}, makes a
+     * request naming both a create. A POST naming none gets no name rather than a wrong one.
+     */
+    private static String postObjectEventName(String action, Set<String> queryParameters) {
+        return switch (action) {
+            case "s3:PutObject" -> {
+                if (queryParameters.contains("uploads")) {
+                    yield "CreateMultipartUpload";
+                }
+                yield queryParameters.contains("uploadId") ? "CompleteMultipartUpload" : null;
+            }
+            case "s3:RestoreObject" -> queryParameters.contains("restore") ? "RestoreObject" : null;
+            case "s3:GetObject", "s3:GetObjectVersion" ->
+                    queryParameters.contains("select") ? "SelectObjectContent" : null;
+            default -> null;
+        };
+    }
+
+    /**
+     * Logs and Secrets Manager targets depend on the serving operation and the request's partition;
+     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in.
+     */
+    private List<String> targetResources(String credentialScope, String action, ContainerRequestContext ctx,
+                                         String region, String accountId) {
+        if ("logs".equals(credentialScope)) {
+            return arnBuilder.buildLogResources(action, ctx, region, accountId, requestPartition());
+        }
+        if ("secretsmanager".equals(credentialScope)) {
+            return arnBuilder.buildSecretsManagerResources(action, ctx, region, accountId, requestPartition());
+        }
+        if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope)) {
+            return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
+        }
+        return arnBuilder.buildResources(credentialScope, ctx, region, accountId);
     }
 
     /**

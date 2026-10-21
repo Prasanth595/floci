@@ -3,7 +3,10 @@ package io.github.hectorvent.floci.services.autoscaling;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -12,23 +15,27 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class AutoScalingService {
 
+    private static final String FULLY_FORMED_LAUNCH_TEMPLATE = "You must use a valid fully-formed launch template. ";
     static final String MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE =
-            "You must use a valid fully-formed launch template. The request must contain the parameter ImageId";
+            FULLY_FORMED_LAUNCH_TEMPLATE + "The request must contain the parameter ImageId";
     static final String INVALID_LAUNCH_TEMPLATE_MESSAGE =
             "The specified launch template does not exist.";
     static final String INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE =
@@ -115,7 +122,7 @@ public class AutoScalingService {
 
     // region :: name → resource
     private Map<String, LaunchConfiguration> launchConfigs = new ConcurrentHashMap<>();
-    private Map<String, AutoScalingGroup> groups = new ConcurrentHashMap<>();
+    Map<String, AutoScalingGroup> groups = new ConcurrentHashMap<>();
     private final Map<String, Object> groupLocks = new ConcurrentHashMap<>();
     private AccountAwareStorageBackend<AutoScalingGroup> groupsStore;
     private Map<String, LifecycleHook> hooks = new ConcurrentHashMap<>();
@@ -166,6 +173,19 @@ public class AutoScalingService {
                                                           Boolean associatePublicIpAddress,
                                                           Boolean instanceMonitoringEnabled,
                                                           List<LaunchConfigurationBlockDeviceMapping> blockDeviceMappings) {
+        return createLaunchConfiguration(region, name, instanceId, imageId, instanceType, keyName,
+                securityGroups, userData, iamInstanceProfile, associatePublicIpAddress,
+                instanceMonitoringEnabled, blockDeviceMappings, null);
+    }
+
+    public LaunchConfiguration createLaunchConfiguration(String region, String name, String instanceId,
+                                                          String imageId, String instanceType, String keyName,
+                                                          List<String> securityGroups, String userData,
+                                                          String iamInstanceProfile, Boolean associatePublicIpAddress,
+                                                          Boolean instanceMonitoringEnabled,
+                                                          List<LaunchConfigurationBlockDeviceMapping> blockDeviceMappings,
+                                                          LaunchTemplateData.MetadataOptions metadataOptions) {
+        validateMetadataOptions(metadataOptions);
         String key = lcKey(region, name);
         if (launchConfigs.containsKey(key)) {
             throw new AwsException("AlreadyExists",
@@ -210,6 +230,7 @@ public class AutoScalingService {
             }
         }
         Ec2UserDataDecoder.decode(userData);
+        resolveLaunchConfigurationProfile(iamInstanceProfile);
         LaunchConfiguration lc = new LaunchConfiguration();
         lc.setLaunchConfigurationName(name);
         lc.setLaunchConfigurationArn(
@@ -222,6 +243,7 @@ public class AutoScalingService {
         lc.setUserData(userData);
         lc.setUserDataBase64Encoded(Boolean.TRUE);
         lc.setIamInstanceProfile(iamInstanceProfile);
+        lc.setMetadataOptions(metadataOptions);
         lc.setAssociatePublicIpAddress(associatePublicIpAddress);
         // AWS documents InstanceMonitoring as enabled by default and always returns the
         // structure from Describe, unlike AssociatePublicIpAddress whose absence is meaningful.
@@ -231,6 +253,56 @@ public class AutoScalingService {
         lc.setRegion(region);
         launchConfigs.put(key, lc);
         return lc;
+    }
+
+    /**
+     * Refuses metadata options outside the Auto Scaling model, every violation in one
+     * {@code ValidationError} with AWS's texts.
+     */
+    private static void validateMetadataOptions(LaunchTemplateData.MetadataOptions options) {
+        if (options == null) {
+            return;
+        }
+        List<String> violations = new ArrayList<>();
+        requireMetadataEnum(violations, "httpTokens", options.getHttpTokens(), "optional", "required");
+        Integer hopLimit = options.getHttpPutResponseHopLimit();
+        if (hopLimit != null && (hopLimit < 1 || hopLimit > 64)) {
+            violations.add("Value '" + hopLimit + "' at 'metadataOptions.httpPutResponseHopLimit' failed to satisfy"
+                    + " constraint: Member must have value "
+                    + (hopLimit < 1 ? "greater than or equal to 1" : "less than or equal to 64"));
+        }
+        requireMetadataEnum(violations, "httpEndpoint", options.getHttpEndpoint(), "disabled", "enabled");
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+    }
+
+    private static void requireMetadataEnum(List<String> violations, String member, String value,
+                                            String... allowed) {
+        if (value != null && !List.of(allowed).contains(value)) {
+            violations.add("Value '" + value + "' at 'metadataOptions." + member + "' failed to satisfy constraint:"
+                    + " Member must satisfy enum value set: [" + String.join(", ", allowed) + "]");
+        }
+    }
+
+    String resolveLaunchConfigurationProfile(String profile) {
+        if (isBlank(profile)) {
+            return null;
+        }
+        boolean arn = AwsArnUtils.isArn(profile);
+        String name = arn ? profile.substring(profile.lastIndexOf('/') + 1) : profile;
+        try {
+            String resolved = ec2Service.resolveIamInstanceProfileName(name);
+            if (arn && !profile.equals(resolved)) {
+                throw new AwsException("ValidationError", "Invalid IamInstanceProfile: " + profile, 400);
+            }
+            return resolved;
+        } catch (AwsException error) {
+            if (!"InvalidParameterValue".equals(error.getErrorCode())) {
+                throw error;
+            }
+            throw new AwsException("ValidationError", "Invalid IamInstanceProfile: " + profile, 400);
+        }
     }
 
     public List<LaunchConfiguration> describeLaunchConfigurations(String region, List<String> names) {
@@ -486,7 +558,9 @@ public class AutoScalingService {
                     .filter(Objects::nonNull)
                     .collect(Collectors.toList());
         }
+        // StorageBackedMap reads each value lazily, so a group deleted mid-iteration shows up as null.
         return groups.values().stream()
+                .filter(Objects::nonNull)
                 .filter(g -> region == null || region.equals(g.getRegion()))
                 .collect(Collectors.toList());
     }
@@ -555,6 +629,62 @@ public class AutoScalingService {
         groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
     }
 
+    // AWS: values inside one filter are ORed, separate filters are ANDed; only these four
+    // filter names exist. Ordered by (group, key); NextToken is the last pair returned, so tags
+    // added or removed between pages neither skip nor repeat an entry.
+    public PaginatedResult<TagDescription> describeTags(String region, List<Map.Entry<String, List<String>>> filters,
+                                                         Integer maxRecords, String nextToken) {
+        List<Map.Entry<String, List<String>>> normalizedFilters = new ArrayList<>();
+        for (Map.Entry<String, List<String>> filter : filters) {
+            String name = filter.getKey() == null ? "" : filter.getKey().toLowerCase(Locale.ROOT);
+            if (!Set.of("auto-scaling-group", "key", "value", "propagate-at-launch").contains(name)) {
+                throw new AwsException("ValidationError", "Filter name '" + filter.getKey() + "' is not valid.", 400);
+            }
+            if (filter.getValue() == null) {
+                throw new AwsException("ValidationError", "The Values attribute and one or more filter values are required.", 400);
+            }
+            List<String> values = filter.getValue();
+            if ("propagate-at-launch".equals(name)) {
+                values = values.stream().map(value -> value.trim().toLowerCase(Locale.ROOT)).toList();
+                if (values.stream().anyMatch(value -> !Set.of("true", "false").contains(value))) {
+                    throw new AwsException("ValidationError", "The propagate-at-launch filter requires true or false.", 400);
+                }
+            }
+            normalizedFilters.add(Map.entry(name, values));
+        }
+        if (maxRecords != null && (maxRecords < 1 || maxRecords > 100)) {
+            throw new AwsException("ValidationError", "MaxRecords must be between 1 and 100.", 400);
+        }
+        if (nextToken != null && nextToken.isBlank()) {
+            throw new AwsException("ValidationError", "The NextToken value is not valid.", 400);
+        }
+        int limit = maxRecords != null ? maxRecords : 50;
+        List<TagDescription> matches = groups.values().stream()
+                .filter(Objects::nonNull) // group deleted between key snapshot and value read
+                .filter(g -> region.equals(g.getRegion()))
+                .flatMap(g -> g.getTags().entrySet().stream()
+                        .map(t -> new TagDescription(g.getAutoScalingGroupName(), t.getKey(), t.getValue(),
+                                g.getTagPropagateAtLaunch().getOrDefault(t.getKey(), false))))
+                .filter(t -> matchesFilter(normalizedFilters, "auto-scaling-group", t.resourceId())
+                        && matchesFilter(normalizedFilters, "key", t.key())
+                        && matchesFilter(normalizedFilters, "value", t.value())
+                        && matchesFilter(normalizedFilters, "propagate-at-launch", String.valueOf(t.propagateAtLaunch())))
+                .collect(Collectors.toList());
+        // "\0" sorts below every other character, so the cursor orders as the (group, key) pair.
+        return Pagination.paginate(matches,
+                t -> t.resourceId() + "\0" + t.key(), limit, nextToken, "autoscaling-tags",
+                token -> new AwsException("ValidationError", "The NextToken value is not valid.", 400));
+    }
+
+    // Every filter of this name must match (a repeated name is a second filter, ANDed).
+    private static boolean matchesFilter(List<Map.Entry<String, List<String>>> filters, String name, String actual) {
+        return filters.stream()
+                .filter(f -> f.getKey().equals(name) && !f.getValue().isEmpty())
+                .allMatch(f -> f.getValue().contains(actual));
+    }
+
+    public record TagDescription(String resourceId, String key, String value, boolean propagateAtLaunch) {}
+
     private AutoScalingGroup requireTaggableGroup(String region, String resourceId, String resourceType) {
         if (!"auto-scaling-group".equals(resourceType)) {
             throw new AwsException("ValidationError",
@@ -575,9 +705,17 @@ public class AutoScalingService {
         synchronized (lockFor(key)) {
             AutoScalingGroup asg = requireGroup(region, name);
             List<String> toSuspend = processes.isEmpty() ? ALL_SCALING_PROCESSES : processes;
-            Set<String> suspended = new LinkedHashSet<>(asg.getSuspendedProcesses());
-            suspended.addAll(toSuspend);
-            asg.setSuspendedProcesses(new ArrayList<>(suspended));
+            AutoScalingGroup.SuspensionState previous = asg.suspensionState();
+            Set<String> suspended = new LinkedHashSet<>(previous.processes());
+            Map<String, Instant> times = new LinkedHashMap<>(previous.times());
+            Instant now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+            for (String process : toSuspend) {
+                if (suspended.add(process)) {
+                    times.put(process, now);
+                }
+            }
+            times.keySet().retainAll(suspended);
+            asg.updateSuspensionState(new ArrayList<>(suspended), times);
             groups.put(key, asg);
         }
     }
@@ -586,13 +724,16 @@ public class AutoScalingService {
         String key = asgKey(region, name);
         synchronized (lockFor(key)) {
             AutoScalingGroup asg = requireGroup(region, name);
+            AutoScalingGroup.SuspensionState previous = asg.suspensionState();
+            List<String> remaining = new ArrayList<>(previous.processes());
             if (processes.isEmpty()) {
-                asg.setSuspendedProcesses(new ArrayList<>());
+                remaining.clear();
             } else {
-                List<String> remaining = new ArrayList<>(asg.getSuspendedProcesses());
                 remaining.removeAll(processes);
-                asg.setSuspendedProcesses(remaining);
             }
+            Map<String, Instant> times = new LinkedHashMap<>(previous.times());
+            times.keySet().retainAll(remaining);
+            asg.updateSuspensionState(remaining, times);
             groups.put(key, asg);
         }
     }
@@ -601,6 +742,7 @@ public class AutoScalingService {
 
     public List<AsgInstance> describeAutoScalingInstances(String region, List<String> instanceIds) {
         List<AsgInstance> all = groups.values().stream()
+                .filter(Objects::nonNull)
                 .filter(g -> region.equals(g.getRegion()))
                 .flatMap(g -> g.getInstances().stream())
                 .collect(Collectors.toList());
@@ -647,18 +789,39 @@ public class AutoScalingService {
             throw new AwsException("ValidationError",
                     "HealthStatus must be Healthy or Unhealthy.", 400);
         }
-        AutoScalingGroup asg = groups.values().stream()
-                .filter(group -> region.equals(group.getRegion()))
-                .filter(group -> group.getInstances().stream()
-                        .anyMatch(instance -> instanceId != null && instanceId.equals(instance.getInstanceId())))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("ValidationError",
-                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
-        asg.getInstances().stream()
+        updateGroupOfInstance(region, instanceId, asg -> asg.getInstances().stream()
                 .filter(instance -> instanceId.equals(instance.getInstanceId()))
                 .findFirst()
-                .ifPresent(instance -> instance.setHealthStatus(healthStatus));
-        groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
+                .ifPresent(instance -> instance.setHealthStatus(healthStatus)));
+    }
+
+    /** Applies {@code update} to the group holding {@code instanceId}, under that group's lock. */
+    private void updateGroupOfInstance(String region, String instanceId, Consumer<AutoScalingGroup> update) {
+        String name = groups.values().stream()
+                .filter(Objects::nonNull)
+                .filter(g -> region.equals(g.getRegion()) && containsInstance(g, instanceId))
+                .map(AutoScalingGroup::getAutoScalingGroupName)
+                .findFirst()
+                .orElseThrow(() -> instanceNotFound(instanceId));
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            // Re-read under the lock: the group may have been deleted or replaced since the scan.
+            AutoScalingGroup asg = groups.get(key);
+            if (asg == null || !containsInstance(asg, instanceId)) {
+                throw instanceNotFound(instanceId);
+            }
+            update.accept(asg);
+            groups.put(key, asg);
+        }
+    }
+
+    private static AwsException instanceNotFound(String instanceId) {
+        return new AwsException("ValidationError",
+                "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400);
+    }
+
+    private static boolean containsInstance(AutoScalingGroup asg, String instanceId) {
+        return instanceId != null && asg.getInstances().stream().anyMatch(i -> instanceId.equals(i.getInstanceId()));
     }
 
     public void attachInstances(String region, String name, List<String> instanceIds) {
@@ -701,30 +864,17 @@ public class AutoScalingService {
 
     public void terminateInstanceInAutoScalingGroup(String region, String instanceId,
                                                      boolean decrementDesiredCapacity) {
-        AutoScalingGroup asg = groups.values().stream()
-                .filter(g -> region.equals(g.getRegion()))
-                .filter(g -> g.getInstances().stream().anyMatch(i -> instanceId.equals(i.getInstanceId())))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("ValidationError",
-                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
-        String key = asgKey(region, asg.getAutoScalingGroupName());
-        synchronized (lockFor(key)) {
-            if (groups.get(key) != asg) {
-                throw new AwsException("ValidationError",
-                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400);
-            }
-            AsgInstance instance = asg.getInstances().stream()
-                    .filter(i -> instanceId.equals(i.getInstanceId())).findFirst()
-                    .orElseThrow(() -> new AwsException("ValidationError",
-                            "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
+        updateGroupOfInstance(region, instanceId, asg -> {
             releaseRefreshOwnership(asg, List.of(instanceId));
-            instance.setLifecycleState("Terminating");
+            asg.getInstances().stream()
+                    .filter(i -> instanceId.equals(i.getInstanceId()))
+                    .findFirst()
+                    .ifPresent(i -> i.setLifecycleState("Terminating"));
             if (decrementDesiredCapacity) {
                 int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - 1);
                 asg.setDesiredCapacity(newDesired);
             }
-            groups.put(key, asg);
-        }
+        });
     }
 
     private void releaseRefreshOwnership(AutoScalingGroup asg, List<String> instanceIds) {
@@ -1026,30 +1176,30 @@ public class AutoScalingService {
 
     private static void validateLifecycleHookName(String hookName) {
         if (hookName == null) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value null at 'lifecycleHookName' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value null at 'lifecycleHookName' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         if (hookName.length() > 255) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + hookName
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + hookName
                             + "' at 'lifecycleHookName' failed to satisfy constraint: Member must have length "
-                            + "less than or equal to 255", 400);
+                            + "less than or equal to 255");
         }
         if (!LIFECYCLE_HOOK_NAME_PATTERN.matcher(hookName).matches()) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value '" + hookName
+            throw SmithyValidationErrors.validationError(
+                    "Value '" + hookName
                             + "' at 'lifecycleHookName' failed to satisfy constraint: Member must satisfy "
-                            + "regular expression pattern: [A-Za-z0-9\\-_/]+", 400);
+                            + "regular expression pattern: [A-Za-z0-9\\-_/]+");
         }
     }
 
     /** LifecycleActionToken is modeled as a fixed 36-character token (autoscaling/2011-01-01/service-2.json). */
     private static void validateLifecycleActionToken(String token) {
         if (token == null || token.length() != 36) {
-            throw new AwsException("ValidationError",
-                    "1 validation error detected: Value at 'lifecycleActionToken' failed to satisfy constraint: "
-                            + "Member must have length equal to 36", 400);
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'lifecycleActionToken' failed to satisfy constraint: "
+                            + "Member must have length equal to 36");
         }
     }
 
@@ -1468,20 +1618,19 @@ public class AutoScalingService {
         for (String id : specification.getCapacityReservationIds()) {
             if (id == null || id.isEmpty() || id.length() > 255
                     || !CAPACITY_RESERVATION_ID_PATTERN.matcher(id).matches()) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value '" + id
+                throw SmithyValidationErrors.validationError(
+                        "Value '" + id
                                 + "' at 'capacityReservationSpecification.capacityReservationTarget"
                                 + ".capacityReservationIds' failed to satisfy constraint: Member must have length "
-                                + "between 1 and 255 and satisfy regular expression pattern: [A-Za-z0-9\\-_\\/]+",
-                        400);
+                                + "between 1 and 255 and satisfy regular expression pattern: [A-Za-z0-9\\-_\\/]+");
             }
         }
         for (String arn : specification.getCapacityReservationResourceGroupArns()) {
             if (arn == null || arn.isEmpty() || arn.length() > MAX_RESOURCE_NAME_LENGTH) {
-                throw new AwsException("ValidationError",
-                        "1 validation error detected: Value at 'capacityReservationSpecification"
+                throw SmithyValidationErrors.validationError(
+                        "Value at 'capacityReservationSpecification"
                                 + ".capacityReservationTarget.capacityReservationResourceGroupArns' failed to "
-                                + "satisfy constraint: Member must have length between 1 and 1600", 400);
+                                + "satisfy constraint: Member must have length between 1 and 1600");
             }
         }
     }
@@ -1565,8 +1714,19 @@ public class AutoScalingService {
         if (launchTemplateVersions.isEmpty()) {
             throw invalidLaunchTemplate();
         }
-        if (isBlank(launchTemplateVersions.getFirst().getData().getImageId())) {
+        LaunchTemplateData data = launchTemplateVersions.getFirst().getData();
+        if (isBlank(data.getImageId())) {
             throw missingLaunchTemplateImageId();
+        }
+        // EC2 stores a template naming both profile selectors; the group's launch would fail, so
+        // the group is refused up front, as AWS does.
+        if (data.getIamInstanceProfile() != null) {
+            try {
+                Ec2Service.validateLaunchProfileSelectors(data.getIamInstanceProfile().getName(),
+                        data.getIamInstanceProfile().getArn());
+            } catch (AwsException invalid) {
+                throw new AwsException("ValidationError", FULLY_FORMED_LAUNCH_TEMPLATE + invalid.getMessage(), 400);
+            }
         }
     }
 

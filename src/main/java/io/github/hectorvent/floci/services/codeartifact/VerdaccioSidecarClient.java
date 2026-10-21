@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.codeartifact;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Digests;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -11,12 +13,14 @@ import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
+import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -98,6 +102,16 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
             String packageName) {
         String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
         return fetchPackageDocument(baseUrl, namespace, packageName).isPresent();
+    }
+
+    /** Verdaccio's own packument already lists every version it holds, keyed by version string. */
+    @Override
+    public boolean packageVersionExists(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        return fetchPackageDocument(baseUrl, namespace, packageName)
+                .map(document -> document.path("versions").has(version))
+                .orElse(false);
     }
 
     /**
@@ -217,17 +231,220 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
     }
 
     private boolean versionHasAsset(String baseUrl, String packagePath, String version, String assetName) {
-        Optional<JsonNode> document = packageDocument(baseUrl, packagePath);
-        if (document.isEmpty()) {
-            return false;
+        return assetName.equals(tarballFilenameFor(packageDocument(baseUrl, packagePath).orElse(null), version));
+    }
+
+    /**
+     * The tarball filename Verdaccio's own packument records for {@code version}, derived from
+     * {@code versions[version].dist.tarball}'s own last path segment the same way {@link
+     * #fetchPackageVersionAsset} already trusts it, rather than assuming a fixed {@code
+     * <packageName>-<version>.tgz} shape: real npm names it that way, but nothing here needs to
+     * assume so when the packument already states it outright. {@code null} when the document is
+     * absent, the version doesn't exist, or the version has no tarball recorded.
+     */
+    private static String tarballFilenameFor(JsonNode document, String version) {
+        if (document == null) {
+            return null;
         }
-        JsonNode versionNode = document.get().path("versions").path(version);
+        JsonNode versionNode = document.path("versions").path(version);
         if (versionNode.isMissingNode()) {
-            return false;
+            return null;
         }
         String tarballUrl = versionNode.path("dist").path("tarball").asText("");
         String tarballFilename = tarballUrl.substring(tarballUrl.lastIndexOf('/') + 1);
-        return assetName.equals(tarballFilename);
+        return tarballFilename.isEmpty() ? null : tarballFilename;
+    }
+
+    /**
+     * npm has exactly one asset per version, the tarball: unlike Maven's version directory, there
+     * is no separate checksum sidecar file or secondary artifact to enumerate. Empty when the
+     * package or version doesn't exist, or the existing version has no tarball recorded (should
+     * not happen for anything this emulator itself ever published, but a real registry can be
+     * imported from or hand-edited).
+     */
+    @Override
+    public List<String> listPackageVersionAssetNames(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        String filename = tarballFilenameFor(
+                packageDocument(baseUrl, packagePath(namespace, packageName)).orElse(null), version);
+        return filename == null ? List.of() : List.of(filename);
+    }
+
+    /**
+     * Publishes {@code version} straight to this sidecar's own packument, the real npm registry
+     * wire shape confirmed against a live Verdaccio container: a {@code PUT} to the package path
+     * carrying just the new version's metadata, its tarball as a base64 {@code _attachments}
+     * entry, and {@code dist-tags.latest} pointed at it. Verdaccio merges this into whatever
+     * {@code versions} the package already has rather than requiring the caller to resend them
+     * (also confirmed live), so this never needs to read the existing packument first the way
+     * {@link #deletePackageVersionAsset} does. Rejected outright (a real {@code 409}, "this
+     * package is already present") if {@code version} already exists, even if its content is
+     * identical: the caller ({@code CodeArtifactService#copyContainerBackedPackageVersions}) is
+     * expected to have already deleted a conflicting existing version first for an overwrite, the
+     * same reason {@code ReposiliteSidecarClient#storePackageVersionAsset} documents for Maven.
+     */
+    @Override
+    public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, byte[] content) {
+        storeVersion(repositoryContainerId, domain, repository, namespace, packageName, version, assetName, content,
+                null);
+    }
+
+    /**
+     * Reuses {@code sourceRepositoryContainerId}'s own version entry verbatim (the exact document
+     * its original publish wrote, including {@code dependencies}/{@code scripts}/{@code engines}
+     * and anything else npm's own protocol carries on a version), rather than building a fresh,
+     * minimal one from scratch the way {@link #storePackageVersionAsset} does on its own — only
+     * {@code dist} is overwritten, to point at the copy's own tarball/shasum/integrity. Confirmed
+     * live that a copy with no matching source version entry (should not happen for anything this
+     * emulator itself ever published, but defends the same way {@link #listPackageVersionAssetNames}
+     * already does for a hand-edited registry) falls back to the same minimal document {@link
+     * #storePackageVersionAsset} would have built.
+     */
+    @Override
+    public void copyPackageVersionAsset(String sourceRepositoryContainerId, String domain, String sourceRepository,
+            String repositoryContainerId, String repository, String namespace, String packageName, String version,
+            String assetName, byte[] content) {
+        String sourceBaseUrl = ensureReady(sourceRepositoryContainerId, publicUrl(domain, sourceRepository));
+        JsonNode sourceVersionDoc = packageDocument(sourceBaseUrl, packagePath(namespace, packageName))
+                .map(doc -> doc.path("versions").path(version))
+                .filter(node -> !node.isMissingNode() && !node.isNull())
+                .orElse(null);
+        storeVersion(repositoryContainerId, domain, repository, namespace, packageName, version, assetName, content,
+                sourceVersionDoc);
+    }
+
+    private void storeVersion(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName, String version, String assetName, byte[] content, JsonNode sourceVersionDoc) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        String path = packagePath(namespace, packageName);
+        String npmName = npmPackageName(namespace, packageName);
+        String tarballUrl = baseUrl + "/" + path + "/-/" + assetName;
+
+        ObjectNode versionDoc = sourceVersionDoc != null ? sourceVersionDoc.deepCopy() : mapper.createObjectNode();
+        versionDoc.put("name", npmName);
+        versionDoc.put("version", version);
+        if (!versionDoc.has("description")) {
+            versionDoc.put("description", "");
+        }
+        ObjectNode dist = versionDoc.putObject("dist");
+        dist.put("shasum", Digests.sha1Hex(content));
+        dist.put("integrity", "sha512-" + Base64.getEncoder().encodeToString(sha512().digest(content)));
+        dist.put("tarball", tarballUrl);
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("_id", npmName);
+        body.put("name", npmName);
+        body.put("description", "");
+        body.putObject("dist-tags").put("latest", version);
+        body.putObject("versions").set(version, versionDoc);
+        ObjectNode attachment = body.putObject("_attachments").putObject(assetName);
+        attachment.put("content_type", "application/octet-stream");
+        attachment.put("data", Base64.getEncoder().encodeToString(content));
+        attachment.put("length", content.length);
+
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), "/" + path))
+                .timeout(Duration.ofSeconds(30))
+                .header("Content-Type", "application/json")
+                .PUT(BodyPublishers.ofByteArray(writeValue(body)))
+                .build();
+        HttpResponse<Void> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.discarding());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the Verdaccio sidecar to publish " + npmName + "@"
+                    + version, e);
+        }
+        if (response.statusCode() != 200 && response.statusCode() != 201) {
+            throw new IllegalStateException("Could not publish " + npmName + "@" + version + " to the Verdaccio "
+                    + "sidecar: upstream returned " + response.statusCode());
+        }
+    }
+
+    /**
+     * Removes one version from this package the same two-step way the real npm CLI's single-
+     * version {@code npm unpublish <pkg>@<version>} does, both confirmed live against a Verdaccio
+     * container: first a {@code PUT} of the packument with that version deleted from {@code
+     * versions} (and {@code dist-tags.latest} cleared if it pointed at the removed version),
+     * carrying the package's current {@code _rev} in the path for Verdaccio's own optimistic-
+     * concurrency check; then, once that succeeds and the package has a fresh {@code _rev} of its
+     * own, a {@code DELETE} of the tarball itself. Both steps are required: removing the version
+     * from the packument alone leaves the tarball file in place on Verdaccio's own storage, which
+     * then makes a same-named {@link #storePackageVersionAsset} republish fail with the same
+     * {@code 409} as before, since Verdaccio checks the stored file, not just the packument.
+     */
+    @Override
+    public void deletePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        String path = packagePath(namespace, packageName);
+        ObjectNode document = (ObjectNode) packageDocument(baseUrl, path)
+                .orElseThrow(() -> new IllegalStateException(packageName + " no longer exists on the Verdaccio "
+                        + "sidecar"));
+        String revision = document.path("_rev").asText("");
+        ((ObjectNode) document.path("versions")).remove(version);
+        ObjectNode distTags = (ObjectNode) document.path("dist-tags");
+        if (version.equals(distTags.path("latest").asText(""))) {
+            distTags.remove("latest");
+        }
+        putPackument(baseUrl, path, revision, document, packageName, version);
+
+        String revisionAfterRemove = packageDocument(baseUrl, path)
+                .orElseThrow(() -> new IllegalStateException(packageName + " no longer exists on the Verdaccio "
+                        + "sidecar"))
+                .path("_rev").asText("");
+        URI tarballUri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + path + "/-/"
+                + SidecarUriUtils.encodeSegment(assetName) + "/-rev/" + SidecarUriUtils.encodeSegment(
+                        revisionAfterRemove));
+        HttpRequest deleteRequest = HttpRequest.newBuilder(tarballUri).timeout(Duration.ofSeconds(10)).DELETE()
+                .build();
+        HttpResponse<Void> deleteResponse;
+        try {
+            deleteResponse = httpClient.send(deleteRequest, BodyHandlers.discarding());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the Verdaccio sidecar to delete " + packageName + "@"
+                    + version + "'s asset " + assetName, e);
+        }
+        if (deleteResponse.statusCode() != 200 && deleteResponse.statusCode() != 201) {
+            throw new IllegalStateException("Could not delete " + packageName + "@" + version + "'s asset "
+                    + assetName + " from the Verdaccio sidecar: upstream returned " + deleteResponse.statusCode());
+        }
+    }
+
+    private void putPackument(String baseUrl, String path, String revision, ObjectNode document, String packageName,
+            String version) {
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + path + "/-rev/"
+                + SidecarUriUtils.encodeSegment(revision));
+        HttpRequest request = HttpRequest.newBuilder(uri)
+                .timeout(Duration.ofSeconds(10))
+                .header("Content-Type", "application/json")
+                .PUT(BodyPublishers.ofByteArray(writeValue(document)))
+                .build();
+        HttpResponse<Void> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.discarding());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the Verdaccio sidecar to update " + packageName + "@"
+                    + version, e);
+        }
+        if (response.statusCode() != 200 && response.statusCode() != 201) {
+            throw new IllegalStateException("Could not update " + packageName + "@" + version + " on the "
+                    + "Verdaccio sidecar: upstream returned " + response.statusCode());
+        }
+    }
+
+    /** The real npm package name, {@code @namespace/packageName} for a scoped package. */
+    private static String npmPackageName(String namespace, String packageName) {
+        return namespace == null ? packageName : "@" + namespace + "/" + packageName;
+    }
+
+    private byte[] writeValue(ObjectNode value) {
+        try {
+            return mapper.writeValueAsBytes(value);
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not serialize a Verdaccio request body", e);
+        }
     }
 
     private static MessageDigest sha512() {

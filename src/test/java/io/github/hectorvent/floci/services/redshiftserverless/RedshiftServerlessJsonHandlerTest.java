@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.redshift.RedshiftIamDbUserResolver;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
@@ -83,10 +84,30 @@ class RedshiftServerlessJsonHandlerTest {
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-usagelimits.json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        stubAdministrationStores(storageFactory);
         RedshiftServerlessService service =
                 new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
+        AcmService acmService = mock(AcmService.class);
+        RedshiftServerlessCustomDomainService customDomains =
+                new RedshiftServerlessCustomDomainService(storageFactory, service, acmService);
         handler = new RedshiftServerlessJsonHandler(service, mapper, iamDbUserResolver,
-                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service));
+                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service),
+                new RedshiftServerlessAdminJsonHandler(mapper,
+                        new RedshiftServerlessResourcePolicyService(storageFactory, service, mapper),
+                        new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, service),
+                        customDomains,
+                        new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service),
+                        new RedshiftServerlessScheduledActionService(storageFactory, service)),
+                customDomains);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void stubAdministrationStores(StorageFactory storageFactory) {
+        for (String file : List.of("resourcepolicies", "endpointaccess", "customdomains", "snapshotcopyconfigurations", "scheduledactions")) {
+            when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-" + file + ".json"),
+                    any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
+                    AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        }
     }
 
     @Test
@@ -224,7 +245,26 @@ class RedshiftServerlessJsonHandlerTest {
     }
 
     @Test
-    void getCredentialsRejectsABadDurationAMissingWorkgroupAndACustomDomain() {
+    void getCredentialsAcceptsACustomDomainNameInPlaceOfWorkgroupName() {
+        create("cred-dom-ns");
+        body(handler.handle("CreateWorkgroup",
+                parse("{\"workgroupName\":\"cred-dom-wg\",\"namespaceName\":\"cred-dom-ns\"}"), REGION));
+        body(handler.handle("CreateCustomDomainAssociation",
+                parse("{\"workgroupName\":\"cred-dom-wg\",\"customDomainName\":\"db.example.com\","
+                        + "\"customDomainCertificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555\"}"),
+                REGION));
+
+        JsonNode credentials = body(handler.handle("GetCredentials",
+                parse("{\"customDomainName\":\"db.example.com\",\"dbName\":\"dev\",\"durationSeconds\":1800}"),
+                REGION, "AUTH"));
+
+        assertEquals("IAM:alice", credentials.get("dbUser").textValue());
+        assertEquals("tempPassword1", credentials.get("dbPassword").textValue());
+        assertEquals(1_800_000_000L, credentials.get("expiration").longValue());
+    }
+
+    @Test
+    void getCredentialsRejectsInvalidParametersAndUnknownTargets() {
         create("cred-err-ns");
         body(handler.handle("CreateWorkgroup",
                 parse("{\"workgroupName\":\"cred-err-wg\",\"namespaceName\":\"cred-err-ns\"}"), REGION));
@@ -238,14 +278,29 @@ class RedshiftServerlessJsonHandlerTest {
                 parse("{\"workgroupName\":\"cred-err-wg\",\"durationSeconds\":\"900\"}"), REGION, "AUTH");
         assertEquals(400, wrongType.getStatus());
 
-        Response missing = handler.handle("GetCredentials", parse("{\"workgroupName\":\"absent-wg\"}"), REGION, "AUTH");
-        assertEquals(400, missing.getStatus());
-        assertEquals("ResourceNotFoundException", errorType(missing));
+        Response missingWorkgroup = handler.handle("GetCredentials",
+                parse("{\"workgroupName\":\"absent-wg\"}"), REGION, "AUTH");
+        assertEquals(400, missingWorkgroup.getStatus());
+        assertEquals("ResourceNotFoundException", errorType(missingWorkgroup));
 
-        Response customDomain = handler.handle("GetCredentials",
-                parse("{\"customDomainName\":\"wg.example.com\"}"), REGION, "AUTH");
-        assertEquals(400, customDomain.getStatus());
-        assertEquals("ValidationException", errorType(customDomain));
+        Response missingDomain = handler.handle("GetCredentials",
+                parse("{\"customDomainName\":\"absent.example.com\"}"), REGION, "AUTH");
+        assertEquals(400, missingDomain.getStatus());
+        assertEquals("ResourceNotFoundException", errorType(missingDomain));
+
+        Response both = handler.handle("GetCredentials",
+                parse("{\"workgroupName\":\"cred-err-wg\",\"customDomainName\":\"wg.example.com\"}"), REGION, "AUTH");
+        assertEquals(400, both.getStatus());
+        assertEquals("ValidationException", errorType(both));
+
+        Response neither = handler.handle("GetCredentials", parse("{}"), REGION, "AUTH");
+        assertEquals(400, neither.getStatus());
+        assertEquals("ValidationException", errorType(neither));
+
+        Response badDomain = handler.handle("GetCredentials",
+                parse("{\"customDomainName\":\"-bad\"}"), REGION, "AUTH");
+        assertEquals(400, badDomain.getStatus());
+        assertEquals("ValidationException", errorType(badDomain));
     }
 
     @Test
@@ -381,10 +436,57 @@ class RedshiftServerlessJsonHandlerTest {
 
     @Test
     void anUnknownActionIsReportedAsUnknownOperation() {
-        Response response = handler.handle("CreateScheduledAction", mapper.createObjectNode(), REGION);
+        Response response = handler.handle("NoSuchOperation", mapper.createObjectNode(), REGION);
 
         assertEquals(400, response.getStatus());
         assertEquals("UnknownOperationException", errorType(response));
+    }
+
+    @Test
+    void aModeledActionWithoutAnImplementationIsStillAnUnknownOperation() {
+        Response response = handler.handle("ConvertRecoveryPointToSnapshot", mapper.createObjectNode(), REGION);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("UnknownOperationException", errorType(response));
+    }
+
+    @Test
+    void aRequestBreakingTheModelConstraintsIsRejectedWithoutChangingState() {
+        Response badEnum = handler.handle("CreateNamespace",
+                parse("{\"namespaceName\":\"state-ns\",\"logExports\":[\"nope\"]}"), REGION);
+        Response missingNamespace = handler.handle("CreateWorkgroup", parse("{\"workgroupName\":\"state-wg\"}"), REGION);
+        Response missingName = handler.handle("GetWorkgroup", parse("{}"), REGION);
+
+        assertEquals("ValidationException", errorType(badEnum));
+        assertEquals("ValidationException", errorType(missingNamespace));
+        assertEquals("ValidationException", errorType(missingName));
+        assertEquals("ResourceNotFoundException", errorType(
+                handler.handle("GetNamespace", parse("{\"namespaceName\":\"state-ns\"}"), REGION)));
+        assertEquals(0, body(handler.handle("ListWorkgroups", parse("{}"), REGION)).get("workgroups").size());
+    }
+
+    @Test
+    void aNonStringPageTokenIsRejectedInsteadOfRestartingTheListing() {
+        for (String action : new String[] {"ListNamespaces", "ListWorkgroups", "ListSnapshots", "ListUsageLimits"}) {
+            Response response = handler.handle(action, parse("{\"nextToken\":12345678}"), REGION);
+
+            assertEquals("ValidationException", errorType(response), action);
+        }
+    }
+
+    @Test
+    void aTagWithANonStringKeyOrValueIsRejectedInsteadOfCoerced() {
+        String arn = body(handler.handle("CreateNamespace", parse("{\"namespaceName\":\"tag-ns\"}"), REGION))
+                .get("namespace").get("namespaceArn").textValue();
+
+        for (String tag : new String[] {"{\"key\":123,\"value\":\"v\"}", "{\"key\":\"k\",\"value\":false}"}) {
+            Response response = handler.handle("TagResource",
+                    parse("{\"resourceArn\":\"" + arn + "\",\"tags\":[" + tag + "]}"), REGION);
+
+            assertEquals("ValidationException", errorType(response), tag);
+        }
+        assertEquals(0, body(handler.handle("ListTagsForResource", parse("{\"resourceArn\":\"" + arn + "\"}"), REGION))
+                .get("tags").size());
     }
 
     @Test

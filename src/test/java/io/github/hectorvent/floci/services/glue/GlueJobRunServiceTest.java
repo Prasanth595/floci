@@ -436,4 +436,14 @@ class GlueJobRunServiceTest {
             return AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         }
     }
+
+    @Test
+    void tagsReachAJobWhoseNameContainsAColon() {
+        createJob("nightly:etl", null, null);
+        String arn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":job/nightly:etl";
+
+        glueService.tagResource(arn, Map.of("team", "data"), REGION);
+
+        assertEquals(Map.of("team", "data"), glueService.getTags(arn, REGION));
+    }
 }

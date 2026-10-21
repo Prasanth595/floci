@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
@@ -1460,18 +1461,16 @@ public class EcsJsonHandler {
             return null;
         }
         if (!node.hasNonNull("type")) {
-            throw new AwsException("ClientException",
-                    "1 validation error detected: Value null at 'containerDefinitions." + containerIndex
-                            + ".member.firelensConfiguration.type' failed to satisfy constraint: Member must not be null",
-                    400);
+            throw SmithyValidationErrors.exception("ClientException",
+                    "Value null at 'containerDefinitions." + containerIndex
+                            + ".member.firelensConfiguration.type' failed to satisfy constraint: Member must not be null");
         }
         String type = node.path("type").asText();
         if (!"fluentd".equals(type) && !"fluentbit".equals(type)) {
-            throw new AwsException("ClientException",
-                    "1 validation error detected: Value '" + type + "' at 'containerDefinitions." + containerIndex
+            throw SmithyValidationErrors.exception("ClientException",
+                    "Value '" + type + "' at 'containerDefinitions." + containerIndex
                             + ".member.firelensConfiguration.type' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [fluentd, fluentbit]",
-                    400);
+                            + "Member must satisfy enum value set: [fluentd, fluentbit]");
         }
         Map<String, String> options = null;
         if (node.path("options").isObject()) {

@@ -355,6 +355,27 @@ regenerates the IAM managed-policy catalog (`src/main/resources/iam/managed-poli
 `local/aws/iam-dataset` checkout; without that checkout, as in CI, `make aws-data-check` only
 verifies the catalog's shape.
 
+### Botocore pin of record
+
+[tools/aws/requirements.txt](tools/aws/requirements.txt) is the botocore pin of record
+for AWS model audits and vendored AWS data. CI installs this file before running
+`make aws-data-check`. Use an isolated environment installed from this file when checking
+whether botocore models an operation, request member, endpoint, or partition.
+
+[compatibility-tests/sdk-test-python/requirements.txt](compatibility-tests/sdk-test-python/requirements.txt)
+pins the boto3 and botocore clients used by the Python compatibility suite. Those client
+versions can differ from the generator pin; they are not the model-audit reference.
+Updating a compatibility client alone does not change the vendored AWS data.
+
+Generators using `resolve_botocore_data`, including partitions and request shapes, prefer
+an explicit `--botocore-data` directory, then `local/aws/botocore/botocore/data`, then the
+installed botocore package. The region-facts generator instead requires its local sources
+(or explicit source paths); it does not fall back to the installed package, and `--check`
+only verifies shape when its sources are missing. When a local checkout or explicit
+directory is selected, ensure it matches the tools pin too: checking only the installed
+package version does not establish which data is being read.
+Keep a generator-pin change and its required regenerated data together, as described above.
+
 ## Reporting Security Issues
 
 Please do **not** open public issues for security vulnerabilities. Report them privately by emailing the maintainer or using [GitHub private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability).

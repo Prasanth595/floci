@@ -7,11 +7,15 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecr.model.*;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -236,6 +240,110 @@ class EcrTest {
                     // The rule was already deleted by the lifecycle assertion.
                 }
             }
+        }
+    }
+
+    @Test
+    @Order(13)
+    @DisplayName("An image pushed through the layer API and PutImage reads back and retags")
+    void pushThroughTheApiAndRetag() throws Exception {
+        String repo = "floci-it/api-push-" + System.nanoTime();
+        ecr.createRepository(b -> b.repositoryName(repo));
+        reposToCleanup.add(repo);
+
+        String config = "{\"architecture\":\"amd64\",\"os\":\"linux\"}";
+        String layer = "floci layer bytes";
+        String configDigest = uploadLayer(repo, config.getBytes(StandardCharsets.UTF_8));
+        String layerDigest = uploadLayer(repo, layer.getBytes(StandardCharsets.UTF_8));
+
+        BatchCheckLayerAvailabilityResponse check = ecr.batchCheckLayerAvailability(b -> b
+                .repositoryName(repo).layerDigests(configDigest, layerDigest));
+        assertThat(check.layers()).extracting(Layer::layerAvailability)
+                .containsOnly(LayerAvailability.AVAILABLE);
+        assertThat(check.failures()).isEmpty();
+
+        String manifest = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\","
+                + "\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"size\":"
+                + config.length() + ",\"digest\":\"" + configDigest + "\"},"
+                + "\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar\",\"size\":"
+                + layer.length() + ",\"digest\":\"" + layerDigest + "\"}]}";
+        PutImageResponse put = ecr.putImage(b -> b.repositoryName(repo).imageTag("v1").imageManifest(manifest));
+        assertThat(put.image().imageId().imageDigest()).isEqualTo(sha256(manifest.getBytes(StandardCharsets.UTF_8)));
+
+        String read = ecr.batchGetImage(b -> b.repositoryName(repo)
+                .imageIds(ImageIdentifier.builder().imageTag("v1").build()))
+                .images().get(0).imageManifest();
+        ecr.putImage(b -> b.repositoryName(repo).imageTag("release").imageManifest(read));
+        assertThat(ecr.listImages(b -> b.repositoryName(repo)).imageIds())
+                .extracting(ImageIdentifier::imageTag).contains("v1", "release");
+        assertThatThrownBy(() -> ecr.putImage(b -> b.repositoryName(repo).imageTag("release").imageManifest(read)))
+                .isInstanceOf(ImageAlreadyExistsException.class);
+
+        String url = ecr.getDownloadUrlForLayer(b -> b.repositoryName(repo).layerDigest(layerDigest)).downloadUrl();
+        assertThat(url).endsWith("/v2/" + repo + "/blobs/" + layerDigest);
+    }
+
+    private static String uploadLayer(String repo, byte[] bytes) throws Exception {
+        String uploadId = ecr.initiateLayerUpload(b -> b.repositoryName(repo)).uploadId();
+        UploadLayerPartResponse part = ecr.uploadLayerPart(b -> b.repositoryName(repo).uploadId(uploadId)
+                .partFirstByte(0L).partLastByte((long) bytes.length - 1).layerPartBlob(SdkBytes.fromByteArray(bytes)));
+        assertThat(part.lastByteReceived()).isEqualTo(bytes.length - 1L);
+        String digest = sha256(bytes);
+        return ecr.completeLayerUpload(b -> b.repositoryName(repo).uploadId(uploadId).layerDigests(digest))
+                .layerDigest();
+    }
+
+    private static String sha256(byte[] bytes) throws Exception {
+        return "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+    }
+
+    @Test
+    @Order(14)
+    @DisplayName("Registry policy, replication and scanning configuration round-trip")
+    void registrySettingsRoundTrip() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"Replicate\",\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:" + TestFixtures.partition() + ":iam::111111111111:root\"},"
+                + "\"Action\":[\"ecr:CreateRepository\",\"ecr:ReplicateImage\"],\"Resource\":\"*\"}]}";
+        try {
+            assertThatThrownBy(() -> ecr.getRegistryPolicy(b -> {}))
+                    .isInstanceOf(RegistryPolicyNotFoundException.class);
+            ecr.putRegistryPolicy(b -> b.policyText(policy));
+            assertThat(ecr.getRegistryPolicy(b -> {}).policyText()).isEqualTo(policy);
+
+            ecr.putReplicationConfiguration(b -> b.replicationConfiguration(c -> c.rules(ReplicationRule.builder()
+                    .destinations(ReplicationDestination.builder().region("us-west-2").registryId("111111111111").build())
+                    .repositoryFilters(RepositoryFilter.builder().filter("prod").filterType("PREFIX_MATCH").build())
+                    .build())));
+            DescribeRegistryResponse registry = ecr.describeRegistry(b -> {});
+            assertThat(registry.registryId()).matches("[0-9]{12}");
+            assertThat(registry.replicationConfiguration().rules()).hasSize(1);
+            assertThat(registry.replicationConfiguration().rules().get(0).destinations().get(0).region())
+                    .isEqualTo("us-west-2");
+
+            ecr.putRegistryScanningConfiguration(b -> b.scanType(ScanType.ENHANCED).rules(RegistryScanningRule.builder()
+                    .scanFrequency(ScanFrequency.CONTINUOUS_SCAN)
+                    .repositoryFilters(ScanningRepositoryFilter.builder().filter("prod-*")
+                            .filterType(ScanningRepositoryFilterType.WILDCARD).build())
+                    .build()));
+            GetRegistryScanningConfigurationResponse scanning = ecr.getRegistryScanningConfiguration(b -> {});
+            assertThat(scanning.scanningConfiguration().scanType()).isEqualTo(ScanType.ENHANCED);
+            assertThat(scanning.scanningConfiguration().rules().get(0).scanFrequency())
+                    .isEqualTo(ScanFrequency.CONTINUOUS_SCAN);
+            assertThatThrownBy(() -> ecr.putRegistryScanningConfiguration(b -> b.scanType(ScanType.BASIC)
+                    .rules(RegistryScanningRule.builder().scanFrequency(ScanFrequency.CONTINUOUS_SCAN)
+                            .repositoryFilters(ScanningRepositoryFilter.builder().filter("*")
+                                    .filterType(ScanningRepositoryFilterType.WILDCARD).build())
+                            .build())))
+                    .isInstanceOf(InvalidParameterException.class);
+        } finally {
+            // Registry settings are per account and Region, so put back what a fresh registry has.
+            try {
+                ecr.deleteRegistryPolicy(b -> {});
+            } catch (RegistryPolicyNotFoundException ignored) {
+                // Already absent.
+            }
+            ecr.putReplicationConfiguration(b -> b.replicationConfiguration(c -> c.rules(List.of())));
+            ecr.putRegistryScanningConfiguration(b -> b.scanType(ScanType.BASIC).rules(List.of()));
         }
     }
 }

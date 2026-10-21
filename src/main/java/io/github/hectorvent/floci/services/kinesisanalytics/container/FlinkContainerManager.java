@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.kinesisanalytics.KinesisAnalyticsRuntimes;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
@@ -25,12 +26,8 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -361,38 +358,24 @@ public class FlinkContainerManager {
      *  the stock config. */
     private void copyFileIntoContainer(String containerId, String remoteDir, String relativePath, byte[] content,
             boolean required) {
+        copyFileIntoContainer(containerId, remoteDir, relativePath, content, required,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
+
+    void copyFileIntoContainer(String containerId, String remoteDir, String relativePath, byte[] content,
+            boolean required, long backoffMillis) {
         if (containerId == null) {
             return;
         }
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(relativePath, content)))
-                    .withRemotePath(remoteDir)
-                    .exec();
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, remoteDir,
+                    relativePath, content, 0644, RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, backoffMillis);
         } catch (Exception e) {
             if (required) {
                 throw new IllegalStateException(
                         "Could not copy " + relativePath + " into Flink container " + containerId, e);
             }
             LOG.warnv("Could not copy {0} into Flink container {1}: {2}", relativePath, containerId, e.getMessage());
-        }
-    }
-
-    private static byte[] tarSingleFile(String entryName, byte[] content) {
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(out)) {
-                TarArchiveEntry entry = new TarArchiveEntry(entryName);
-                entry.setSize(content.length);
-                entry.setMode(0644);
-                tar.putArchiveEntry(entry);
-                tar.write(content);
-                tar.closeArchiveEntry();
-            }
-            return out.toByteArray();
-        } catch (IOException e) {
-            throw new IllegalStateException("Could not build in-memory tar for " + entryName, e);
         }
     }
 

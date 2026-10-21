@@ -9,8 +9,10 @@ import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
+import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -49,25 +51,39 @@ public class ResourceArnBuilder {
     /** Reads the CBOR bodies the RPC v2 and {@code x-amz-cbor-1.1} paths carry. */
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
 
+    /**
+     * Stands in for the random suffix of a secret that {@code CreateSecret} has not made yet. Each
+     * {@code ?} matches the one character a {@code secret:<name>-??????} policy expects there.
+     */
+    private static final String UNASSIGNED_SECRET_SUFFIX = "-??????";
+
     private final ObjectMapper objectMapper;
     /**
      * Looked up lazily through a provider: this builder is constructed by the enforcement filter,
      * which IamService itself does not depend on, and a direct injection would close that loop.
      */
     private final Instance<IamService> iamService;
+    /** Looked up lazily for the same reason, to resolve a secret named by its name or a partial ARN. */
+    private final Instance<SecretsManagerService> secretsManagerService;
 
     @Inject
-    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              Instance<SecretsManagerService> secretsManagerService) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
+        this.secretsManagerService = secretsManagerService;
+    }
+
+    ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
+        this(objectMapper, iamService, null);
     }
 
     public ResourceArnBuilder() {
-        this(new ObjectMapper(), null);
+        this(new ObjectMapper(), null, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper) {
-        this(objectMapper, null);
+        this(objectMapper, null, null);
     }
 
     public String build(String credentialScope, ContainerRequestContext ctx,
@@ -78,6 +94,16 @@ public class ResourceArnBuilder {
 
     public List<String> buildResources(String credentialScope, ContainerRequestContext ctx,
                                        String region, String accountId) {
+        return buildResources(credentialScope, ctx, region, accountId, AwsRegions.partitionFor(region));
+    }
+
+    /**
+     * The resources a request is checked against. Scheduler and Pipes ARNs are minted in {@code partition},
+     * the request's, as those services mint theirs, so a Region no partition publishes gets the deployment's
+     * partition rather than {@code aws}.
+     */
+    public List<String> buildResources(String credentialScope, ContainerRequestContext ctx,
+                                       String region, String accountId, String partition) {
         if (credentialScope == null) {
             return List.of("*");
         }
@@ -89,29 +115,55 @@ public class ResourceArnBuilder {
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
-            case "secretsmanager" -> List.of(buildSecretsManagerArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "kms"            -> List.of(buildKmsArn(path, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
+            case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
+            case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
+            case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
             default               -> List.of("*");
         };
     }
 
-    /** Uses the serving operation, not an independently parsed target header. */
-    public List<String> buildLogStreamResources(String action, ContainerRequestContext ctx,
-                                                 String region, String accountId, String partition) {
-        if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
+    private String buildResourceGroupArn(ContainerRequestContext ctx, String region, String accountId) {
+        JsonNode body = readJsonBody(ctx);
+        if (body == null) {
+            return "*";
+        }
+        String path = ctx.getUriInfo().getPath();
+        boolean create = path.endsWith("/groups") || path.endsWith("/groups/");
+        String group = create ? body.path("Name").asText()
+                : body.path("Group").asText(body.path("GroupName").asText());
+        if (group.isEmpty()) {
+            return "*";
+        }
+        return group.startsWith("arn:") ? group
+                : AwsArnUtils.Arn.of("resource-groups", region, accountId, "group/" + group).toString();
+    }
+
+    /** Uses the serving operation and the same raw names as the handler. */
+    public List<String> buildLogResources(String action, ContainerRequestContext ctx,
+                                          String region, String accountId, String partition) {
+        boolean stream = "logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action);
+        boolean group = switch (action) {
+            case "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
+                    "logs:DeleteRetentionPolicy" -> true;
+            default -> false;
+        };
+        if (!stream && !group && !LogGroupTagTarget.supports(action)) {
             return List.of("*");
         }
         JsonNode body = readJsonBody(ctx);
         if (body == null) {
             return List.of("*");
         }
-        // Match the handler's coercion and raw names, including whitespace and numeric values.
-        String group = body.path("logGroupName").asText();
-        String stream = body.path("logStreamName").asText();
-        return List.of(new AwsArnUtils.Arn(partition, "logs", region, accountId,
-                "log-group:" + group + ":log-stream:" + stream).toString());
+        if (LogGroupTagTarget.supports(action)) {
+            return List.of(LogGroupTagTarget.resolve(body.path("resourceArn").asText(), region, accountId, partition).arn());
+        }
+        String name = body.path("logGroupName").asText();
+        String resource = "log-group:" + name + (stream
+                ? ":log-stream:" + body.path("logStreamName").asText() : ":*");
+        return List.of(new AwsArnUtils.Arn(partition, "logs", region, accountId, resource).toString());
     }
 
     // ── IAM ─────────────────────────────────────────────────────────────────────
@@ -187,7 +239,6 @@ public class ResourceArnBuilder {
      * exists to close.
      */
     static final Map<String, String> UNRESOLVED_TYPES = Map.of(
-            "delegation-request", "the delegation request family is not dispatched",
             "role-template", "GetRoleTemplateVersion is not dispatched");
 
     /**
@@ -207,9 +258,9 @@ public class ResourceArnBuilder {
      * The actions resolved by a branch of their own in {@link #buildIamArns}, because what the
      * request carries is not an IAM entity's name: a service principal for
      * {@code CreateServiceLinkedRole}, an access key id for {@code GetAccessKeyLastUsed}, a
-     * deletion task id for {@code GetServiceLinkedRoleDeletionStatus}, and an Organizations
+     * deletion task id for {@code GetServiceLinkedRoleDeletionStatus}, an Organizations
      * entity path for {@code GenerateOrganizationsAccessReport}, whose resource lives in another
-     * service's tree.
+     * service's tree, and a request id for the five delegation actions that name one.
      *
      * <p>The resolver is the value rather than a branch elsewhere, so this cannot become a list
      * that says an action is handled while the dispatch has nothing for it. The keys are also what
@@ -222,7 +273,12 @@ public class ResourceArnBuilder {
             (self, ctx, region, accountId) -> self.accessKeyOwnerArn(ctx, accountId),
             "GetServiceLinkedRoleDeletionStatus", ResourceArnBuilder::deletionTaskRoleArn,
             "GenerateOrganizationsAccessReport",
-            ResourceArnBuilder::organizationsAccessReportArn);
+            ResourceArnBuilder::organizationsAccessReportArn,
+            "AssociateDelegationRequest", ResourceArnBuilder::delegationRequestArn,
+            "AcceptDelegationRequest", ResourceArnBuilder::delegationRequestArn,
+            "RejectDelegationRequest", ResourceArnBuilder::delegationRequestArn,
+            "GetDelegationRequest", ResourceArnBuilder::delegationRequestArn,
+            "SendDelegationToken", ResourceArnBuilder::delegationRequestArn);
 
     /** How one of {@link #DERIVED_RESOLVERS} reads its resource out of the request. */
     interface DerivedResolver {
@@ -400,6 +456,29 @@ public class ResourceArnBuilder {
         };
         return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId, resource)
                 .toString();
+    }
+
+    /**
+     * The delegation request a by-id action names.
+     *
+     * <p>Minted from the request rather than read back: the id is the whole resource name, with no
+     * path and no partition of its own to recover, and an id naming no request answers
+     * {@code NoSuchEntity} whatever a policy says. That is the same reasoning the ARN-carrying
+     * actions use, one step earlier, because this family passes an id where they pass an ARN.
+     *
+     * <p>{@code CreateDelegationRequest} is not here: IAM mints the id, so the request names no
+     * resource and the wildcard is the honest answer. {@code UpdateDelegationRequest} is not here
+     * either, AWS publishing no authorizable action for it at all, so it carries no type to
+     * resolve.
+     */
+    private List<String> delegationRequestArn(ContainerRequestContext ctx, String region,
+                                              String accountId) {
+        String id = RequestBodyReader.formField(ctx, "DelegationRequestId");
+        if (id == null || id.isBlank()) {
+            return List.of("*");
+        }
+        return List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                "delegation-request/" + id).toString());
     }
 
     /** An OIDC provider URL as its ARN carries it, which is the URL without its scheme. */
@@ -610,7 +689,8 @@ public class ResourceArnBuilder {
         // path: /2015-03-31/functions/name or similar
         String name = extractSegmentAfter(path, "functions");
         if (name == null) return "*";
-        boolean invoke = path.endsWith("/functions/" + name + "/invocations");
+        boolean invoke = path.endsWith("/functions/" + name + "/invocations")
+                || path.endsWith("/functions/" + name + "/response-streaming-invocations");
         try {
             if (!invoke) {
                 LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(name);
@@ -633,6 +713,87 @@ public class ResourceArnBuilder {
             // A reference Lambda refuses, which its handler answers with a 400 before acting on anything.
             return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
         }
+    }
+
+    /**
+     * The resource of an EventBridge Scheduler route: {@code schedule/<group>/<name>}, the group read where
+     * Scheduler reads it, the body's {@code GroupName} on a create or an update and {@code groupName}
+     * otherwise, and {@code default} when the request names none; {@code schedule-group/<name>}; or the
+     * ARN a tagging route names. The list routes name no resource.
+     */
+    private String buildSchedulerArn(String path, ContainerRequestContext ctx, String region, String accountId,
+                                     String partition) {
+        String schedule = segmentAfterPrefix(path, "/schedules/");
+        if (schedule != null) {
+            String group;
+            if ("POST".equalsIgnoreCase(ctx.getMethod()) || "PUT".equalsIgnoreCase(ctx.getMethod())) {
+                JsonNode body = readJsonBody(ctx);
+                group = body == null ? null : body.path("GroupName").asText(null);
+            } else {
+                group = ctx.getUriInfo().getQueryParameters().getFirst("groupName");
+            }
+            if (group == null || group.isBlank()) {
+                group = "default";
+            }
+            return new AwsArnUtils.Arn(partition, "scheduler", region, accountId,
+                    "schedule/" + group + "/" + schedule).toString();
+        }
+        String scheduleGroup = segmentAfterPrefix(path, "/schedule-groups/");
+        if (scheduleGroup != null) {
+            return new AwsArnUtils.Arn(partition, "scheduler", region, accountId,
+                    "schedule-group/" + scheduleGroup).toString();
+        }
+        return taggedResource(ctx);
+    }
+
+    /** The resource of an EventBridge Pipes route: {@code pipe/<name>}, or the ARN a tagging route names. */
+    private String buildPipesArn(String path, ContainerRequestContext ctx, String region, String accountId,
+                                 String partition) {
+        String pipe = segmentAfterPrefix(path, "/v1/pipes/");
+        if (pipe != null) {
+            return new AwsArnUtils.Arn(partition, "pipes", region, accountId, "pipe/" + pipe).toString();
+        }
+        return taggedResource(ctx);
+    }
+
+    /** The ARN a shared tagging route names, or {@code *} for any other route. */
+    private String taggedResource(ContainerRequestContext ctx) {
+        String arn = taggedArn(ctx);
+        return arn != null && arn.startsWith("arn:") ? arn : "*";
+    }
+
+    /**
+     * The ARN a shared tagging route acts on, read where its controller reads it: after {@code /tags/} or
+     * {@code /v1/tags/} in the path; on {@code POST /tags}, the body's {@code resourceArn}; and on the other
+     * bare routes, the {@code resourceArn} query parameter. Null for any other route, or when the request
+     * names none.
+     */
+    public String taggedArn(ContainerRequestContext ctx) {
+        String path = ctx.getUriInfo().getPath();
+        for (String route : List.of("/tags", "/v1/tags")) {
+            if (path.startsWith(route + "/")) {
+                return path.substring(route.length() + 1);
+            }
+        }
+        if ("/tags".equals(path) && "POST".equalsIgnoreCase(ctx.getMethod())) {
+            JsonNode body = readJsonBody(ctx);
+            return body == null ? null : body.path("resourceArn").asText(null);
+        }
+        if ("/tags".equals(path) || "/v1/tags".equals(path)) {
+            return ctx.getUriInfo().getQueryParameters().getFirst("resourceArn");
+        }
+        return null;
+    }
+
+    /** The path segment right after {@code prefix}, or null when the path doesn't start with it or names none. */
+    private static String segmentAfterPrefix(String path, String prefix) {
+        if (!path.startsWith(prefix)) {
+            return null;
+        }
+        String rest = path.substring(prefix.length());
+        int slash = rest.indexOf('/');
+        String segment = slash < 0 ? rest : rest.substring(0, slash);
+        return segment.isEmpty() ? null : segment;
     }
 
     /**
@@ -816,6 +977,19 @@ public class ResourceArnBuilder {
                     return List.of(importArn);
                 }
             }
+            // AWS authorizes RestoreTableToPointInTime on its source table.
+            if (json.hasNonNull("SourceTableArn")) {
+                String sourceTableArn = json.get("SourceTableArn").asText().trim();
+                if (!sourceTableArn.isEmpty()) {
+                    return List.of(sourceTableArn);
+                }
+            }
+            if (json.hasNonNull("SourceTableName")) {
+                String sourceTableName = json.get("SourceTableName").asText().trim();
+                if (!sourceTableName.isEmpty()) {
+                    return List.of(toDynamoDbTableArn(sourceTableName, region, accountId));
+                }
+            }
             if (json.hasNonNull("RequestItems") && json.get("RequestItems").isObject()) {
                 Set<String> arns = new LinkedHashSet<>();
                 Iterator<String> fieldNames = json.get("RequestItems").fieldNames();
@@ -936,20 +1110,57 @@ public class ResourceArnBuilder {
     }
 
     // ── Secrets Manager ──────────────────────────────────────────────────────────
-    private String buildSecretsManagerArn(ContainerRequestContext ctx, String region, String accountId) {
+
+    /**
+     * Uses the serving operation, as {@link #buildLogResources} does: {@code CreateSecret}
+     * names the secret in {@code Name} and every other operation in {@code SecretId}, so a field the
+     * handler does not read cannot choose the resource. A minted ARN takes the request's partition,
+     * the one the secret is created in, which a region Floci does not know cannot be mapped to.
+     */
+    public List<String> buildSecretsManagerResources(String action, ContainerRequestContext ctx,
+                                                     String region, String accountId, String partition) {
+        return List.of(buildSecretsManagerArn(action, ctx, region, accountId, partition));
+    }
+
+    /**
+     * A secret named by its name or a partial ARN is authorized against its full ARN, random suffix
+     * included, so a {@code secret:<name>-??????} policy matches it as it does on AWS. The suffix of
+     * the secret {@code CreateSecret} is making is not assigned until it is created.
+     */
+    private String buildSecretsManagerArn(String action, ContainerRequestContext ctx, String region,
+                                          String accountId, String partition) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
-            if (json.hasNonNull("SecretId")) {
+            if ("secretsmanager:CreateSecret".equals(action)) {
+                if (json.hasNonNull("Name")) {
+                    String name = json.get("Name").asText().trim();
+                    if (!name.isEmpty()) {
+                        return secretArn(name + UNASSIGNED_SECRET_SUFFIX, region, accountId, partition);
+                    }
+                }
+            } else if (json.hasNonNull("SecretId")) {
                 String secretId = json.get("SecretId").asText().trim();
                 if (!secretId.isEmpty()) {
+                    Optional<String> stored = storedSecretArn(secretId, region, accountId);
                     if (AwsArnUtils.isArnFor(secretId, "secretsmanager")) {
-                        return secretId;
+                        return stored.orElse(secretId);
                     }
-                    return AwsArnUtils.Arn.of("secretsmanager", region, accountId, "secret:" + secretId).toString();
+                    return stored.orElseGet(() -> secretArn(secretId, region, accountId, partition));
                 }
             }
         }
-        return AwsArnUtils.Arn.of("secretsmanager", region, accountId, "secret:*").toString();
+        return secretArn("*", region, accountId, partition);
+    }
+
+    private Optional<String> storedSecretArn(String secretId, String region, String accountId) {
+        if (secretsManagerService == null) {
+            return Optional.empty();
+        }
+        return secretsManagerService.get().findArn(accountId, secretId, region);
+    }
+
+    private static String secretArn(String name, String region, String accountId, String partition) {
+        return new AwsArnUtils.Arn(partition, "secretsmanager", region, accountId, "secret:" + name).toString();
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────
@@ -979,7 +1190,8 @@ public class ResourceArnBuilder {
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    private JsonNode readJsonBody(ContainerRequestContext ctx) {
+    /** The request's JSON or CBOR body, buffered so the handler still reads it, or null when it has none. */
+    public JsonNode readJsonBody(ContainerRequestContext ctx) {
         Object cached = ctx.getProperty("floci.bufferedJsonBody");
         if (cached instanceof JsonNode node) {
             return node;

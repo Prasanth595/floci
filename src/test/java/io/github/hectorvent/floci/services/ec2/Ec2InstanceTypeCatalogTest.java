@@ -75,6 +75,39 @@ class Ec2InstanceTypeCatalogTest {
     }
 
     @Test
+    void defaultCpuSnapshotDoesNotInventOtherDescribeMetadata() {
+        assertEquals(Optional.of(2), instanceTypeCatalog.defaultVcpus("t3.large"));
+        assertEquals(Optional.of(144), instanceTypeCatalog.defaultVcpus("p6e-gb200.36xlarge"));
+        assertEquals(Optional.of(2), instanceTypeCatalog.defaultVcpus("cc1.4xlarge"));
+        assertTrue(instanceTypeCatalog.find("t3.large").isEmpty());
+        assertTrue(instanceTypeCatalog.find("p6e-gb200.36xlarge").isEmpty());
+        assertTrue(instanceTypeCatalog.defaultVcpus("m9g.metal-24xl").isEmpty());
+        assertTrue(instanceTypeCatalog.defaultVcpus("m9gd.metal-24xl").isEmpty());
+        assertTrue(instanceTypeCatalog.defaultVcpus(null).isEmpty());
+        assertTrue(instanceTypeCatalog.defaultVcpus("").isEmpty());
+    }
+
+    @Test
+    void anExplicitFullCatalogEntryTakesPrecedenceOverTheCpuOnlySnapshot() {
+        Ec2InstanceTypeCatalog.CatalogInstanceType configured =
+                instanceTypeCatalog.find("t3.micro").orElseThrow();
+        Ec2InstanceTypeCatalog.Catalog catalog = new Ec2InstanceTypeCatalog.Catalog();
+        // Make a detached entry so this test cannot alter the injected application catalog.
+        Ec2InstanceTypeCatalog.CatalogInstanceType override = new Ec2InstanceTypeCatalog.CatalogInstanceType();
+        override.instanceType = configured.instanceType;
+        override.vcpu = 3;
+        override.memoryMib = configured.memoryMib;
+        override.supportedArchitectures = configured.supportedArchitectures;
+        override.encryptionInTransitSupported = configured.encryptionInTransitSupported;
+        override.defaultNetworkCardIndex = configured.defaultNetworkCardIndex;
+        override.ipv4AddressesPerInterface = configured.ipv4AddressesPerInterface;
+        override.networkCards = configured.networkCards;
+        catalog.instanceTypes = List.of(override);
+        assertEquals(Optional.of(3), new Ec2InstanceTypeCatalog(catalog).defaultVcpus("t3.micro"));
+        assertEquals(2, configured.vcpu);
+    }
+
+    @Test
     void catalogEntriesIncludeNetworkCompatibilityMetadata() {
         instanceTypeCatalog.instanceTypes().forEach(instanceType ->
                 assertNotNull(instanceType.encryptionInTransitSupported, instanceType.instanceType));
@@ -132,6 +165,20 @@ class Ec2InstanceTypeCatalogTest {
     }
 
     @Test
+    void t2FamilySupportsI386AndX86_64() {
+        for (String name : List.of("t2.nano", "t2.micro", "t2.small", "t2.medium")) {
+            assertEquals(Set.of("i386", "x86_64"),
+                    Set.copyOf(instanceTypeCatalog.find(name).orElseThrow().supportedArchitectures), name);
+        }
+        // AWS's 32-bit-capable t2 list stops at medium
+        for (String name : List.of("t2.large", "t2.xlarge", "t2.2xlarge")) {
+            assertEquals(List.of("x86_64"), instanceTypeCatalog.find(name).orElseThrow().supportedArchitectures, name);
+        }
+        // launch-time default architecture must stay x86_64 (first entry)
+        assertEquals("x86_64", instanceTypeCatalog.find("t2.micro").orElseThrow().supportedArchitectures.get(0));
+    }
+
+    @Test
     void burstableFamiliesCarryTheirDocumentedDefaultCreditOption() {
         assertEquals(Optional.of("standard"), Ec2InstanceTypeCatalog.defaultCpuCredits("t2.micro"));
         assertEquals(Optional.of("unlimited"), Ec2InstanceTypeCatalog.defaultCpuCredits("t3.small"));
@@ -162,7 +209,6 @@ class Ec2InstanceTypeCatalogTest {
 
         assertEquals(vcpu, instanceType.vcpu, name);
         assertEquals(memoryMib, instanceType.memoryMib, name);
-        assertEquals(List.of("x86_64"), instanceType.supportedArchitectures, name);
         assertEquals(ipv4PerInterface, instanceType.ipv4AddressesPerInterface, name);
         assertEquals(maxInterfaces, instanceType.networkCards.get(0).maximumNetworkInterfaces, name);
         assertTrue(instanceType.currentGeneration, name);

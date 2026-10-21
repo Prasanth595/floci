@@ -56,9 +56,6 @@ class ContainerLifecycleManagerVolumeTest {
     private ContainerDetector containerDetector;
 
     @Mock
-    private PortAllocator portAllocator;
-
-    @Mock
     private EmulatorConfig config;
 
     private ContainerLifecycleManager manager;
@@ -66,7 +63,7 @@ class ContainerLifecycleManagerVolumeTest {
     @BeforeEach
     void setUp() {
         manager = new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, portAllocator, config);
+                dockerClient, imageCacheService, containerDetector, config);
     }
 
     @Test
@@ -504,6 +501,18 @@ class ContainerLifecycleManagerVolumeTest {
                 manager.ensureSharedVolume("shared", OptionalInt.of(1001), OptionalInt.of(1001),
                         Optional.of("999"), "busybox:stable"));
         verify(dockerClient, never()).createContainerCmd(anyString());
+    }
+
+    @Test
+    void isValidPermissions_matchesThreeOrFourOctalDigits() {
+        assertTrue(ContainerLifecycleManager.isValidPermissions("755"));
+        assertTrue(ContainerLifecycleManager.isValidPermissions("0755"));
+        assertTrue(ContainerLifecycleManager.isValidPermissions("2775"));
+        assertFalse(ContainerLifecycleManager.isValidPermissions(null));
+        assertFalse(ContainerLifecycleManager.isValidPermissions(""));
+        assertFalse(ContainerLifecycleManager.isValidPermissions("888"));
+        assertFalse(ContainerLifecycleManager.isValidPermissions("07777"));
+        assertFalse(ContainerLifecycleManager.isValidPermissions("rwxr-xr-x"));
     }
 
     @Test

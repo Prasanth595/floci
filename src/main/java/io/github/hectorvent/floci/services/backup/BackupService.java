@@ -11,7 +11,16 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.backup.model.*;
+import io.github.hectorvent.floci.services.backup.model.BackupJob;
+import io.github.hectorvent.floci.services.backup.model.BackupPlan;
+import io.github.hectorvent.floci.services.backup.model.BackupRule;
+import io.github.hectorvent.floci.services.backup.model.BackupSelection;
+import io.github.hectorvent.floci.services.backup.model.BackupVault;
+import io.github.hectorvent.floci.services.backup.model.BackupVaultNotifications;
+import io.github.hectorvent.floci.services.backup.model.Lifecycle;
+import io.github.hectorvent.floci.services.backup.model.RecoveryPoint;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -20,8 +29,14 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -47,6 +62,7 @@ public class BackupService {
     private final StorageBackend<String, BackupVaultNotifications> notificationStore;
 
     private final RegionResolver regionResolver;
+    private final SnsService snsService;
     private final int jobCompletionDelaySeconds;
     private final ObjectMapper objectMapper;
 
@@ -67,7 +83,7 @@ public class BackupService {
 
     @Inject
     public BackupService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                         ObjectMapper objectMapper) {
+                         ObjectMapper objectMapper, SnsService snsService) {
         this.vaultStore     = storageFactory.create("backup", "backup-vaults.json",     new TypeReference<>() {});
         this.planStore      = storageFactory.create("backup", "backup-plans.json",      new TypeReference<>() {});
         this.selectionStore = storageFactory.create("backup", "backup-selections.json", new TypeReference<>() {});
@@ -77,6 +93,7 @@ public class BackupService {
         this.notificationStore  = storageFactory.create("backup", "backup-vault-notifications.json",   new TypeReference<>() {});
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.snsService = snsService;
         this.jobCompletionDelaySeconds = config.services().backup().jobCompletionDelaySeconds();
     }
 
@@ -137,6 +154,43 @@ public class BackupService {
     public BackupVault createBackupVault(String vaultName, String encryptionKeyArn,
                                          String creatorRequestId, Map<String, String> tags,
                                          String region) {
+        return createVault(new BackupVault(), vaultName, encryptionKeyArn, creatorRequestId, tags, region);
+    }
+
+    /**
+     * CreateLogicallyAirGappedBackupVault. Both retention values are "Required: Yes" in the
+     * reference, and MinRetentionDays carries "The minimum value accepted is 7 days." The vault
+     * shares the standard vault namespace and ARN shape, so DescribeBackupVault, DeleteBackupVault
+     * and the tag operations reach it unchanged; what distinguishes it is VaultType, which the
+     * Terraform provider checks on every read. Creation is synchronous here, so the vault is
+     * AVAILABLE at once rather than passing through CREATING.
+     */
+    public BackupVault createLogicallyAirGappedBackupVault(String vaultName, String encryptionKeyArn,
+                                                           String creatorRequestId, Map<String, String> tags,
+                                                           Long minRetentionDays, Long maxRetentionDays,
+                                                           String region) {
+        if (minRetentionDays == null) {
+            throw new AwsException("MissingParameterValueException", "MinRetentionDays is required", 400);
+        }
+        if (maxRetentionDays == null) {
+            throw new AwsException("MissingParameterValueException", "MaxRetentionDays is required", 400);
+        }
+        requireDayRange("MinRetentionDays", minRetentionDays, 7, null);
+        requireDayRange("MaxRetentionDays", maxRetentionDays, minRetentionDays, null);
+        BackupVault vault = new BackupVault();
+        vault.setVaultType("LOGICALLY_AIR_GAPPED_BACKUP_VAULT");
+        vault.setVaultState("AVAILABLE");
+        // Retention is mandatory and fixed at creation, so the existing locked-vault enforcement
+        // (backup-job lifecycle window, recovery-point deletion floor) applies to it as well.
+        // createVault sets LockDate to the creation date: a compliance lock, never changeable.
+        vault.setLocked(true);
+        vault.setMinRetentionDays(minRetentionDays);
+        vault.setMaxRetentionDays(maxRetentionDays);
+        return createVault(vault, vaultName, encryptionKeyArn, creatorRequestId, tags, region);
+    }
+
+    private BackupVault createVault(BackupVault vault, String vaultName, String encryptionKeyArn,
+                                    String creatorRequestId, Map<String, String> tags, String region) {
         String key = vaultKey(region, vaultName);
         // Check and write under one monitor. Unsynchronised, two creates of the same name can
         // both find the name free and both write, so AlreadyExistsException never fires and the
@@ -154,11 +208,18 @@ public class BackupService {
             if (vaultStore.get(key).isPresent()) {
                 throw new AwsException("AlreadyExistsException", "Backup vault already exists: " + vaultName, 400);
             }
-            BackupVault vault = new BackupVault();
             vault.setBackupVaultName(vaultName);
             vault.setBackupVaultArn(regionResolver.buildArn("backup", region, "backup-vault:" + vaultName));
             vault.setEncryptionKeyArn(encryptionKeyArn);
-            vault.setCreationDate(Instant.now().getEpochSecond());
+            long now = Instant.now().getEpochSecond();
+            vault.setCreationDate(now);
+            // Only an air-gapped vault arrives here locked. AWS creates it with a compliance-mode
+            // lock whose LockDate is the creation date, so the lock is immutable from the start;
+            // a null LockDate would read as a governance lock that can still change.
+            if (vault.isLocked()) {
+                vault.setLockDate(now);
+            }
+            vault.setVaultId(UUID.randomUUID().toString());
             vault.setCreatorRequestId(creatorRequestId);
             vault.setNumberOfRecoveryPoints(0);
             vault.setTags(tags);
@@ -170,7 +231,7 @@ public class BackupService {
 
     public BackupVault describeBackupVault(String vaultName, String region) {
         return vaultStore.get(vaultKey(region, vaultName))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup vault not found: " + vaultName, 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup vault not found: " + vaultName, 400));
     }
 
     public void deleteBackupVault(String vaultName, String region) {
@@ -201,7 +262,7 @@ public class BackupService {
         // Dependents first, the vault record last. There is no transaction across three
         // stores, so whatever sits between the first delete and the last is observable, and
         // this order keeps the observable state a vault with no configuration rather than a
-        // configuration with no vault. The sub-resource keys carry this vault's creation date,
+        // configuration with no vault. The sub-resource keys carry this vault's FlociVaultId,
         // so these two deletes cannot reach a configuration belonging to a later vault that
         // has taken the same name -- which is what made the previous order lose data.
         accessPolicyStore.delete(subResourceKey(region, vault));
@@ -209,9 +270,21 @@ public class BackupService {
         vaultStore.delete(vaultKey(region, vaultName));
     }
 
-    public List<BackupVault> listBackupVaults(String region) {
+    public List<BackupVault> listBackupVaults(String region, String byVaultType) {
         String prefix = region + ":";
-        return vaultStore.scan(k -> k.startsWith(prefix));
+        // A standard vault leaves VaultType unset; AWS reports it as BACKUP_VAULT.
+        return vaultStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(v -> byVaultType == null || byVaultType.equals(
+                        v.getVaultType() == null ? "BACKUP_VAULT" : v.getVaultType()))
+                .toList();
+    }
+
+    private static void requireNotAirGapped(BackupVault vault, String action) {
+        if (vault.getVaultType() != null) {
+            throw new AwsException("InvalidRequestException",
+                    "Backup vault lock configuration cannot be " + action
+                            + " on a logically air-gapped vault: " + vault.getBackupVaultName(), 400);
+        }
     }
 
     // ── Vault sub-resources: access policy, notifications, lock ────────────────
@@ -398,6 +471,7 @@ public class BackupService {
                                                        Long maxRetentionDays,
                                                        Long changeableForDays) {
         BackupVault vault = describeBackupVault(vaultName, region);
+        requireNotAirGapped(vault, "changed");
         if (vault.isLocked() && !lockIsStillChangeable(vault)) {
             throw new AwsException("InvalidRequestException",
                     "Backup vault lock is immutable and cannot be changed: " + vaultName, 400);
@@ -457,6 +531,7 @@ public class BackupService {
 
     public void deleteBackupVaultLockConfiguration(String vaultName, String region) {
         BackupVault vault = describeBackupVault(vaultName, region);
+        requireNotAirGapped(vault, "deleted");
         if (vault.isLocked() && !lockIsStillChangeable(vault)) {
             throw new AwsException("InvalidRequestException",
                     "Backup vault lock is immutable and cannot be deleted: " + vaultName, 400);
@@ -556,7 +631,7 @@ public class BackupService {
 
     public BackupPlan getBackupPlan(String planId) {
         return planStore.get(planId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup plan not found: " + planId, 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup plan not found: " + planId, 400));
     }
 
     public BackupPlan updateBackupPlan(String planId, String planName, List<BackupRule> rules) {
@@ -609,9 +684,9 @@ public class BackupService {
 
     public BackupSelection getBackupSelection(String planId, String selectionId) {
         BackupSelection sel = selectionStore.get(selectionId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup selection not found: " + selectionId, 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup selection not found: " + selectionId, 400));
         if (!planId.equals(sel.getBackupPlanId())) {
-            throw new AwsException("ResourceNotFoundException", "Backup selection not found in plan: " + planId, 404);
+            throw new AwsException("ResourceNotFoundException", "Backup selection not found in plan: " + planId, 400);
         }
         return sel;
     }
@@ -641,6 +716,7 @@ public class BackupService {
         job.setBackupJobId(jobId);
         job.setBackupVaultName(vaultName);
         job.setBackupVaultArn(vault.getBackupVaultArn());
+        job.setVaultId(vault.getVaultId());
         job.setBackupVaultCreationDate(vault.getCreationDate());
         job.setResourceArn(resourceArn);
         job.setResourceType(inferResourceType(resourceArn));
@@ -653,7 +729,6 @@ public class BackupService {
         String accountId = regionResolver.getAccountId();
         job.setAccountId(accountId);
         jobStore.put(jobId, job);
-
         scheduleJob(jobId, job, accountId, region);
 
         return job;
@@ -661,7 +736,7 @@ public class BackupService {
 
     public BackupJob describeBackupJob(String jobId) {
         return jobStore.get(jobId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup job not found: " + jobId, 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup job not found: " + jobId, 400));
     }
 
     public void stopBackupJob(String jobId) {
@@ -669,13 +744,15 @@ public class BackupService {
             BackupJob job = describeBackupJob(jobId);
             String state = job.getState();
             if (List.of("COMPLETED", "ABORTED", "FAILED", "EXPIRED", "PARTIAL").contains(state)) {
-                throw new AwsException("InvalidRequestException", "Job cannot be stopped in state: " + state, 400);
+                throw new AwsException("InvalidRequestException",
+                        "Job cannot be stopped in state: " + state, 400);
             }
             job.setState("ABORTING");
             job.setStatusMessage("Job stop requested");
             jobStore.put(jobId, job);
             String accountId = regionResolver.getAccountId();
-            scheduler.schedule(() -> RequestScopes.runAs(accountId, () -> abortJob(jobId)), 1, TimeUnit.SECONDS);
+            String region = AwsArnUtils.regionOrDefault(job.getBackupVaultArn(), regionResolver.getDefaultRegion());
+            scheduler.schedule(() -> RequestScopes.runAs(accountId, region, () -> abortJob(jobId)), 1, TimeUnit.SECONDS);
         }
     }
 
@@ -696,7 +773,7 @@ public class BackupService {
         return recoveryStore.get(recoveryPointArn)
                 .filter(rp -> vaultName.equals(rp.getBackupVaultName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Recovery point not found: " + recoveryPointArn, 404));
+                        "Recovery point not found: " + recoveryPointArn, 400));
     }
 
     public List<RecoveryPoint> listRecoveryPointsByBackupVault(String vaultName, String region) {
@@ -778,62 +855,105 @@ public class BackupService {
     }
 
     private void completeJob(String jobId, String vaultName, String region) {
+        // Under the vault-name monitor, so the vault cannot be deleted or recreated between the
+        // incarnation check and the recovery point landing in it.
         synchronized (lockFor(jobLockKey(jobId))) {
-            jobStore.get(jobId).ifPresent(job -> {
-                if (!"RUNNING".equals(job.getState())) {
+            synchronized (lockFor(vaultKey(region, vaultName))) {
+                completeJobLocked(jobId, vaultName, region);
+            }
+        }
+    }
+
+    private void completeJobLocked(String jobId, String vaultName, String region) {
+        jobStore.get(jobId).ifPresent(job -> {
+            if ("RUNNING".equals(job.getState())) {
+                long now = Instant.now().getEpochSecond();
+                // The recovery point belongs to the vault the job started in, not to whatever
+                // vault holds the name now. A vault deleted mid-job (allowed: it held no recovery
+                // point yet) and recreated unlocked would otherwise receive a recovery point its
+                // creator's lock was meant to protect, deletable inside that lock's retention.
+                Optional<BackupVault> vault = vaultStore.get(vaultKey(region, vaultName));
+                boolean sameVault = vault.filter(v -> v.getBackupVaultArn().equals(job.getBackupVaultArn())
+                        && (job.getVaultId() != null ? job.getVaultId().equals(v.getVaultId())
+                        : job.getBackupVaultCreationDate() != null
+                                ? job.getBackupVaultCreationDate() == v.getCreationDate()
+                                : v.getCreationDate() <= job.getCreationDate())).isPresent();
+                if (!sameVault) {
+                    job.setState("FAILED");
+                    job.setStatusMessage("Backup vault was deleted before the job completed: " + vaultName);
+                    job.setCompletionDate(now);
+                    jobStore.put(jobId, job);
                     return;
                 }
-                synchronized (lockFor(vaultKey(region, vaultName))) {
-                    long now = Instant.now().getEpochSecond();
-                    Optional<BackupVault> vault = vaultStore.get(vaultKey(region, vaultName));
-                    // Null preserves legacy jobs only when the vault is not newer than the job.
-                    // Epoch-second incarnation dates cannot distinguish same-second delete/recreate.
-                    Long vaultCreationDate = job.getBackupVaultCreationDate();
-                    if (vault.isEmpty() || !vault.get().getBackupVaultArn().equals(job.getBackupVaultArn())
-                            || (vaultCreationDate == null
-                                    ? vault.get().getCreationDate() > job.getCreationDate()
-                                    : vaultCreationDate != vault.get().getCreationDate())) {
-                        job.setState("FAILED");
-                        job.setStatusMessage("Backup vault no longer exists: " + vaultName);
-                        job.setCompletionDate(now);
-                        jobStore.put(jobId, job);
-                        return;
-                    }
-                    // A retry after writing the point but before the terminal job write reuses it.
-                    String rpArn = job.getRecoveryPointArn() != null ? job.getRecoveryPointArn()
-                            : regionResolver.buildArn("backup", region, "recovery-point:" + jobId);
-                    BackupVault currentVault = vault.get();
-                    if (recoveryStore.get(rpArn).isEmpty()) {
-                        RecoveryPoint rp = new RecoveryPoint();
-                        rp.setRecoveryPointArn(rpArn);
-                        rp.setBackupVaultName(vaultName);
-                        rp.setBackupVaultArn(job.getBackupVaultArn());
-                        rp.setResourceArn(job.getResourceArn());
-                        rp.setResourceType(job.getResourceType());
-                        rp.setIamRoleArn(job.getIamRoleArn());
-                        rp.setStatus("COMPLETED");
-                        rp.setCreationDate(job.getCreationDate());
-                        rp.setCompletionDate(now);
-                        rp.setBackupSizeInBytes(0L);
-                        rp.setStorageClass("WARM");
-                        rp.setEncrypted(false);
-                        recoveryStore.put(rpArn, rp);
-                        currentVault.setNumberOfRecoveryPoints(currentVault.getNumberOfRecoveryPoints() + 1);
-                    } else {
-                        currentVault.setNumberOfRecoveryPoints((int) recoveryStore.scan(k -> true).stream()
-                                .filter(point -> currentVault.getBackupVaultArn().equals(point.getBackupVaultArn())).count());
-                    }
-                    vaultStore.put(vaultKey(region, vaultName), currentVault);
-                    job.setState("COMPLETED");
-                    job.setPercentDone("100.0");
-                    job.setCompletionDate(now);
-                    job.setRecoveryPointArn(rpArn);
-                    job.setBackupSizeInBytes(0L);
-                    job.setBytesTransferred(0L);
-                    jobStore.put(jobId, job);
-                    LOG.infov("Backup job {0} completed, recovery point: {1}", jobId, rpArn);
+                BackupVault currentVault = vault.orElseThrow();
+                String notificationKey = subResourceKey(region, currentVault);
+                String rpArn = job.getRecoveryPointArn() != null ? job.getRecoveryPointArn()
+                        : regionResolver.buildArn("backup", region, "recovery-point:" + jobId);
+                if (recoveryStore.get(rpArn).isEmpty()) {
+                    RecoveryPoint rp = new RecoveryPoint();
+                    rp.setRecoveryPointArn(rpArn);
+                    rp.setBackupVaultName(vaultName);
+                    rp.setBackupVaultArn(job.getBackupVaultArn());
+                    rp.setResourceArn(job.getResourceArn());
+                    rp.setResourceType(job.getResourceType());
+                    rp.setIamRoleArn(job.getIamRoleArn());
+                    rp.setStatus("COMPLETED");
+                    rp.setCreationDate(job.getCreationDate());
+                    rp.setCompletionDate(now);
+                    rp.setBackupSizeInBytes(0L);
+                    rp.setStorageClass("WARM");
+                    rp.setEncrypted(false);
+                    recoveryStore.put(rpArn, rp);
+                    currentVault.setNumberOfRecoveryPoints(currentVault.getNumberOfRecoveryPoints() + 1);
+                } else {
+                    currentVault.setNumberOfRecoveryPoints((int) recoveryStore.scan(k -> true).stream()
+                            .filter(point -> currentVault.getBackupVaultArn().equals(point.getBackupVaultArn())).count());
                 }
-            });
+                vaultStore.put(vaultKey(region, vaultName), currentVault);
+                job.setState("COMPLETED");
+                job.setPercentDone("100.0");
+                job.setCompletionDate(now);
+                job.setRecoveryPointArn(rpArn);
+                job.setBackupSizeInBytes(0L);
+                job.setBytesTransferred(0L);
+                jobStore.put(jobId, job);
+                LOG.infov("Backup job {0} completed, recovery point: {1}", jobId, rpArn);
+                notifyJobCompleted(job, vaultName, region, notificationKey);
+            }
+        });
+    }
+
+    /**
+     * Publishes BACKUP_JOB_COMPLETED to the vault's SNS topic, if the vault asked for it.
+     * Runs after the job and recovery point are stored, and never fails the completion: AWS
+     * does not undo a backup because its notification could not be delivered.
+     *
+     * <p>{@code notificationKey} is the sub-resource key of the vault the job started in. A vault
+     * deleted mid-job takes its configuration with it, so the job publishes nothing rather than
+     * reaching a later vault that took the same name.
+     */
+    private void notifyJobCompleted(BackupJob job, String vaultName, String region, String notificationKey) {
+        try {
+            notificationStore.get(notificationKey)
+                    .filter(n -> n.getBackupVaultEvents() != null
+                            && n.getBackupVaultEvents().contains("BACKUP_JOB_COMPLETED"))
+                    .ifPresent(n -> snsService.publish(n.getSnsTopicArn(), null, null,
+                            "An AWS Backup job was completed successfully. Recovery point ARN: "
+                                    + job.getRecoveryPointArn() + ". Resource ARN : " + job.getResourceArn()
+                                    + ". BackupJob ID : " + job.getBackupJobId(),
+                            "Notification from AWS Backup",
+                            // AWS's documented "Backup job completed" example; subscription
+                            // filter policies match on these.
+                            Map.of("EventType", new MessageAttributeValue("BACKUP_JOB", "String"),
+                                    "State", new MessageAttributeValue("COMPLETED", "String"),
+                                    "AccountId", new MessageAttributeValue(job.getAccountId(), "String"),
+                                    "Id", new MessageAttributeValue(job.getBackupJobId(), "String"),
+                                    "StartTime", new MessageAttributeValue(DateTimeFormatter.ISO_INSTANT
+                                            .format(Instant.ofEpochSecond(job.getCreationDate())), "String")),
+                            AwsArnUtils.regionOrDefault(n.getSnsTopicArn(), region)));
+        } catch (Exception e) {
+            LOG.warnv(e, "Failed to publish BACKUP_JOB_COMPLETED for job {0} in vault {1}",
+                    job.getBackupJobId(), vaultName);
         }
     }
 
@@ -869,7 +989,7 @@ public class BackupService {
         if (plan.isPresent()) {
             return new HashMap<>();
         }
-        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 404);
+        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 400);
     }
 
     private void applyTags(String arn, Map<String, String> newTags) {
@@ -882,7 +1002,7 @@ public class BackupService {
             vaultStore.put(vaultKey(vault), vault);
             return;
         }
-        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 404);
+        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 400);
     }
 
     private void removeTags(String arn, List<String> tagKeys) {
@@ -895,7 +1015,7 @@ public class BackupService {
             vaultStore.put(vaultKey(vault), vault);
             return;
         }
-        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 404);
+        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 400);
     }
 
     private static void assignRuleIds(List<BackupRule> rules) {
@@ -946,20 +1066,19 @@ public class BackupService {
      * the second worse, because two creates racing the existence check would both sweep, and the
      * later sweep would delete a configuration applied against the earlier vault.
      *
-     * <p>Including the creation date removes the shared key instead of policing it. A new vault
-     * cannot read, and cleanup for an old vault cannot touch, a record belonging to a different
-     * incarnation of the name -- no sweep, and no dependence on the order two stores are written
-     * in. Deleting a vault still removes its own records, now because they are its own rather
-     * than because nothing else has claimed them yet.
-     *
-     * <p>The creation date is only unique per name because {@code createBackupVault} holds a
-     * per-name monitor across its check and its write, so two vaults of one name cannot exist
-     * and cannot be created in the same second. Without that lock this key would still collide
-     * and the two vaults could read each other's configuration. The delete path also removes its
-     * own sub-resources, which covers a record surviving for any other reason.
+     * <p>Including the vault's {@code FlociVaultId}, a random id minted at creation, removes the
+     * shared key instead of policing it. A new vault cannot read, and cleanup for an old vault
+     * cannot touch, a record belonging to a different incarnation of the name -- no sweep, and
+     * no dependence on the order two stores are written in, and no dependence on the clock: a
+     * vault deleted and recreated within the same second still gets a different key. Deleting a
+     * vault still removes its own records, now because they are its own rather than because
+     * nothing else has claimed them yet.
      */
     private static String subResourceKey(String region, BackupVault vault) {
-        return vaultKey(region, vault.getBackupVaultName()) + ":" + vault.getCreationDate();
+        // Vaults stored before FlociVaultId existed keep their creation-date key, so their
+        // stored policy and notification configuration are still found.
+        String incarnation = vault.getVaultId() != null ? vault.getVaultId() : String.valueOf(vault.getCreationDate());
+        return vaultKey(region, vault.getBackupVaultName()) + ":" + incarnation;
     }
 
     private static String vaultKey(BackupVault vault) {

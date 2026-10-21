@@ -49,14 +49,43 @@
 
 `SendCommand` supports the `AWS-RunShellScript` document. For EC2 instances launched by Floci in real Docker mode, Floci creates the command invocation, returns the command response, and then runs the script asynchronously inside the target instance container. Callers observe completion through `GetCommandInvocation`. `stdout`, `stderr`, response code, start time, and end time are recorded on the invocation.
 
+For public `SendCommand`, set `TimeoutSeconds` to a delivery/start allowance from 30 to
+2,592,000 seconds. The default is 3,600 seconds. Floci does not automatically expire
+commands waiting for an agent, so a command that is never delivered can remain pending
+indefinitely. The document's execution allowance and internal CodeDeploy hook budgets
+are separate.
+
 If the target is not a Floci EC2 container, or if the document is not supported for direct execution, Floci falls back to the SSM agent polling flow. In that mode, `SendCommand` queues an ec2messages payload and the invocation completes after an agent calls `SendReply`.
+
+Background execution retains the issuing account and region. Agent queues and message correlations
+use that same account, region and instance identity; polling or completing a message from another
+account or region leaves the owner's work untouched. Pending messages remain in memory and are lost
+on restart.
 
 !!! note "Managed instance registration is independent of EC2 and IMDS"
     Registering a container's SSM agent with `UpdateInstanceInformation` only creates the managed instance record. It does not create an EC2 instance, does not install the link-local `169.254.169.254` proxy in the container, and does not register the container with the [EC2 IMDS server](ec2.md#imds-and-ssm-managed-instances). A container that was only registered with SSM therefore has no working IMDS endpoint and no instance profile credentials, and `SendCommand` against it uses the agent polling flow rather than direct execution.
 
     To get a container that both answers IMDS and runs `SendCommand` directly, launch it with EC2 `RunInstances` first and then register that same container's SSM agent. Floci logs a warning when an agent registers from a container that is not backed by a Floci EC2 instance.
 
-Direct command output follows the AWS inline output limits: first 24,000 characters of stdout and first 8,000 characters of stderr. Commands that exceed `TimeoutSeconds` are constrained inside the target container when the container has the `timeout` command available, and terminal timeout results are marked `TimedOut` with `StatusDetails` set to `Execution Timed Out`; commands with nonzero exit codes are marked `Failed`.
+Direct command output follows the AWS inline output limits: first 24,000 characters of stdout and first 8,000 characters of stderr. Commands that exceed their execution budget are constrained inside the target container when the container has the `timeout` command available, and terminal timeout results are marked `TimedOut` with `StatusDetails` set to `Execution Timed Out`; commands with nonzero exit codes are marked `Failed`.
+
+### Shell command timeout budgets
+
+For public `SendCommand` requests using the exact `AWS-RunShellScript` document name,
+`TimeoutSeconds` is the delivery/start allowance. `Parameters.executionTimeout` is a separate
+execution allowance, defaulting to 3600 seconds and accepting one decimal string from 1 to
+172800. The direct worker uses this execution allowance; agent payloads retain the public
+document's 3600-second default and carry an explicit parameter unchanged.
+
+`Command.TimeoutSeconds` still reports the delivery allowance. `ExpiresAfter` includes both
+allowances for these shell requests. This corrects metadata and execution budgets; it does not
+add automatic delivery expiration, restart recovery, cleanup retries or late-start fencing.
+Internal CodeDeploy hook budgets and non-shell document handling keep their existing behavior.
+Missing or empty `commands`, malformed shell parameter wire shapes and invalid execution limits
+are refused before command creation
+with `InvalidParameters`/HTTP400. This is Floci's chosen mapping; exact AWS error wording and
+empty-list normalization were not observed live. Other document parameters and delivery-timeout
+coercion/upper-bound handling are not a complete document-schema implementation.
 
 ## Configuration
 
@@ -130,9 +159,38 @@ and a refusal fails the whole call with a `ValidationException`, as it does on A
 aws ssm get-parameter --name /aws/reference/secretsmanager/my-app/api-key --with-decryption
 ```
 
+## Parameter ARNs
+
+A parameter's ARN is `arn:<partition>:ssm:<region>:<account>:parameter/<name without leading slash>`
+for both a top-level name such as `db-host` and a path such as `/app/db/host`, as on AWS.
+The CloudFormation `Arn` attribute of an `AWS::SSM::Parameter` is the same ARN, and
+`AddTagsToResource`, `ListTagsForResource` and `RemoveTagsFromResource` accept it as `ResourceId`.
+An ECS container secret's `valueFrom` accepts it too.
+
 ## Parameter Types
 
 All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.
 
 !!! note
     `SecureString` parameters are stored as-is without actual KMS encryption in Floci. The type is preserved and returned correctly, but the value is not encrypted at rest.
+
+## Parameter Store Change events
+
+Like AWS, Floci publishes a `Parameter Store Change` event (`source: aws.ssm`) to the account's
+**default** EventBridge bus after a successful parameter write, so a rule matching `aws.ssm` fires
+from Parameter Store activity. `resources` holds the parameter ARN, and the event carries the
+account and region of the call.
+
+| Call | Events | `detail` |
+|---|---|---|
+| `PutParameter`, new name | one `Create` | `operation`, `name`, `type`, and `description` when set |
+| `PutParameter` overwriting an existing name | one `Update`, even when the value is unchanged | as for `Create` |
+| `DeleteParameter` | one `Delete` | as for `Create` |
+| `DeleteParameters` | one `Delete` per deleted name, none for a missing name | as for `Create` |
+| `LabelParameterVersion` | one `LabelParameterVersion` per valid label it attaches or moves | as for `Create`, from the labelled version, plus `label`, `fromVersion` (the version the label left as a string, `""` for a new label) and `toVersion` |
+| `UnlabelParameterVersion` | one `UnlabelParameterVersion` when it removes a label, none otherwise | as for `Create`, from the unlabelled version, plus `labels` (the labels removed), `fromVersion` (that version as a string) and `toVersion` (`""`) |
+
+Parameters a CloudFormation stack creates or deletes publish the same events. A call that fails,
+such as a `PutParameter` on an existing name without `Overwrite`, publishes nothing, and so do
+`AddTagsToResource`, a label already on the requested version and an invalid label. Publishing
+is best effort: a delivery failure is logged and never fails or undoes the write.

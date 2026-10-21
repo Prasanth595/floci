@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -159,7 +160,7 @@ class CloudFormationRollbackCompleteUpdateIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", topicTemplate(topicName))
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(topicTemplate(topicName)))
         .when()
             .post("/")
         .then()

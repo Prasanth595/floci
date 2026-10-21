@@ -414,6 +414,44 @@ public class CodeArtifactController {
                 .build();
     }
 
+    @POST
+    @Path("/v1/package/version/assets")
+    @Consumes(MediaType.WILDCARD)
+    public Response listPackageVersionAssets(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                              @QueryParam("domain-owner") String domainOwner,
+                                              @QueryParam("repository") String repository,
+                                              @QueryParam("format") String format,
+                                              @QueryParam("namespace") String namespace,
+                                              @QueryParam("package") String packageName,
+                                              @QueryParam("version") String version,
+                                              @QueryParam("max-results") String maxResults,
+                                              @QueryParam("next-token") String nextToken) {
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(region, domain,
+                domainOwner, repository, format, namespace, packageName, version,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("format", result.format());
+        if (result.namespace() != null) {
+            response.put("namespace", result.namespace());
+        }
+        response.put("package", result.packageName());
+        response.put("version", result.version());
+        response.put("versionRevision", result.versionRevision());
+        ArrayNode assets = response.putArray("assets");
+        result.assets().forEach(asset -> {
+            ObjectNode node = assets.addObject();
+            node.put("name", asset.name());
+            node.put("size", asset.size());
+            ObjectNode hashes = node.putObject("hashes");
+            asset.hashes().forEach(hashes::put);
+        });
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return ok(response);
+    }
+
     @GET
     @Path("/v1/package/version/readme")
     public Response getPackageVersionReadme(@Context HttpHeaders headers, @QueryParam("domain") String domain,
@@ -427,6 +465,37 @@ public class CodeArtifactController {
         PackageVersionReadmeResult result = service.getPackageVersionReadme(region, domain, domainOwner, repository,
                 format, namespace, packageName, version);
         return ok(packageVersionReadme(result));
+    }
+
+    @POST
+    @Path("/v1/package/versions/copy")
+    public Response copyPackageVersions(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                         @QueryParam("domain-owner") String domainOwner,
+                                         @QueryParam("source-repository") String sourceRepository,
+                                         @QueryParam("destination-repository") String destinationRepository,
+                                         @QueryParam("format") String format,
+                                         @QueryParam("namespace") String namespace,
+                                         @QueryParam("package") String packageName, String body) {
+        JsonNode req = readTree(body);
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(region, domain,
+                domainOwner, sourceRepository, destinationRepository, format, namespace, packageName,
+                readStringArray(req.get("versions"), "versions"), readStringMap(req.get("versionRevisions")),
+                readBoolean(req, "allowOverwrite"), readBoolean(req, "includeFromUpstream"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode successfulVersions = response.putObject("successfulVersions");
+        result.successfulVersions().forEach((version, outcome) -> {
+            ObjectNode node = successfulVersions.putObject(version);
+            node.put("revision", outcome.revision());
+            node.put("status", outcome.status());
+        });
+        ObjectNode failedVersions = response.putObject("failedVersions");
+        result.failedVersions().forEach((version, failure) -> {
+            ObjectNode node = failedVersions.putObject(version);
+            node.put("errorCode", failure.errorCode());
+            node.put("errorMessage", failure.errorMessage());
+        });
+        return ok(response);
     }
 
     // -------------------------------------------------------------------- tags
@@ -663,6 +732,53 @@ public class CodeArtifactController {
         }
         upstreamsArray.forEach(n -> upstreams.add(text(n, "repositoryName")));
         return upstreams;
+    }
+
+    private List<String> readStringArray(JsonNode arrayNode, String field) {
+        List<String> values = new ArrayList<>();
+        if (arrayNode == null || arrayNode.isNull()) {
+            return values;
+        }
+        if (!arrayNode.isArray()) {
+            throw new AwsException("ValidationException", field + " must be an array of strings.", 400);
+        }
+        arrayNode.forEach(n -> {
+            if (!n.isTextual()) {
+                throw new AwsException("ValidationException", field + " must be an array of strings.", 400);
+            }
+            values.add(n.textValue());
+        });
+        return values;
+    }
+
+    private Map<String, String> readStringMap(JsonNode objectNode) {
+        Map<String, String> values = new LinkedHashMap<>();
+        if (objectNode == null || objectNode.isNull()) {
+            return values;
+        }
+        if (!objectNode.isObject()) {
+            throw new AwsException("ValidationException",
+                    "versionRevisions must be an object of string to string.", 400);
+        }
+        objectNode.fields().forEachRemaining(e -> {
+            if (!e.getValue().isTextual()) {
+                throw new AwsException("ValidationException",
+                        "versionRevisions['" + e.getKey() + "'] must be a string.", 400);
+            }
+            values.put(e.getKey(), e.getValue().textValue());
+        });
+        return values;
+    }
+
+    private static boolean readBoolean(JsonNode req, String field) {
+        JsonNode value = req == null ? null : req.get(field);
+        if (value == null || value.isNull()) {
+            return false;
+        }
+        if (!value.isBoolean()) {
+            throw new AwsException("ValidationException", field + " must be a boolean.", 400);
+        }
+        return value.asBoolean();
     }
 
     private static String text(JsonNode node, String field) {

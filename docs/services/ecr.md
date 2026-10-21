@@ -21,12 +21,21 @@
 | `DescribeImages` | Image metadata: digest, size, push timestamp, manifest media type |
 | `BatchGetImage` | Fetch image manifests, honoring `acceptedMediaTypes` |
 | `BatchDeleteImage` | Delete images by tag or digest |
+| `PutImage` | Write an image manifest under a tag, or under its digest, into the backing registry |
+| `BatchCheckLayerAvailability` | Report which layers a repository holds, with their sizes |
+| `GetDownloadUrlForLayer` | Return the layer's address on Floci's registry endpoint |
+| `InitiateLayerUpload` | Open a layer upload backed by a registry upload session |
+| `UploadLayerPart` | Send the next part of a layer upload |
+| `CompleteLayerUpload` | Store an uploaded layer under its digest |
 | `PutImageTagMutability` | Set tag mutability and reject replacement pushes to immutable tags |
 | `PutImageScanningConfiguration` | Set a repository's `scanOnPush` flag and return the updated configuration; a non-boolean value is rejected |
 | `BatchGetRepositoryScanningConfiguration` | Report each repository's `scanOnPush` setting with a derived `scanFrequency` (`SCAN_ON_PUSH` or `MANUAL`); a missing repository fails the whole batch instead of appearing in `failures` |
 | `TagResource` / `UntagResource` / `ListTagsForResource` | Resource tagging |
 | `PutLifecyclePolicy` / `GetLifecyclePolicy` / `DeleteLifecyclePolicy` | Lifecycle policy round-trip (stored, not enforced) |
 | `SetRepositoryPolicy` / `GetRepositoryPolicy` / `DeleteRepositoryPolicy` | Repository policy round-trip (stored, not enforced) |
+| `PutRegistryPolicy` / `GetRegistryPolicy` / `DeleteRegistryPolicy` | Registry policy round-trip (stored, not enforced) |
+| `PutReplicationConfiguration` / `DescribeRegistry` | Store the registry's replication rules and return them with the registry ID (stored, not acted on) |
+| `PutRegistryScanningConfiguration` / `GetRegistryScanningConfiguration` | Store the registry's scan type and scanning rules (stored, not acted on) |
 
 ### Admin Endpoints
 
@@ -40,15 +49,27 @@
 - **TLS registry data plane.** Real AWS ECR is HTTPS-only. When TLS is enabled (`FLOCI_TLS_ENABLED=true`), Floci serves the registry data plane over TLS at `<account>.dkr.ecr.<region>.localhost.floci.io:<port>/<repo>`. The server certificate automatically includes regional wildcards `*.dkr.ecr.<region>.localhost.floci.io` for every advertised AWS region as Subject Alternative Names (SANs). Container runtimes and tools (Docker, containerd, nerdctl, podman) connect over HTTPS after trusting Floci's root CA certificate (`GET /_floci/ca.pem` or system trust store). The plain HTTP loopback path (`<account>.dkr.ecr.<region>.localhost:<port>`) remains fully supported without changes.
 - **Advertise TLS addresses.** Set `FLOCI_SERVICES_ECR_TLS_URI=true` together with `FLOCI_TLS_ENABLED=true` to return the TLS hostname in `repositoryUri` and an HTTPS `proxyEndpoint` from `GetAuthorizationToken`. This opt-in defaults to `false`. With `uri-style: path`, the URI becomes `localhost.floci.io:<port>/<account>/<region>/<repo>` and the login endpoint is `https://localhost.floci.io:<port>`. Existing repository records acquire the current URI when described or returned by deletion. If global TLS is disabled, the option has no effect. Clients must trust the Floci CA, or the configured certificate must cover the advertised names.
 - **Storage cleanup.** `DeleteRepository --force` removes repository manifests, including untagged manifests. When it deletes the final repository, or when a non-retained runtime stops, Floci removes the named registry volume only in `memory` mode or when `prune-volumes-on-delete: true`.
-- **Loopback URI scheme.** Repository URIs follow `<account>.dkr.ecr.<region>.localhost:<flociPort>/<repoName>`. RFC 6761 reserves `*.localhost` to resolve to the loopback address, and the docker daemon auto-trusts loopback as an insecure registry, so `docker push` and `docker pull` work without daemon configuration. A `path` URI style fallback (`localhost:<flociPort>/<account>/<region>/<repo>`) is available via `floci.services.ecr.uri-style: path` for environments where `*.localhost` resolution misbehaves.
-- **Image tag mutability.** `IMMUTABLE` repositories allow the first manifest write for a tag and reject every replacement, including a replacement with the same manifest. The proxy forwards blob uploads and digest-addressed manifests unchanged.
+- **Loopback URI scheme.** Repository URIs follow `<account>.dkr.ecr.<region>.localhost:<flociPort>/<repoName>`. RFC 6761 reserves `*.localhost` to resolve to the loopback address, and a Docker daemon with the classic image store auto-trusts loopback as an insecure registry, so `docker push` and `docker pull` work without daemon configuration. A daemon with the containerd image store, the default from Docker Engine 29, reaches only `localhost` and `127.0.0.1` over plain HTTP and takes `*.localhost` for an HTTPS registry: use the `path` URI style (`localhost:<flociPort>/<account>/<region>/<repo>`, `floci.services.ecr.uri-style: path`) there, as well as where `*.localhost` resolution misbehaves.
+- **Image tag mutability.** `IMMUTABLE` repositories allow the first manifest write for a tag and reject every replacement, including a replacement with the same manifest. The proxy forwards blob uploads and digest-addressed manifests unchanged. `PutImage` follows the same rule and answers `ImageTagAlreadyExistsException`; a `docker push` and a `PutImage` of the same tag cannot both succeed.
+- **Pushing through the API.** `PutImage` and the layer API write to the same `registry:2` container as `docker push`, so an image written through the API is the one `docker pull` and `BatchGetImage` return. Retagging without Docker works as on AWS: read the manifest with `batch-get-image`, then write it with `put-image --image-tag <new>`.
+  - `PutImage` takes the media type from `imageManifestMediaType`, else from the manifest's own `mediaType`; a manifest with neither is `InvalidParameterException`, as on AWS. A tag outside ECR's rule (`[a-zA-Z0-9-_.]+`, at most 300 characters) is `InvalidParameterException` with ECR's message. The backing registry follows the OCI tag grammar, so Floci also refuses two kinds of tag ECR takes, with a message naming the limit: one starting with `.` or `-`, and one longer than 128 characters. A manifest whose layers the repository does not hold answers `LayersNotFoundException`; writing the manifest a tag already points at answers `ImageAlreadyExistsException`.
+  - Layer uploads map onto the registry's upload sessions. `InitiateLayerUpload` reports a `partSize` of 10 MiB. Each part must start at the byte after the last one received and can be at most 20 MiB, and every part but the last must be at least 5 MiB (`LayerPartTooSmallException`). `CompleteLayerUpload` checks the digest (`InvalidLayerException`) and refuses a layer the repository already holds (`LayerAlreadyExistsException`).
+  - Upload sessions live in memory: a restart ends them, and one left idle for a day is dropped.
+  - `GetDownloadUrlForLayer` returns `<scheme>://<repository URI host>/v2/<repo>/blobs/<digest>`, served by Floci's registry endpoint without credentials, in place of AWS's pre-signed S3 URL.
+  - `BatchCheckLayerAvailability` lists held layers as `AVAILABLE`, and a layer the repository does not hold under `failures` as `MissingLayerDigest`.
 - **Authorization.** `GetAuthorizationToken` returns `Base64("AWS:floci")` plus a proxy endpoint. The backing `registry:2` runs without auth, so any `aws ecr get-login-password | docker login` succeeds.
 - **Pull through cache rule configuration.** Pull-through cache rule actions persist AWS-compatible rule metadata with account and Region isolation. `UpdatePullThroughCacheRule` preserves fields omitted by the request and refreshes `updatedAt`. `ValidatePullThroughCacheRule` checks that the rule exists and reports it as valid; Floci does not contact the upstream registry or validate credentials. Rules do not proxy or cache images from the configured upstream registry.
+- **Registry settings.** The registry policy, replication configuration and scanning configuration are kept per account and Region and returned as written. Floci does not replicate or scan images, or evaluate the registry policy.
+  - Each request is checked against the constraints of the ECR service model, vendored in `src/main/resources/aws/ecr-request-shapes.json` by `tools/aws/regen_ecr_shapes.py`: member types, required members, lengths and counts, patterns and enum values. A request outside them is `InvalidParameterException` in ECR's form, `Invalid parameter at '<member>' failed to satisfy constraint: '<rule>'`.
+  - Concurrent writes to the policy, replication and scanning configuration, as Terraform makes, each keep their setting.
+  - `GetRegistryPolicy` and `DeleteRegistryPolicy` answer `RegistryPolicyNotFoundException` when no policy is set. `PutRegistryPolicy` refuses text that is not a JSON object.
+  - An empty `rules` list in `PutReplicationConfiguration` clears the configuration. `DescribeRegistry` returns `{"rules": []}` until rules are set.
+  - The scanning configuration is `BASIC` with no rules until one is put. `CONTINUOUS_SCAN` is refused with `BASIC`, since AWS offers it only with enhanced scanning. `BatchGetRepositoryScanningConfiguration` still reports each repository's own `scanOnPush`.
 - **Manifest format negotiation.** `BatchGetImage` forwards the caller's `acceptedMediaTypes` as the upstream `Accept` header. Modern OCI manifests (`application/vnd.oci.image.manifest.v1+json`) and Docker v2 schema 2 are both supported.
 - **Cross-account / cross-region isolation.** Internally the registry namespaces repositories as `<account>/<region>/<repoName>`, so the same repository name in different accounts or regions cannot collide.
 - **Reconcile on first start.** When the registry container starts, Floci queries `GET /v2/_catalog` and recreates `Repository` metadata entries for any namespaces present in the registry but missing from local storage. This means image bytes are never orphaned across restarts.
 - **Upgrade from direct registry access.** Floci recreates an older backing container with the same volume and a loopback-only port binding. Repositories written through the former direct endpoint retain their physical paths and map to the default account and Region; their returned URI moves to port `4566`.
-- **Lambda and ECS integration.** Image-backed Lambda functions (`PackageType=Image`) and ECS task containers reference the same loopback `repositoryUri`. Floci rewrites real-AWS-shaped `<account>.dkr.ecr.<region>.amazonaws.com/...` URIs to the loopback registry at pull time, so CDK's `DockerImageFunction` (which generates AWS-shaped URIs in CloudFormation templates) works without any user-side rewriting.
+- **Lambda and ECS integration.** Image-backed Lambda functions (`PackageType=Image`) and ECS task containers reference the same loopback `repositoryUri`. Floci rewrites real-AWS-shaped `<account>.dkr.ecr.<region>.amazonaws.com/...` URIs to the loopback registry at pull time, path style on `localhost` (`localhost:<flociPort>/<account>/<region>/<repo>`) in either URI style and with or without TLS, the one address every Docker daemon pulls from over plain HTTP, so CDK's `DockerImageFunction` (which generates AWS-shaped URIs in CloudFormation templates) works without any user-side rewriting.
 - **Locally built images win.** An AWS-shaped URI that names an image already present on the Docker daemon is used as-is instead of being rewritten (`FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES`, default `true`). Build the image under the exact URI your function or task definition declares (`docker build -t <account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag> .`) and it runs without a push to the emulated registry, and without the registry container being started. The check uses the reference Floci would launch, so with `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` set the image must be present as `<base>/<account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>`.
 
 ## Configuration
@@ -88,7 +109,7 @@ services:
 
 `docker login 000000000000.dkr.ecr.us-east-1.localhost:4566` works once Floci starts the registry sidecar.
 
-When Floci runs in a container that publishes its port on another host port (for example `docker run -p 54321:4566`), the `repositoryUri`, the `GetAuthorizationToken` `proxyEndpoint` and the rewritten Lambda and ECS image URIs all name that host port (`000000000000.dkr.ecr.us-east-1.localhost:54321`), because the Docker daemon performs login, push and pull through it. Floci reads the published port from its own container through the mounted Docker socket, and uses `floci.port` (`4566`) when it does not run in a container or the port is not published.
+When Floci runs in a container that publishes its port on another host port (for example `docker run -p 54321:4566`), the `repositoryUri`, the `GetAuthorizationToken` `proxyEndpoint` and the rewritten Lambda and ECS image URIs all name that host port (`000000000000.dkr.ecr.us-east-1.localhost:54321`, and `localhost:54321/...` for a rewrite), because the Docker daemon performs login, push and pull through it. Floci reads the published port from its own container through the mounted Docker socket, and uses `floci.port` (`4566`) when it does not run in a container or the port is not published.
 
 ## Examples
 
@@ -189,8 +210,8 @@ and restart Docker Desktop, following [Docker's CA certificate instructions](htt
     When TLS URI advertising is enabled, newly configured EKS registry mirrors accept both
     the loopback and TLS names and forward them to the same internal HTTP endpoint. Recreate
     existing clusters to pick up changed registry mirror settings. Automatic rewrites of
-    AWS-shaped Lambda/ECS image references continue using loopback URIs; an explicitly supplied
-    TLS image reference is used as supplied.
+    AWS-shaped Lambda/ECS image references continue using the plain HTTP loopback address; an
+    explicitly supplied TLS image reference is used as supplied.
 
 ## SDK Example (Java)
 
@@ -239,7 +260,7 @@ new lambda.DockerImageFunction(this, 'MyFn', {
 
 The following ECR features are **not** implemented. Stored values for policies and lifecycle rules round-trip via the API but are not enforced at runtime:
 
-- Replication
+- Replication and registry scanning (the configurations are stored, but images are not copied or scanned)
 - Pull-through cache image proxying and population. Rule configuration APIs are supported, but pulls are not routed to upstream registries
 - Image scanning (`StartImageScan`, `DescribeImageScanFindings`)
 - Image signing and notary attachments

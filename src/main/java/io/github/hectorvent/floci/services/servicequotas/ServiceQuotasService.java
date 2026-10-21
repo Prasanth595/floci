@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.ServiceQuotasStartupValidator;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
@@ -29,9 +31,10 @@ import java.util.zip.CRC32;
  * quota codes where tooling depends on them (CodeBuild's {@code L-2DC20C30}
  * "Concurrently running builds", Lambda's {@code L-B99A9384} "Concurrent
  * executions"), plus a deterministic generic set for any other service code.
- * All values are deliberately generous so local pipelines that gate on quota
- * headroom (for example Landing Zone Accelerator) never stall on a limit the
- * emulator does not enforce. Applied and default quotas return the same data.
+ * Unmodeled values are deliberately generous so local pipelines that gate on
+ * quota headroom never stall on a limit the emulator does not enforce.
+ * Applied EC2 Standard On-Demand vCPU values use local configuration; AWS defaults
+ * retain the catalog value.
  *
  * @see <a href="https://docs.aws.amazon.com/servicequotas/2019-06-24/apireference/Welcome.html">Service Quotas API</a>
  */
@@ -66,6 +69,9 @@ public class ServiceQuotasService {
                     new QuotaDefinition("L-B99A9384", "Concurrent executions", GENERIC_QUOTA_VALUE, false)),
             "organizations", List.of(
                     new QuotaDefinition("L-E619E033", "Maximum number of accounts", 50.0, true)),
+            "ec2", List.of(
+                    new QuotaDefinition("L-1216C47A",
+                            "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances", 5.0, false)),
             // AWS default values: tooling such as Terraform's aws_servicequotas_service_quota
             // compares its desired value against these before requesting an increase.
             "vpc", List.of(
@@ -78,12 +84,15 @@ public class ServiceQuotasService {
             "Concurrent operations");
 
     private final ObjectMapper objectMapper;
+    private final int standardOnDemandVcpus;
     private final StorageBackend<String, ObjectNode> requestedQuotaStore;
     private final Object openRequestLock = new Object();
 
     @Inject
-    public ServiceQuotasService(StorageFactory storageFactory, ObjectMapper objectMapper) {
+    public ServiceQuotasService(StorageFactory storageFactory, ObjectMapper objectMapper, EmulatorConfig config) {
         this.objectMapper = objectMapper;
+        this.standardOnDemandVcpus = config.services().servicequotas().standardOnDemandVcpus();
+        ServiceQuotasStartupValidator.validateStandardOnDemandVcpus(standardOnDemandVcpus);
         this.requestedQuotaStore = storageFactory.create("servicequotas",
                 "servicequotas-requested-changes.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
@@ -91,6 +100,16 @@ public class ServiceQuotasService {
 
     public ObjectNode listServiceQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
                                         Integer maxResults, String region, String accountId) {
+        return listQuotas(serviceCode, quotaCodeFilter, nextToken, maxResults, region, accountId, true);
+    }
+
+    public ObjectNode listAwsDefaultServiceQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
+                                                  Integer maxResults, String region, String accountId) {
+        return listQuotas(serviceCode, quotaCodeFilter, nextToken, maxResults, region, accountId, false);
+    }
+
+    private ObjectNode listQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
+                                  Integer maxResults, String region, String accountId, boolean applied) {
         requireServiceCode(serviceCode);
         List<QuotaDefinition> quotas = quotasFor(serviceCode);
         if (quotaCodeFilter != null && !quotaCodeFilter.isEmpty()) {
@@ -101,7 +120,7 @@ public class ServiceQuotasService {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("Quotas");
         for (QuotaDefinition quota : page.items()) {
-            array.add(quotaNode(serviceCode, quota, region, accountId));
+            array.add(quotaNode(serviceCode, quota, region, accountId, applied));
         }
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());
@@ -110,6 +129,14 @@ public class ServiceQuotasService {
     }
 
     public ObjectNode getServiceQuota(String serviceCode, String quotaCode, String region, String accountId) {
+        return getQuota(serviceCode, quotaCode, region, accountId, true);
+    }
+
+    public ObjectNode getAwsDefaultServiceQuota(String serviceCode, String quotaCode, String region, String accountId) {
+        return getQuota(serviceCode, quotaCode, region, accountId, false);
+    }
+
+    private ObjectNode getQuota(String serviceCode, String quotaCode, String region, String accountId, boolean applied) {
         requireServiceCode(serviceCode);
         if (quotaCode == null || quotaCode.isEmpty()) {
             throw new AwsException("IllegalArgumentException",
@@ -121,7 +148,7 @@ public class ServiceQuotasService {
                 .orElseThrow(() -> new AwsException("NoSuchResourceException",
                         "The request failed because the specified service quota does not exist.", 400));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Quota", quotaNode(serviceCode, quota, region, accountId));
+        response.set("Quota", quotaNode(serviceCode, quota, region, accountId, applied));
         return response;
     }
 
@@ -145,7 +172,8 @@ public class ServiceQuotasService {
         return "L-%08X".formatted(crc.getValue());
     }
 
-    private ObjectNode quotaNode(String serviceCode, QuotaDefinition quota, String region, String accountId) {
+    private ObjectNode quotaNode(String serviceCode, QuotaDefinition quota, String region, String accountId,
+                                  boolean applied) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("ServiceCode", serviceCode);
         node.put("ServiceName", SERVICE_NAMES.getOrDefault(serviceCode, serviceCode));
@@ -153,7 +181,9 @@ public class ServiceQuotasService {
                 serviceCode + "/" + quota.quotaCode()).toString());
         node.put("QuotaCode", quota.quotaCode());
         node.put("QuotaName", quota.quotaName());
-        node.put("Value", quota.value());
+        double value = applied && "ec2".equals(serviceCode) && "L-1216C47A".equals(quota.quotaCode())
+                ? standardOnDemandVcpus : quota.value();
+        node.put("Value", value);
         node.put("Unit", "None");
         node.put("Adjustable", true);
         node.put("GlobalQuota", quota.globalQuota());

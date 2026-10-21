@@ -9,15 +9,11 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.PerKeyContainerPool;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -106,7 +102,7 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
                 .build();
         String containerId = lifecycleManager.create(spec);
         try {
-            copyConfig(containerId);
+            copyConfig(containerId, RetryingTarCopier.DEFAULT_BACKOFF_MS);
             ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             EndpointInfo endpoint = info.getEndpoint(VERDACCIO_PORT);
             String url = "http://" + endpoint;
@@ -124,25 +120,10 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
      * when Floci itself runs in Docker, its own persistent path is not a host path the daemon can
      * mount into a sibling container.
      */
-    private void copyConfig(String containerId) {
-        byte[] content = CONFIG_YAML.getBytes(StandardCharsets.UTF_8);
-        try {
-            ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 512);
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
-                TarArchiveEntry entry = new TarArchiveEntry(CONFIG_FILE_NAME);
-                entry.setSize(content.length);
-                entry.setMode(0644);
-                tar.putArchiveEntry(entry);
-                tar.write(content);
-                tar.closeArchiveEntry();
-            }
-            lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
-                    .withRemotePath(CONFIG_REMOTE_DIR)
-                    .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
-                    .exec();
-        } catch (IOException e) {
-            throw new IllegalStateException("Could not write the Verdaccio config into container " + containerId, e);
-        }
+    void copyConfig(String containerId, long backoffMillis) {
+        RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, CONFIG_REMOTE_DIR,
+                CONFIG_FILE_NAME, CONFIG_YAML.getBytes(StandardCharsets.UTF_8), 0644,
+                RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, backoffMillis);
     }
 
     @Override

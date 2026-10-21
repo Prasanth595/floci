@@ -143,7 +143,8 @@ public class ElastiCacheQueryHandler {
                             intParam(params, "Port"),
                             replicationGroupSettings(params),
                             parseTags(params),
-                            extractMemberList(params, "UserGroupIds.member.")));
+                            extractMemberList(params, "UserGroupIds.member."),
+                            parseSecurityGroupIds(params)));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -525,6 +526,7 @@ public class ElastiCacheQueryHandler {
         if (g.getCacheSubnetGroupName() != null) {
             xml.elem("CacheSubnetGroupName", g.getCacheSubnetGroupName());
         }
+        appendSecurityGroups(xml, g.getSecurityGroupIds());
         if (showNodeInfo && g.getConfigurationEndpoint() != null) {
             xml.start("CacheNodes")
                .start("CacheNode")
@@ -959,16 +961,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         if (c.getIpDiscovery() != null) {
             xml.elem("IpDiscovery", c.getIpDiscovery());
         }
-        if (!c.getSecurityGroupIds().isEmpty()) {
-            xml.start("SecurityGroups");
-            for (String securityGroupId : c.getSecurityGroupIds()) {
-                xml.start("member")
-                   .elem("SecurityGroupId", securityGroupId)
-                   .elem("Status", "active")
-                   .end("member");
-            }
-            xml.end("SecurityGroups");
-        }
+        appendSecurityGroups(xml, c.getSecurityGroupIds());
         if (c.getCacheNodeType() != null) {
             xml.elem("CacheNodeType", c.getCacheNodeType());
         }
@@ -1014,6 +1007,19 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             xml.end("CacheNodes");
         }
         return xml.end("CacheCluster").build();
+    }
+
+    private static void appendSecurityGroups(XmlBuilder xml, List<String> securityGroupIds) {
+        if (!securityGroupIds.isEmpty()) {
+            xml.start("SecurityGroups");
+            for (String securityGroupId : securityGroupIds) {
+                xml.start("member")
+                   .elem("SecurityGroupId", securityGroupId)
+                   .elem("Status", "active")
+                   .end("member");
+            }
+            xml.end("SecurityGroups");
+        }
     }
 
     /**

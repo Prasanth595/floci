@@ -1283,6 +1283,43 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void scanReportsTheMissingProjectionBeforeTheSegmentPairing() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Select": "SPECIFIC_ATTRIBUTES", "Segment": 5, "TotalSegments": 5}
+                """));
+        assertEquals("1 validation error detected: Must specify the AttributesToGet or ProjectionExpression "
+                + "when choosing to get SPECIFIC_ATTRIBUTES", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsAnUnknownSelectBeforeAMissingTotalSegments() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Select": "BOGUS", "Segment": 1}
+                """));
+        assertEquals("1 validation error detected: Value 'BOGUS' at 'select' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: "
+                + "[SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsACountProjectionBeforeTheSegmentPairingOnAMissingTable() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Missing", "Select": "COUNT", "ProjectionExpression": "a", "Segment": 1}
+                """));
+        assertEquals("1 validation error detected: "
+                + "Cannot specify the ProjectionExpression when choosing to get only the Count", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsAllProjectedWithoutAnIndexBeforeAMissingSegment() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Missing", "Select": "ALL_PROJECTED_ATTRIBUTES", "TotalSegments": 2}
+                """));
+        assertEquals("1 validation error detected: "
+                + "ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName", ex.getMessage());
+    }
+
+    @Test
     void scanAcceptsSegmentsAtTheBounds() throws Exception {
         createUsersTable("eu-west-1");
 
@@ -1531,6 +1568,30 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void updateItemRejectsAnUnclosedCallAtTheEndBeforeTheTableLookup() {
+        Map<String, String> nearByExpression = Map.of(
+                "SET a = list_append(l, :v", ":v",
+                "SET a = if_not_exists(a,:v", ":v",
+                "SET a = list_append(l, :v ", ":v ",
+                "SET a = list_append(if_not_exists(l, :v, :v)", ")",
+                "SET a = if_not_exists(a.b[1], c[0]", "]",
+                "SET a = list_append(", "(",
+                "SET a = :v, b = if_not_exists(b, :v", ":v",
+                "SET a = :v + (:v", ":v");
+        nearByExpression.forEach((expression, near) -> {
+            ObjectNode request = updateUserRequest();
+            request.put("TableName", "Missing");
+            request.put("UpdateExpression", expression);
+
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> handler.handle("UpdateItem", request, "eu-west-1"), expression);
+            assertEquals("ValidationException", ex.getErrorCode());
+            assertEquals("1 validation error detected: Invalid UpdateExpression: Syntax error; "
+                    + "token: \"<EOF>\", near: \"" + near + "\"", ex.getMessage());
+        });
+    }
+
+    @Test
     void updateItemAcceptsAnUpdateExpressionOfExactly4096Bytes() throws Exception {
         createUsersTable("eu-west-1");
         ObjectNode request = updateUserRequest();
@@ -1740,6 +1801,20 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
         assertEquals("Invalid UpdateExpression: Expression size has exceeded the maximum allowed size;",
                 ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsRejectsAnUnclosedCallAtTheEnd() {
+        createUsersTable("eu-west-1");
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "SET a = list_append(l, :v");
+        update.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: Syntax error; token: \"<EOF>\", near: \":v\"", ex.getMessage());
     }
 
     @Test

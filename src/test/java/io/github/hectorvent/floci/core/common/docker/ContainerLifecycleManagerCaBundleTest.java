@@ -16,19 +16,28 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -53,7 +62,6 @@ class ContainerLifecycleManagerCaBundleTest {
     @Mock DockerClient dockerClient;
     @Mock ImageCacheService imageCacheService;
     @Mock ContainerDetector containerDetector;
-    @Mock PortAllocator portAllocator;
     @Mock EmulatorConfig config;
     @Mock EmulatorConfig.DockerConfig dockerConfig;
     @Mock EmulatorConfig.TlsConfig tlsConfig;
@@ -84,10 +92,19 @@ class ContainerLifecycleManagerCaBundleTest {
     @Test
     void tlsOnCopiesTheBundleAndAppendsTheTrustEnvAfterTheSpecEnv() throws Exception {
         when(tlsConfig.enabled()).thenReturn(true);
-        Path bundle = writeBundle();
+        writeBundle();
         CreateContainerCmd createCmd = stubCreateContainer();
         CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
         when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        List<InputStream> streams = new ArrayList<>();
+        when(copyCmd.withTarInputStream(any(InputStream.class))).thenAnswer(invocation -> {
+            streams.add(invocation.getArgument(0));
+            return copyCmd;
+        });
+        when(copyCmd.exec()).thenAnswer(invocation -> {
+            assertBundleArchive(streams.getLast());
+            return null;
+        });
 
         assertEquals("container-id", manager().create(specWithEnv(List.of("FOO=bar"))));
 
@@ -100,16 +117,49 @@ class ContainerLifecycleManagerCaBundleTest {
                 "AWS_CA_BUNDLE=/etc/floci-ca-bundle.pem"), env);
 
         verify(copyCmd).withRemotePath("/etc");
-        ArgumentCaptor<InputStream> tar = ArgumentCaptor.forClass(InputStream.class);
-        verify(copyCmd).withTarInputStream(tar.capture());
+        assertEquals(1, streams.size());
         verify(copyCmd).exec();
-        try (TarArchiveInputStream in = new TarArchiveInputStream(tar.getValue())) {
-            TarArchiveEntry entry = in.getNextEntry();
-            assertEquals("floci-ca-bundle.pem", entry.getName());
-            assertEquals(0644, entry.getMode() & 0777, "world-readable, so a non-root USER can read it");
-            assertEquals(Files.readString(bundle), new String(in.readAllBytes(), StandardCharsets.UTF_8));
-            assertNull(in.getNextEntry(), "the archive holds only the bundle");
-        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void transientCopyFailurePreservesTheContainerAndTrustWithAFreshTar(boolean consumeCompletely) throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+        CreateContainerCmd createCmd = stubCreateContainer();
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        List<InputStream> streams = new ArrayList<>();
+        when(copyCmd.withTarInputStream(any(InputStream.class))).thenAnswer(invocation -> {
+            streams.add(invocation.getArgument(0));
+            return copyCmd;
+        });
+        AtomicInteger attempts = new AtomicInteger();
+        when(copyCmd.exec()).thenAnswer(invocation -> {
+            int attempt = attempts.incrementAndGet();
+            InputStream stream = streams.getLast();
+            if (attempt == 1 && !consumeCompletely) {
+                assertEquals(513, stream.readNBytes(513).length, "consume the tar header and part of the CA bundle");
+            } else {
+                assertBundleArchive(stream);
+            }
+            if (attempt == 1) {
+                throw new RuntimeException(new IOException("Connection reset"));
+            }
+            return null;
+        });
+        lenient().when(dockerClient.removeContainerCmd("container-id"))
+                .thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+
+        assertEquals("container-id", manager().create(specWithEnv(List.of("FOO=bar"))));
+
+        assertEquals(2, attempts.get());
+        assertEquals(2, streams.size());
+        assertNotSame(streams.getFirst(), streams.get(1), "a consumed tar stream cannot be replayed");
+        assertTrue(capturedEnv(createCmd).contains("AWS_CA_BUNDLE=/etc/floci-ca-bundle.pem"));
+        verify(copyCmd, times(2)).withRemotePath("/etc");
+        verify(createCmd).exec();
+        verify(dockerClient, never()).removeContainerCmd(anyString());
     }
 
     @Test
@@ -205,7 +255,6 @@ class ContainerLifecycleManagerCaBundleTest {
         assertEquals(6, env.getAllValues().get(0).size(), "the first attempt carried the trust variables");
         assertEquals(List.of("FOO=bar"), env.getAllValues().get(1), "the retry carries only the spec's own");
         verify(dockerClient, times(1)).copyArchiveToContainerCmd(anyString());
-        verify(portAllocator, never()).allocateAny();
     }
 
     private Path writeBundle() throws Exception {
@@ -213,8 +262,20 @@ class ContainerLifecycleManagerCaBundleTest {
         return Files.writeString(tlsDir.resolve("floci-ca-bundle.pem"), BUNDLE_PEM);
     }
 
+    private static void assertBundleArchive(InputStream stream) throws IOException {
+        byte[] archive = stream.readAllBytes();
+        try (TarArchiveInputStream in = new TarArchiveInputStream(new ByteArrayInputStream(archive))) {
+            TarArchiveEntry entry = in.getNextEntry();
+            assertNotNull(entry, "every attempt must begin with a complete tar header");
+            assertEquals("floci-ca-bundle.pem", entry.getName());
+            assertEquals(0644, entry.getMode() & 0777, "world-readable, so a non-root USER can read it");
+            assertArrayEquals(BUNDLE_PEM.getBytes(StandardCharsets.UTF_8), in.readAllBytes());
+            assertNull(in.getNextEntry(), "the archive holds only the bundle");
+        }
+    }
+
     private ContainerLifecycleManager manager() {
-        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, portAllocator, config);
+        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, config, 0L);
     }
 
     private static ContainerSpec specWithEnv(List<String> env) {

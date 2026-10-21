@@ -149,6 +149,20 @@ class S3VirtualHostStyleTest {
 
     @Test
     @Order(10)
+    void keyWithPercentSign() {
+        String key = "a%/b";
+        s3.putObject(PutObjectRequest.builder().bucket(BUCKET).key(key).build(),
+                RequestBody.fromString(CONTENT));
+
+        ListObjectsV2Response listed = s3.listObjectsV2(
+                ListObjectsV2Request.builder().bucket(BUCKET).build());
+        assertThat(listed.contents()).extracting(S3Object::key).containsExactly(key);
+
+        s3.deleteObject(DeleteObjectRequest.builder().bucket(BUCKET).key(key).build());
+    }
+
+    @Test
+    @Order(11)
     void deleteBucket() {
         s3.deleteBucket(DeleteBucketRequest.builder().bucket(BUCKET).build());
     }

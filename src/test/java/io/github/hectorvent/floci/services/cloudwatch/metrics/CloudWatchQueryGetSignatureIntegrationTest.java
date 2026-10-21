@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
+import io.github.hectorvent.floci.testing.SignedIamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
@@ -23,18 +23,18 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
+/**
+ * Verifies that a CloudWatch Query GET request, signed in its headers or presigned, is
+ * authenticated and then decided by IAM in the region it was signed for, and that an S3-signed
+ * request to the root stays with S3.
+ *
+ * <p>Signature validation, IAM enforcement and S3 auth enforcement come from
+ * {@link SignedIamEnforcementProfile}, which this class shares with the other classes that test
+ * signed requests under IAM enforcement.
+ */
 @QuarkusTest
-@TestProfile(CloudWatchQueryGetSignatureIntegrationTest.Authentication.class)
+@TestProfile(SignedIamEnforcementProfile.class)
 class CloudWatchQueryGetSignatureIntegrationTest {
-
-    public static class Authentication implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.auth.validate-signatures", "true",
-                    "floci.services.s3.enforce-auth", "true",
-                    "floci.services.iam.enforcement-enabled", "true");
-        }
-    }
 
     @TestHTTPResource("/")
     URI endpoint;

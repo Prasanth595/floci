@@ -51,6 +51,14 @@ public class CfnResourceDispatcher {
     }
 
     /**
+     * Whether the generic custom-resource handler serves a type, as the registry routes it; see
+     * {@link CloudFormationResourceRegistry#isCustomResourceType}.
+     */
+    public boolean isCustomResourceType(String resourceType) {
+        return registry.isCustomResourceType(resourceType);
+    }
+
+    /**
      * Provisions a single resource and returns the populated StackResource (physical id and
      * attributes set).
      *
@@ -277,11 +285,31 @@ public class CfnResourceDispatcher {
                 .orElse(false);
     }
 
+    public boolean requiresUpdateRecovery(StackResource resource) {
+        return registry.forType(resource.getResourceType())
+                .map(owner -> owner.requiresUpdateRecovery(resource))
+                .orElse(false);
+    }
+
     /** Whether this update replaced the resource's physical entity, so the stack has cleanup pending. */
     public boolean hasReplacementUpdate(StackResource resource) {
         return registry.forType(resource.getResourceType())
                 .map(owner -> owner.hasReplacementUpdate(resource))
                 .orElse(false);
+    }
+
+    /** Whether the owner of a type says it takes its parent's physical id; see the provisioner hook. */
+    public boolean takesParentPhysicalId(String resourceType) {
+        return registry.forType(resourceType)
+                .map(owner -> owner.takesParentPhysicalId(resourceType))
+                .orElse(false);
+    }
+
+    /** Whether the owner of a type says a prefix of its id can name its parent; see the provisioner hook. */
+    public boolean idPrefixCanNameParent(String resourceType) {
+        return registry.forType(resourceType)
+                .map(owner -> owner.idPrefixCanNameParent(resourceType))
+                .orElse(true);
     }
 
     /** Drops the cleanup bookkeeping this update left on the resource. */

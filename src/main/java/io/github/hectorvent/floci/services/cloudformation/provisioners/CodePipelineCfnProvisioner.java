@@ -47,6 +47,12 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
                 "AWS::CodePipeline::Webhook");
     }
 
+    /** A custom action type's id is its own {@code category|Custom|provider|version}, which names no parent. */
+    @Override
+    public boolean idPrefixCanNameParent(String resourceType) {
+        return !"AWS::CodePipeline::CustomActionType".equals(resourceType);
+    }
+
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         switch (r.getResourceType()) {

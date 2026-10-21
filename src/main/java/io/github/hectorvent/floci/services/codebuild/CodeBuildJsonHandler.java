@@ -38,7 +38,7 @@ public class CodeBuildJsonHandler {
             case "UpdateProject" -> updateProject(request, region);
             case "DeleteProject" -> deleteProject(request, region);
             case "BatchGetProjects" -> batchGetProjects(request, region);
-            case "ListProjects" -> listProjects(region);
+            case "ListProjects" -> listProjects(request, region);
             case "CreateReportGroup" -> createReportGroup(request, region, account);
             case "UpdateReportGroup" -> updateReportGroup(request, region);
             case "DeleteReportGroup" -> deleteReportGroup(request, region);
@@ -50,7 +50,7 @@ public class CodeBuildJsonHandler {
             case "ListCuratedEnvironmentImages" -> listCuratedEnvironmentImages();
             case "StartBuild" -> startBuild(request, region, account);
             case "BatchGetBuilds" -> batchGetBuilds(request, region, account);
-            case "ListBuilds" -> listBuilds(region, account);
+            case "ListBuilds" -> listBuilds(request, region, account);
             case "ListBuildsForProject" -> listBuildsForProject(request, region, account);
             case "StopBuild" -> stopBuild(request, region, account);
             case "RetryBuild" -> retryBuild(request, region, account);
@@ -129,8 +129,9 @@ public class CodeBuildJsonHandler {
         return Response.ok(Map.of("projects", found, "projectsNotFound", notFound)).build();
     }
 
-    private Response listProjects(String region) {
-        List<String> names = service.listProjects(region);
+    private Response listProjects(JsonNode req, String region) {
+        List<String> names = service.listProjects(region,
+                req.path("sortBy").asText(null), req.path("sortOrder").asText(null));
         return Response.ok(Map.of("projects", names)).build();
     }
 
@@ -248,13 +249,15 @@ public class CodeBuildJsonHandler {
         return Response.ok(Map.of("builds", found, "buildsNotFound", notFound)).build();
     }
 
-    private Response listBuilds(String region, String account) {
-        return Response.ok(Map.of("ids", service.listBuilds(region, account))).build();
+    private Response listBuilds(JsonNode req, String region, String account) {
+        return Response.ok(Map.of("ids", service.listBuilds(region, account,
+                req.path("sortOrder").asText(null)))).build();
     }
 
     private Response listBuildsForProject(JsonNode req, String region, String account) {
         String projectName = req.path("projectName").asText(null);
-        return Response.ok(Map.of("ids", service.listBuildsForProject(region, account, projectName))).build();
+        return Response.ok(Map.of("ids", service.listBuildsForProject(region, account, projectName,
+                req.path("sortOrder").asText(null)))).build();
     }
 
     private Response stopBuild(JsonNode req, String region, String account) {

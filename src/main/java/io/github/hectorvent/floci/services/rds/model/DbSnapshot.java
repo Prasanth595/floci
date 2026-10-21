@@ -20,6 +20,7 @@ public class DbSnapshot {
     private DatabaseEngine engine;
     private String engineVersion;
     private int allocatedStorage;
+    private String storageType;
     private String status;
     private String masterUsername;
     private String masterPassword;
@@ -87,6 +88,9 @@ public class DbSnapshot {
 
     public String getEngineVersion() { return engineVersion; }
     public void setEngineVersion(String engineVersion) { this.engineVersion = engineVersion; }
+
+    public String getStorageType() { return storageType != null ? storageType : DbInstance.DEFAULT_STORAGE_TYPE; }
+    public void setStorageType(String storageType) { this.storageType = storageType; }
 
     public int getAllocatedStorage() { return allocatedStorage; }
     public void setAllocatedStorage(int allocatedStorage) { this.allocatedStorage = allocatedStorage; }

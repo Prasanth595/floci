@@ -15,7 +15,9 @@ import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.Base64;
 import java.util.List;
+import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -30,8 +32,16 @@ class DynamoDbItemSizeServiceTest {
             "Item size to update has exceeded the maximum allowed size";
     private static final int UPDATE_COST = 3;
     private static final int SET_OR_ADD_COST = 19;
-    private static final int REMOVE_OR_DELETE_COST = 2;
+    private static final int REMOVE_OR_DELETE_COST = 1;
     private static final int LIST_INDEX_COST = 1;
+    private static final int OPERAND_PATH_COST = 1;
+    private static final int OPERAND_PATH_ELEMENT_COST = 14;
+    private static final int PLUS_COST = 34;
+    private static final int MINUS_COST = 37;
+    private static final int LIST_APPEND_COST = 37;
+    private static final int IF_NOT_EXISTS_COST = 39;
+    private static final int CONTAINER_COST = 3;
+    private static final int TARGET_CONTAINER_COST = 4;
     // "pk" plus a one-byte value, short enough that the ceiling falls below 400KB.
     private static final int SHORT_KEY_BYTES = 3;
 
@@ -142,7 +152,7 @@ class DynamoDbItemSizeServiceTest {
     @Test
     void updateItemChargesTwoBytesForARemoveAlongsideASet() {
         int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES
-                - (UPDATE_COST + SET_OR_ADD_COST + REMOVE_OR_DELETE_COST);
+                - (UPDATE_COST + SET_OR_ADD_COST + REMOVE_OR_DELETE_COST + "r".length());
         seed("a", "r", stringValue("z"));
         seed("b", "r", stringValue("z"));
 
@@ -154,7 +164,7 @@ class DynamoDbItemSizeServiceTest {
     @Test
     void updateItemChargesTwoBytesForADeleteAlongsideASet() {
         int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES
-                - (UPDATE_COST + SET_OR_ADD_COST + REMOVE_OR_DELETE_COST);
+                - (UPDATE_COST + SET_OR_ADD_COST + REMOVE_OR_DELETE_COST + "s".length());
         ObjectNode members = values(":members", stringSetValue("z"));
         seed("a", "s", stringSetValue("z"));
         seed("b", "s", stringSetValue("z"));
@@ -180,7 +190,7 @@ class DynamoDbItemSizeServiceTest {
     void updateItemChargesOneMoreByteThroughAListIndex() {
         int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES
                 - (UPDATE_COST + SET_OR_ADD_COST + LIST_INDEX_COST);
-        int elementBytes = 3;
+        int elementBytes = CONTAINER_COST + 1;
         seed("a", "d", listValue(stringValue("x")));
         seed("b", "d", listValue(stringValue("x")));
 
@@ -190,8 +200,9 @@ class DynamoDbItemSizeServiceTest {
     }
 
     @Test
-    void updateItemChargesAFunctionCallAsOneAction() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES - (UPDATE_COST + SET_OR_ADD_COST);
+    void updateItemChargesIfNotExistsAndTheOperandsItReads() {
+        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES
+                - (UPDATE_COST + SET_OR_ADD_COST + IF_NOT_EXISTS_COST + operandPath("b"));
 
         update("a", "SET b = if_not_exists(b, :pad)", ceiling, 0);
         assertEquals(ceiling, storedBytes("a"));
@@ -199,12 +210,10 @@ class DynamoDbItemSizeServiceTest {
     }
 
     @Test
-    void updateItemChargesALegacyAttributeUpdateLikeASet() {
-        int ceiling = MAX_ITEM_SIZE + SHORT_KEY_BYTES - (UPDATE_COST + SET_OR_ADD_COST);
-
-        updateAttribute("a", ceiling);
-        assertEquals(ceiling, storedBytes("a"));
-        assertRefused(() -> updateAttribute("b", ceiling + 1));
+    void updateItemMeasuresALegacyAttributeUpdateByTheFinishedItem() {
+        updateAttribute("a", MAX_ITEM_SIZE);
+        assertEquals(MAX_ITEM_SIZE, storedBytes("a"));
+        assertRefused(() -> updateAttribute("b", MAX_ITEM_SIZE + 1));
     }
 
     @Test
@@ -242,6 +251,168 @@ class DynamoDbItemSizeServiceTest {
         assertNull(service.getItem(TABLE, key("b"), REGION));
     }
 
+    @Test
+    void putItemMeasuresAListAtThreeBytesPlusOnePerElement() {
+        ObjectNode attributes = JsonNodeFactory.instance.objectNode();
+        attributes.set("l", listValue(stringValue("x"), stringValue("y")));
+        attributes.set("e", listValue());
+
+        assertPutCeiling(attributes, "l".length() + CONTAINER_COST + 2 * (1 + 1) + "e".length() + CONTAINER_COST);
+    }
+
+    @Test
+    void putItemMeasuresAMapAtThreeBytesPlusOnePerEntryAndItsName() {
+        ObjectNode map = JsonNodeFactory.instance.objectNode();
+        map.putObject("M").set("k", stringValue("x"));
+        ((ObjectNode) map.get("M")).set("kk", stringValue("y"));
+        ObjectNode attributes = JsonNodeFactory.instance.objectNode();
+        attributes.set("m", map);
+        attributes.set("n", JsonNodeFactory.instance.objectNode().set("M", JsonNodeFactory.instance.objectNode()));
+
+        assertPutCeiling(attributes, "m".length() + CONTAINER_COST + (1 + 1 + 1) + (2 + 1 + 1)
+                + "n".length() + CONTAINER_COST);
+    }
+
+    @Test
+    void putItemMeasuresStringAndBinarySetsByTheirMembersAlone() {
+        ObjectNode binarySet = JsonNodeFactory.instance.objectNode();
+        binarySet.putArray("BS")
+                .add(Base64.getEncoder().encodeToString(new byte[] {1}))
+                .add(Base64.getEncoder().encodeToString(new byte[] {2, 2}));
+        ObjectNode attributes = JsonNodeFactory.instance.objectNode();
+        attributes.set("ss", stringSetValue("x", "yy"));
+        attributes.set("bs", binarySet);
+
+        assertPutCeiling(attributes, "ss".length() + 1 + 2 + "bs".length() + 1 + 2);
+    }
+
+    @Test
+    void refusedPutLeavesTheStoredItemAsItWas() {
+        seed("a", "u", stringValue("y".repeat(10)));
+        JsonNode before = service.getItem(TABLE, key("a"), REGION).deepCopy();
+        ObjectNode over = key("a");
+        over.set("b", stringValue(padding("a", MAX_ITEM_SIZE + 1, 0)));
+
+        assertThrows(AwsException.class, () -> service.putItem(TABLE, over, REGION));
+        assertEquals(before, service.getItem(TABLE, key("a"), REGION));
+    }
+
+    @Test
+    void refusedUpdateLeavesTheStoredItemAsItWas() {
+        seed("a", "u", stringValue("y".repeat(10)));
+        JsonNode before = service.getItem(TABLE, key("a"), REGION).deepCopy();
+
+        assertRefused(() -> update("a", "SET b = :pad", MAX_ITEM_SIZE + 1, "u".length() + 10));
+        assertEquals(before, service.getItem(TABLE, key("a"), REGION));
+    }
+
+    @Test
+    void updateItemChargesListAppendAndTheOperandsItReads() {
+        int fixed = UPDATE_COST + SET_OR_ADD_COST + "l".length()
+                + LIST_APPEND_COST + operandPath("l") + CONTAINER_COST + 1;
+
+        assertUpdateCeiling(attributes("l", listValue(stringValue("x"))), "SET l = list_append(l, :list)",
+                pad -> values(":list", listValue(stringValue("x".repeat(pad)))), MAX_ITEM_SIZE - fixed);
+    }
+
+    @Test
+    void updateItemChargesIfNotExistsNestedInListAppend() {
+        int fixed = UPDATE_COST + SET_OR_ADD_COST + "l".length() + LIST_APPEND_COST
+                + IF_NOT_EXISTS_COST + operandPath("l") + CONTAINER_COST + CONTAINER_COST + 1;
+
+        assertUpdateCeiling(null, "SET l = list_append(if_not_exists(l, :empty), :list)", pad -> {
+            ObjectNode values = values(":list", listValue(stringValue("x".repeat(pad))));
+            values.set(":empty", listValue());
+            return values;
+        }, MAX_ITEM_SIZE - fixed);
+    }
+
+    @Test
+    void updateItemChargesTheSourcePathOfACopy() {
+        int fixed = UPDATE_COST + 2 * SET_OR_ADD_COST + "a".length() + operandPath("b") + "c".length();
+
+        assertUpdateCeiling(attributes("b", stringValue("y")), "SET a = b, c = :pad",
+                pad -> values(":pad", stringValue("x".repeat(pad))), MAX_ITEM_SIZE - fixed);
+    }
+
+    @Test
+    void updateItemChargesEveryElementOfANestedSourcePath() {
+        ObjectNode list = listValue();
+        for (int i = 0; i < 11; i++) {
+            ((ArrayNode) list.get("L")).add(stringValue("x"));
+        }
+        int fixed = UPDATE_COST + 2 * SET_OR_ADD_COST + "a".length() + operandPath("d", "ee", "10") + "c".length();
+
+        assertUpdateCeiling(attributes("d", mapValue("ee", list)), "SET a = d.ee[10], c = :pad",
+                pad -> values(":pad", stringValue("x".repeat(pad))), MAX_ITEM_SIZE - fixed);
+    }
+
+    @Test
+    void updateItemChargesPlusAndMinusDifferently() {
+        int one = 2;
+        int fixed = UPDATE_COST + 3 * SET_OR_ADD_COST
+                + "n".length() + PLUS_COST + operandPath("n") + one
+                + "m".length() + MINUS_COST + operandPath("m") + one
+                + "c".length();
+        ObjectNode seed = attributes("n", numberValue("1"));
+        seed.set("m", numberValue("1"));
+
+        assertUpdateCeiling(seed, "SET n = n + :one, m = m - :one, c = :pad", pad -> {
+            ObjectNode values = values(":pad", stringValue("x".repeat(pad)));
+            values.set(":one", numberValue("1"));
+            return values;
+        }, MAX_ITEM_SIZE - fixed);
+    }
+
+    @Test
+    void updateItemCountsASharedTargetPrefixOnce() {
+        int fixed = UPDATE_COST + 2 * SET_OR_ADD_COST
+                + "d".length() + TARGET_CONTAINER_COST + "a".length() + "b".length() + "e".length();
+
+        assertUpdateCeiling(attributes("d", JsonNodeFactory.instance.objectNode().set("M",
+                        JsonNodeFactory.instance.objectNode())), "SET d.a = :pad, d.b = :e", pad -> {
+            ObjectNode values = values(":pad", stringValue("x".repeat(pad)));
+            values.set(":e", stringValue("e"));
+            return values;
+        }, MAX_ITEM_SIZE - fixed);
+    }
+
+    @Test
+    void updateItemCountsTheDigitsOfAListIndex() {
+        ObjectNode list = listValue();
+        for (int i = 0; i < 11; i++) {
+            ((ArrayNode) list.get("L")).add(stringValue("x"));
+        }
+        int fixed = UPDATE_COST + SET_OR_ADD_COST + "l".length() + TARGET_CONTAINER_COST + "10".length();
+
+        assertUpdateCeiling(attributes("l", list), "SET l[10] = :pad",
+                pad -> values(":pad", stringValue("x".repeat(pad))), MAX_ITEM_SIZE - fixed);
+    }
+
+    @Test
+    void updateItemChargesRemoveAndDeleteByTheirPathAlone() {
+        ObjectNode seed = attributes("rrrrrrrrrr", stringValue("y"));
+        seed.set("ssssssssss", stringSetValue("y", "z"));
+        int fixed = UPDATE_COST + 2 * (REMOVE_OR_DELETE_COST + 10) + SET_OR_ADD_COST + "c".length();
+
+        assertUpdateCeiling(seed, "REMOVE rrrrrrrrrr DELETE ssssssssss :z SET c = :pad", pad -> {
+            ObjectNode values = values(":pad", stringValue("x".repeat(pad)));
+            values.set(":z", stringSetValue("z".repeat(100)));
+            return values;
+        }, MAX_ITEM_SIZE - fixed);
+    }
+
+    @Test
+    void updateItemChargesTheValueAnAddWritesNotTheSetItBuilds() {
+        int fixed = UPDATE_COST + 2 * SET_OR_ADD_COST + "ss".length() + 1 + "c".length();
+
+        assertUpdateCeiling(attributes("ss", stringSetValue("yy")), "ADD ss :v SET c = :pad", pad -> {
+            ObjectNode values = values(":pad", stringValue("x".repeat(pad)));
+            values.set(":v", stringSetValue("z"));
+            return values;
+        }, MAX_ITEM_SIZE - fixed);
+    }
+
     private void update(String keyValue, String expression, int totalBytes, int otherBytes) {
         update(keyValue, expression, totalBytes, otherBytes, JsonNodeFactory.instance.objectNode());
     }
@@ -277,6 +448,49 @@ class DynamoDbItemSizeServiceTest {
         update.set("ExpressionAttributeValues",
                 values(":pad", stringValue(padding(keyValue, totalBytes, 0))));
         return member;
+    }
+
+    private void assertPutCeiling(ObjectNode attributes, int attributeBytes) {
+        putPadded("a", MAX_ITEM_SIZE, attributes, attributeBytes);
+        assertEquals(MAX_ITEM_SIZE, storedBytes("a"));
+        AwsException refused = assertThrows(AwsException.class,
+                () -> putPadded("b", MAX_ITEM_SIZE + 1, attributes, attributeBytes));
+        assertEquals("Item size has exceeded the maximum allowed size", refused.getMessage());
+    }
+
+    private void putPadded(String keyValue, int totalBytes, ObjectNode attributes, int attributeBytes) {
+        ObjectNode item = key(keyValue);
+        item.setAll(attributes.deepCopy());
+        item.set("b", stringValue(padding(keyValue, totalBytes, attributeBytes)));
+        service.putItem(TABLE, item, REGION);
+    }
+
+    private void assertUpdateCeiling(ObjectNode seed, String expression, IntFunction<ObjectNode> values,
+                                     int maxPadding) {
+        for (String keyValue : List.of("a", "b")) {
+            if (seed != null) {
+                ObjectNode item = key(keyValue);
+                item.setAll(seed.deepCopy());
+                service.putItem(TABLE, item, REGION);
+            }
+        }
+        service.updateItem(TABLE, key("a"), null, expression, null, values.apply(maxPadding), "NONE", REGION);
+        assertRefused(() -> service.updateItem(TABLE, key("b"), null, expression, null,
+                values.apply(maxPadding + 1), "NONE", REGION));
+    }
+
+    private static int operandPath(String... elements) {
+        int size = OPERAND_PATH_COST;
+        for (String element : elements) {
+            size += OPERAND_PATH_ELEMENT_COST + element.length();
+        }
+        return size;
+    }
+
+    private ObjectNode attributes(String name, JsonNode value) {
+        ObjectNode attributes = JsonNodeFactory.instance.objectNode();
+        attributes.set(name, value);
+        return attributes;
     }
 
     private void seed(String keyValue, String attribute, JsonNode value) {
@@ -318,9 +532,12 @@ class DynamoDbItemSizeServiceTest {
         return value;
     }
 
-    private ObjectNode stringSetValue(String member) {
+    private ObjectNode stringSetValue(String... members) {
         ObjectNode value = JsonNodeFactory.instance.objectNode();
-        value.putArray("SS").add(member);
+        ArrayNode set = value.putArray("SS");
+        for (String member : members) {
+            set.add(member);
+        }
         return value;
     }
 
@@ -330,9 +547,12 @@ class DynamoDbItemSizeServiceTest {
         return map;
     }
 
-    private ObjectNode listValue(JsonNode element) {
+    private ObjectNode listValue(JsonNode... elements) {
         ObjectNode list = JsonNodeFactory.instance.objectNode();
-        list.putArray("L").add(element);
+        ArrayNode array = list.putArray("L");
+        for (JsonNode element : elements) {
+            array.add(element);
+        }
         return list;
     }
 

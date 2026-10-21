@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -378,9 +379,9 @@ public class SesTenantService implements SesTaggable {
      */
     public static AssociationResource parseResourceArn(String resourceArn, String accountId, String region) {
         if (resourceArn == null) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'resourceArn' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'resourceArn' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         String[] parts = resourceArn.split(":", 6);
         if (parts.length < 6 || !"arn".equals(parts[0])) {
@@ -613,9 +614,9 @@ public class SesTenantService implements SesTaggable {
         }
         if (suppressionScope != null && !"TENANT".equals(suppressionScope)
                 && !"ACCOUNT".equals(suppressionScope)) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'suppressionScope' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set: [TENANT, ACCOUNT]", 400);
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'suppressionScope' failed to satisfy "
+                            + "constraint: Member must satisfy enum value set: [TENANT, ACCOUNT]");
         }
         if (suppressedReasons != null) {
             Set<String> seen = new HashSet<>();
@@ -649,17 +650,17 @@ public class SesTenantService implements SesTaggable {
     private static void validateTenantName(String name, boolean createTenantSmithyVariants) {
         if (name == null) {
             if (createTenantSmithyVariants) {
-                throw new AwsException("BadRequestException",
-                        "1 validation error detected: Value at 'tenantName' failed to satisfy "
-                                + "constraint: Member must not be null", 400);
+                throw SmithyValidationErrors.badRequest(
+                        "Value at 'tenantName' failed to satisfy "
+                                + "constraint: Member must not be null");
             }
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }
         if (name.isEmpty()) {
             if (createTenantSmithyVariants) {
-                throw new AwsException("BadRequestException",
-                        "1 validation error detected: Value at 'tenantName' failed to satisfy "
-                                + "constraint: Member must have length greater than or equal to 1", 400);
+                throw SmithyValidationErrors.badRequest(
+                        "Value at 'tenantName' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1");
             }
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }

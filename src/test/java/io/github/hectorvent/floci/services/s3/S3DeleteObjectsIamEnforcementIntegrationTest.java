@@ -14,11 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.net.URI;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -42,10 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class S3DeleteObjectsIamEnforcementIntegrationTest {
 
     private static final String ADMIN = "test";
-    private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
-    private static final DateTimeFormatter AMZ_DATE =
-            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
     @Inject
     IamService iamService;
@@ -238,7 +231,7 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
     @Test
     void bypassingGovernanceRetentionNeedsTheBypassPermission() {
         String bucket = bucket("delobj-governance");
-        enableVersioning(bucket);
+        enableObjectLock(bucket);
         String versionId = putGovernanceRetained(bucket, "retained.txt");
         String plainVersionId = put(bucket, "plain.txt");
         String user = uniqueName("delobj-governance");
@@ -267,12 +260,17 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
     }
 
     // An object written before versioning was enabled is the null version, which an entry names as
-    // VersionId "null". Its retention protects it as any version's does, so the bypass needs the permission.
+    // VersionId "null". Retention set on it once the bucket has Object Lock protects it as any version's
+    // does, so the bypass needs the permission.
     @Test
     void bypassingGovernanceRetentionOnTheNullVersionNeedsTheBypassPermission() {
         String bucket = bucket("delobj-governance-null");
-        putGovernanceRetained(bucket, "retained.txt");
-        enableVersioning(bucket);
+        put(bucket, "retained.txt");
+        enableObjectLock(bucket);
+        given().header("Authorization", auth(ADMIN, "s3")).queryParam("versionId", "null")
+                .body("<Retention><Mode>GOVERNANCE</Mode>"
+                        + "<RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>")
+                .when().put("/" + bucket + "/retained.txt?retention").then().statusCode(200);
         String user = uniqueName("delobj-governance-null");
         String accessKeyId = createUser(user);
         String objects = "arn:aws:s3:::" + bucket + "/*";
@@ -296,7 +294,7 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
     @Test
     void aNullVersionEntryDoesNotInheritTheRetentionOfAVersionedObject() {
         String bucket = bucket("delobj-governance-no-null");
-        enableVersioning(bucket);
+        enableObjectLock(bucket);
         String versionId = putGovernanceRetained(bucket, "retained.txt");
         String user = uniqueName("delobj-governance-no-null");
         String accessKeyId = createUser(user);
@@ -428,16 +426,7 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
     }
 
     private static String presignedDeletePath(String bucket, String accessKeyId) {
-        String amzDate = AMZ_DATE.format(Instant.now());
-        String credential = URLEncoder.encode(
-                accessKeyId + "/" + amzDate.substring(0, 8) + "/" + REGION + "/s3/aws4_request", StandardCharsets.UTF_8);
-        return "/" + bucket + "?delete"
-                + "&X-Amz-Algorithm=AWS4-HMAC-SHA256"
-                + "&X-Amz-Credential=" + credential
-                + "&X-Amz-Date=" + amzDate
-                + "&X-Amz-Expires=3600"
-                + "&X-Amz-SignedHeaders=host"
-                + "&X-Amz-Signature=fakesig";
+        return "/" + bucket + "?delete&" + EnforcementFixtures.presignedQuery(accessKeyId, "s3");
     }
 
     private static String bucket(String prefix) {
@@ -469,6 +458,14 @@ class S3DeleteObjectsIamEnforcementIntegrationTest {
         given().header("Authorization", auth(ADMIN, "s3")).contentType("application/xml")
                 .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
                 .when().put("/" + bucket + "?versioning").then().statusCode(200);
+    }
+
+    /** Object Lock on an existing bucket, which needs versioning: "Object Lock works only with versioned buckets". */
+    private static void enableObjectLock(String bucket) {
+        enableVersioning(bucket);
+        given().header("Authorization", auth(ADMIN, "s3")).contentType("application/xml")
+                .body("<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>")
+                .when().put("/" + bucket + "?object-lock").then().statusCode(200);
     }
 
     private static void assertPresent(String bucket, String key) {

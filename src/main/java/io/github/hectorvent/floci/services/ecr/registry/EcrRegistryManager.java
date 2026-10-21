@@ -139,7 +139,12 @@ public class EcrRegistryManager {
         String region = m.group(2);
         String repoAndTag = m.group(3);
         ensureStarted();
-        String rewritten = repositoryUri(account, region, repoAndTag, "localhost");
+        // Path style on localhost whatever style the API advertises. A daemon with the
+        // containerd image store, the default from Docker Engine 29, reaches only localhost and
+        // 127.0.0.1 over plain HTTP and takes every other name, *.localhost included, for an
+        // HTTPS registry: Floci's plain port cannot answer that, and its TLS port cannot prove
+        // itself to a daemon that does not trust Floci's CA.
+        String rewritten = "localhost:" + advertisedPort() + "/" + internalRepoName(account, region, repoAndTag);
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
     }
@@ -173,6 +178,18 @@ public class EcrRegistryManager {
 
     private boolean tlsUriEnabled() {
         return config.services().ecr().tlsUri() && config.tls().enabled();
+    }
+
+    /**
+     * The address a blob can be fetched from through Floci's registry endpoint: the repository URI's
+     * host, with {@code /v2/<repository>/blobs/<digest>}, over the scheme the proxy endpoint uses.
+     */
+    public String blobUrl(String repositoryUri, String digest) {
+        int slash = repositoryUri.indexOf('/');
+        String endpoint = getProxyEndpoint();
+        String scheme = endpoint.substring(0, endpoint.indexOf("://"));
+        return scheme + "://" + repositoryUri.substring(0, slash) + "/v2/" + repositoryUri.substring(slash + 1)
+                + "/blobs/" + digest;
     }
 
     /**
@@ -628,7 +645,8 @@ public class EcrRegistryManager {
     private void adoptExisting(Container existing) {
         this.containerId = existing.getId();
         try {
-            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT));
+            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT),
+                    containerBuilder.resolveDockerNetwork(resolveRegistryDockerNetwork()));
             // The control plane reaches the backing registry through this published loopback
             // binding when Floci runs on the host. In Docker, httpClient() uses container DNS.
             OptionalInt published = info.publishedHostPort(CONTAINER_INTERNAL_PORT);

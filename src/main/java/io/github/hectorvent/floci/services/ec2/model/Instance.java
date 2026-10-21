@@ -18,6 +18,7 @@ public class Instance {
     private volatile InstanceState state;
     private String stateTransitionReason;
     private String instanceType;
+    private boolean spot;
     private Placement placement;
     private String subnetId;
     private String vpcId;
@@ -26,8 +27,9 @@ public class Instance {
     private String publicIpAddress;
     private String privateDnsName;
     private String publicDnsName;
-    // Whether this instance should be assigned a public IP — true when its subnet
-    // has MapPublicIpOnLaunch (#1984). Instances in private subnets get none.
+    // Whether this instance's launch asked for an automatic public IP: the launch's
+    // AssociatePublicIpAddress, else its subnet's MapPublicIpOnLaunch, and never for an
+    // interface the caller created. AutomaticPublicAddress decides from it in every mode.
     private boolean associatePublicIp = false;
     private String keyName;
     private List<GroupIdentifier> securityGroups = new ArrayList<>();
@@ -45,6 +47,7 @@ public class Instance {
     private boolean ebsOptimized = false;
     private boolean enaSupport = true;
     private String iamInstanceProfileArn;
+    private String iamInstanceProfileId;
     private Instant iamInstanceProfileAssociationTime;
     private String stateReasonCode;
     private String stateReasonMessage;
@@ -61,8 +64,9 @@ public class Instance {
     private boolean disableApiTermination = false;
 
     // Null for an instance persisted before metadata options were stored; reads fall back to
-    // AWS's launch defaults through effectiveMetadataOptions().
-    private LaunchTemplateData.MetadataOptions metadataOptions;
+    // AWS's launch defaults through effectiveMetadataOptions(). Volatile because IMDS reads it on
+    // its event loop while ModifyInstanceMetadataOptions replaces it from a request thread.
+    private volatile LaunchTemplateData.MetadataOptions metadataOptions;
 
     // The credit option this instance acquired, at launch from the request or from its burstable
     // family's default, or at a resize onto a burstable type. Stored rather than derived from the
@@ -106,6 +110,9 @@ public class Instance {
 
     public String getStateTransitionReason() { return stateTransitionReason; }
     public void setStateTransitionReason(String stateTransitionReason) { this.stateTransitionReason = stateTransitionReason; }
+
+    public boolean isSpot() { return spot; }
+    public void setSpot(boolean spot) { this.spot = spot; }
 
     public String getInstanceType() { return instanceType; }
     public void setInstanceType(String instanceType) { this.instanceType = instanceType; }
@@ -184,6 +191,8 @@ public class Instance {
 
     public String getIamInstanceProfileArn() { return iamInstanceProfileArn; }
     public void setIamInstanceProfileArn(String iamInstanceProfileArn) { this.iamInstanceProfileArn = iamInstanceProfileArn; }
+    public String getIamInstanceProfileId() { return iamInstanceProfileId; }
+    public void setIamInstanceProfileId(String iamInstanceProfileId) { this.iamInstanceProfileId = iamInstanceProfileId; }
     public Instant getIamInstanceProfileAssociationTime() { return iamInstanceProfileAssociationTime; }
     public void setIamInstanceProfileAssociationTime(Instant iamInstanceProfileAssociationTime) { this.iamInstanceProfileAssociationTime = iamInstanceProfileAssociationTime; }
 

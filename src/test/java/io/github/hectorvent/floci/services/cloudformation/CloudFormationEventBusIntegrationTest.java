@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -424,7 +425,7 @@ class CloudFormationEventBusIntegrationTest {
         createStack(stackName, originalTemplate);
         assertStackStatus(stackName, "CREATE_COMPLETE");
 
-        updateStack(stackName, originalTemplate);
+        updateStack(stackName, CfnUpdates.forceUpdate(originalTemplate));
         assertStackStatus(stackName, "UPDATE_COMPLETE");
 
         updateStack(stackName, eventBusAndNamedRuleTemplate(busName, "after"));
@@ -621,7 +622,7 @@ class CloudFormationEventBusIntegrationTest {
         createStack(stackName, originalTemplate);
         assertStackStatus(stackName, "CREATE_COMPLETE");
 
-        updateStack(stackName, originalTemplate);
+        updateStack(stackName, CfnUpdates.forceUpdate(originalTemplate));
         assertStackStatus(stackName, "UPDATE_COMPLETE");
 
         updateStack(stackName, eventBusWithPolicyTemplate(busName, "After"));

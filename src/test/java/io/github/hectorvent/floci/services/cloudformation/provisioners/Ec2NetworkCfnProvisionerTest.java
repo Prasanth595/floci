@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -192,7 +193,30 @@ class Ec2NetworkCfnProvisionerTest {
         provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID), ctx());
 
         assertEquals(NAT_ID, r.getPhysicalId());
-        assertEquals(Set.of("NatGatewayId"), r.getAttributes().keySet());
+        assertEquals(Set.of("NatGatewayId"), r.getAttributes().keySet().stream()
+                .filter(key -> !key.startsWith("__Floci")).collect(Collectors.toSet()));
+    }
+
+    /**
+     * A gateway records the subnet and the Elastic IP it holds under hidden keys, by their physical
+     * ids, so a stack that no longer names it still deletes it before them.
+     */
+    @Test
+    void natGatewayRecordsTheSubnetAndElasticIpItUsesUnderHiddenKeys() {
+        NatGateway nat = new NatGateway();
+        nat.setNatGatewayId(NAT_ID);
+        nat.setSubnetId(SUBNET_ID);
+        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", List.of())).thenReturn(nat);
+        Address addr = new Address();
+        addr.setAllocationId(ALLOC_ID);
+        addr.setPublicIp(PUBLIC_IP);
+        when(ec2.describeAddresses(REGION, List.of(ALLOC_ID), Map.of())).thenReturn(List.of(addr));
+        StackResource r = resource("AWS::EC2::NatGateway", "Nat");
+
+        provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID), ctx());
+
+        assertEquals(SUBNET_ID, r.getAttributes().get(CfnRollback.USES_ATTR_PREFIX + "SubnetId"));
+        assertEquals(PUBLIC_IP, r.getAttributes().get(CfnRollback.USES_ATTR_PREFIX + "PublicIp"));
     }
 
     @Test
@@ -294,6 +318,25 @@ class Ec2NetworkCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r), "the prior MapPublicIpOnLaunch is restored from the snapshot");
         verify(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "false");
         assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void aRestoreThatThrowsKeepsTheSnapshotForTheRetry() {
+        when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(subnet()));
+        StackResource r = prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID, "VpcId", VPC_ID, "AvailabilityZone", "us-east-1a"));
+        ObjectNode props = mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.0/24")
+                .put("AvailabilityZone", "us-east-1a").put("MapPublicIpOnLaunch", true);
+        provisioner.provision(r, props, ctx(SUBNET_ID));
+        String snapshot = r.getAttributes().get(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR);
+        assertTrue(snapshot != null, "the prior MapPublicIpOnLaunch is snapshotted");
+        doThrow(new AwsException("InternalError", "ec2 is down", 500))
+                .when(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "false");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertEquals("InternalError", failure.getErrorCode());
+        assertEquals(snapshot, r.getAttributes().get(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR),
+                "a failed restore keeps the snapshot for a ContinueUpdateRollback retry");
     }
 
     @Test

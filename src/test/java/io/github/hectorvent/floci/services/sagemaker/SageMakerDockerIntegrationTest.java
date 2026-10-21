@@ -85,13 +85,16 @@ class SageMakerDockerIntegrationTest {
     @Test
     void endpointHostsRealContainerAndRuntimeProxiesInvocations() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "sm-ep-" + suffix;
+        s3Service.createBucket(bucket, "us-east-1");
+        s3Service.putObject(bucket, "prefix.txt", "MODEL:".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
         String model = "sm-ep-model-" + suffix;
         String cfg = "sm-ep-cfg-" + suffix;
         String endpoint = "sm-endpoint-" + suffix;
-        String script = "trap 'exit 0' TERM; cat > /server.py <<'PY'\nfrom http.server import BaseHTTPRequestHandler,HTTPServer\nclass H(BaseHTTPRequestHandler):\n def do_GET(self):\n  self.send_response(200 if self.path == '/ping' else 404); self.end_headers()\n def do_POST(self):\n  n=int(self.headers.get('content-length','0')); b=self.rfile.read(n); self.send_response(200); self.send_header('Content-Type','text/plain'); self.end_headers(); self.wfile.write(b.upper())\nHTTPServer(('0.0.0.0',8080),H).serve_forever()\nPY\npython /server.py & wait $!";
+        String script = "trap 'exit 0' TERM; cat > /server.py <<'PY'\nfrom http.server import BaseHTTPRequestHandler,HTTPServer\nfrom pathlib import Path\nmodel=Path('/opt/ml/model/prefix.txt').read_bytes()\nclass H(BaseHTTPRequestHandler):\n def do_GET(self):\n  self.send_response(200 if self.path == '/ping' else 404); self.end_headers()\n def do_POST(self):\n  n=int(self.headers.get('content-length','0')); b=self.rfile.read(n); self.send_response(200); self.send_header('Content-Type','text/plain'); self.end_headers(); self.wfile.write(model+b.upper())\nHTTPServer(('0.0.0.0',8080),H).serve_forever()\nPY\npython /server.py & wait $!";
         post("SageMaker.CreateModel", """
-                {"ModelName":"%s","PrimaryContainer":{"Image":"%s","ContainerEntrypoint":["/bin/sh","-c"],"ContainerArguments":[%s]}}
-                """.formatted(model, TestImages.PYTHON_ALPINE, json(script))).then().statusCode(200);
+                {"ModelName":"%s","PrimaryContainer":{"Image":"%s","ModelDataUrl":"s3://%s/prefix.txt","ContainerEntrypoint":["/bin/sh","-c"],"ContainerArguments":[%s]}}
+                """.formatted(model, TestImages.PYTHON_ALPINE, bucket, json(script))).then().statusCode(200);
         post("SageMaker.CreateEndpointConfig", """
                 {"EndpointConfigName":"%s","ProductionVariants":[{"VariantName":"AllTraffic","ModelName":"%s","InitialInstanceCount":1,"InstanceType":"ml.t2.medium","InitialVariantWeight":1.0}]}
                 """.formatted(cfg, model)).then().statusCode(200);
@@ -101,7 +104,7 @@ class SageMakerDockerIntegrationTest {
         given().header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/runtime.sagemaker/aws4_request")
                 .contentType("text/plain").body("hello")
                 .when().post("/endpoints/%s/invocations".formatted(endpoint))
-                .then().statusCode(200).body(equalTo("HELLO"));
+                .then().statusCode(200).body(equalTo("MODEL:HELLO"));
         post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(200);
     }
 

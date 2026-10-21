@@ -11,7 +11,7 @@ import java.util.Map;
 @RegisterForReflection
 public class DbInstance {
 
-    /** The only storage type Floci models, and the one DescribeDBInstances reports. */
+    /** The fallback for existing records and requests that do not name a storage type. */
     public static final String DEFAULT_STORAGE_TYPE = "gp2";
 
     private String dbInstanceIdentifier;
@@ -25,6 +25,7 @@ public class DbInstance {
     private String dbName;
     private String dbInstanceClass;
     private int allocatedStorage;
+    private String storageType;
     private DbInstanceStatus status;
     private DbEndpoint endpoint;
     private boolean iamDatabaseAuthenticationEnabled;
@@ -132,6 +133,9 @@ public class DbInstance {
 
     public String getDbInstanceClass() { return dbInstanceClass; }
     public void setDbInstanceClass(String dbInstanceClass) { this.dbInstanceClass = dbInstanceClass; }
+
+    public String getStorageType() { return storageType != null ? storageType : DEFAULT_STORAGE_TYPE; }
+    public void setStorageType(String storageType) { this.storageType = storageType; }
 
     public int getAllocatedStorage() { return allocatedStorage; }
     public void setAllocatedStorage(int allocatedStorage) { this.allocatedStorage = allocatedStorage; }

@@ -4,13 +4,14 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
-import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
+import io.github.hectorvent.floci.services.lambda.zip.DeploymentPackage;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -19,7 +20,6 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
@@ -136,61 +136,62 @@ public class LambdaLayerService {
                 ? (List<String>) request.get("CompatibleArchitectures") : null;
 
         // Resolve the zip content
-        byte[] zipBytes = resolveLayerContent(content);
-        if (content.get("ZipFile") != null
-                && zipBytes.length > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
-            throw new AwsException("RequestEntityTooLargeException",
-                    "Request must be smaller than 52428800 bytes.", 413);
+        try (DeploymentPackage zip = resolveLayerContent(content, layersRoot())) {
+            if (content.get("ZipFile") != null
+                    && zip.size() > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
+                throw new AwsException("RequestEntityTooLargeException",
+                        "Request must be smaller than 52428800 bytes.", 413);
+            }
+
+            String accountId = regionResolver.getAccountId();
+
+            // Determine the next version number
+            long nextVersion = layerStore.getLatestVersion(region, layerName) + 1;
+
+            // Extract the layer zip to disk
+            Path layerPath = getLayerCodePath(accountId, region, layerName, nextVersion);
+            try {
+                zip.extractTo(zipExtractor, layerPath, configuredZipMaxEntries(), null);
+            } catch (IOException e) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Failed to extract layer archive: " + e.getMessage(), 400);
+            }
+
+            // Compute SHA-256
+            String codeSha256 = zip.sha256();
+
+            // Build the layer version
+            String layerArn = AwsArnUtils.Arn.of("lambda", region, accountId, "layer:" + layerName).toString();
+            String layerVersionArn = layerArn + ":" + nextVersion;
+
+            LambdaLayerVersion layerVersion = new LambdaLayerVersion();
+            layerVersion.setLayerName(layerName);
+            layerVersion.setLayerArn(layerArn);
+            layerVersion.setLayerVersionArn(layerVersionArn);
+            layerVersion.setVersion(nextVersion);
+            layerVersion.setDescription(description);
+            layerVersion.setLicenseInfo(licenseInfo);
+            layerVersion.setCompatibleRuntimes(compatibleRuntimes != null ? new ArrayList<>(compatibleRuntimes) : null);
+            layerVersion.setCompatibleArchitectures(compatibleArchitectures != null ? new ArrayList<>(compatibleArchitectures) : null);
+            layerVersion.setCreatedDate(DateTimeFormatter.ISO_INSTANT.format(Instant.now().atOffset(ZoneOffset.UTC)));
+            layerVersion.setCodeSizeBytes(zip.size());
+            layerVersion.setCodeSha256(codeSha256);
+            layerVersion.setCodeLocalPath(layerPath.toAbsolutePath().normalize().toString());
+
+            // Store the archive before persisting the version so a load-bearing store failure
+            // (kubernetes executor) fails the publish instead of leaving a version pods cannot use.
+            boolean stored = storeLayerArchive(region, accountId, layerName, nextVersion, zip);
+            if (!stored && LambdaService.requiresStoredTasksObject(config)) {
+                throw new AwsException("ServiceException",
+                        "Could not store the layer archive for '" + layerName + "' v" + nextVersion
+                                + " in Floci's S3, which the kubernetes Lambda executor needs. The "
+                                + "layer version was not published.", 500);
+            }
+            layerVersion.setArchiveStored(stored);
+            layerStore.save(region, layerVersion);
+            LOG.infov("Published layer version: {0} v{1} in region {2}", layerName, nextVersion, region);
+            return layerVersion;
         }
-
-        String accountId = regionResolver.getAccountId();
-
-        // Determine the next version number
-        long nextVersion = layerStore.getLatestVersion(region, layerName) + 1;
-
-        // Extract the layer zip to disk
-        Path layerPath = getLayerCodePath(accountId, region, layerName, nextVersion);
-        try {
-            zipExtractor.extractTo(zipBytes, layerPath, configuredZipMaxEntries());
-        } catch (IOException e) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Failed to extract layer archive: " + e.getMessage(), 400);
-        }
-
-        // Compute SHA-256
-        String codeSha256 = computeSha256(zipBytes);
-
-        // Build the layer version
-        String layerArn = AwsArnUtils.Arn.of("lambda", region, accountId, "layer:" + layerName).toString();
-        String layerVersionArn = layerArn + ":" + nextVersion;
-
-        LambdaLayerVersion layerVersion = new LambdaLayerVersion();
-        layerVersion.setLayerName(layerName);
-        layerVersion.setLayerArn(layerArn);
-        layerVersion.setLayerVersionArn(layerVersionArn);
-        layerVersion.setVersion(nextVersion);
-        layerVersion.setDescription(description);
-        layerVersion.setLicenseInfo(licenseInfo);
-        layerVersion.setCompatibleRuntimes(compatibleRuntimes != null ? new ArrayList<>(compatibleRuntimes) : null);
-        layerVersion.setCompatibleArchitectures(compatibleArchitectures != null ? new ArrayList<>(compatibleArchitectures) : null);
-        layerVersion.setCreatedDate(DateTimeFormatter.ISO_INSTANT.format(Instant.now().atOffset(ZoneOffset.UTC)));
-        layerVersion.setCodeSizeBytes(zipBytes.length);
-        layerVersion.setCodeSha256(codeSha256);
-        layerVersion.setCodeLocalPath(layerPath.toAbsolutePath().normalize().toString());
-
-        // Store the archive before persisting the version so a load-bearing store failure
-        // (kubernetes executor) fails the publish instead of leaving a version pods cannot use.
-        boolean stored = storeLayerArchive(region, accountId, layerName, nextVersion, zipBytes);
-        if (!stored && LambdaService.requiresStoredTasksObject(config)) {
-            throw new AwsException("ServiceException",
-                    "Could not store the layer archive for '" + layerName + "' v" + nextVersion
-                            + " in Floci's S3, which the kubernetes Lambda executor needs. The "
-                            + "layer version was not published.", 500);
-        }
-        layerVersion.setArchiveStored(stored);
-        layerStore.save(region, layerVersion);
-        LOG.infov("Published layer version: {0} v{1} in region {2}", layerName, nextVersion, region);
-        return layerVersion;
     }
 
     private int configuredZipMaxEntries() {
@@ -209,9 +210,9 @@ public class LambdaLayerService {
      * Best-effort unless the active Lambda executor requires stored tasks-bucket objects.
      */
     private boolean storeLayerArchive(String region, String accountId, String layerName,
-                                      long version, byte[] zipBytes) {
+                                      long version, DeploymentPackage zip) {
         return LambdaService.putTasksObjectQuietly(s3Service, region,
-                LambdaService.layerObjectKey(accountId, layerName, version), zipBytes,
+                LambdaService.layerObjectKey(accountId, layerName, version), zip,
                 "layer archive for " + layerName + " v" + version);
     }
 
@@ -328,9 +329,7 @@ public class LambdaLayerService {
                     "Member must satisfy enum value set: " + COMPATIBLE_ARCHITECTURES));
         }
         if (!errors.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    errors.size() + (errors.size() == 1 ? " validation error" : " validation errors")
-                            + " detected: " + String.join("; ", errors), 400);
+            throw SmithyValidationErrors.validationException(errors);
         }
         return parsed;
     }
@@ -448,16 +447,16 @@ public class LambdaLayerService {
      */
     public LambdaLayerVersion getLayerVersionByArn(String layerVersionArn) {
         if (layerVersionArn == null || layerVersionArn.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'arn' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'arn' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         if (layerVersionArn.length() > MAX_LAYER_VERSION_ARN_LENGTH
                 || !LAYER_VERSION_ARN.matcher(layerVersionArn).matches()) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + layerVersionArn + "' at 'arn' failed to satisfy"
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + layerVersionArn + "' at 'arn' failed to satisfy"
                             + " constraint: Member must satisfy regular expression pattern: "
-                            + LAYER_VERSION_ARN_PATTERN, 400);
+                            + LAYER_VERSION_ARN_PATTERN);
         }
         // The live service rejects a layer from another partition outright, and with a different
         // error than an unresolvable ARN, so this precedes the lookup.
@@ -552,10 +551,10 @@ public class LambdaLayerService {
                 || AwsArnUtils.isForeignAccount(arn, regionResolver.getAccountId());
     }
 
-    private byte[] resolveLayerContent(Map<String, Object> content) {
+    private DeploymentPackage resolveLayerContent(Map<String, Object> content, Path stagingDir) {
         String zipFileBase64 = (String) content.get("ZipFile");
         if (zipFileBase64 != null) {
-            return Base64.getDecoder().decode(zipFileBase64);
+            return DeploymentPackage.of(Base64.getDecoder().decode(zipFileBase64));
         }
 
         String s3Bucket = (String) content.get("S3Bucket");
@@ -565,8 +564,7 @@ public class LambdaLayerService {
                 throw new AwsException("ServiceUnavailableException", "S3 service not available", 503);
             }
             try {
-                S3Object obj = s3Service.getObject(s3Bucket, s3Key);
-                return obj.getData();
+                return DeploymentPackage.read(s3Service.openObject(s3Bucket, s3Key, null), stagingDir);
             } catch (Exception e) {
                 throw new AwsException("InvalidParameterValueException",
                         "Unable to fetch layer content from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
@@ -575,6 +573,10 @@ public class LambdaLayerService {
 
         throw new AwsException("InvalidParameterValueException",
                 "Layer content must include either ZipFile or S3Bucket/S3Key", 400);
+    }
+
+    private Path layersRoot() {
+        return Path.of(config.services().lambda().codePath()).resolve("layers");
     }
 
     private Path getLayerCodePath(String accountId, String region, String layerName, long version) {
@@ -592,24 +594,9 @@ public class LambdaLayerService {
         return sanitized.isEmpty() || sanitized.chars().allMatch(c -> c == '.') ? "_" : sanitized;
     }
 
-    private String computeSha256(byte[] data) {
-        return Base64.getEncoder().encodeToString(Digests.sha256(data));
-    }
-
     private void deleteDirectory(Path dir) {
-        if (!Files.exists(dir)) {
-            return;
-        }
         try {
-            Files.walk(dir)
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(p -> {
-                        try {
-                            Files.delete(p);
-                        } catch (IOException e) {
-                            LOG.warnv("Failed to delete {0}: {1}", p, e.getMessage());
-                        }
-                    });
+            FileTrees.delete(dir);
         } catch (IOException e) {
             LOG.warnv("Failed to delete layer directory {0}: {1}", dir, e.getMessage());
         }

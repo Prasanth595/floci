@@ -14,8 +14,8 @@ import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.VolumeModification;
+import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -27,7 +27,6 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -39,19 +38,17 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * EBS volumes backed by real storage: attaching one gives a running instance container a block
+ * device of the right size, and detaching, resizing, restoring and deleting it act on that device
+ * and its backing file.
+ *
+ * <p>Real instances and volume block devices come from {@link IndependentServiceSettingsProfile},
+ * which this class shares with other classes that each call a different service.
+ */
 @QuarkusTest
-@TestProfile(Ec2VolumeBlockDeviceDockerIntegrationTest.Profile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class Ec2VolumeBlockDeviceDockerIntegrationTest {
-
-    public static class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.ec2.mock", "false",
-                    "floci.services.ec2.volume-block-devices", "true"
-            );
-        }
-    }
 
     @Inject
     Ec2Service ec2Service;
@@ -127,6 +124,7 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         }
         instancesToClean.clear();
 
+        // After the volumes: detaching one from a cluster node finds the node through the provider.
         ec2Service.setClusterNodeInstanceProvider(null);
 
         for (String cid : containersToClean) {
@@ -380,8 +378,6 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
 
         ContainerExec.Result checkDev = execIn(containerId, "test -b /dev/xvdf || test -L /dev/xvdf");
         assertEquals(0, checkDev.exitCode(), "Block device should exist inside cluster node container: " + checkDev.summary());
-
-        ec2Service.setClusterNodeInstanceProvider(null);
     }
 
     @Test
@@ -396,6 +392,7 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         instance.setPlacement(placement);
         instance.setState(InstanceState.running());
         ec2Service.putInstanceForTest(instance);
+        instancesToClean.add(instance.getInstanceId());
 
         Volume volume = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 1, false, 3000, 125, null, null);
         volumesToClean.add(volume.getVolumeId());

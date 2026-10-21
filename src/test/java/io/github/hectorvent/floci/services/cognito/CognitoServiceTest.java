@@ -34,6 +34,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.lang.management.ManagementFactory;
@@ -42,6 +43,7 @@ import java.lang.management.ThreadMXBean;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -240,6 +242,79 @@ class CognitoServiceTest {
         service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
         service.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
         return pool;
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"alice smith@example.com", "alice", "alice@", "@example.com",
+            "alice@@example.com", "alice@example.com\n", "alice@example.com\u0000", "alice@exa mple.com",
+            "alice\\@example.com", "\"alice@example.com\""})
+    @SuppressWarnings("unchecked")
+    void malformedEmailsAreRejectedBeforeAnyUserOrAttributeIsStored(String email) {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "email-client", false);
+        Map<String, Object> auth = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String token = (String) ((Map<String, Object>) auth.get("AuthenticationResult")).get("AccessToken");
+        Map<String, String> attributes = Map.of("email", email, "name", "must-not-be-saved");
+        for (Runnable operation : List.<Runnable>of(
+                () -> service.adminCreateUser(pool.getId(), "invalid-admin", attributes, "TempPass1!"),
+                () -> service.signUp(client.getClientId(), "invalid-signup", "Pass1234!", attributes, Map.of(), Map.of()),
+                () -> service.adminUpdateUserAttributes(pool.getId(), "alice", attributes),
+                () -> service.updateUserAttributes(token, attributes))) {
+            AwsException error = assertThrows(AwsException.class, operation::run);
+            assertEquals("InvalidParameterException", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        }
+        assertEquals(1, userStore.keys().size());
+        CognitoUser unchanged = service.adminGetUser(pool.getId(), "alice");
+        assertEquals("alice@example.com", unchanged.getAttributes().get("email"));
+        assertFalse(unchanged.getAttributes().containsKey("name"));
+        assertTrue(unchanged.getPendingAttributes().isEmpty());
+    }
+
+    @Test
+    void emailLengthUsesCognitoLimitAndBlankSelfServiceUpdateStillDeletes() {
+        UserPool pool = createPoolAndUser();
+        String validLongEmail = "a".repeat(2036) + "@example.com";
+        assertEquals(2048, validLongEmail.length());
+        service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("email", validLongEmail));
+        assertEquals(validLongEmail, service.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("email", "a" + validLongEmail)))
+                .getErrorCode());
+        UserPoolClient client = openClient(service, pool.getId(), "email-client", false);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> auth = (Map<String, Object>) service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")).get("AuthenticationResult");
+        service.updateUserAttributes((String) auth.get("AccessToken"), Map.of("email", ""));
+        assertNull(service.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "\t\r\n", "\u2003"})
+    @SuppressWarnings("unchecked")
+    void blankSelfServiceEmailUpdateDeletesAttributeAndVerifiedFlag(String email) {
+        UserPool pool = createPoolAndUser();
+        service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("email_verified", "true"));
+        UserPoolClient client = openClient(service, pool.getId(), "blank-email-client", false);
+        Map<String, Object> auth = (Map<String, Object>) service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")).get("AuthenticationResult");
+
+        assertTrue(service.updateUserAttributes((String) auth.get("AccessToken"), Map.of("email", email)).isEmpty());
+
+        CognitoUser updated = service.adminGetUser(pool.getId(), "alice");
+        assertFalse(updated.getAttributes().containsKey("email"));
+        assertFalse(updated.getAttributes().containsKey("email_verified"));
+    }
+
+    @Test
+    void emailSeparatorAfterAQuotedLocalPartOrEscapedBackslashRemainsValid() {
+        UserPool pool = createPoolAndUser();
+        for (String email : List.of("\"alice\\\\name\"@example.com", "alice\\\\@example.com")) {
+            service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("email", email));
+            assertEquals(email, service.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
+        }
     }
 
     private UserPool createPoolWithStrictPasswordPolicy() {
@@ -557,6 +632,13 @@ class CognitoServiceTest {
                 null, null, List.of(), null, null);
     }
 
+    /** A client of the authorization code grant, with the default explicit auth flows. */
+    private UserPoolClient codeGrantClient(UserPool pool) {
+        return service.createUserPoolClient(pool.getId(), "c", false, true, List.of("code"),
+                List.of("openid", "email", "aws.cognito.signin.user.admin"), null, List.of("https://app.example.test/cb"),
+                null, List.of(), null, null, List.of(), null, List.of(), null, null, null, List.of(), null, null);
+    }
+
     @ParameterizedTest
     @CsvSource({
             "Short1!a",
@@ -575,7 +657,7 @@ class CognitoServiceTest {
                 service.signUp(client.getClientId(), "alice@example.com", password, Map.of(
                         "email", "alice@example.com",
                         "phone_number", "+4915112345678"
-                )));
+                ), Map.of(), Map.of()));
 
         assertEquals("InvalidPasswordException", exception.getErrorCode());
     }
@@ -591,7 +673,7 @@ class CognitoServiceTest {
                 "alice@example.com",
                 "ValidPassword1!",
                 Map.of("email", "alice@example.com", "phone_number", "+4915112345678")
-        );
+        , Map.of(), Map.of());
 
         assertEquals("alice@example.com", user.getUsername());
     }
@@ -834,7 +916,7 @@ class CognitoServiceTest {
                 pool.getId(), "no-requirements-client", false, false, List.of(), List.of());
         assertDoesNotThrow(() -> service.signUp(
                 client.getClientId(), "alice@example.com", "abcdefg", Map.of(
-                        "email", "alice@example.com", "phone_number", "+4915112345678")));
+                        "email", "alice@example.com", "phone_number", "+4915112345678"), Map.of(), Map.of()));
     }
 
     @Test
@@ -2217,7 +2299,7 @@ class CognitoServiceTest {
                 false, false, List.of(), List.of());
 
         CognitoUser user = service.signUp(client.getClientId(),
-                "carol", "Pass1234!", Map.of("email", "carol@example.com"));
+                "carol", "Pass1234!", Map.of("email", "carol@example.com"), Map.of(), Map.of());
 
         assertTrue(user.getAttributes().containsKey("sub"),
                 "signUp should auto-generate a sub attribute");
@@ -2252,7 +2334,7 @@ class CognitoServiceTest {
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "test-client", false);
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                serviceWithVerification.signUp(client.getClientId(), "carol", "Pass1234!", Map.of()));
+                serviceWithVerification.signUp(client.getClientId(), "carol", "Pass1234!", Map.of(), Map.of(), Map.of()));
         assertEquals("InvalidParameterException", ex.getErrorCode());
 
         AwsException lookupEx = assertThrows(AwsException.class, () ->
@@ -2294,7 +2376,7 @@ class CognitoServiceTest {
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 serviceWithVerification.signUp(client.getClientId(), "carol", "Pass1234!",
-                        Map.of("email", "carol@example.com")));
+                        Map.of("email", "carol@example.com"), Map.of(), Map.of()));
         assertEquals("CodeDeliveryFailureException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
         assertEquals("Failed to deliver the message.", ex.getMessage());
@@ -2309,7 +2391,7 @@ class CognitoServiceTest {
     @Test
     void signUpReturnsResourceNotFoundAsBadRequestWhenClientMissing() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.signUp("missing-client", "carol", "Pass1234!", Map.of("email", "carol@example.com")));
+                service.signUp("missing-client", "carol", "Pass1234!", Map.of("email", "carol@example.com"), Map.of(), Map.of()));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -2535,6 +2617,33 @@ class CognitoServiceTest {
                 VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "\t\r\n", "\u2003"})
+    void blankAdminEmailUpdateDeletesAttributesAndClearsOnlyMatchingVerification(String email) {
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = inlineMock(CognitoMessageDispatcher.class);
+        PendingContactFixture fixture = createPendingContactFixture(verificationCodeService, messageDispatcher);
+        clearInvocations(verificationCodeService, messageDispatcher);
+
+        fixture.service().adminUpdateUserAttributes(fixture.pool().getId(), "alice", Map.of(
+                "email", email, "custom:note", email, "name", "updated"));
+
+        CognitoUser updated = fixture.service().adminGetUser(fixture.pool().getId(), "alice");
+        assertFalse(updated.getAttributes().containsKey("email"));
+        assertFalse(updated.getAttributes().containsKey("email_verified"));
+        assertFalse(updated.getAttributes().containsKey("custom:note"));
+        assertEquals("updated", updated.getAttributes().get("name"));
+        assertFalse(updated.getPendingAttributes().containsKey("email"));
+        assertEquals("+12025550100", updated.getAttributes().get("phone_number"));
+        assertEquals("true", updated.getAttributes().get("phone_number_verified"));
+        assertEquals("+12025550101", updated.getPendingAttributes().get("phone_number"));
+        verify(verificationCodeService).invalidatePrevious(fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
+        verify(verificationCodeService, never()).invalidatePrevious(any(), any(),
+                eq(VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION));
+        verifyNoInteractions(messageDispatcher);
+    }
+
     @Test
     void adminContactDeleteClearsOnlyMatchingPendingValueAndVerificationCode() {
         VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
@@ -2757,7 +2866,7 @@ class CognitoServiceTest {
     void initiateAuthWithUserSrpAuthRejectsUnconfirmedUser() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
-        service.signUp(client.getClientId(), "bob", "Password123!", Map.of("email", "bob@example.com"));
+        service.signUp(client.getClientId(), "bob", "Password123!", Map.of("email", "bob@example.com"), Map.of(), Map.of());
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_SRP_AUTH",
@@ -4309,18 +4418,19 @@ class CognitoServiceTest {
     }
 
     @Test
-    void preTokenGenerationOverrideCannotSuppressOrReplaceIdentityClaims() {
+    void preTokenGenerationOverrideCannotSuppressOrReplaceProtectedClaims() {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "c", false, false, List.of(), List.of());
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
         String sub = user.getAttributes().get("sub");
         CognitoService.ClaimsOverride suppress = new CognitoService.ClaimsOverride(
-                null, List.of("sub", "cognito:username"), null, List.of("sub", "username"),
+                null, List.of("sub", "cognito:username", "auth_time"),
+                null, List.of("sub", "username", "auth_time"),
                 null, null, null, null, null);
         CognitoService.ClaimsOverride replace = new CognitoService.ClaimsOverride(
-                Map.<String, Object>of("sub", "other", "cognito:username", "bob"), null,
-                Map.<String, Object>of("sub", "other", "username", "bob"), null,
+                Map.<String, Object>of("sub", "other", "cognito:username", "bob", "auth_time", 1L), null,
+                Map.<String, Object>of("sub", "other", "username", "bob", "auth_time", 1L), null,
                 null, null, null, null, null);
 
         for (CognitoService.ClaimsOverride override : List.of(suppress, replace)) {
@@ -4333,6 +4443,8 @@ class CognitoServiceTest {
             assertEquals("alice", access.get("username"));
             assertEquals(sub, id.get("sub"));
             assertEquals("alice", id.get("cognito:username"));
+            assertEquals(access.get("iat"), access.get("auth_time"));
+            assertEquals(id.get("iat"), id.get("auth_time"));
         }
     }
 
@@ -4478,12 +4590,12 @@ class CognitoServiceTest {
                 Map.of("PoolName", "TestPool", "AliasAttributes", List.of("email")),
                 "us-east-1"
         );
-        service.adminCreateUser(pool.getId(), "shared-lookup", Map.of("email", "owner@example.com"), null);
+        service.adminCreateUser(pool.getId(), "shared-lookup@example.com", Map.of("email", "owner@example.com"), null);
         service.adminCreateUser(pool.getId(), "alice",
-                Map.of("email", "shared-lookup", "email_verified", "true"), null);
+                Map.of("email", "shared-lookup@example.com", "email_verified", "true"), null);
 
         AwsException ex = assertThrows(AwsException.class,
-                () -> service.adminGetUser(pool.getId(), "shared-lookup"));
+                () -> service.adminGetUser(pool.getId(), "shared-lookup@example.com"));
         assertEquals("InvalidParameterException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -4494,13 +4606,13 @@ class CognitoServiceTest {
                 Map.of("PoolName", "TestPool", "AliasAttributes", List.of("email")),
                 "us-east-1"
         );
-        service.adminCreateUser(pool.getId(), "shared-lookup", Map.of("email", "owner@example.com"), null);
+        service.adminCreateUser(pool.getId(), "shared-lookup@example.com", Map.of("email", "owner@example.com"), null);
         service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), null);
         service.adminUpdateUserAttributes(pool.getId(), "alice",
-                Map.of("email", "shared-lookup", "email_verified", "true"));
+                Map.of("email", "shared-lookup@example.com", "email_verified", "true"));
 
         AwsException ex = assertThrows(AwsException.class,
-                () -> service.adminGetUser(pool.getId(), "shared-lookup"));
+                () -> service.adminGetUser(pool.getId(), "shared-lookup@example.com"));
         assertEquals("InvalidParameterException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
@@ -4623,15 +4735,17 @@ class CognitoServiceTest {
         String refreshToken = (String) auth.get("RefreshToken");
 
         assertNotNull(refreshToken);
-        // Should be parseable as base64 structured token: 5 payload fields + trailing HMAC signature
+        // Should be parseable as base64 structured token: 6 payload fields + trailing HMAC signature
         String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
-        String[] parts = decoded.split("\\|", 6);
-        assertEquals(6, parts.length, "Refresh token should encode 5 pipe-separated fields plus a signature");
+        String[] parts = decoded.split("\\|", 7);
+        assertEquals(7, parts.length, "Refresh token should encode 6 pipe-separated fields plus a signature");
         assertEquals(pool.getId(), parts[0]);
         assertEquals("alice", parts[1]);
         assertEquals(client.getClientId(), parts[2]);
         assertFalse(parts[3].isBlank(), "Refresh token should encode its issued-at timestamp");
-        assertFalse(parts[5].isBlank(), "Refresh token should encode a signature");
+        assertEquals("auth_time=" + Long.parseLong(parts[3]) / 1000L, parts[5],
+                "Refresh token should encode the user's auth_time, the issued-at second of an API sign-in");
+        assertFalse(parts[6].isBlank(), "Refresh token should encode a signature");
     }
 
     @Test
@@ -4660,6 +4774,84 @@ class CognitoServiceTest {
 
         assertThrows(AwsException.class, () ->
                 service.getTokensFromRefreshToken(client.getClientId(), "not-a-valid-refresh-token"));
+    }
+
+    // =========================================================================
+    // Issue #5146: refreshed tokens keep the auth_time of the sign-in
+    // =========================================================================
+
+    /**
+     * The tokens of an authorization code carry the time its user signed in, and AWS: "Refreshing a
+     * token doesn't reset the auth_time claim." Neither refresh operation does.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshedTokensKeepTheAuthTimeOfTheSignIn() throws Exception {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = codeGrantClient(pool);
+        Instant signedIn = Instant.parse("2026-01-01T00:00:00Z");
+        Map<String, Object> redeemed = service.generateAuthResultForHostedAuth(service.adminGetUser(pool.getId(), "alice"),
+                pool, client, null, List.of("openid"), signedIn);
+        String refreshToken = (String) redeemed.get("RefreshToken");
+
+        Map<String, Object> viaInitiateAuth = (Map<String, Object>) service.initiateAuth(client.getClientId(),
+                "REFRESH_TOKEN_AUTH", Map.of("REFRESH_TOKEN", refreshToken)).get("AuthenticationResult");
+        Map<String, Object> viaGetTokens = (Map<String, Object>) service.getTokensFromRefreshToken(
+                client.getClientId(), refreshToken).get("AuthenticationResult");
+
+        for (Map<String, Object> tokens : List.of(redeemed, viaInitiateAuth, viaGetTokens)) {
+            assertEquals(signedIn.getEpochSecond(), authTime(tokens.get("IdToken")));
+            assertEquals(signedIn.getEpochSecond(), authTime(tokens.get("AccessToken")));
+        }
+    }
+
+    /**
+     * A code grant's refresh token minted before refresh tokens kept auth_time has the scope field
+     * alone, and refreshes with the time it was issued, as one of an API sign-in does.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aCodeGrantRefreshTokenWithoutAuthTimeRefreshesWithTheTimeItWasIssued() throws Exception {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = codeGrantClient(pool);
+        long issuedAtMillis = System.currentTimeMillis() - 120_000L;
+        String scopeField = "scope=" + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString("openid".getBytes(StandardCharsets.UTF_8));
+        String refreshToken = signRawRefreshToken(pool, pool.getId() + "|alice|" + client.getClientId() + "|"
+                + issuedAtMillis + "|" + UUID.randomUUID() + "|" + scopeField);
+
+        for (Map<String, Object> response : List.of(
+                service.getTokensFromRefreshToken(client.getClientId(), refreshToken),
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", refreshToken)))) {
+            Map<String, Object> refreshed = (Map<String, Object>) response.get("AuthenticationResult");
+            assertEquals(issuedAtMillis / 1000L, authTime(refreshed.get("IdToken")));
+            assertEquals(issuedAtMillis / 1000L, authTime(refreshed.get("AccessToken")));
+        }
+    }
+
+    /**
+     * Only the fields after the family id are tagged, so a username holding the auth_time tag stays a
+     * username, in a token with the field and in one minted before it.
+     */
+    @Test
+    void aUsernameHoldingTheAuthTimeTagIsReadAsTheUsername() {
+        UserPool pool = createPoolAndUser();
+        String username = "alice|auth_time=1";
+
+        String[] withField = service.parseRefreshToken(service.buildRefreshToken(pool, username, "client-id",
+                1_790_000_000_123L, "family-id", null, 1_789_999_400L));
+        String[] withoutField = service.parseRefreshToken(signRawRefreshToken(pool,
+                pool.getId() + "|" + username + "|client-id|1790000000123|family-id"));
+
+        assertEquals(List.of(pool.getId(), username, "client-id", "1790000000123", "family-id", "1789999400"),
+                List.of(withField));
+        assertEquals(List.of(pool.getId(), username, "client-id", "1790000000123", "family-id", ""),
+                List.of(withoutField));
+    }
+
+    private static long authTime(Object token) throws Exception {
+        return MAPPER.readTree(jwtPayload((String) token)).path("auth_time").asLong();
     }
 
     // =========================================================================
@@ -4889,9 +5081,9 @@ class CognitoServiceTest {
         UserPool pool = createPoolAndUser();
 
         String[] parts = service.parseRefreshToken(service.buildRefreshToken(pool, "alice", "client-id",
-                1_790_000_000_123L, "family-id", List.of("openid", "notes/read|write")));
+                1_790_000_000_123L, "family-id", List.of("openid", "notes/read|write"), 1_789_999_400L));
 
-        assertEquals(List.of(pool.getId(), "alice", "client-id", "1790000000123", "family-id",
+        assertEquals(List.of(pool.getId(), "alice", "client-id", "1790000000123", "family-id", "1789999400",
                 "openid notes/read|write"), List.of(parts));
     }
 
@@ -4899,21 +5091,22 @@ class CognitoServiceTest {
     void refreshTokenOfACodeGrantWithoutScopesHasAnEmptyScopeField() {
         UserPool pool = createPoolAndUser();
 
-        String[] parts = service.parseRefreshToken(
-                service.buildRefreshToken(pool, "alice", "client-id", 1_790_000_000_123L, "family-id", List.of()));
+        String[] parts = service.parseRefreshToken(service.buildRefreshToken(pool, "alice", "client-id",
+                1_790_000_000_123L, "family-id", List.of(), 1_789_999_400L));
 
-        assertEquals(6, parts.length);
-        assertEquals("", parts[5]);
+        assertEquals(7, parts.length);
+        assertEquals("", parts[6]);
     }
 
     @Test
     void refreshTokenOfAnApiSignInHasNoScopeField() {
         UserPool pool = createPoolAndUser();
 
-        String[] parts = service.parseRefreshToken(
-                service.buildRefreshToken(pool, "alice", "client-id", 1_790_000_000_123L, "family-id", null));
+        String[] parts = service.parseRefreshToken(service.buildRefreshToken(pool, "alice", "client-id",
+                1_790_000_000_123L, "family-id", null, 1_790_000_000L));
 
-        assertEquals(List.of(pool.getId(), "alice", "client-id", "1790000000123", "family-id"), List.of(parts));
+        assertEquals(List.of(pool.getId(), "alice", "client-id", "1790000000123", "family-id", "1790000000"),
+                List.of(parts));
     }
 
     /**
@@ -4935,23 +5128,21 @@ class CognitoServiceTest {
         assertNotNull(service.getTokensFromRefreshToken(client.getClientId(), refreshToken).get("AuthenticationResult"));
         assertNotNull(service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
                 Map.of("REFRESH_TOKEN", refreshToken)).get("AuthenticationResult"));
-        assertEquals(List.of(pool.getId(), "pipe|user", "client-id", "1790000000123", "family-id", "openid"),
-                List.of(service.parseRefreshToken(service.buildRefreshToken(pool, "pipe|user", "client-id",
-                        1_790_000_000_123L, "family-id", List.of("openid")))));
+        assertEquals(List.of(pool.getId(), "pipe|user", "client-id", "1790000000123", "family-id", "1789999400",
+                "openid"), List.of(service.parseRefreshToken(service.buildRefreshToken(pool, "pipe|user", "client-id",
+                        1_790_000_000_123L, "family-id", List.of("openid"), 1_789_999_400L))));
     }
 
     @Test
     @SuppressWarnings("unchecked")
     void getTokensFromRefreshTokenOfACodeGrantKeepsItsScopesAndIssuesAnIdTokenOnlyWithOpenid() throws Exception {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, true, List.of("code"),
-                List.of("openid", "email", "aws.cognito.signin.user.admin"), null, List.of("https://app.example.test/cb"),
-                null, List.of(), null, null, List.of(), null, List.of(), null, null, null, List.of(), null, null);
+        UserPoolClient client = codeGrantClient(pool);
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 
         for (List<String> granted : List.of(List.of("openid", "email"), List.of("email"))) {
-            String refreshToken = (String) service.generateAuthResultForHostedAuth(user, pool, client, null, granted)
-                    .get("RefreshToken");
+            String refreshToken = (String) service.generateAuthResultForHostedAuth(user, pool, client, null, granted,
+                    Instant.now()).get("RefreshToken");
 
             Map<String, Object> refreshed = (Map<String, Object>) service
                     .getTokensFromRefreshToken(client.getClientId(), refreshToken).get("AuthenticationResult");
@@ -4970,8 +5161,8 @@ class CognitoServiceTest {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
-        String refreshToken = (String) service.generateAuthResultForHostedAuth(user, pool, client, null, List.of())
-                .get("RefreshToken");
+        String refreshToken = (String) service.generateAuthResultForHostedAuth(user, pool, client, null, List.of(),
+                Instant.now()).get("RefreshToken");
 
         Map<String, Object> refreshed = (Map<String, Object>) service
                 .getTokensFromRefreshToken(client.getClientId(), refreshToken).get("AuthenticationResult");
@@ -5485,7 +5676,7 @@ class CognitoServiceTest {
                     pool.getId(), "c", false, false, List.of(), List.of());
 
             svc.signUp(client.getClientId(), username, password,
-                    Map.of("email", username));
+                    Map.of("email", username), Map.of(), Map.of());
             svc.confirmSignUp(client.getClientId(), username, "123456");
 
             CognitoUser user = svc.adminGetUser(pool.getId(), username);
@@ -5512,7 +5703,7 @@ class CognitoServiceTest {
                     pool.getId(), "c", false, false, List.of(), List.of());
 
             svc.signUp(client.getClientId(), username, password,
-                    Map.of("phone_number", phoneNumber));
+                    Map.of("phone_number", phoneNumber), Map.of(), Map.of());
             svc.confirmSignUp(client.getClientId(), username, "123456");
 
             CognitoUser user = svc.adminGetUser(pool.getId(), username);
@@ -5539,7 +5730,7 @@ class CognitoServiceTest {
                     pool.getId(), "c", false, false, List.of(), List.of());
 
             svc.signUp(client.getClientId(), email, password,
-                    Map.of("email", email, "phone_number", phoneNumber));
+                    Map.of("email", email, "phone_number", phoneNumber), Map.of(), Map.of());
             svc.confirmSignUp(client.getClientId(), email, "123456");
 
             CognitoUser user = svc.adminGetUser(pool.getId(), email);
@@ -5566,7 +5757,7 @@ class CognitoServiceTest {
                     pool.getId(), "c", false, false, List.of(), List.of());
 
             svc.signUp(client.getClientId(), email, password,
-                    Map.of("email", email, "phone_number", phoneNumber));
+                    Map.of("email", email, "phone_number", phoneNumber), Map.of(), Map.of());
             svc.confirmSignUp(client.getClientId(), email, "123456");
 
             CognitoUser user = svc.adminGetUser(pool.getId(), email);
@@ -5589,7 +5780,7 @@ class CognitoServiceTest {
                     pool.getId(), "c", false, false, List.of(), List.of());
 
             svc.signUp(client.getClientId(), username, password,
-                    Map.of("email", username));
+                    Map.of("email", username), Map.of(), Map.of());
             svc.confirmSignUp(client.getClientId(), username, "123456");
 
             CognitoUser user = svc.adminGetUser(pool.getId(), username);
@@ -5616,7 +5807,7 @@ class CognitoServiceTest {
                     pool.getId(), "c", false, false, List.of(), List.of());
 
             service.signUp(client.getClientId(), username, password,
-                    Map.of("email", username));
+                    Map.of("email", username), Map.of(), Map.of());
 
             service.confirmSignUp(client.getClientId(), username);
 
@@ -5643,7 +5834,7 @@ class CognitoServiceTest {
                     pool.getId(), "c", false, false, List.of(), List.of());
 
             svc.signUp(client.getClientId(), username, password,
-                    Map.of("email", username));
+                    Map.of("email", username), Map.of(), Map.of());
             svc.updateUserPool(Map.of(
                     "UserPoolId", pool.getId(),
                     "AutoVerifiedAttributes", List.of("phone_number")

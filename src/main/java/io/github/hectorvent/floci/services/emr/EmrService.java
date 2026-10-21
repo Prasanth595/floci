@@ -5,7 +5,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.emr.model.EmrBlockPublicAccess;
@@ -19,17 +22,22 @@ import jakarta.inject.Inject;
 
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * EMR management-plane business logic. Cluster and step lifecycles are simulated
- * through immediate state transitions (no Hadoop runs): clusters land in WAITING and
- * initial steps in COMPLETED. The {@code clusterStartupDelaySeconds} config exists for
+ * through immediate state transitions (no Hadoop runs): steps complete immediately,
+ * leaving persistent clusters WAITING and transient clusters with steps TERMINATED.
+ * The {@code clusterStartupDelaySeconds} config exists for
  * future deferred transitions; Phase 1 advances synchronously for deterministic tests.
  */
 @ApplicationScoped
@@ -73,9 +81,9 @@ public class EmrService {
         // Only a missing Name fails AWS's framework validation: the member is REQUIRED but its
         // constraint is len=[0..256], so an explicit empty string is accepted by real EMR.
         if (cluster.getName() == null) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value null at 'name' failed to satisfy constraint: "
-                            + "Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(
+                    "Value null at 'name' failed to satisfy constraint: "
+                            + "Member must not be null");
         }
         String id = "j-" + randomId(13);
         cluster.setId(id);
@@ -88,7 +96,7 @@ public class EmrService {
                 ? "INSTANCE_GROUP" : "INSTANCE_FLEET");
         cluster.setAutoTerminate(!cluster.isKeepJobFlowAliveWhenNoSteps());
         cluster.setMasterPublicDnsName(masterDnsName(region));
-        cluster.setCreationDateTime(Instant.now());
+        cluster.setCreationDateTime(Instant.now().truncatedTo(ChronoUnit.MILLIS));
         for (EmrInstanceGroup g : cluster.getInstanceGroups()) {
             g.setId("ig-" + randomId(13));
             g.setRunningInstanceCount(g.getRequestedInstanceCount());
@@ -105,6 +113,7 @@ public class EmrService {
             completeStep(step);
         }
         advanceToWaiting(cluster);
+        terminateAfterCompletedSteps(cluster);
         clusterStore.put(id, cluster);
         return cluster;
     }
@@ -118,13 +127,24 @@ public class EmrService {
         return requireCluster(id);
     }
 
-    public List<EmrCluster> listClusters(String region, List<String> states) {
+    public List<EmrCluster> listClusters(String region, List<String> states,
+                                          Instant createdAfter, Instant createdBefore) {
         List<EmrCluster> result = new ArrayList<>();
         for (EmrCluster c : clusterStore.scan(k -> true)) {
             if (!region.equals(c.getRegion())) {
                 continue;
             }
             if (states != null && !states.isEmpty() && !states.contains(c.getState())) {
+                continue;
+            }
+            Instant createdAt = c.getCreationDateTime();
+            if (createdAt != null) {
+                createdAt = createdAt.truncatedTo(ChronoUnit.MILLIS);
+            }
+            if (createdAfter != null && (createdAt == null || !createdAt.isAfter(createdAfter))) {
+                continue;
+            }
+            if (createdBefore != null && (createdAt == null || !createdAt.isBefore(createdBefore))) {
                 continue;
             }
             result.add(c);
@@ -141,14 +161,15 @@ public class EmrService {
             if (cluster == null) {
                 continue;
             }
+            if ("TERMINATED".equals(cluster.getState())) {
+                continue;
+            }
             if (cluster.isTerminationProtected()) {
                 anyProtected = true;
                 continue;
             }
-            if ("TERMINATED".equals(cluster.getState())) {
-                continue;
-            }
             cluster.setState("TERMINATED");
+            releaseInstanceCapacity(cluster);
             cluster.setStateChangeReasonCode("USER_REQUEST");
             cluster.setStateChangeMessage("Terminated by user request");
             cluster.setEndDateTime(Instant.now());
@@ -192,12 +213,19 @@ public class EmrService {
 
     public synchronized List<String> addJobFlowSteps(String clusterId, List<EmrStep> steps) {
         EmrCluster cluster = requireCluster(clusterId);
+        if ("TERMINATED".equals(cluster.getState())) {
+            throw new AwsException("ValidationException",
+                    "A job flow that is shutting down, terminated, or finished may not be modified.", 400);
+        }
         List<String> ids = new ArrayList<>();
         for (EmrStep step : steps) {
             initStep(step);
             completeStep(step);
             cluster.getSteps().add(step);
             ids.add(step.getId());
+        }
+        if (!steps.isEmpty()) {
+            terminateAfterCompletedSteps(cluster);
         }
         clusterStore.put(clusterId, cluster);
         return ids;
@@ -257,6 +285,7 @@ public class EmrService {
 
     public synchronized List<String> addInstanceGroups(String clusterId, List<EmrInstanceGroup> groups) {
         EmrCluster cluster = requireCluster(clusterId);
+        rejectTerminatedCluster(cluster);
         List<String> ids = new ArrayList<>();
         for (EmrInstanceGroup group : groups) {
             group.setId("ig-" + randomId(13));
@@ -286,6 +315,7 @@ public class EmrService {
         List<EmrInstanceGroup> groups = new ArrayList<>();
         for (InstanceGroupModification mod : modifications) {
             EmrCluster found = clusterId != null ? requireCluster(clusterId) : clusterOwning(region, mod.instanceGroupId());
+            rejectTerminatedCluster(found);
             // One copy per cluster, so two groups of the same cluster are changed and stored together.
             EmrCluster cluster = touched.computeIfAbsent(found.getId(), id -> found);
             EmrInstanceGroup group = requireInstanceGroup(cluster, mod.instanceGroupId());
@@ -321,6 +351,7 @@ public class EmrService {
 
     public synchronized String addInstanceFleet(String clusterId, EmrInstanceFleet fleet) {
         EmrCluster cluster = requireCluster(clusterId);
+        rejectTerminatedCluster(cluster);
         fleet.setId("if-" + randomId(13));
         fleet.setProvisionedOnDemandCapacity(fleet.getTargetOnDemandCapacity());
         fleet.setProvisionedSpotCapacity(fleet.getTargetSpotCapacity());
@@ -337,6 +368,7 @@ public class EmrService {
         if (instanceFleetId == null) {
             throw invalid("InstanceFleetId is required.");
         }
+        rejectTerminatedCluster(cluster);
         EmrInstanceFleet fleet = cluster.getInstanceFleets().stream()
                 .filter(f -> instanceFleetId.equals(f.getId()))
                 .findFirst()
@@ -399,6 +431,97 @@ public class EmrService {
                     "Security configuration does not exist: " + name, 400);
         }
         secConfigStore.delete(name);
+    }
+
+    // ──────────────────────────── Release catalogue ────────────────────────────
+
+    private static final int MAX_RESULTS = 100;
+    private static final int INSTANCE_TYPE_PAGE = 50;
+
+    /**
+     * The catalogue's releases, newest first. Floci's configured default release label is always
+     * among them, with no applications when the catalogue does not describe it, so a non-default
+     * setting never makes Floci's own default unknown.
+     */
+    List<EmrReleaseCatalog.Release> releases() {
+        if (EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
+            return EmrReleaseCatalog.RELEASES;
+        }
+        List<EmrReleaseCatalog.Release> all = new ArrayList<>(EmrReleaseCatalog.RELEASES);
+        all.add(new EmrReleaseCatalog.Release(defaultReleaseLabel, List.of(), List.of()));
+        all.sort((a, b) -> EmrReleaseCatalog.NEWEST_FIRST.compare(a.label(), b.label()));
+        return all;
+    }
+
+    /**
+     * Release labels, newest first, narrowed by {@code prefix} (such as {@code emr-6}) and by
+     * {@code application}, a name or {@code name@version} (such as {@code spark@3.5.2}) matched
+     * without regard to case. A token belongs to the filters it was issued for, so one replayed
+     * with other filters, or altered, is refused.
+     */
+    public PaginatedResult<String> listReleaseLabels(String prefix, String application, String nextToken,
+                                                     Integer maxResults) {
+        if (maxResults != null && (maxResults < 1 || maxResults > MAX_RESULTS)) {
+            throw new AwsException("InvalidRequestException",
+                    "MaxResults must be between 1 and " + MAX_RESULTS + ".", 400);
+        }
+        String appName = null;
+        String appVersion = null;
+        if (application != null && !application.isBlank()) {
+            int at = application.indexOf('@');
+            appName = (at < 0 ? application : application.substring(0, at)).trim();
+            appVersion = at < 0 ? null : application.substring(at + 1).trim();
+        }
+        String name = appName;
+        String version = appVersion;
+        List<String> labels = releases().stream()
+                .filter(r -> prefix == null || prefix.isBlank() || r.label().startsWith(prefix))
+                .filter(r -> name == null || r.applications().stream().anyMatch(a -> a.name().equalsIgnoreCase(name)
+                        && (version == null || version.isEmpty() || a.version().equalsIgnoreCase(version))))
+                .map(EmrReleaseCatalog.Release::label)
+                .toList();
+        String namespace = "ListReleaseLabels|" + Objects.toString(prefix, "") + "|" + Objects.toString(application, "");
+        return Pagination.paginate(labels, positionIn(labels), maxResults != null ? maxResults : MAX_RESULTS,
+                nextToken, namespace, EmrService::invalidToken);
+    }
+
+    /** A release's applications and OS releases; no label means the latest release. */
+    public EmrReleaseCatalog.Release describeReleaseLabel(String label) {
+        return label == null || label.isBlank() ? releases().get(0) : requireRelease(label);
+    }
+
+    public PaginatedResult<EmrReleaseCatalog.InstanceType> listSupportedInstanceTypes(String label, String marker) {
+        if (label == null || label.isBlank()) {
+            throw new AwsException("InvalidRequestException", "ReleaseLabel is required.", 400);
+        }
+        requireRelease(label);
+        List<EmrReleaseCatalog.InstanceType> types = EmrReleaseCatalog.INSTANCE_TYPES;
+        return Pagination.paginate(types, positionIn(types), INSTANCE_TYPE_PAGE, marker,
+                "ListSupportedInstanceTypes|" + label, EmrService::invalidToken);
+    }
+
+    private EmrReleaseCatalog.Release requireRelease(String label) {
+        return releases().stream()
+                .filter(r -> r.label().equals(label))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "The specified release label " + label + " is not valid.", 400));
+    }
+
+    /**
+     * A cursor that keeps the catalogue's own order: {@link Pagination} sorts by cursor, and the
+     * catalogue is newest first rather than alphabetical.
+     */
+    private static <T> Function<T, String> positionIn(List<T> items) {
+        Map<T, String> positions = new HashMap<>();
+        for (int i = 0; i < items.size(); i++) {
+            positions.put(items.get(i), String.format("%06d", i));
+        }
+        return positions::get;
+    }
+
+    private static AwsException invalidToken(String token) {
+        return new AwsException("InvalidRequestException", "Invalid pagination token: " + token, 400);
     }
 
     public List<SecurityConfiguration> listSecurityConfigurations() {
@@ -640,6 +763,12 @@ public class EmrService {
         return new AwsException("InvalidRequestException", message, 400);
     }
 
+    private static void rejectTerminatedCluster(EmrCluster cluster) {
+        if ("TERMINATED".equals(cluster.getState())) {
+            throw invalid("Cluster " + cluster.getId() + " is terminated.");
+        }
+    }
+
     private static EmrInstanceGroup requireInstanceGroup(EmrCluster cluster, String instanceGroupId) {
         if (instanceGroupId == null) {
             throw invalid("InstanceGroupId is required.");
@@ -681,6 +810,31 @@ public class EmrService {
         cluster.setStateChangeReasonCode(cluster.getSteps().isEmpty() ? null : "ALL_STEPS_COMPLETED");
         cluster.setStateChangeMessage("Cluster ready to run steps.");
         cluster.setReadyDateTime(Instant.now());
+    }
+
+    private void terminateAfterCompletedSteps(EmrCluster cluster) {
+        if (cluster.getSteps().isEmpty() || !cluster.isAutoTerminate()
+                || "TERMINATED".equals(cluster.getState())) {
+            return;
+        }
+        cluster.setState("TERMINATED");
+        releaseInstanceCapacity(cluster);
+        cluster.setStateChangeReasonCode("ALL_STEPS_COMPLETED");
+        cluster.setStateChangeMessage("All steps completed.");
+        cluster.setEndDateTime(Instant.now());
+    }
+
+    private void releaseInstanceCapacity(EmrCluster cluster) {
+        for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
+            group.setState("TERMINATED");
+            group.setTerminatedInstanceCount(group.getRunningInstanceCount());
+            group.setRunningInstanceCount(0);
+        }
+        for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
+            fleet.setState("TERMINATED");
+            fleet.setProvisionedOnDemandCapacity(0);
+            fleet.setProvisionedSpotCapacity(0);
+        }
     }
 
     private void initStep(EmrStep step) {

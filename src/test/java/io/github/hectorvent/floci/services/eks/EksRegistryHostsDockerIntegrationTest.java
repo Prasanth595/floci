@@ -1,38 +1,37 @@
 package io.github.hectorvent.floci.services.eks;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.github.hectorvent.floci.testing.RealEksProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPOutputStream;
@@ -50,22 +49,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * directory (/var/lib/rancher/k3s/agent/etc/containerd/certs.d) before container start, so standard
  * user data works unchanged. A pod scheduled in the cluster pulls its image through the configured
  * host, with the custom header that registries.yaml could not express.
+ *
+ * <p>The real cluster comes from {@link RealEksProfile}, which this class shares with the other
+ * classes that run a k3s cluster, so it removes the cluster, node group and launch template it
+ * creates.
  */
 @QuarkusTest
-@TestProfile(EksRegistryHostsDockerIntegrationTest.Profile.class)
-// Three 60 s cluster-ready waits plus 30 s, 30 s and 45 s polls: past the suite's 2-minute default.
+@TestProfile(RealEksProfile.class)
+// Bounded cluster/workload waits total 285 s; allow Docker setup and cleanup as well.
 @Timeout(value = 6, unit = TimeUnit.MINUTES)
 class EksRegistryHostsDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksRegistryHostsDockerIntegrationTest.class);
     private static final String JSON = "application/json";
 
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.eks.mock", "false");
-        }
-    }
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @ConfigProperty(name = "quarkus.http.test-port", defaultValue = "8081")
     int httpPort;
@@ -85,8 +84,6 @@ class EksRegistryHostsDockerIntegrationTest {
     @Inject
     DockerHostResolver dockerHostResolver;
 
-    private String clusterName;
-
     @BeforeEach
     void requireDocker() {
         boolean dockerAvailable = isDockerAvailable();
@@ -96,21 +93,11 @@ class EksRegistryHostsDockerIntegrationTest {
         Assumptions.assumeTrue(dockerAvailable, "Docker daemon must be available for the registry-hosts integration test");
     }
 
-    @AfterEach
-    void tearDown() {
-        if (clusterName != null) {
-            try {
-                eksService.deleteCluster(clusterName);
-            } catch (Exception e) {
-                LOG.warnv("Failed to delete test cluster {0}: {1}", clusterName, e.getMessage());
-            }
-        }
-    }
-
     @Test
     void podPullsThroughRegistryHostConfiguredViaLaunchTemplateUserData() throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
-        clusterName = "reg-hosts-dock-" + suffix;
+        String clusterName = "reg-hosts-dock-" + suffix;
+        String nodegroupName = "ng-" + suffix;
         String repo = "reg-hosts-it-" + suffix;
         // Not "000000000000": the generated ECR mirror only covers the default account, so this
         // hostname is only reachable at all because of the registry-hosts configuration below.
@@ -124,6 +111,7 @@ class EksRegistryHostsDockerIntegrationTest {
                         + "\"arn:aws:iam::000000000000:role/eks-service-role\"}")
                 .when().post("/clusters")
                 .then().statusCode(200);
+        cleanup.register(() -> eksService.deleteCluster(clusterName));
 
         Cluster cluster = eksService.describeCluster(clusterName);
         assertNotNull(cluster.getContainerId(), "Container ID must not be null");
@@ -132,7 +120,7 @@ class EksRegistryHostsDockerIntegrationTest {
         String containerId = cluster.getContainerId();
 
         // Verify symlink was created before container started
-        ExecResult linkResult = execInContainerWithExitCode(containerId,
+        ContainerExec.Result linkResult = execInContainerWithExitCode(containerId,
                 new String[]{"readlink", "/etc/containerd/certs.d"});
         assertEquals(0, linkResult.exitCode(), "readlink /etc/containerd/certs.d must succeed");
         assertEquals(EksClusterManager.CONTAINERD_CERTS_TARGET, linkResult.stdout().trim());
@@ -163,11 +151,12 @@ class EksRegistryHostsDockerIntegrationTest {
         LaunchTemplateData ltData = new LaunchTemplateData();
         ltData.setUserData(Base64.getEncoder().encodeToString(userDataScript.getBytes(StandardCharsets.UTF_8)));
         LaunchTemplate lt = ec2Service.createLaunchTemplate("us-east-1", "eks-hosts-lt-" + suffix, ltData, List.of());
+        cleanup.register(() -> ec2Service.deleteLaunchTemplate("us-east-1", lt.getLaunchTemplateId(), null));
 
         given().contentType(JSON)
                 .body("""
                         {
-                          "nodegroupName": "ng-%s",
+                          "nodegroupName": "%s",
                           "subnets": ["subnet-12345678"],
                           "nodeRole": "arn:aws:iam::000000000000:role/eks-node-role",
                           "launchTemplate": {
@@ -175,9 +164,10 @@ class EksRegistryHostsDockerIntegrationTest {
                             "version": "1"
                           }
                         }
-                        """.formatted(suffix, lt.getLaunchTemplateId()))
+                        """.formatted(nodegroupName, lt.getLaunchTemplateId()))
                 .when().post("/clusters/" + clusterName + "/node-groups")
                 .then().statusCode(200);
+        cleanup.register(() -> eksService.deleteNodeGroup(clusterName, nodegroupName));
 
         // Re-read cluster and container ID: applying the first node group replaces the k3s container
         // to apply node capacity limits, invalidating the previous container ID.
@@ -194,6 +184,7 @@ class EksRegistryHostsDockerIntegrationTest {
 
         // Verify hosts.toml survives container restart
         dockerClient.restartContainerCmd(containerId).exec();
+        Instant restartCompletedAt = Instant.now();
         waitUntilReady(cluster);
         String hostsTomlAfterRestart = null;
         long restartDeadline = System.currentTimeMillis() + 30000;
@@ -211,17 +202,27 @@ class EksRegistryHostsDockerIntegrationTest {
                 "the configured header must survive container restart");
 
         long saDeadline = System.currentTimeMillis() + 30000;
-        boolean saReady = false;
+        boolean ready = false;
         while (System.currentTimeMillis() < saDeadline) {
-            ExecResult saResult = execInContainerWithExitCode(containerId,
-                    new String[]{"kubectl", "get", "serviceaccount", "default"});
-            if (saResult.exitCode() == 0) {
-                saReady = true;
+            ContainerExec.Result saResult = execInContainerWithExitCode(containerId,
+                    new String[]{"kubectl", "--request-timeout=2s", "get", "serviceaccount", "default"});
+            ContainerExec.Result nodeReady = execInContainerWithExitCode(containerId,
+                    new String[]{"kubectl", "--request-timeout=2s", "wait",
+                            "--for=condition=Ready", "nodes", "--all", "--timeout=1s"});
+            ContainerExec.Result leases = execInContainerWithExitCode(containerId,
+                    new String[]{"kubectl", "--request-timeout=2s", "get", "leases", "-n", "kube-node-lease",
+                            "-o", "jsonpath={.items[*].spec.renewTime}"});
+            String renewals = leases.stdout().trim();
+            boolean freshHeartbeat = leases.exitCode() == 0 && !renewals.isEmpty()
+                    && Arrays.stream(renewals.split("\\s+"))
+                            .allMatch(renewal -> Instant.parse(renewal).isAfter(restartCompletedAt));
+            if (saResult.exitCode() == 0 && nodeReady.exitCode() == 0 && freshHeartbeat) {
+                ready = true;
                 break;
             }
             Thread.sleep(1000);
         }
-        assertTrue(saReady, "default serviceaccount must be created within 30 seconds");
+        assertTrue(ready, "serviceaccount and Ready nodes with renewed Leases must be available within 30 seconds");
 
         String podYaml = """
                 apiVersion: v1
@@ -240,7 +241,7 @@ class EksRegistryHostsDockerIntegrationTest {
         long deadline = System.currentTimeMillis() + 45000;
         boolean running = false;
         while (System.currentTimeMillis() < deadline) {
-            ExecResult status = execInContainerWithExitCode(containerId,
+            ContainerExec.Result status = execInContainerWithExitCode(containerId,
                     new String[]{"kubectl", "get", "pod", "registry-hosts-pod", "-o", "jsonpath={.status.phase}"});
             if ("Running".equalsIgnoreCase(status.stdout().trim())) {
                 running = true;
@@ -426,43 +427,21 @@ class EksRegistryHostsDockerIntegrationTest {
     }
 
     private String execInContainer(String containerId, String[] cmd) {
-        ExecResult result = execInContainerWithExitCode(containerId, cmd);
+        ContainerExec.Result result = execInContainerWithExitCode(containerId, cmd);
         if (result.exitCode() != 0) {
-            throw new IllegalStateException("Command failed with exit code " + result.exitCode() + ": " + result.stdout());
+            throw new IllegalStateException("Command failed with exit code " + result.exitCode() + ": " + result.summary());
         }
         return result.stdout();
     }
 
-    private record ExecResult(int exitCode, String stdout) {}
-
-    private ExecResult execInContainerWithExitCode(String containerId, String[] cmd) {
+    private ContainerExec.Result execInContainerWithExitCode(String containerId, String[] cmd) {
         try {
-            ExecCreateCmdResponse exec = dockerClient.execCreateCmd(containerId)
-                    .withCmd(cmd)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .exec();
-
-            StringBuilder stdout = new StringBuilder();
-            dockerClient.execStartCmd(exec.getId())
-                    .exec(new ResultCallback.Adapter<Frame>() {
-                        @Override
-                        public void onNext(Frame frame) {
-                            if (frame.getStreamType() == StreamType.STDOUT
-                                    || frame.getStreamType() == StreamType.STDERR) {
-                                stdout.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                            }
-                        }
-                    })
-                    .awaitCompletion(30, TimeUnit.SECONDS);
-
-            Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-            return new ExecResult(exitCode != null ? exitCode.intValue() : -1, stdout.toString());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Exec command interrupted", e);
-        } catch (Exception e) {
-            return new ExecResult(-1, e.getMessage());
+            return ContainerExec.run(dockerClient, containerId, cmd, 30);
+        } catch (RuntimeException failure) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw failure;
+            }
+            return new ContainerExec.Result(-1, "", failure.toString(), false);
         }
     }
 }

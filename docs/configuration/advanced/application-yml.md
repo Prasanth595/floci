@@ -36,7 +36,7 @@ The block below mirrors `src/main/resources/application.yml`, it's the effective
 
 ```yaml
 floci:
-  base-url: "http://localhost:4566"  # Used to build response URLs (SQS QueueUrl, SNS endpoints, etc.)
+  base-url: "http://localhost:4566"  # Used to build response URLs (SQS QueueUrl unless sqs.endpoint-strategy is aws, SNS endpoints, etc.)
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
   default-region: us-east-1           # Also selects the partition (cn-north-1 -> aws-cn)
   default-account-id: "000000000000"
@@ -136,10 +136,13 @@ floci:
       max-message-size: 1048576              # Bytes (1 MiB, the AWS maximum)
       clear-fifo-deduplication-cache-on-purge: false  # When true, PurgeQueue clears SQS FIFO dedup and SNS FIFO topic dedup for topics subscribed to that queue
       receipt-handle-secret: local-emulator-secret  # HMAC secret that signs receipt handles
+      endpoint-strategy: floci               # QueueUrl shape: floci is <base-url>/<account>/<name>, aws is https://sqs.<region>.<dns-suffix>/<account>/<name>
 
     s3:
       enabled: true
       default-presign-expiry-seconds: 3600
+      lifecycle-sweep-enabled: true            # Apply bucket lifecycle expiration rules in the background
+      lifecycle-sweep-interval-seconds: 60     # Seconds between lifecycle sweeps
 
     dynamodb:
       enabled: true
@@ -220,6 +223,7 @@ floci:
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+      database-resuming-exception-enabled: false
 
     eventbridge:
       enabled: true
@@ -344,15 +348,17 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE`              | `1048576`        | Max message size (bytes)                                      |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` clears the FIFO 5-minute deduplication cache for the target queue and matching SNS FIFO topic dedup entries |
 | `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles, so a handle that was edited or built by hand is rejected |
+| `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `floci` | Shape of the returned `QueueUrl`. `floci` gives `<FLOCI_BASE_URL>/<account>/<name>` and `aws` gives `https://sqs.<region>.<dns-suffix>/<account>/<name>`. Both forms are accepted as input |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600`           | Pre-signed URL expiry                                         |
 | `FLOCI_SERVICES_DOCKER_NETWORK`                    | *(unset)*        | Shared Docker network for Lambda, RDS, ElastiCache containers |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED`                  | `true`           | Enable the RDS Data API service                               |
 | `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS`  | `180`            | Idle timeout, in seconds, before leaked RDS Data API transactions expire |
+| `FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED` | `false` | Return HTTP 400 `DatabaseResumingException` during Aurora resume instead of waiting |
 | `FLOCI_SERVICES_ECS_MOCK`                          | `false`          | Skip Docker; tasks go straight to RUNNING (useful for CI)     |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK`                | *(unset)*        | Docker network for ECS task containers                        |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB`             | `512`            | Default memory (MB) when task definition omits it             |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS`             | `256`            | Default CPU units when task definition omits it               |
-| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`             | *(unset)*        | Comma-separated allowlist of parent directories for host volume bind mounts; by default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
+| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`             | *(unset)*        | Comma-separated allowlist of parent directories for host volume bind mounts and container devices; by default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` and device `hostPath` is rejected |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES`     | `false`          | Allow any host path, bypassing the host-volume-roots allowlist (traversal, bare root, and the Docker socket or an ancestor directory of it are still always rejected) |
 | `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true`         | Remove the ECS containers a previous run of this Floci left on the daemon before replacement tasks start |
 | `FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR`           | `default`        | How task images are pulled at launch, as the ECS agent's `ECS_IMAGE_PULL_BEHAVIOR`: `default`, `always`, `once` or `prefer-cached` |

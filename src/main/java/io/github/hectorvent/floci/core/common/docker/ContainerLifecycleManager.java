@@ -30,23 +30,23 @@ import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.Lau
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -74,17 +74,22 @@ public class ContainerLifecycleManager {
     private static final Pattern KEYRING_QUOTA_PATTERN =
             Pattern.compile("join keyctl.*disk quota exceeded", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
+    /** Matches 3-4 octal digits (e.g. "0755", "755", "2775"), matching CreationInfo.Permissions. */
+    public static final Pattern PERMISSIONS_PATTERN = Pattern.compile("^[0-7]{3,4}$");
+
     private static final long NANO_CPUS_PER_CPU = 1_000_000_000L;
     private static final String CONTAINER_NETWORK_MODE_PREFIX = "container:";
 
     /** Host interface a port marked loopback-only publishes on. */
     private static final String LOOPBACK_HOST_IP = "127.0.0.1";
 
+    private final Semaphore teardownSlots = new Semaphore(8, true);
+
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
-    private final PortAllocator portAllocator;
     private final EmulatorConfig config;
+    private final long archiveRetryBackoffMillis;
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
@@ -96,13 +101,21 @@ public class ContainerLifecycleManager {
     public ContainerLifecycleManager(DockerClient dockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
-                                     PortAllocator portAllocator,
                                      EmulatorConfig config) {
+        this(dockerClient, imageCacheService, containerDetector, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
+
+    ContainerLifecycleManager(DockerClient dockerClient,
+                              ImageCacheService imageCacheService,
+                              ContainerDetector containerDetector,
+                              EmulatorConfig config,
+                              long archiveRetryBackoffMillis) {
         this.dockerClient = dockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
-        this.portAllocator = portAllocator;
         this.config = config;
+        this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
     }
 
     /**
@@ -327,18 +340,9 @@ public class ContainerLifecycleManager {
     private boolean copyCaBundle(String containerId, Path bundle) {
         try {
             byte[] content = Files.readAllBytes(bundle);
-            ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
-                TarArchiveEntry entry = new TarArchiveEntry(ContainerCaBundle.FILE_NAME);
-                entry.setSize(content.length);
-                tar.putArchiveEntry(entry);
-                tar.write(content);
-                tar.closeArchiveEntry();
-            }
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withRemotePath(ContainerCaBundle.CONTAINER_DIR)
-                    .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
-                    .exec();
+            RetryingTarCopier.copyBytes(dockerClient, containerId, ContainerCaBundle.CONTAINER_DIR,
+                    ContainerCaBundle.FILE_NAME, content, 0644,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
             LOG.debugv("Copied the CA bundle into container {0} at {1}", containerId, ContainerCaBundle.CONTAINER_PATH);
             return true;
         } catch (Exception e) {
@@ -389,6 +393,13 @@ public class ContainerLifecycleManager {
                         .withNetworkId(spec.networkMode())
                         .exec();
                 LOG.debugv("Connected container {0} to network {1}", containerId, spec.networkMode());
+            } catch (NotFoundException e) {
+                // Docker answers 404 when the network does not exist, which fails a container that
+                // joins at creation, or when the container is already gone. Either way it cannot
+                // reach its network, so fail the start instead of leaving it on the default bridge.
+                // Docker's message says which of the two was missing.
+                throw new IllegalStateException("Could not connect container " + containerId
+                        + " to Docker network " + spec.networkMode() + ": " + e.getMessage(), e);
             } catch (Exception e) {
                 LOG.warnv("Could not connect container {0} to network {1}: {2}",
                         containerId, spec.networkMode(), e.getMessage());
@@ -473,6 +484,10 @@ public class ContainerLifecycleManager {
      *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
      */
     public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
+        withTeardownSlot(() -> stopAndRemoveAdmitted(containerId, logStream, stopTimeoutSeconds));
+    }
+
+    private void stopAndRemoveAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds) {
         LOG.infov("Stopping container {0}", containerId);
 
         boolean stoppedOrMissing = false;
@@ -526,6 +541,10 @@ public class ContainerLifecycleManager {
      * only once the container is gone; when removal fails it is left open for the retry.
      */
     public void stopAndRemoveStrict(String containerId, Closeable logStream) {
+        withTeardownSlot(() -> stopAndRemoveStrictAdmitted(containerId, logStream));
+    }
+
+    private void stopAndRemoveStrictAdmitted(String containerId, Closeable logStream) {
         LOG.infov("Stopping container {0}", containerId);
 
         Exception stopFailure = null;
@@ -558,6 +577,15 @@ public class ContainerLifecycleManager {
         // Closed only once the container is stopped and gone, as in stopAndRemove, so the follower
         // can drain the final tail.
         closeLogStreamIfPresent(logStream);
+    }
+
+    private void withTeardownSlot(Runnable stopAndRemove) {
+        teardownSlots.acquireUninterruptibly();
+        try {
+            stopAndRemove.run();
+        } finally {
+            teardownSlots.release();
+        }
     }
 
     private void closeLogStreamIfPresent(Closeable logStream) {
@@ -656,6 +684,26 @@ public class ContainerLifecycleManager {
      */
     public void ensureSharedVolume(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
                                    Optional<String> rootPermissions, String initImage) {
+        ensureSharedVolumeRoot(volumeName,
+                ownerUid.isPresent() ? OptionalLong.of(ownerUid.getAsInt()) : OptionalLong.empty(),
+                ownerGid.isPresent() ? OptionalLong.of(ownerGid.getAsInt()) : OptionalLong.empty(),
+                rootPermissions, initImage);
+    }
+
+    /** True when {@code permissions} is 3 to 4 octal digits (e.g. "0755", "755", "2775"). */
+    public static boolean isValidPermissions(String permissions) {
+        return permissions != null && PERMISSIONS_PATTERN.matcher(permissions).matches();
+    }
+
+    /** Initialises an access point's root without narrowing AWS's unsigned 32-bit POSIX ids. */
+    public void ensureSharedVolume(String volumeName, long ownerUid, long ownerGid,
+                                   String rootPermissions, String initImage) {
+        ensureSharedVolumeRoot(volumeName, OptionalLong.of(ownerUid), OptionalLong.of(ownerGid),
+                Optional.of(rootPermissions), initImage);
+    }
+
+    private void ensureSharedVolumeRoot(String volumeName, OptionalLong ownerUid, OptionalLong ownerGid,
+                                        Optional<String> rootPermissions, String initImage) {
         // A volume created now is root:root 0755 again, so a memo left by a volume of the same name
         // that was removed since (e.g. DeleteApplication, docker volume rm) is stale.
         if (createVolumeIfAbsent(volumeName, ContainerStorageHelper.defaultLabels(config))) {
@@ -674,7 +722,7 @@ public class ContainerLifecycleManager {
         // Validate before splicing into the helper's `sh -c`, matching CreationInfo.Permissions
         // (^[0-7]{3,4}$), so a typo can't produce a mangled script that soft-fails.
         rootPermissions.ifPresent(p -> {
-            if (!p.matches("^[0-7]{3,4}$")) {
+            if (!isValidPermissions(p)) {
                 throw new IllegalArgumentException(
                         "floci.storage.efs root-permissions must be 3-4 octal digits (e.g. \"0777\","
                                 + " or \"2775\" for setgid): " + p);
@@ -694,7 +742,7 @@ public class ContainerLifecycleManager {
         });
     }
 
-    private void initSharedVolumeRoot(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
+    private void initSharedVolumeRoot(String volumeName, OptionalLong ownerUid, OptionalLong ownerGid,
                                       Optional<String> rootPermissions, String initImage) {
         String mount = "/floci-shared-volume";
         StringBuilder script = new StringBuilder();
@@ -702,7 +750,7 @@ public class ContainerLifecycleManager {
         // always has both operands (no trailing colon). setgid is expressed via a 4-digit octal
         // rootPermissions (e.g. "2775"), matching CreationInfo.Permissions.
         if (ownerUid.isPresent() && ownerGid.isPresent()) {
-            script.append("chown ").append(ownerUid.getAsInt()).append(':').append(ownerGid.getAsInt())
+            script.append("chown ").append(ownerUid.getAsLong()).append(':').append(ownerGid.getAsLong())
                     .append(' ').append(mount).append(" && ");
         }
         rootPermissions.ifPresent(p -> script.append("chmod ").append(p).append(' ').append(mount).append(" && "));
@@ -915,6 +963,15 @@ public class ContainerLifecycleManager {
      * @return information about the adopted container
      */
     public ContainerInfo adopt(String containerId, List<Integer> ports) {
+        return adopt(containerId, ports, Optional.empty());
+    }
+
+    /**
+     * Adopts a container and resolves its endpoints on {@code preferredNetwork} when it is attached
+     * there, as {@link #createAndStart} does with the spec's network. A container that is on the
+     * default bridge as well as that network is otherwise reached at whichever address comes first.
+     */
+    public ContainerInfo adopt(String containerId, List<Integer> ports, Optional<String> preferredNetwork) {
         LOG.infov("Adopting existing container {0}", containerId);
 
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
@@ -929,7 +986,7 @@ public class ContainerLifecycleManager {
         Map<Integer, EndpointInfo> endpoints = new HashMap<>();
         Map<Integer, Integer> publishedHostPorts = new HashMap<>();
         for (int port : ports) {
-            endpoints.put(port, resolveEndpoint(inspect, port));
+            endpoints.put(port, resolveEndpoint(inspect, port, preferredNetwork.orElse(null)));
             OptionalInt published = readPublishedHostPort(inspect, port);
             if (published.isPresent()) {
                 publishedHostPorts.put(port, published.getAsInt());
@@ -1040,7 +1097,19 @@ public class ContainerLifecycleManager {
      */
     public EndpointInfo resolveEndpoint(String containerId, int containerPort) {
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
-        return resolveEndpoint(inspect, containerPort);
+        return resolveEndpoint(inspect, containerPort, null, true);
+    }
+
+    /**
+     * Like {@link #resolveEndpoint(String, int)}, but prefers the container's address on
+     * {@code preferredNetwork}, as {@link #createAndStart} does with the spec's network. A
+     * container that publishes ports is created on the default bridge and connected to its
+     * service network after start, so without a preference the bridge address, which Floci
+     * usually cannot reach, can be returned instead.
+     */
+    public EndpointInfo resolveEndpoint(String containerId, int containerPort, String preferredNetwork) {
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        return resolveEndpoint(inspect, containerPort, preferredNetwork, true);
     }
 
     /**
@@ -1142,6 +1211,30 @@ public class ContainerLifecycleManager {
         }
     }
 
+    /**
+     * Capability names as a task definition or a caller gives them, with or without the
+     * {@code CAP_} prefix and in any case. A name Docker does not know fails the create, as
+     * {@code docker run --cap-add} does.
+     */
+    private static List<Capability> capabilities(List<String> names) {
+        List<Capability> result = new ArrayList<>();
+        for (String name : names) {
+            String normalized = name.trim().toUpperCase(Locale.ROOT);
+            if (normalized.startsWith("CAP_")) {
+                normalized = normalized.substring("CAP_".length());
+            }
+            try {
+                Capability capability = Capability.valueOf(normalized);
+                if (!result.contains(capability)) {
+                    result.add(capability);
+                }
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("Unknown Linux capability: " + name, e);
+            }
+        }
+        return result;
+    }
+
     private HostConfig buildHostConfig(ContainerSpec spec) {
         HostConfig hostConfig = HostConfig.newHostConfig();
 
@@ -1149,15 +1242,45 @@ public class ContainerLifecycleManager {
         if (spec.privileged()) {
             hostConfig.withPrivileged(true);
         }
+        LinuxOptions linux = spec.linuxOptions();
+        List<Capability> capDrop = new ArrayList<>();
+        List<Capability> capAdd = capabilities(linux.capAdd());
         if ("true".equals(ContainerStorageHelper.labelValue(
                 spec.labels(), ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL))) {
-            hostConfig.withCapDrop(Capability.NET_ADMIN, Capability.NET_RAW);
+            // The security group is enforced inside the namespace the workload shares, so the
+            // workload must not be able to rewrite it, whatever capabilities it asks for. Docker
+            // applies a named add over a drop, so the two are taken out of the adds as well; ALL
+            // among the adds is every capability but the dropped ones, so it can stay.
+            capDrop.add(Capability.NET_ADMIN);
+            capDrop.add(Capability.NET_RAW);
+            capAdd.removeAll(capDrop);
+        }
+        for (Capability capability : capabilities(linux.capDrop())) {
+            if (!capDrop.contains(capability)) {
+                capDrop.add(capability);
+            }
         }
         // The firewall helper only has to program nftables in the namespace it already owns,
         // which needs CAP_NET_ADMIN and nothing else that privileged mode would also grant.
         if ("true".equals(ContainerStorageHelper.labelValue(
-                spec.labels(), ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL))) {
-            hostConfig.withCapAdd(Capability.NET_ADMIN);
+                spec.labels(), ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL))
+                && !capAdd.contains(Capability.NET_ADMIN)) {
+            capAdd.add(Capability.NET_ADMIN);
+        }
+        if (!capDrop.isEmpty()) {
+            hostConfig.withCapDrop(capDrop.toArray(new Capability[0]));
+        }
+        if (!capAdd.isEmpty()) {
+            hostConfig.withCapAdd(capAdd.toArray(new Capability[0]));
+        }
+        if (!linux.devices().isEmpty()) {
+            hostConfig.withDevices(linux.devices());
+        }
+        if (linux.shmSizeBytes() != null) {
+            hostConfig.withShmSize(linux.shmSizeBytes());
+        }
+        if (!linux.tmpfs().isEmpty()) {
+            hostConfig.withTmpFs(linux.tmpfs());
         }
 
         if (spec.cgroupnsMode() != null && !spec.cgroupnsMode().isBlank()) {
@@ -1173,6 +1296,12 @@ public class ContainerLifecycleManager {
         // Memory limit
         if (spec.hasMemoryLimit()) {
             hostConfig.withMemory(spec.memoryBytes());
+        }
+        if (linux.memorySwapBytes() != null) {
+            hostConfig.withMemorySwap(linux.memorySwapBytes());
+        }
+        if (linux.memorySwappiness() != null) {
+            hostConfig.withMemorySwappiness(linux.memorySwappiness());
         }
 
         // CPU quota and weight
@@ -1200,14 +1329,9 @@ public class ContainerLifecycleManager {
             for (Map.Entry<Integer, Integer> entry : spec.portBindings().entrySet()) {
                 int containerPort = entry.getKey();
                 int hostPort = entry.getValue();
-
-                // 0 means dynamic allocation
-                if (hostPort == 0) {
-                    hostPort = portAllocator.allocateAny();
-                }
-
                 ports.bind(ExposedPort.tcp(containerPort), bindingFor(spec, containerPort, hostPort));
-                LOG.debugv("Port binding: {0} -> {1}", String.valueOf(containerPort), String.valueOf(hostPort));
+                LOG.debugv("Port binding: {0} -> {1}", String.valueOf(containerPort),
+                        hostPort == 0 ? "dynamic" : String.valueOf(hostPort));
             }
             hostConfig.withPortBindings(ports);
         } else if (spec.hasPortBindings()) {
@@ -1276,17 +1400,20 @@ public class ContainerLifecycleManager {
      * form of the same decision, for a port that is an implementation detail and must never leave
      * the host. A port in neither binds every interface, which is Docker's own default and what
      * every caller that does not ask has always got.
+     *
+     * <p>A host port of 0 leaves the port to the daemon, and the endpoint is read back from
+     * inspect after start. A port Floci picked itself would be probed where Floci runs, not where
+     * the daemon binds it: on Docker Desktop that is the VM, whose ephemeral range lies inside the
+     * Mac's, so a VM socket on the same number fails the start with "address already in use".
      */
     private static Ports.Binding bindingFor(ContainerSpec spec, int containerPort, int hostPort) {
         String hostIp = spec.portBindingHostIps() == null
                 ? null
                 : spec.portBindingHostIps().get(containerPort);
-        if (hostIp != null && !hostIp.isBlank()) {
-            return Ports.Binding.bindIpAndPort(hostIp, hostPort);
+        if (hostIp == null || hostIp.isBlank()) {
+            hostIp = spec.loopbackPortBindings().contains(containerPort) ? LOOPBACK_HOST_IP : null;
         }
-        return spec.loopbackPortBindings().contains(containerPort)
-                ? Ports.Binding.bindIpAndPort(LOOPBACK_HOST_IP, hostPort)
-                : Ports.Binding.bindPort(hostPort);
+        return new Ports.Binding(hostIp, hostPort == 0 ? null : String.valueOf(hostPort));
     }
 
     /**
@@ -1365,7 +1492,13 @@ public class ContainerLifecycleManager {
         return resolveEndpoint(inspect, containerPort, null);
     }
 
-    private EndpointInfo resolveEndpoint(InspectContainerResponse inspect, int containerPort, String preferredNetwork) {
+    private EndpointInfo resolveEndpoint(InspectContainerResponse inspect, int containerPort,
+                                         String preferredNetwork) {
+        return resolveEndpoint(inspect, containerPort, preferredNetwork, false);
+    }
+
+    private EndpointInfo resolveEndpoint(InspectContainerResponse inspect, int containerPort,
+                                         String preferredNetwork, boolean requireReachable) {
         if (!containerDetector.isRunningInContainer()) {
             // Native mode: use localhost and the bound host port
             Map<ExposedPort, Ports.Binding[]> bindings = inspect.getNetworkSettings().getPorts().getBindings();
@@ -1375,11 +1508,19 @@ public class ContainerLifecycleManager {
                 int hostPort = Integer.parseInt(binding[0].getHostPortSpec());
                 return new EndpointInfo("localhost", hostPort);
             }
-            // Fallback to container port
+            if (requireReachable) {
+                throw new IllegalStateException(
+                        "Container " + inspect.getId() + " has no published binding for port " + containerPort);
+            }
+            // Creation can still expose an internal-only port to another container.
             return new EndpointInfo("localhost", containerPort);
-        } else {
-            return new EndpointInfo(resolveReachableHost(inspect, preferredNetwork), containerPort);
         }
+        String host = resolveReachableHost(inspect, preferredNetwork);
+        if (requireReachable && (host == null || host.isBlank())) {
+            throw new IllegalStateException(
+                    "Container " + inspect.getId() + " has no reachable address for port " + containerPort);
+        }
+        return new EndpointInfo(host, containerPort);
     }
 
     private String resolveReachableHost(InspectContainerResponse inspect, String preferredNetwork) {

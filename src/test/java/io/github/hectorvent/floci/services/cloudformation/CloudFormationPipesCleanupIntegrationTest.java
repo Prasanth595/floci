@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.services.pipes.PipesService;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
@@ -410,7 +411,9 @@ class CloudFormationPipesCleanupIntegrationTest {
         assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
         Mockito.doCallRealMethod().when(pipesService).deletePipe(eq(replacementName), anyString());
-        updateStack(stackName, renameRollbackTemplate(priorName, ""));
+        // The rollback left the stack on this very template, which AWS refuses to update to with
+        // "No updates are to be performed.": a new output makes it an update.
+        updateStack(stackName, CfnUpdates.forceUpdate(renameRollbackTemplate(priorName, "")));
 
         given()
             .contentType("application/json")

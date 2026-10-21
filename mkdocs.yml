@@ -140,6 +140,7 @@ nav:
     - AWS Service Catalog: services/service-catalog.md
     - ElastiCache: services/elasticache.md
     - MemoryDB: services/memorydb.md
+    - Aurora DSQL: services/dsql.md
     - RDS: services/rds.md
     - RDS Data API: services/rds-data.md
     - Timestream for InfluxDB: services/timestream-influxdb.md
@@ -170,6 +171,7 @@ nav:
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
+    - AWS Resource Groups: services/resource-groups.md
     - Resource Groups Tagging API: services/resource-groups-tagging.md
     - Resource Explorer 2: services/resource-explorer.md
     - EKS: services/eks.md

@@ -10,6 +10,10 @@ quarkus:
       "io.apicurio":
         level: WARN
 
+  tls:
+    # Keep AWS's TLS 1.2 minimum and preserve explicit legacy HTTP protocol restrictions.
+    protocols: ${quarkus.http.ssl.protocols:TLSv1.3,TLSv1.2}
+
   http:
     port: ${floci.port}
     # Loopback by default. Any other address (0.0.0.0, a LAN IP) also needs
@@ -31,6 +35,10 @@ quarkus:
       require-localhost: false
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
+      # The server reads heads past the Lambda Web limits so their own 431 and 414 can answer them.
+      # LambdaWebDataPlane keeps these two at the Quarkus defaults for every other host.
+      max-header-size: 256K
+      max-initial-line-length: 262144
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
@@ -51,7 +59,8 @@ quarkus:
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
       # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
       # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
-      # parser reads its message bundles, EC2 security group enforcement builds
+      # parser reads its message bundles, Lambda Web Functions copy their
+      # runtime (lambdaweb/index.mjs) into each environment, EC2 security group enforcement builds
       # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
       # engine reads its default properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -66,6 +75,7 @@ quarkus:
         - pricing-snapshots/**
         - ui/*.html
         - appsync/*.mjs
+        - lambdaweb/*.mjs
         - ec2/*.yaml
         - docker/*.Dockerfile
         - sagemaker/*.yaml
@@ -76,6 +86,7 @@ quarkus:
         - cloudformation/*.json
         - redshift/*.sql
         - i18n/*.properties
+        - floci/version.properties
         - org/apache/velocity/runtime/defaults/*.properties
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
         # driver reads its time zone table at connect time.
@@ -83,14 +94,21 @@ quarkus:
         # OpenAPIParser discovers the Swagger 2.0 converter through ServiceLoader.
         - META-INF/services/io.swagger.v3.parser.core.extensions.SwaggerParserExtension
         - com/mysql/cj/util/TimeZoneMapping.properties
+        # JNA's dispatch library, which docker-java's named-pipe transport (Docker Desktop on
+        # Windows) loads. Only the Windows build includes it, with -Dfloci.native.windows-jni-include=*.
+        - com/sun/jna/win32-x86-64/${floci.native.windows-jni-include:none}
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
-      # for the running platform loads, so 23 are dropped. Linux x86_64 and
-      # aarch64 cover the published images, Mac covers a local native build.
+      # for the running platform loads, so the others are dropped. Linux x86_64 and
+      # aarch64 cover the published images, Mac covers the macOS binaries. The
+      # Windows x86_64 library is kept only by the Windows build, which passes
+      # -Dfloci.native.windows-jni-exclude=none; every other build still excludes it.
       excludes:
         - org/xerial/snappy/native/AIX/**
         - org/xerial/snappy/native/FreeBSD/**
         - org/xerial/snappy/native/SunOS/**
-        - org/xerial/snappy/native/Windows/**
+        - org/xerial/snappy/native/Windows/aarch64/**
+        - org/xerial/snappy/native/Windows/x86/**
+        - org/xerial/snappy/native/Windows/x86_64/${floci.native.windows-jni-exclude:**}
         - org/xerial/snappy/native/Linux/android-aarch64/**
         - org/xerial/snappy/native/Linux/android-arm/**
         - org/xerial/snappy/native/Linux/arm/**
@@ -131,6 +149,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess
       - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.spectrum.SpectrumMaterializer
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.stepfunctions.ApiGatewayTaskInvoker
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
       # bundled JNI library from the static initializers of these two classes.
       - --initialize-at-run-time=org.xerial.snappy.Snappy
@@ -226,6 +245,9 @@ floci:
         flush-interval-ms: 5000
       codedeploy:
         flush-interval-ms: 5000
+      resource-groups:
+        mode: ${FLOCI_STORAGE_SERVICES_RESOURCE_GROUPS_MODE:}
+        flush-interval-ms: ${FLOCI_STORAGE_SERVICES_RESOURCE_GROUPS_FLUSH_INTERVAL_MS:5000}
       tagging:
         flush-interval-ms: 5000
       elasticbeanstalk:
@@ -304,6 +326,12 @@ floci:
     allow-unsafe-network-exposure: false
     allow-private-jwt-targets: false
 
+  init-hooks:
+    dir: /etc/floci/init           # FLOCI_INIT_HOOKS_DIR: root of boot.d, start.d, ready.d, stop.d, shutdown.d (a binary on the host points it elsewhere)
+    shell-executable: /bin/sh      # FLOCI_INIT_HOOKS_SHELL_EXECUTABLE: runs .sh hooks
+    timeout-seconds: 30
+    shutdown-grace-period-seconds: 2
+
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
     # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)
@@ -358,15 +386,21 @@ floci:
       max-message-size: 1048576
       clear-fifo-deduplication-cache-on-purge: false
       receipt-handle-secret: local-emulator-secret
+      # QueueUrl shape. floci is <base-url>/<account>/<name>,
+      # aws is https://sqs.<region>.<partition dns suffix>/<account>/<name>
+      endpoint-strategy: floci
     s3:
       enabled: true
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      lifecycle-sweep-enabled: true          # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED - apply lifecycle expiration rules in the background
+      lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS
     dynamodb:
       enabled: true
       vector-index-allocation-seconds: 4   # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS. Resource allocation phase of a vector index added by UpdateTable.
       vector-index-backfill-seconds: 10    # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS. Backfilling phase that follows it.
+      latest-restorable-lag-seconds: 300   # FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS. How far LatestRestorableDateTime trails now.
       backend: native                      # FLOCI_SERVICES_DYNAMODB_BACKEND: native or local
       # local-endpoint: http://dynamodb-local:8000   # FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT
       local-connect-timeout-seconds: 2     # FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS
@@ -436,6 +470,13 @@ floci:
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
+      # bootstrap-hostname: unset by default, so GetBootstrapBrokers returns the broker's
+      # Docker-network address. Only applies when Floci runs in a container: each broker then
+      # also has a host listener, published on a port from the kafka-host-port range and
+      # advertised as <this hostname, else localhost>:<port>. When set, GetBootstrapBrokers
+      # returns both listeners, <container-name>:9092,<hostname>:<port>, so clients on the
+      # Docker host and in sibling containers can each discover the broker.
+      # Env var: FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME=localhost
     amazonmq:
       enabled: true
       mock: false
@@ -497,6 +538,13 @@ floci:
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+      database-resuming-exception-enabled: false # FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED
+    dsql:
+      enabled: true
+      mock: false                                 # FLOCI_SERVICES_DSQL_MOCK; true = clusters without a database, no Docker
+      port: 5432                                  # FLOCI_SERVICES_DSQL_PORT; the port every cluster endpoint is served on
+      endpoint-suffix: localhost.floci.io         # FLOCI_SERVICES_DSQL_ENDPOINT_SUFFIX; endpoints are <id>.dsql.<region>.<suffix>
+      image: "postgres:16-alpine"                 # FLOCI_SERVICES_DSQL_IMAGE
     redshift-data:
       enabled: true
       result-ttl-hours: 24
@@ -545,6 +593,7 @@ floci:
       enabled: true
     cognito:
       enabled: true
+      google-issuer: https://accounts.google.com
       enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
@@ -612,6 +661,8 @@ floci:
       proxy-max-port: 9499
       keep-running-on-shutdown: false
     ec2:
+      # Opt-in Standard On-Demand vCPU admission. FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS
+      enforce-vcpu-quotas: false
       # Optional complete catalog override for locally built guest images.
       image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
       enabled: true
@@ -630,6 +681,11 @@ floci:
       volume-block-devices: true
       volume-helper-image: alpine:3.21
       mock: false
+      # Automatic public IPv4 address of a mock instance: none, documentation (203.0.113.0/24,
+      # routed nowhere) or fixed (mock-public-address, default 127.0.0.1). Instances with
+      # containers report the container's reachable address. FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES
+      mock-public-addresses: none
+      # mock-public-address: 127.0.0.1  # FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS
       # Bound instance containers to their instance type's CPU and memory limits from the catalog.
       # FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS
       instance-resource-limits: true
@@ -714,6 +770,7 @@ floci:
       backend: stub
       proxy:
         passthrough: false
+        error-body-timeout-millis: 1000
         # url: http://localhost:11434/v1
         # api-key: sk-...
         # default-model: llama3
@@ -941,6 +998,8 @@ floci:
       enabled: true
     lakeformation:
       enabled: true
+    resource-groups:
+      enabled: true
     tagging:
       enabled: true
     pipes:
@@ -965,6 +1024,7 @@ floci:
       enabled: true
     servicequotas:
       enabled: true
+      standard-on-demand-vcpus: 5
     verifiedpermissions:
       enabled: true
       # cedar-url: http://floci-cedar:8180  # set to skip sidecar container management
@@ -980,6 +1040,7 @@ floci:
       maven-image: "dzikoysk/reposilite:3.6.3"
       npm-image: "verdaccio/verdaccio:6.10.4"
       pypi-image: "pypiserver/pypiserver:v2.4.2"
+      nuget-image: "bagetter/bagetter:1.6.5"
     marketplace:
       enabled: true
     dms:

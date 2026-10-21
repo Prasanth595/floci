@@ -2,34 +2,57 @@ package io.github.hectorvent.floci.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.exception.DockerClientException;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.core.DefaultDockerClientConfig;
+import com.github.dockerjava.core.DockerClientImpl;
+import com.github.dockerjava.core.util.CompressArchiveUtil;
+import com.github.dockerjava.transport.DockerHttpClient;
+import io.github.hectorvent.floci.testing.DockerArchiveUploadFixture;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockMakers;
+import org.mockito.MockedStatic;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 /**
  * The transport-level retry ({@code RetryingDockerHttpClient}) must refuse to replay a one-shot
@@ -45,6 +68,13 @@ class RetryingTarCopierTest {
 
     private static RuntimeException brokenPipe() {
         return new RuntimeException(new IOException("Broken pipe"));
+    }
+
+    private static DockerClient dockerClient(DockerHttpClient transport) {
+        return DockerClientImpl.getInstance(DefaultDockerClientConfig.createDefaultConfigBuilder()
+                .withDockerHost("tcp://localhost:2375")
+                .withApiVersion("1.44")
+                .build(), transport);
     }
 
     private static CopyArchiveToContainerCmd failingOnce(DockerClient docker, AtomicInteger calls) {
@@ -95,6 +125,60 @@ class RetryingTarCopierTest {
         assertSame(noSuchContainer, thrown.getCause(),
                 "a genuine daemon rejection must surface after a single attempt");
         assertEquals(1, calls.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 73, 8192})
+    void copyArchiveReplaysTheExactBytesWithoutAStreamingPipe(int consumedBytes) {
+        DockerClient docker = mock(DockerClient.class);
+        DockerArchiveUploadFixture uploads = new DockerArchiveUploadFixture(docker, "c-1");
+        uploads.failures = 1;
+        uploads.consumedBytes = consumedBytes;
+        uploads.failure = brokenPipe();
+        byte[] archive = RetryingTarCopier.singleFileTar("config", new byte[16384], 0644);
+
+        RetryingTarCopier.copyArchive(docker, "c-1", "/etc", "config-archive", archive, MAX_ATTEMPTS, 0L);
+
+        assertEquals(2, uploads.commands.size());
+        assertEquals(1, uploads.completed.size());
+        assertArrayEquals(archive, uploads.completed.getFirst(), "an existing tar must not be wrapped in another tar");
+        assertNotSame(uploads.streams.getFirst(), uploads.streams.get(1));
+        for (int attempt = 0; attempt < uploads.commands.size(); attempt++) {
+            assertInstanceOf(ByteArrayInputStream.class, uploads.streams.get(attempt));
+            verify(uploads.commands.get(attempt)).withRemotePath("/etc");
+        }
+    }
+
+    @Test
+    void copyArchiveStopsAtTheRetryBudget() {
+        DockerClient docker = mock(DockerClient.class);
+        DockerArchiveUploadFixture uploads = new DockerArchiveUploadFixture(docker, "c-1");
+        uploads.failures = Integer.MAX_VALUE;
+        uploads.failure = brokenPipe();
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> RetryingTarCopier.copyArchive(docker, "c-1", "/etc", "config-archive",
+                        new byte[1024], MAX_ATTEMPTS, 0L));
+
+        assertSame(uploads.failure, thrown.getCause());
+        assertTrue(thrown.getMessage().contains("config-archive"), thrown.getMessage());
+        assertEquals(MAX_ATTEMPTS, uploads.commands.size());
+        assertTrue(uploads.completed.isEmpty());
+    }
+
+    @Test
+    void copyArchiveDoesNotRetryDaemonRejection() {
+        DockerClient docker = mock(DockerClient.class);
+        DockerArchiveUploadFixture uploads = new DockerArchiveUploadFixture(docker, "c-1");
+        uploads.failures = Integer.MAX_VALUE;
+        uploads.failure = new NotFoundException("container missing");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> RetryingTarCopier.copyArchive(docker, "c-1", "/etc", "config-archive",
+                        new byte[1024], MAX_ATTEMPTS, 0L));
+
+        assertSame(uploads.failure, thrown.getCause());
+        assertEquals(1, uploads.commands.size());
     }
 
     // copyFile streams tarWriter through a pipe on its own thread; if the writer fails before
@@ -180,14 +264,128 @@ class RetryingTarCopierTest {
     void copyHostResourceRetriesTransientBrokenPipe(@TempDir Path dir) throws IOException {
         Path file = dir.resolve("kubeconfig.yaml");
         Files.writeString(file, "apiVersion: v1");
-        DockerClient docker = mock(DockerClient.class);
-        AtomicInteger calls = new AtomicInteger();
-        failingOnce(docker, calls);
+        DockerHttpClient transport = mock(DockerHttpClient.class);
+        DockerHttpClient.Response ok = mock(DockerHttpClient.Response.class);
+        when(ok.getStatusCode()).thenReturn(200);
+        when(transport.execute(any())).thenThrow(brokenPipe()).thenReturn(ok);
 
-        RetryingTarCopier.copyHostResource(docker, "c-1", "/var/lib/rancher", file.toString(),
-                MAX_ATTEMPTS, 0L);
+        try (DockerClient docker = dockerClient(transport)) {
+            RetryingTarCopier.copyHostResource(docker, "c-1", "/var/lib/rancher", file.toString(),
+                    MAX_ATTEMPTS, 0L);
+        }
 
-        assertEquals(2, calls.get());
+        verify(transport, times(2)).execute(any());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"Docker transport failure"})
+    void copyHostResourceStillRetriesTransportClientExceptions(String message, @TempDir Path dir) throws IOException {
+        Path file = dir.resolve("kubeconfig.yaml");
+        Files.writeString(file, "apiVersion: v1");
+        DockerHttpClient transport = mock(DockerHttpClient.class);
+        DockerHttpClient.Response ok = mock(DockerHttpClient.Response.class);
+        when(ok.getStatusCode()).thenReturn(200);
+        when(transport.execute(any()))
+                .thenThrow(new DockerClientException(message, new IOException("Broken pipe"))).thenReturn(ok);
+
+        try (DockerClient docker = dockerClient(transport)) {
+            RetryingTarCopier.copyHostResource(docker, "c-1", "/var/lib/rancher", file.toString(),
+                    MAX_ATTEMPTS, 0L);
+        }
+
+        verify(transport, times(2)).execute(any());
+    }
+
+    @Test
+    void copyHostResourceDoesNotRetryLocalArchiveFailure(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("kubeconfig.yaml");
+        Files.writeString(file, "apiVersion: v1");
+        DockerHttpClient transport = mock(DockerHttpClient.class);
+        IOException archiveFailure = new IOException("No space left on device");
+        AtomicInteger archiveAttempts = new AtomicInteger();
+
+        try (DockerClient docker = dockerClient(transport);
+             MockedStatic<CompressArchiveUtil> archives = mockStatic(CompressArchiveUtil.class,
+                     withSettings().mockMaker(MockMakers.INLINE).defaultAnswer(CALLS_REAL_METHODS))) {
+            archives.when(() -> CompressArchiveUtil.tar(any(Path.class), any(Path.class),
+                    anyBoolean(), anyBoolean())).thenAnswer(invocation -> {
+                        archiveAttempts.incrementAndGet();
+                        throw archiveFailure;
+                    });
+
+            RuntimeException thrown = assertThrows(RuntimeException.class,
+                    () -> RetryingTarCopier.copyHostResource(docker, "c-1", "/var/lib/rancher",
+                            file.toString(), MAX_ATTEMPTS, 0L));
+
+            Throwable cause = thrown;
+            while (cause.getCause() != null) {
+                cause = cause.getCause();
+            }
+            assertSame(archiveFailure, cause, "the original local archive failure must survive");
+            verify(transport, never()).execute(any());
+            assertEquals(1, archiveAttempts.get(), "local archive failures cannot recover by retrying Docker");
+        }
+    }
+
+    @Test
+    void copyHostResourceDoesNotRetryLocalArchiveReadFailure(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("kubeconfig.yaml");
+        Files.writeString(file, "apiVersion: v1");
+        DockerHttpClient transport = mock(DockerHttpClient.class);
+        AtomicInteger archiveAttempts = new AtomicInteger();
+        AtomicReference<Path> archivePath = new AtomicReference<>();
+
+        try (DockerClient docker = dockerClient(transport);
+             MockedStatic<CompressArchiveUtil> archives = mockStatic(CompressArchiveUtil.class,
+                     withSettings().mockMaker(MockMakers.INLINE).defaultAnswer(CALLS_REAL_METHODS))) {
+            archives.when(() -> CompressArchiveUtil.tar(any(Path.class), any(Path.class),
+                    anyBoolean(), anyBoolean())).thenAnswer(invocation -> {
+                        archiveAttempts.incrementAndGet();
+                        Path archive = invocation.getArgument(1);
+                        archivePath.set(archive);
+                        Files.delete(archive);
+                        // A symlink loop fails when docker-java opens the archive, before HTTP.
+                        Files.createSymbolicLink(archive, archive.getFileName());
+                        return null;
+                    });
+
+            RuntimeException thrown = assertThrows(RuntimeException.class,
+                    () -> RetryingTarCopier.copyHostResource(docker, "c-1", "/var/lib/rancher",
+                            file.toString(), MAX_ATTEMPTS, 0L));
+
+            Throwable cause = thrown;
+            while (cause.getCause() != null) {
+                cause = cause.getCause();
+            }
+            FileSystemException readFailure = assertInstanceOf(FileSystemException.class, cause);
+            assertEquals(archivePath.get().toString(), readFailure.getFile());
+            verify(transport, never()).execute(any());
+            assertEquals(1, archiveAttempts.get(), "opening a local archive must not spend the Docker retry budget");
+        }
+    }
+
+    @Test
+    void copyHostResourceDoesNotRetryDaemonRejection(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("kubeconfig.yaml");
+        Files.writeString(file, "apiVersion: v1");
+        DockerHttpClient transport = mock(DockerHttpClient.class);
+        DockerHttpClient.Response missingContainer = mock(DockerHttpClient.Response.class);
+        when(missingContainer.getStatusCode()).thenReturn(404);
+        when(missingContainer.getHeaders()).thenReturn(Map.of());
+        when(missingContainer.getBody()).thenAnswer(invocation -> new ByteArrayInputStream(
+                "{\"message\":\"No such container: c-1\"}".getBytes(StandardCharsets.UTF_8)));
+        when(transport.execute(any())).thenReturn(missingContainer);
+
+        try (DockerClient docker = dockerClient(transport)) {
+            RuntimeException thrown = assertThrows(RuntimeException.class,
+                    () -> RetryingTarCopier.copyHostResource(docker, "c-1", "/var/lib/rancher",
+                            file.toString(), MAX_ATTEMPTS, 0L));
+
+            assertInstanceOf(NotFoundException.class, thrown.getCause());
+        }
+
+        verify(transport, times(1)).execute(any());
     }
 
     @Test

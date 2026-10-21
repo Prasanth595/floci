@@ -13,7 +13,8 @@
 | `CreateBackupVault` | `PUT` | `/backup-vaults/{backupVaultName}` | Create a backup vault |
 | `DescribeBackupVault` | `GET` | `/backup-vaults/{backupVaultName}` | Describe a backup vault |
 | `DeleteBackupVault` | `DELETE` | `/backup-vaults/{backupVaultName}` | Delete an empty backup vault, locked or not |
-| `ListBackupVaults` | `GET` | `/backup-vaults/` | List all backup vaults |
+| `ListBackupVaults` | `GET` | `/backup-vaults/` | List all backup vaults; honours the `vaultType` filter |
+| `CreateLogicallyAirGappedBackupVault` | `PUT` | `/logically-air-gapped-backup-vaults/{backupVaultName}` | Create a logically air-gapped vault, `AVAILABLE` at once; `DescribeBackupVault` reports its `VaultType`, `VaultState`, retention and a compliance lock whose `LockDate` is the creation date |
 
 ### Backup Vault Access Policy
 
@@ -109,12 +110,27 @@ FLOCI_SERVICES_BACKUP_JOB_COMPLETION_DELAY_SECONDS=3
 
 Use a shorter delay (e.g. `1`) in test environments to speed up job-completion assertions.
 
-With persistent storage, unfinished jobs resume after restart in their original account and
-region. `CREATED` and `RUNNING` jobs use their stored completion deadline; an elapsed deadline
-completes the simulated backup immediately. A `CREATED` job whose start window has expired
-becomes `EXPIRED`, a job whose vault no longer exists becomes `FAILED`, and an `ABORTING` job
-becomes `ABORTED`. Terminal jobs are left unchanged. Retrying completion reuses the job's
-recovery point and reconciles the vault count to avoid duplicates after an interrupted write.
+On startup, persisted `CREATED`, `RUNNING` and `ABORTING` jobs resume in their owning
+account and original region. Existing completion deadlines are retained; older jobs without
+one use their creation time plus the configured delay. A `CREATED` job whose start window
+has elapsed becomes `EXPIRED`. Terminal jobs are not restarted and cannot be stopped.
+
+Completion writes a stable recovery point before marking the job `COMPLETED`. Recovery
+after an interrupted completion reuses that point without changing its original creation
+date, and reconciles the vault count only on this retry path. A new point increments the
+count without scanning the recovery-point store. Completion and recovery-point deletion
+share the vault monitor so retention checks, deletion and count updates stay consistent.
+
+New jobs persist the vault's internal `FlociVaultId` and creation date before scheduling.
+Completion requires the original vault ARN and captured id, so deleting and recreating a
+vault with the same name and ARN, even within one second, fails the old job without writing
+a point or notifying the replacement. Older date-only jobs require an equal vault creation
+date. Legacy jobs with neither identity accept only a vault no newer than the job; historical
+dates cannot prove that a same-second vault is the original incarnation. Recovery never
+fills a missing job id from the currently resolved vault. Both internal identity fields stay
+in persisted JSON but are omitted from `DescribeBackupJob` and `ListBackupJobs` responses.
+Successful resumed completions use the existing SNS notification path and event filter;
+publish failures do not undo the job or recovery point.
 
 ## Supported Resource Types
 
@@ -198,7 +214,8 @@ Actual backup is simulated — no data is read from or written to the referenced
 - The access policy and notification configuration are **not** returned by
   `DescribeBackupVault`, matching AWS: each is reachable only through its own `Get`
   operation. The lock fields (`Locked`, `LockDate`, `MinRetentionDays`,
-  `MaxRetentionDays`) are on the vault, also matching AWS.
+  `MaxRetentionDays`) are on the vault, also matching AWS. A standard vault reports
+  `VaultType` `BACKUP_VAULT` in `DescribeBackupVault` and `ListBackupVaults`.
 
 ## Configuration
 
@@ -209,11 +226,16 @@ Actual backup is simulated — no data is read from or written to the referenced
 
 ## Not Yet Supported
 
-- **Notification delivery.** `PutBackupVaultNotifications` stores the configuration and
-  `GetBackupVaultNotifications` reports it, but no vault event is ever published to the SNS
-  topic: a subscriber receives nothing when a backup job completes. The configuration is
-  modelled, the delivery is not, so a Terraform configuration that attaches notifications
-  applies and reads back correctly while a test asserting on a received message will fail.
+- **Notification delivery, beyond `BACKUP_JOB_COMPLETED`.** When a backup job completes in a
+  vault whose `BackupVaultEvents` include `BACKUP_JOB_COMPLETED`, Floci publishes one message to
+  the configured `SNSTopicArn` with AWS's documented subject (`Notification from AWS Backup`), body
+  (recovery point, resource and job ID) and message attributes (`EventType`, `State`, `AccountId`,
+  `Id`, `StartTime`), so subscription filter policies on those attributes match. That is the only
+  event delivered. Every other event --
+  including `BACKUP_JOB_STARTED`, `BACKUP_JOB_SUCCESSFUL`, `BACKUP_JOB_FAILED` and all
+  `RESTORE_JOB_*` and `COPY_JOB_*` events -- is stored and reported by
+  `GetBackupVaultNotifications` but never published. A failed publish (for example, a topic that does not
+  exist) is logged and dropped without affecting the job.
 - **Access policy enforcement.** `PutBackupVaultAccessPolicy` stores a resource policy and
   `GetBackupVaultAccessPolicy` reports it, but no authorization path consults it: a policy
   denying a vault operation does not prevent that operation, even with IAM enforcement

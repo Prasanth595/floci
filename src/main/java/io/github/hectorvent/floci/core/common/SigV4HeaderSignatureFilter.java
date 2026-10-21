@@ -160,7 +160,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
                 return;
             }
             signed = new SigV4AuthorizationHeader(query.getFirst("X-Amz-Credential"),
-                    query.getFirst("X-Amz-SignedHeaders"), query.getFirst("X-Amz-Signature"));
+                    query.getFirst("X-Amz-SignedHeaders"), query.getFirst("X-Amz-Signature"), false);
         } else {
             signed = SigV4AuthorizationHeader.parse(authorization);
             if (signed == null) {
