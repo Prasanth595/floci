@@ -488,8 +488,8 @@ class ElbV2CfnProvisionerTest {
         assertEquals(Set.of("subnet-1", "subnet-2"), usedSubnets(created));
 
         StackResource moved = keptLoadBalancerUpdatedTo(loadBalancerOn("web", "subnet-1", "subnet-2"),
-                "subnet-3");
-        assertEquals(Set.of("subnet-3"), usedSubnets(moved));
+                "subnet-3", "subnet-4");
+        assertEquals(Set.of("subnet-3", "subnet-4"), usedSubnets(moved));
 
         assertTrue(provisioner.rollbackUpdate(moved));
         assertEquals(Set.of("subnet-1", "subnet-2"), usedSubnets(moved));
@@ -635,18 +635,21 @@ class ElbV2CfnProvisionerTest {
         assertEquals("SubnetNotFound", e.getErrorCode());
     }
 
-    /** On an update of a kept load balancer, a blank {@code SubnetId} reaches SetSubnets for ELBv2 to refuse. */
+    /**
+     * On an update of a kept Network Load Balancer, a blank {@code SubnetId} reaches SetSubnets for ELBv2
+     * to refuse as an unknown subnet. An Application Load Balancer would get the subnet count error first.
+     */
     @Test
     void anUpdateWithABlankSubnetIdIsRefusedByTheMoveAndKeepsNoSnapshot() {
-        when(elb.createLoadBalancer(eq(REGION), eq("web"), isNull(), isNull(), isNull(), anyList(), anyList(), any()))
-                .thenThrow(new AwsException("DuplicateLoadBalancerName", "exists", 400));
+        when(elb.createLoadBalancer(eq(REGION), eq("web"), isNull(), eq("network"), isNull(), anyList(), anyList(),
+                any())).thenThrow(new AwsException("DuplicateLoadBalancerName", "exists", 400));
         when(elb.describeLoadBalancers(REGION, null, List.of("web"), null, null))
                 .thenReturn(List.of(loadBalancerOn("web", "subnet-1", "subnet-2")));
         doThrow(new AwsException("SubnetNotFound", "The subnet ID ' ' does not exist", 400))
                 .when(elb).setSubnets(REGION, LB_ARN, List.of(" "));
-        ObjectNode props = mapper.createObjectNode().put("Name", "web");
+        ObjectNode props = mapper.createObjectNode().put("Name", "web").put("Type", "network");
         props.putArray("SubnetMappings").addObject().put("SubnetId", " ");
-        StackResource lb = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Alb");
+        StackResource lb = resource("AWS::ElasticLoadBalancingV2::LoadBalancer", "Nlb");
         lb.getAttributes().put("LoadBalancerName", "web");
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(lb, props, ctx(LB_ARN)));
