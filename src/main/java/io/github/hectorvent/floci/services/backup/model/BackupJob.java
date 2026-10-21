@@ -22,9 +22,6 @@ public class BackupJob {
     @JsonProperty("FlociVaultId")
     private String vaultId;
 
-    @JsonProperty("BackupVaultCreationDate")
-    private Long backupVaultCreationDate;
-
     @JsonProperty("RecoveryPointArn")
     private String recoveryPointArn;
 
@@ -80,9 +77,6 @@ public class BackupJob {
 
     public String getVaultId() { return vaultId; }
     public void setVaultId(String vaultId) { this.vaultId = vaultId; }
-
-    public Long getBackupVaultCreationDate() { return backupVaultCreationDate; }
-    public void setBackupVaultCreationDate(Long backupVaultCreationDate) { this.backupVaultCreationDate = backupVaultCreationDate; }
 
     public String getRecoveryPointArn() { return recoveryPointArn; }
     public void setRecoveryPointArn(String recoveryPointArn) { this.recoveryPointArn = recoveryPointArn; }

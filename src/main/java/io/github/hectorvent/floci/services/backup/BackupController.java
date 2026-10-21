@@ -442,7 +442,6 @@ public class BackupController {
     private ObjectNode jobJson(BackupJob job) {
         ObjectNode node = objectMapper.valueToTree(job);
         node.remove(BackupVault.VAULT_ID_FIELD);
-        node.remove("BackupVaultCreationDate");
         return node;
     }
 

@@ -27,7 +27,6 @@ import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Integration tests for AWS Backup via REST JSON protocol.
@@ -1965,11 +1964,9 @@ class BackupIntegrationTest {
         assertEquals(capturedId, stored.getVaultId());
         JsonNode before = mapper.valueToTree(stored);
         assertEquals(capturedId, before.path("FlociVaultId").asText());
-        assertTrue(before.has("BackupVaultCreationDate"));
         given().header("Authorization", AUTH)
                 .when().get("/backup-jobs/" + jid).then().statusCode(200)
                 .body("$", not(hasKey("FlociVaultId")))
-                .body("$", not(hasKey("BackupVaultCreationDate")))
                 .body("BackupJobId", equalTo(jid))
                 .body("BackupVaultName", equalTo(vault))
                 .body("BackupVaultArn", equalTo(stored.getBackupVaultArn()))
@@ -1980,7 +1977,6 @@ class BackupIntegrationTest {
                 .when().get("/backup-jobs/").then().statusCode(200)
                 .body("BackupJobs", hasSize(1))
                 .body("BackupJobs[0]", not(hasKey("FlociVaultId")))
-                .body("BackupJobs[0]", not(hasKey("BackupVaultCreationDate")))
                 .body("BackupJobs[0].BackupJobId", equalTo(jid))
                 .body("BackupJobs[0].BackupVaultName", equalTo(vault))
                 .body("BackupJobs[0].ResourceArn", equalTo(RESOURCE_ARN))
@@ -1988,7 +1984,6 @@ class BackupIntegrationTest {
                 .body("BackupJobs[0].State", notNullValue());
         JsonNode after = mapper.valueToTree(backupService.describeBackupJob(jid));
         assertEquals(before.path("FlociVaultId"), after.path("FlociVaultId"));
-        assertEquals(before.path("BackupVaultCreationDate"), after.path("BackupVaultCreationDate"));
         awaitJobCompleted(jid);
         String point = backupService.describeBackupJob(jid).getRecoveryPointArn();
         backupService.deleteRecoveryPoint(vault, point, "us-east-1");

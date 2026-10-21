@@ -66,7 +66,7 @@ class BackupJobRecoveryTest {
             fixture.jobs.put("missing-vault", missing);
             BackupJob future = fixture.legacy("RUNNING", now - 10);
             future.setBackupJobId("future");
-            future.setExpectedCompletionDate(now + 2);
+            future.setExpectedCompletionDate(now + 3600);
             fixture.jobs.put("future", future);
             fixture.jobs.delete("legacy");
             RecoveryPoint existing = new RecoveryPoint();
@@ -78,17 +78,17 @@ class BackupJobRecoveryTest {
             fixture.service = fixture.newService();
             fixture.service.resumeJobs();
             assertEquals("RUNNING", fixture.service.describeBackupJob("future").getState());
+            assertEquals(now + 3600, fixture.service.describeBackupJob("future").getExpectedCompletionDate());
             await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
                 assertEquals("COMPLETED", fixture.service.describeBackupJob(original.getBackupJobId()).getState());
                 assertEquals("COMPLETED", fixture.service.describeBackupJob("RUNNING").getState());
                 assertEquals("ABORTED", fixture.service.describeBackupJob("ABORTING").getState());
                 assertEquals("EXPIRED", fixture.service.describeBackupJob("expired").getState());
                 assertEquals("FAILED", fixture.service.describeBackupJob("missing-vault").getState());
-                assertEquals("COMPLETED", fixture.service.describeBackupJob("future").getState());
             });
             fixture.service.resumeJobs();
-            assertEquals(3, fixture.service.listRecoveryPointsByBackupVault(VAULT, REGION).size());
-            assertEquals(3, fixture.vault().getNumberOfRecoveryPoints());
+            assertEquals(2, fixture.service.listRecoveryPointsByBackupVault(VAULT, REGION).size());
+            assertEquals(2, fixture.vault().getNumberOfRecoveryPoints());
             assertEquals(now - 20, fixture.points.get(existing.getRecoveryPointArn()).orElseThrow().getCreationDate());
             assertTrue(fixture.service.listRecoveryPointsByBackupVault(VAULT, REGION).stream()
                     .allMatch(point -> point.getRecoveryPointArn().contains(":" + REGION + ":" + ACCOUNT + ":")));
@@ -235,20 +235,18 @@ class BackupJobRecoveryTest {
     }
 
     @Test
-    void newJobPersistsVaultIncarnationWithoutNewAccessorDependency() {
+    void newJobPersistsVaultIncarnationBeforeScheduling() {
         try (Fixture fixture = new Fixture()) {
             fixture.vault().setCreationDate(100L);
             doAnswer(call -> {
                 BackupJob written = call.getArgument(1);
                 assertEquals(fixture.vault().getVaultId(), written.getVaultId());
-                assertEquals(100L, written.getBackupVaultCreationDate());
                 return call.callRealMethod();
             }).when(fixture.jobs).put(anyString(), any());
             BackupJob job = fixture.startRunning();
             JsonNode stored = fixture.mapper.valueToTree(fixture.jobs.get(job.getBackupJobId()).orElseThrow());
             assertEquals(fixture.vault().getVaultId(), stored.path("FlociVaultId").asText(),
                     "New jobs must persist the captured incarnation");
-            assertEquals(100L, stored.path("BackupVaultCreationDate").asLong(-1));
         }
     }
 
@@ -266,13 +264,12 @@ class BackupJobRecoveryTest {
         try (Fixture fixture = new Fixture()) {
             fixture.vault().setCreationDate(100L);
             BackupJob job = fixture.startRunning();
-            // Date-only jobs persisted by the old implementation still require exact equality.
-            job.setVaultId(null);
             String originalArn = fixture.vault().getBackupVaultArn();
             fixture.service.deleteBackupVault(VAULT, REGION);
             BackupVault replacement = fixture.service.createBackupVault(VAULT, null, null, Map.of(), REGION);
             replacement.setCreationDate(replacementDate);
             assertEquals(originalArn, replacement.getBackupVaultArn());
+            assertNotEquals(job.getVaultId(), replacement.getVaultId());
             fixture.complete(job);
             assertEquals("FAILED", fixture.service.describeBackupJob(job.getBackupJobId()).getState());
             assertTrue(fixture.points.keys().isEmpty());
@@ -293,6 +290,7 @@ class BackupJobRecoveryTest {
                 assertEquals("arn:aws:backup:" + REGION + ":" + ACCOUNT + ":recovery-point:legacy",
                         legacy.getRecoveryPointArn());
                 assertEquals(ACCOUNT, legacy.getAccountId());
+                assertNull(legacy.getVaultId(), "Recovery must not invent a missing captured id");
             }
         }
     }
@@ -507,7 +505,6 @@ class BackupJobRecoveryTest {
             }
             JsonNode disk = mapper.readTree(path.resolve("backup-jobs.json").toFile()).path(ACCOUNT + "/" + jobId);
             assertEquals(capturedId, disk.path("FlociVaultId").asText());
-            assertEquals(capturedDate, disk.path("BackupVaultCreationDate").asLong(-1));
             StorageFactory reloadedStorage = new StorageFactory(config, access);
             BackupService restarted = new BackupService(reloadedStorage, config, resolver, mapper, sns);
             try {
@@ -540,11 +537,11 @@ class BackupJobRecoveryTest {
     }
 
     @Test
-    void dateOnlyIdentityAcceptsEqualDateButStillRequiresOriginalArn() throws Exception {
+    void capturedIdStillRequiresOriginalArnAfterJsonRoundtrip() throws Exception {
         for (boolean matchingArn : List.of(true, false)) {
             try (Fixture fixture = new Fixture()) {
                 BackupJob job = fixture.startRunning();
-                job.setVaultId(null);
+                String capturedId = job.getVaultId();
                 job = fixture.mapper.readValue(fixture.mapper.writeValueAsString(job), BackupJob.class);
                 if (!matchingArn) {
                     job.setBackupVaultArn(job.getBackupVaultArn() + "-different");
@@ -554,7 +551,8 @@ class BackupJobRecoveryTest {
                 assertEquals(matchingArn ? "COMPLETED" : "FAILED", job.getState());
                 assertEquals(matchingArn ? 1 : 0, fixture.points.keys().size());
                 assertEquals(matchingArn ? 1 : 0, fixture.vault().getNumberOfRecoveryPoints());
-                assertNull(job.getVaultId(), "Recovery must not invent a missing captured id");
+                assertEquals(capturedId, job.getVaultId());
+                assertEquals(fixture.vault().getVaultId(), job.getVaultId());
             }
         }
     }

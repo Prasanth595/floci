@@ -717,7 +717,6 @@ public class BackupService {
         job.setBackupVaultName(vaultName);
         job.setBackupVaultArn(vault.getBackupVaultArn());
         job.setVaultId(vault.getVaultId());
-        job.setBackupVaultCreationDate(vault.getCreationDate());
         job.setResourceArn(resourceArn);
         job.setResourceType(inferResourceType(resourceArn));
         job.setIamRoleArn(iamRoleArn);
@@ -875,9 +874,7 @@ public class BackupService {
                 Optional<BackupVault> vault = vaultStore.get(vaultKey(region, vaultName));
                 boolean sameVault = vault.filter(v -> v.getBackupVaultArn().equals(job.getBackupVaultArn())
                         && (job.getVaultId() != null ? job.getVaultId().equals(v.getVaultId())
-                        : job.getBackupVaultCreationDate() != null
-                                ? job.getBackupVaultCreationDate() == v.getCreationDate()
-                                : v.getCreationDate() <= job.getCreationDate())).isPresent();
+                        : v.getCreationDate() <= job.getCreationDate())).isPresent();
                 if (!sameVault) {
                     job.setState("FAILED");
                     job.setStatusMessage("Backup vault was deleted before the job completed: " + vaultName);

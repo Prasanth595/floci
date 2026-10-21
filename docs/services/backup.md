@@ -121,14 +121,14 @@ date, and reconciles the vault count only on this retry path. A new point increm
 count without scanning the recovery-point store. Completion and recovery-point deletion
 share the vault monitor so retention checks, deletion and count updates stay consistent.
 
-New jobs persist the vault's internal `FlociVaultId` and creation date before scheduling.
+New jobs persist the vault's internal `FlociVaultId` before scheduling.
 Completion requires the original vault ARN and captured id, so deleting and recreating a
 vault with the same name and ARN, even within one second, fails the old job without writing
-a point or notifying the replacement. Older date-only jobs require an equal vault creation
-date. Legacy jobs with neither identity accept only a vault no newer than the job; historical
-dates cannot prove that a same-second vault is the original incarnation. Recovery never
-fills a missing job id from the currently resolved vault. Both internal identity fields stay
-in persisted JSON but are omitted from `DescribeBackupJob` and `ListBackupJobs` responses.
+a point or notifying the replacement. Legacy jobs without `FlociVaultId` accept only a vault
+no newer than the job; historical dates cannot prove that a same-second vault is the original
+incarnation. Recovery never
+fills a missing job id from the currently resolved vault. The internal identity field stays
+in persisted JSON but is omitted from `DescribeBackupJob` and `ListBackupJobs` responses.
 Successful resumed completions use the existing SNS notification path and event filter;
 publish failures do not undo the job or recovery point.
 
