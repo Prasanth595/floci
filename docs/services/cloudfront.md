@@ -411,6 +411,39 @@ Set `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX=cloudfront.localhost.floci.io` to h
 `CreateDistribution` return that hostname as the `DomainName`, so test code can sign the API response
 as it is.
 
+### Behind a reverse proxy
+
+When a proxy terminates HTTPS and forwards HTTP to Floci, sign the browser-visible HTTPS URL,
+including its external hostname, port and path. Floci rebuilds the signed resource from the
+request scheme and host, so it must receive the external scheme through trusted proxy headers.
+A signature made for `https://` does not match a resource rebuilt as `http://`.
+
+For a proxy that preserves `Host` and sets `X-Forwarded-Proto: https`, configure the Floci
+container with:
+
+```yaml
+environment:
+  QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING: "true"
+  QUARKUS_HTTP_PROXY_ALLOW_X_FORWARDED: "true"
+  QUARKUS_HTTP_PROXY_ALLOW_FORWARDED: "false"
+  QUARKUS_HTTP_PROXY_ENABLE_FORWARDED_HOST: "true"
+  QUARKUS_HTTP_PROXY_TRUSTED_PROXIES: "<proxy source IP or CIDR>"
+```
+
+Replace the placeholder with the proxy's source address **as seen by Floci**. In Docker this may
+be a bridge or gateway address rather than the host's loopback address. Quarkus ignores forwarded
+headers from peers outside `QUARKUS_HTTP_PROXY_TRUSTED_PROXIES`; a missing proxy address leaves
+Floci seeing HTTP and a valid HTTPS URL fails with `Signature does not match the policy`.
+
+Preserve the external `Host`, including a non-default port. If the proxy rewrites it, set
+`X-Forwarded-Host` to that external authority; the forwarded-host setting above enables its use.
+The proxy must replace client-supplied forwarded headers, and the trusted-proxy list should cover
+only its actual peers. See [Quarkus reverse-proxy configuration](https://quarkus.io/version/3.40/guides/http-reference/#running-behind-a-reverse-proxy)
+for other header layouts.
+
+With these settings a valid proxy HTTPS signed URL succeeds; missing, expired or invalid
+signatures must still return 403. Verify those cases through the proxy after configuring it.
+
 ## Not Supported (Phase 2)
 
 - Continuous deployment policies (`CreateContinuousDeploymentPolicy`, etc.)
