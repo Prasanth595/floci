@@ -311,11 +311,43 @@ class IamListPaginationIntegrationTest {
         }
     }
 
+    /**
+     * ListPolicies lists customer-managed policies before the AWS-managed catalog. A marker naming
+     * the last customer-managed policy, deleted before the next page, resumes at the first
+     * AWS-managed one, although its name sorts after every managed policy's ARN.
+     */
+    @Test
+    void aDeletedCustomerManagedPolicyResumesAtTheNextPolicyInListPoliciesOrder() {
+        String name = "zzzz-pg-anchor-" + suffix();
+        String arn = createPolicy(name, "/pg-anchor-policy/");
+        boolean deleted = false;
+        try {
+            List<String> all = flatten(walk(marker -> policyPage("All", null, "1000", marker)));
+            int index = all.indexOf(arn);
+            assertTrue(index >= 0, "the created policy is listed");
+            String following = all.get(index + 1);
+            assertTrue(following.startsWith("arn:aws:iam::aws:policy/"),
+                    "the policy is the last customer-managed one: " + following);
+
+            Page first = policyPage("All", null, Integer.toString(index + 1), null);
+            assertEquals(arn, first.names().getLast());
+
+            deletePolicy(arn);
+            deleted = true;
+
+            assertEquals(List.of(following), policyPage("All", null, "1", first.marker()).names());
+        } finally {
+            if (!deleted) {
+                deletePolicy(arn);
+            }
+        }
+    }
+
     /** A marker shaped like an issued one but never issued is refused, as any other unissued marker is. */
     @Test
     void listRolesRejectsAnAnchoredMarkerItDidNotIssue() {
         String forged = Base64.getUrlEncoder().withoutPadding()
-                .encodeToString("after:pg-anchor-forged".getBytes(StandardCharsets.UTF_8));
+                .encodeToString("pg-anchor-forged.not-a-signature".getBytes(StandardCharsets.UTF_8));
 
         iam("ListRoles").formParam("Marker", forged)
         .when().post("/").then()
