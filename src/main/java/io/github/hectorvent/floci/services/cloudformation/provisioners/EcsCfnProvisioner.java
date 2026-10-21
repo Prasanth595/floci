@@ -628,12 +628,13 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         if (resolved == null || !resolved.isObject() || !resolved.hasNonNull("AwsvpcConfiguration")) {
             return null;
         }
-        JsonNode awsvpc = resolved.path("AwsvpcConfiguration");
+        JsonNode awsvpc = node.path("AwsvpcConfiguration");
         AwsVpcConfiguration awsvpcConfig = new AwsVpcConfiguration();
-        awsvpcConfig.setSubnets(toStringList(awsvpc.path("Subnets")));
-        awsvpcConfig.setSecurityGroups(toStringList(awsvpc.path("SecurityGroups")));
-        if (awsvpc.hasNonNull("AssignPublicIp")) {
-            awsvpcConfig.setAssignPublicIp(awsvpc.path("AssignPublicIp").asText());
+        awsvpcConfig.setSubnets(ctx.engine().resolveStringList(awsvpc.get("Subnets")));
+        awsvpcConfig.setSecurityGroups(ctx.engine().resolveStringList(awsvpc.get("SecurityGroups")));
+        JsonNode assignPublicIp = resolved.path("AwsvpcConfiguration").path("AssignPublicIp");
+        if (!assignPublicIp.isMissingNode() && !assignPublicIp.isNull()) {
+            awsvpcConfig.setAssignPublicIp(assignPublicIp.asText());
         }
         NetworkConfiguration networkConfiguration = new NetworkConfiguration();
         networkConfiguration.setAwsvpcConfiguration(awsvpcConfig);
