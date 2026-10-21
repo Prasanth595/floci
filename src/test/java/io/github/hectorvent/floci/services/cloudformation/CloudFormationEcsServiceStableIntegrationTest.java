@@ -96,7 +96,11 @@ class CloudFormationEcsServiceStableIntegrationTest {
 
     private static final String LIST_PARAMETER_TEMPLATE = """
             {
-              "Parameters": { "SubnetIds": { "Type": "List<AWS::EC2::Subnet::Id>" } },
+              "Parameters": {
+                "SubnetIds": { "Type": "List<AWS::EC2::Subnet::Id>" },
+                "Private": { "Type": "String", "Default": "true" }
+              },
+              "Conditions": { "IsPrivate": { "Fn::Equals": [{ "Ref": "Private" }, "true"] } },
               "Resources": {
                 "Cluster": {
                   "Type": "AWS::ECS::Cluster",
@@ -128,11 +132,18 @@ class CloudFormationEcsServiceStableIntegrationTest {
                     "DesiredCount": 1,
                     "LaunchType": "FARGATE",
                     "NetworkConfiguration": {
-                      "AwsvpcConfiguration": {
-                        "AssignPublicIp": "DISABLED",
-                        "SecurityGroups": [{ "Fn::GetAtt": ["TaskSg", "GroupId"] }],
-                        "Subnets": { "Ref": "SubnetIds" }
-                      }
+                      "AwsvpcConfiguration": { "Fn::If": ["IsPrivate",
+                        {
+                          "AssignPublicIp": "DISABLED",
+                          "SecurityGroups": [{ "Fn::GetAtt": ["TaskSg", "GroupId"] }],
+                          "Subnets": { "Ref": "SubnetIds" }
+                        },
+                        {
+                          "AssignPublicIp": "ENABLED",
+                          "SecurityGroups": [{ "Fn::GetAtt": ["TaskSg", "GroupId"] }],
+                          "Subnets": { "Ref": "SubnetIds" }
+                        }
+                      ] }
                     }
                   }
                 }
@@ -197,7 +208,7 @@ class CloudFormationEcsServiceStableIntegrationTest {
     }
 
     @Test
-    void createStack_awsvpcServiceWithSubnetListParameter_usesEverySubnet() {
+    void createStack_awsvpcServiceWithSubnetListParameterUnderFnIf_usesEverySubnet() {
         String name = "cfn-stable-list-" + Long.toString(System.nanoTime(), 36);
         String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a");
         String subnetB = Ec2Service.defaultSubnetId("us-east-1", "b");
