@@ -13,10 +13,10 @@ import java.util.regex.Pattern;
 public final class SigV4CredentialScope {
 
     private static final Pattern SERVICE_PATTERN =
-            Pattern.compile("Credential=[^/,\\s]+/\\d{8}/[^/,\\s]+/([^/,\\s]+)/aws4_request");
+            Pattern.compile("Credential=[^,\\s]+/\\d{8}/[^/,\\s]+/([^/,\\s]+)/aws4_request");
     // SigV4A drops the region segment: Credential=<key>/<date>/<service>/aws4_request
     private static final Pattern SIGV4A_SERVICE_PATTERN =
-            Pattern.compile("Credential=[^/,\\s]+/\\d{8}/([^/,\\s]+)/aws4_request");
+            Pattern.compile("Credential=[^,\\s]+/\\d{8}/([^/,\\s]+)/aws4_request");
     private static final Pattern ACCESS_KEY_PATTERN = Pattern.compile("Credential=([^/\\s,]+)/");
 
     private SigV4CredentialScope() {
