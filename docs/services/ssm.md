@@ -25,6 +25,12 @@
 | `DescribePatchBaselines` | List AWS-owned predefined patch baselines (filter by `OWNER`, `OPERATING_SYSTEM`, `NAME_PREFIX`) |
 | `GetDefaultPatchBaseline` | Get the default patch baseline id for an operating system |
 
+`GetParametersByPath` supports `Type` entries in `ParameterFilters`, with `Equals`
+(the default) or `BeginsWith`. Values within one filter combine with OR; multiple
+type filters combine with AND. Filtering also applies to public AMI parameters and
+respects `Path`, `Recursive`, and region selection. Other `GetParametersByPath`
+filter keys and pagination are not currently modeled.
+
 ### Run Command
 
 | Action | Description |

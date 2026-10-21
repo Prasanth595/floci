@@ -232,7 +232,7 @@ public class SsmJsonHandler {
         String path = request.path("Path").asText();
         boolean recursive = request.path("Recursive").asBoolean(false);
 
-        List<Parameter> params = ssmService.getParametersByPath(path, recursive, region);
+        List<Parameter> params = ssmService.getParametersByPath(path, recursive, parameterFilters(request), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
@@ -302,11 +302,7 @@ public class SsmJsonHandler {
     private static final int DESCRIBE_PARAMETERS_MAX_RESULTS = 50;
 
     private Response handleDescribeParameters(JsonNode request, String region) {
-        List<ParameterStringFilter> filters = new ArrayList<>();
-        for (JsonNode f : request.path("ParameterFilters")) {
-            filters.add(new ParameterStringFilter(f.path("Key").asText(null),
-                    f.path("Option").asText(null), textValues(f.path("Values"))));
-        }
+        List<ParameterStringFilter> filters = parameterFilters(request);
         // The deprecated Filters shape has no option; each of its keys matches exactly.
         for (JsonNode f : request.path("Filters")) {
             String key = f.path("Key").asText(null);
@@ -369,6 +365,15 @@ public class SsmJsonHandler {
     private static String optionalText(JsonNode request, String field) {
         String text = request.path(field).asText("");
         return text.isEmpty() ? null : text;
+    }
+
+    private static List<ParameterStringFilter> parameterFilters(JsonNode request) {
+        List<ParameterStringFilter> filters = new ArrayList<>();
+        for (JsonNode filter : request.path("ParameterFilters")) {
+            filters.add(new ParameterStringFilter(filter.path("Key").asText(null),
+                    filter.path("Option").asText(null), textValues(filter.path("Values"))));
+        }
+        return filters;
     }
 
     private static List<String> textValues(JsonNode values) {

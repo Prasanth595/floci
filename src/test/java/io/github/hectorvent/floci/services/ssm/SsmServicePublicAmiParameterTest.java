@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ec2.Ec2ImageCatalog;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
+import io.github.hectorvent.floci.services.ssm.model.ParameterStringFilter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -108,6 +109,14 @@ class SsmServicePublicAmiParameterTest {
         assertEquals(9, names.size());
         assertTrue(ssmService.getParametersByPath("/aws/service", false, REGION).isEmpty());
         assertEquals(32, ssmService.getParametersByPath("/aws/service", true, REGION).size());
+    }
+
+    @Test
+    void appliesPathTypeFiltersToPublicParameters() {
+        assertEquals(32, ssmService.getParametersByPath("/aws/service", true,
+                List.of(new ParameterStringFilter("Type", null, List.of("String"))), REGION).size());
+        assertTrue(ssmService.getParametersByPath("/aws/service", true,
+                List.of(new ParameterStringFilter("Type", null, List.of("StringList"))), REGION).isEmpty());
     }
 
     @Test

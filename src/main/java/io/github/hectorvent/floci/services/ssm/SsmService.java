@@ -561,6 +561,15 @@ public class SsmService implements ResourceProvider {
         });
     }
 
+    public List<Parameter> getParametersByPath(String path, boolean recursive,
+                                              List<ParameterStringFilter> filters, String region) {
+        List<ParameterStringFilter> typeFilters = filters.stream().filter(filter -> "Type".equals(filter.key())).toList();
+        typeFilters.forEach(SsmService::validateDescribeParametersFilter);
+        return getParametersByPath(path, recursive, region).stream()
+                .filter(parameter -> typeFilters.stream().allMatch(filter -> matchesParameterFilter(parameter, filter)))
+                .toList();
+    }
+
     public List<Parameter> getParametersByPath(String path, boolean recursive, String region) {
         String normalizedPath = path.endsWith("/") ? path : path + "/";
         String prefix = region + "::";
