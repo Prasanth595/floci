@@ -363,14 +363,30 @@ class Ec2RepeatedFilterNamesTest {
 
     @Test
     void aLookupImageIsSynthesizedOnlyWhenItSatisfiesEveryNameFilter() {
-        Set<String> synthesized = names(describe("DescribeImages",
-                filter("name", "repeated-lookup-*-x86_64"), filter("name", "repeated-lookup-*")));
-        assertEquals(1, synthesized.size(), synthesized.toString());
-        String name = synthesized.iterator().next();
-        assertTrue(name.startsWith("repeated-lookup-") && name.endsWith("-x86_64"), name);
+        for (List<String[]> filters : List.of(
+                List.of(filter("name", "repeated-lookup-*-x86_64"), filter("name", "repeated-lookup-*")),
+                List.of(filter("name", "repeated-lookup-*"), filter("name", "repeated-lookup-*-x86_64")))) {
+            Set<String> synthesized = names(describe("DescribeImages", filters.toArray(String[][]::new)));
+            assertEquals(1, synthesized.size(), synthesized.toString());
+            String name = synthesized.iterator().next();
+            assertTrue(name.startsWith("repeated-lookup-") && name.endsWith("-x86_64"), name);
+        }
 
         assertEquals(Set.of(), names(describe("DescribeImages",
                 filter("name", "repeated-first-*"), filter("name", "repeated-second-*"))));
+    }
+
+    @Test
+    void aLookupImageTakesTheValueEveryFilterOfANameAdmits() {
+        String xml = describe("DescribeImages", filter("name", "repeated-scalar-*"),
+                filter("architecture", "x86_64", "arm64"), filter("architecture", "arm64"),
+                filter("owner-id", "111111111111", "222222222222"), filter("owner-id", "222222222222"),
+                filter("state", "available", "pending"), filter("state", "pending"));
+
+        assertEquals(1, names(xml).size(), xml);
+        assertEquals(Set.of("arm64"), ids(xml, "architecture"));
+        assertEquals(Set.of("222222222222"), ids(xml, "imageOwnerId"));
+        assertEquals(Set.of("pending"), ids(xml, "imageState"));
     }
 
     @Test
@@ -441,6 +457,26 @@ class Ec2RepeatedFilterNamesTest {
         assertEquals(Set.of(), ids(describe("DescribeInstanceTypeOfferings",
                 "LocationType", "availability-zone", filter("instance-type", "t3.micro"),
                 filter("location", "us-east-1a"), filter("location", "us-east-1b")), "location"));
+    }
+
+    /**
+     * The InstanceType.N parameter, which Floci reads beside the instance-type filter, adds its
+     * types to those every instance-type filter names, so repeating a filter or reordering the
+     * filters leaves the answer as it was.
+     */
+    @Test
+    void instanceTypeOfferingsKeepTheNamedTypesBesideEveryInstanceTypeFilter() {
+        List<String> params = List.of("LocationType", "region", "InstanceType.1", "m5.large");
+        Set<String> lone = ids(describe("DescribeInstanceTypeOfferings", params,
+                filter("instance-type", "t3.micro")), "instanceType");
+        assertEquals(Set.of("m5.large", "t3.micro"), lone);
+
+        assertEquals(lone, ids(describe("DescribeInstanceTypeOfferings", params,
+                filter("instance-type", "t3.micro"), filter("instance-type", "t3.micro")), "instanceType"));
+        assertEquals(lone, ids(describe("DescribeInstanceTypeOfferings", params,
+                filter("instance-type", "t3.micro", "m5.large"), filter("instance-type", "t3.micro")), "instanceType"));
+        assertEquals(lone, ids(describe("DescribeInstanceTypeOfferings", params,
+                filter("instance-type", "t3.micro"), filter("instance-type", "t3.micro", "m5.large")), "instanceType"));
     }
 
     @Test

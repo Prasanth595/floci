@@ -5025,6 +5025,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .collect(Collectors.toList());
     }
 
+    public InstanceCreditSpecificationListResult describeInstanceCreditSpecifications(
+            String region, List<String> instanceIds, Map<String, List<String>> filters,
+            int maxResults, String nextToken) {
+        return describeInstanceCreditSpecifications(region, instanceIds, filterList(filters), maxResults, nextToken);
+    }
+
     /**
      * The credit option for CPU usage of burstable performance instances.
      *
@@ -5055,12 +5061,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * @param maxResults  page size, or 0 for no pagination. AWS rejects it together with ids
      * @param nextToken   the cursor from a previous page, or null
      */
-    public InstanceCreditSpecificationListResult describeInstanceCreditSpecifications(
-            String region, List<String> instanceIds, Map<String, List<String>> filters,
-            int maxResults, String nextToken) {
-        return describeInstanceCreditSpecifications(region, instanceIds, filterList(filters), maxResults, nextToken);
-    }
-
     InstanceCreditSpecificationListResult describeInstanceCreditSpecifications(
             String region, List<String> instanceIds, List<Map.Entry<String, List<String>>> filters,
             int maxResults, String nextToken) {
@@ -11657,8 +11657,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
                                                             String locationType,
                                                             List<Map.Entry<String, List<String>>> filters) {
-        // The first instance-type filter names the types to look up, as a lone one always has, and
-        // each later one keeps only the types it names too.
+        // The first instance-type filter names the types to look up beside InstanceType.N, as a
+        // lone one always has, and each later one keeps only the filtered types it names too, so
+        // the answer is InstanceType.N plus the types every filter names.
         List<List<String>> typeFilters = filterValues(filters, "instance-type");
         List<String> effectiveTypeNames = new ArrayList<>(new LinkedHashSet<>(instanceTypeNames));
         if (!typeFilters.isEmpty()) {
@@ -11679,7 +11680,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<Map<String, String>> offerings = new ArrayList<>();
         for (Map<String, Object> type : describeInstanceTypes(effectiveTypeNames)) {
             String instanceType = (String) type.get("instanceType");
-            if (laterTypeFilters.stream().anyMatch(values -> !values.isEmpty() && !values.contains(instanceType))) {
+            if (!instanceTypeNames.contains(instanceType) && laterTypeFilters.stream()
+                    .anyMatch(values -> !values.isEmpty() && !values.contains(instanceType))) {
                 continue;
             }
             for (String location : locations) {
@@ -11701,8 +11703,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * Filters of distinct names, as the Map overloads of the Describe methods take them from code
      * that builds its own. A request's Filter.N reaches the list overloads instead, in request
-     * order, because AWS joins every filter with an AND and a name may repeat: a map would keep
-     * only the last filter of each name.
+     * order: every filter is joined with an AND and a name may repeat, which a map, holding one
+     * filter per name, cannot carry.
      */
     private static List<Map.Entry<String, List<String>>> filterList(Map<String, List<String>> filters) {
         return filters == null ? List.of() : List.copyOf(filters.entrySet());
@@ -11721,6 +11723,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(filter -> name.equals(filter.getKey()))
                 .map(Map.Entry::getValue)
                 .toList();
+    }
+
+    /**
+     * Whether every one of {@code filters} admits {@code value}, its values compared the way the
+     * image matchers compare them. A filter without values admits anything.
+     */
+    static boolean everyFilterAdmits(List<List<String>> filters, String value) {
+        return filters.stream().allMatch(values -> values.isEmpty()
+                || values.stream().anyMatch(pattern -> IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value)));
     }
 
     private boolean matchesValue(String resourceValue, List<String> filterValues) {

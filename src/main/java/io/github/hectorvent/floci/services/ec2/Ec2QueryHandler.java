@@ -3351,8 +3351,9 @@ public class Ec2QueryHandler {
         // rules the parameter names. A filter without values narrows nothing.
         List<List<String>> ruleIdFilters = Ec2Service.filterValues(filters, "security-group-rule-id");
         List<List<String>> groupIdFilters = Ec2Service.filterValues(filters, "group-id");
-        List<SecurityGroupRule> rules = service.describeSecurityGroupRules(
-                        region, List.of(), getList(p, "SecurityGroupRuleId")).stream()
+        List<SecurityGroupRule> named = service.describeSecurityGroupRules(
+                region, List.of(), getList(p, "SecurityGroupRuleId"));
+        List<SecurityGroupRule> rules = named.stream()
                 .filter(rule -> ruleIdFilters.stream()
                         .allMatch(ids -> ids.isEmpty() || ids.contains(rule.getSecurityGroupRuleId())))
                 .filter(rule -> groupIdFilters.stream()
@@ -3368,6 +3369,7 @@ public class Ec2QueryHandler {
         xml.end("securityGroupRuleSet").end("DescribeSecurityGroupRulesResponse");
         return xmlResponse(xml.build());
     }
+
     private Response handleModifySecurityGroupRules(MultivaluedMap<String, String> p, String region) {
         String groupId = p.getFirst("GroupId");
         List<Map<String, String>> updates = new ArrayList<>();
@@ -3537,14 +3539,16 @@ public class Ec2QueryHandler {
         if (images.isEmpty() && imageIds.isEmpty() && !nameFilters.isEmpty()) {
             // A filter's values are an OR, so the wildcard is whichever value carries one rather
             // than whichever comes first. Taking the first outright meant an exact value ahead of
-            // a wildcard skipped synthesis and the lookup got nothing. With several name filters
-            // the first wildcard names the image, which the check below holds to the others.
-            String namePattern = nameFilters.stream()
-                    .flatMap(List::stream)
-                    .filter(v -> v != null && (v.contains("*") || v.contains("?")))
-                    .findFirst()
-                    .orElse(null);
-            if (namePattern != null) {
+            // a wildcard skipped synthesis and the lookup got nothing. Each name filter offers its
+            // wildcard in turn, since the image one builds may fail another.
+            for (List<String> nameFilter : nameFilters) {
+                String namePattern = nameFilter.stream()
+                        .filter(v -> v != null && (v.contains("*") || v.contains("?")))
+                        .findFirst()
+                        .orElse(null);
+                if (namePattern == null) {
+                    continue;
+                }
                 Image synthesized = synthesizeLookupImage(namePattern, filters, owners);
                 // Only hand it back if it satisfies everything that was asked for. Returning an
                 // AMI that violates the request is worse than the empty result the lookup would
@@ -3553,6 +3557,7 @@ public class Ec2QueryHandler {
                 if (service.imageMatchesFilters(synthesized, filters)
                         && service.imageMatchesOwners(synthesized, owners)) {
                     images = List.of(synthesized);
+                    break;
                 }
             }
         }
@@ -3614,7 +3619,10 @@ public class Ec2QueryHandler {
         List<List<String>> ownerIdFilters = Ec2Service.filterValues(filters, "owner-id");
         List<String> ownerIds = ownerIdFilters.isEmpty()
                 ? (owners == null ? List.of() : owners)
-                : ownerIdFilters.stream().flatMap(List::stream).toList();
+                : ownerIdFilters.stream()
+                        .flatMap(List::stream)
+                        .filter(v -> Ec2Service.everyFilterAdmits(ownerIdFilters, v))
+                        .toList();
         String requested = ownerIds.stream().findFirst()
                 .orElseGet(() -> firstFilterValue(filters, "owner-alias", AMAZON_OWNER_ID));
         return switch (requested) {
@@ -3638,12 +3646,17 @@ public class Ec2QueryHandler {
         };
     }
 
-    /** The requested value for a scalar filter, so the synthesized image satisfies it. */
+    /**
+     * The requested value for a scalar filter, so the synthesized image satisfies it: the first
+     * value without a wildcard that every filter of that name admits.
+     */
     private static String firstFilterValue(List<Map.Entry<String, List<String>>> filters, String name,
                                            String fallback) {
-        return Ec2Service.filterValues(filters, name).stream()
+        List<List<String>> named = Ec2Service.filterValues(filters, name);
+        return named.stream()
                 .flatMap(List::stream)
                 .filter(v -> v != null && !v.contains("*") && !v.contains("?"))
+                .filter(v -> Ec2Service.everyFilterAdmits(named, v))
                 .findFirst()
                 .orElse(fallback);
     }
