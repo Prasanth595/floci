@@ -7494,26 +7494,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * The key type DescribeKeyPairs reports. A key pair stored before the type was recorded has it
-     * read from what it holds: rsa when CreateKeyPair made it, since CreateKeyPair made only RSA
-     * keys until it recorded their type, and otherwise the type of its imported key, or none when
-     * ImportKeyPair would now refuse that material or reading it fails, which is logged.
+     * read from the public key it holds, whether CreateKeyPair made it or ImportKeyPair took it. A
+     * created key pair saved before created key pairs kept their public key is rsa, the only type
+     * CreateKeyPair made then. Otherwise it has none, when ImportKeyPair would now refuse the
+     * material or reading it fails, which is logged.
      */
     static String keyTypeOf(KeyPair keyPair) {
         if (keyPair.getKeyType() != null) {
             return keyPair.getKeyType();
         }
-        if (keyPair.getKeyMaterial() != null) {
-            return "rsa";
-        }
         try {
-            Ec2KeyMaterial.Imported imported = Ec2KeyMaterial.readImportedKey(keyPair.getPublicKey());
-            return imported != null ? imported.keyType() : null;
+            Ec2KeyMaterial.Imported key = Ec2KeyMaterial.readImportedKey(keyPair.getPublicKey());
+            if (key != null) {
+                return key.keyType();
+            }
         } catch (RuntimeException e) {
             // The record may hold any text an earlier ImportKeyPair stored. Text the reader cannot
             // handle leaves the type out instead of failing every description in the region.
             LOG.warnv(e, "Could not read the key type of stored key pair {0}", keyPair.getKeyPairId());
             return null;
         }
+        return keyPair.getKeyMaterial() != null ? "rsa" : null;
     }
 
     /**

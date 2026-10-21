@@ -4762,8 +4762,9 @@ class Ec2ServiceTest {
 
     /**
      * A key pair stored before its type was recorded has none, so DescribeKeyPairs reads it from
-     * what the record holds: a created key pair is RSA, an imported one has the type of its key,
-     * and material ImportKeyPair would now refuse has no type. key-type filters by the same answer.
+     * the key the record holds, created or imported, and material ImportKeyPair would now refuse has
+     * no type; a created key pair saved before it kept its public key is RSA, all CreateKeyPair made
+     * then. key-type filters by the same answer.
      */
     @Test
     void theTypeOfAKeyPairStoredWithoutOneIsReadFromItsKey() throws Exception {
@@ -4795,6 +4796,18 @@ class Ec2ServiceTest {
             }
             keyPairStore.put("us-east-1::" + record.getKey(), keyPair);
         }
+        Ec2KeyMaterial.Generated ed25519 = Ec2KeyMaterial.generate("ed25519", "pem", "key-created-ed25519");
+        Ec2KeyMaterial.Generated rsa = Ec2KeyMaterial.generateRsa();
+        for (String id : List.of("key-created-ed25519", "key-created-without-public-key")) {
+            KeyPair keyPair = new KeyPair();
+            keyPair.setKeyPairId(id);
+            keyPair.setKeyName(id);
+            keyPair.setRegion("us-east-1");
+            boolean isEd25519 = id.equals("key-created-ed25519");
+            keyPair.setKeyMaterial(isEd25519 ? ed25519.privateKeyPem() : rsa.privateKeyPem());
+            keyPair.setPublicKey(isEd25519 ? ed25519.openSshPublicKey() : null);
+            keyPairStore.put("us-east-1::" + id, keyPair);
+        }
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
@@ -4816,9 +4829,12 @@ class Ec2ServiceTest {
         expected.put("key-garbage", null);
         expected.put("key-pad-bits", null);
         expected.put("key-empty-bit-string", null);
+        expected.put("key-created-ed25519", "ed25519");
+        expected.put("key-created-without-public-key", "rsa");
         assertEquals(expected, types);
-        assertEquals(List.of("key-ed25519"), service.describeKeyPairs("us-east-1", List.of(), List.of(),
-                Map.of("key-type", List.of("ed25519"))).stream().map(KeyPair::getKeyPairId).toList());
+        assertEquals(Set.of("key-ed25519", "key-created-ed25519"), service.describeKeyPairs("us-east-1",
+                List.of(), List.of(), Map.of("key-type", List.of("ed25519")))
+                .stream().map(KeyPair::getKeyPairId).collect(Collectors.toSet()));
     }
 
     /**
