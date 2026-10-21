@@ -418,8 +418,8 @@ including its external hostname, port and path. Floci rebuilds the signed resour
 request scheme and host, so it must receive the external scheme through trusted proxy headers.
 A signature made for `https://` does not match a resource rebuilt as `http://`.
 
-For a proxy that preserves `Host` and sets `X-Forwarded-Proto: https`, configure the Floci
-container with:
+For a proxy that preserves `Host` and sets `X-Forwarded-Proto` and `X-Forwarded-Port`,
+configure the Floci container with:
 
 ```yaml
 environment:
@@ -435,8 +435,20 @@ be a bridge or gateway address rather than the host's loopback address. Quarkus 
 headers from peers outside `QUARKUS_HTTP_PROXY_TRUSTED_PROXIES`; a missing proxy address leaves
 Floci seeing HTTP and a valid HTTPS URL fails with `Signature does not match the policy`.
 
-Preserve the external `Host`, including a non-default port. If the proxy rewrites it, set
-`X-Forwarded-Host` to that external authority; the forwarded-host setting above enables its use.
+For example, when signing `https://e1z2x3c4v5b6n7.cloudfront.localhost.floci.io:19443/hello.txt`,
+the proxy should forward these headers to Floci:
+
+```http
+Host: e1z2x3c4v5b6n7.cloudfront.localhost.floci.io:19443
+X-Forwarded-Proto: https
+X-Forwarded-Port: 19443
+```
+
+A non-default external port needs `X-Forwarded-Port`, even when the proxy preserves `Host`.
+Applying `X-Forwarded-Proto` resets Quarkus' port, so preserving `Host` alone rebuilds the URL
+without `:19443` and fails the signature check. Alternatively, send `X-Forwarded-Host` with
+the external hostname **and port**; the forwarded-host setting above enables its use.
+
 The proxy must replace client-supplied forwarded headers, and the trusted-proxy list should cover
 only its actual peers. See [Quarkus reverse-proxy configuration](https://quarkus.io/version/3.40/guides/http-reference/#running-behind-a-reverse-proxy)
 for other header layouts.
