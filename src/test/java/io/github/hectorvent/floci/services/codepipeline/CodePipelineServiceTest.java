@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -61,7 +62,66 @@ class CodePipelineServiceTest {
             mock(CodeBuildService.class),
             mock(CodeDeployService.class),
             mock(LambdaService.class),
-            mock(S3Service.class));
+            mock(S3Service.class), 5L);
+
+    @Test
+    void existingConstructorsKeepWorkerPollDefaultIndependentOfSourcePolling() throws Exception {
+        CodeBuildService codeBuild = mock(CodeBuildService.class);
+        CodeDeployService codeDeploy = mock(CodeDeployService.class);
+        LambdaService lambda = mock(LambdaService.class);
+        S3Service s3 = mock(S3Service.class);
+        CodePipelineEventPublisher publisher = mock(CodePipelineEventPublisher.class);
+        CodePipelineService[] defaults = {
+                new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild, codeDeploy, lambda, s3),
+                new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild, codeDeploy, lambda, s3,
+                        configWithPollInterval(731L)),
+                new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild, codeDeploy, lambda, s3,
+                        configWithPollInterval(947L), publisher),
+                new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild, codeDeploy, lambda, s3,
+                        publisher, 613L, TimeUnit.SECONDS.toNanos(5), () -> { })
+        };
+        long[] sourceIntervals = {500L, 731L, 947L, 613L};
+        try {
+            for (int i = 0; i < defaults.length; i++) {
+                assertEquals(100L, longField(defaults[i], "workerPollIntervalMs"));
+                assertEquals(sourceIntervals[i], longField(defaults[i], "sourcePollIntervalMs"));
+                assertEquals(TimeUnit.SECONDS.toNanos(5), longField(defaults[i], "runFinishWaitNanos"));
+            }
+        } finally {
+            for (CodePipelineService pipelineService : defaults) {
+                pipelineService.shutdown();
+            }
+        }
+    }
+
+    @Test
+    void explicitWorkerIntervalLeavesSourceIntervalAndRunFinishHooksUnchanged() throws Exception {
+        AtomicInteger cleanupCalls = new AtomicInteger();
+        Runnable cleanup = cleanupCalls::incrementAndGet;
+        CodePipelineService extended = new CodePipelineService(new InMemoryStorageFactory(), mapper,
+                mock(CodeBuildService.class), mock(CodeDeployService.class), mock(LambdaService.class),
+                mock(S3Service.class), mock(CodePipelineEventPublisher.class), 739L, 123456L, cleanup, 5L);
+        try {
+            assertEquals(5L, longField(service, "workerPollIntervalMs"));
+            assertEquals(500L, longField(service, "sourcePollIntervalMs"));
+            assertEquals(TimeUnit.SECONDS.toNanos(5), longField(service, "runFinishWaitNanos"));
+            assertEquals(5L, longField(extended, "workerPollIntervalMs"));
+            assertEquals(739L, longField(extended, "sourcePollIntervalMs"));
+            assertEquals(123456L, longField(extended, "runFinishWaitNanos"));
+            Field probe = CodePipelineService.class.getDeclaredField("beforeOverrideTimeoutCleanup");
+            probe.setAccessible(true);
+            assertEquals(cleanup, probe.get(extended));
+            assertEquals(0, cleanupCalls.get());
+        } finally {
+            extended.shutdown();
+        }
+    }
+
+    private static long longField(CodePipelineService pipelineService, String name) throws Exception {
+        Field field = CodePipelineService.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.getLong(pipelineService);
+    }
 
     /**
      * The configured interval reaches {@code scheduleWithFixedDelay}, which rejects a non-positive
@@ -69,7 +129,7 @@ class CodePipelineServiceTest {
      * would leave CodePipeline unavailable rather than merely mis-scheduled.
      */
     @Test
-    void nonPositiveConfiguredPollInterval_doesNotPreventStartup() {
+    void nonPositiveConfiguredPollInterval_doesNotPreventStartup() throws Exception {
         for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
             CodePipelineService configured = new CodePipelineService(
                     new InMemoryStorageFactory(),
@@ -80,6 +140,8 @@ class CodePipelineServiceTest {
                     mock(S3Service.class),
                     configWithPollInterval(interval));
             try {
+                assertEquals(100L, longField(configured, "workerPollIntervalMs"));
+                assertEquals(500L, longField(configured, "sourcePollIntervalMs"));
                 assertDoesNotThrow(configured::resumePersistedExecutions,
                         "interval " + interval + " must not abort startup");
             } finally {
@@ -147,7 +209,7 @@ class CodePipelineServiceTest {
                 mock(CodeBuildService.class),
                 mock(CodeDeployService.class),
                 mock(LambdaService.class),
-                mock(S3Service.class));
+                mock(S3Service.class), 5L);
         CodePipelinePipeline pipeline = mapper.readValue("""
                 {
                     "accountId": "000000000000",
@@ -207,7 +269,7 @@ class CodePipelineServiceTest {
                 mock(CodeBuildService.class),
                 mock(CodeDeployService.class),
                 mock(LambdaService.class),
-                s3Service);
+                s3Service, 5L);
         String pipelineRequest = """
                 {
                     "pipeline": {
@@ -522,7 +584,7 @@ class CodePipelineServiceTest {
         CapturingStorageFactory storage = new CapturingStorageFactory();
         CodePipelineService catchUpService = new CodePipelineService(storage, mapper,
                 mock(CodeBuildService.class), mock(CodeDeployService.class),
-                mock(LambdaService.class), mock(S3Service.class));
+                mock(LambdaService.class), mock(S3Service.class), 5L);
         String pipelineName = "enabled-catch-up";
         try {
             createExternalActionPipeline(catchUpService, pipelineName, """
@@ -589,7 +651,7 @@ class CodePipelineServiceTest {
         storage.fixedExecutionStartTime = 10.0;
         CodePipelineService pipelineService = new CodePipelineService(storage, mapper,
                 mock(CodeBuildService.class), mock(CodeDeployService.class),
-                mock(LambdaService.class), mock(S3Service.class));
+                mock(LambdaService.class), mock(S3Service.class), 5L);
         String pipeline = "ordinal-admission";
         try {
             createExternalActionPipeline(pipelineService, pipeline, """
@@ -640,7 +702,7 @@ class CodePipelineServiceTest {
         CapturingStorageFactory storage = new CapturingStorageFactory();
         CodePipelineService pipelineService = new CodePipelineService(storage, mapper,
                 mock(CodeBuildService.class), mock(CodeDeployService.class),
-                mock(LambdaService.class), mock(S3Service.class));
+                mock(LambdaService.class), mock(S3Service.class), 5L);
         String pipeline = "ordinal-reverse-arrival";
         try {
             createExternalActionPipeline(pipelineService, pipeline, """
@@ -917,7 +979,7 @@ class CodePipelineServiceTest {
                                             CodeDeployService codeDeployService) {
         return new CodePipelineService(
                 new InMemoryStorageFactory(), mapper, codeBuildService, codeDeployService,
-                mock(LambdaService.class), mock(S3Service.class));
+                mock(LambdaService.class), mock(S3Service.class), 5L);
     }
 
     private void createExternalActionPipeline(CodePipelineService pipelineService,

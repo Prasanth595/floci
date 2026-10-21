@@ -80,7 +80,7 @@ public class CodePipelineService {
     private static final String DEFAULT_EXECUTION_MODE = "SUPERSEDED";
     private static final String DEFAULT_PIPELINE_TYPE = "V1";
     private static final int MAX_ACTIVE_EXECUTIONS = 50;
-    private static final long POLL_INTERVAL_MS = 100L;
+    private static final long DEFAULT_WORKER_POLL_INTERVAL_MS = 100L;
     private static final String SOURCE_POLL_TYPE = "source-poll";
     private static final String MISSING_SOURCE_REVISION = "missing";
     private static final long MAX_ARCHIVE_BYTES = 128L << 20;
@@ -127,6 +127,7 @@ public class CodePipelineService {
     // on sibling actions. Retries check this set so they never overlap a runner that has not finished.
     final Set<String> activeRuns = ConcurrentHashMap.newKeySet();
     private final long sourcePollIntervalMs;
+    private final long workerPollIntervalMs;
     // Test hooks, set only through the package-private constructor: a shortened wait, and a probe
     // for the gap before the override timeout cleanup.
     private final long runFinishWaitNanos;
@@ -148,8 +149,15 @@ public class CodePipelineService {
                         CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                         LambdaService lambdaService, S3Service s3Service) {
         this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
+                DEFAULT_WORKER_POLL_INTERVAL_MS);
+    }
+
+    CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
+                        CodeBuildService codeBuildService, CodeDeployService codeDeployService,
+                        LambdaService lambdaService, S3Service s3Service, long workerPollIntervalMs) {
+        this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
                 detachedEventPublisher(mapper), DEFAULT_SOURCE_POLL_INTERVAL_MS,
-                DEFAULT_RUN_FINISH_WAIT_NANOS, () -> { });
+                DEFAULT_RUN_FINISH_WAIT_NANOS, () -> { }, workerPollIntervalMs);
     }
 
     public CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
@@ -193,12 +201,23 @@ public class CodePipelineService {
         return DEFAULT_SOURCE_POLL_INTERVAL_MS;
     }
 
-    @SuppressWarnings("unchecked")
     CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
                         CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                         LambdaService lambdaService, S3Service s3Service,
                         CodePipelineEventPublisher eventPublisher, long sourcePollIntervalMs,
                         long runFinishWaitNanos, Runnable beforeOverrideTimeoutCleanup) {
+        this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
+                eventPublisher, sourcePollIntervalMs, runFinishWaitNanos, beforeOverrideTimeoutCleanup,
+                DEFAULT_WORKER_POLL_INTERVAL_MS);
+    }
+
+    @SuppressWarnings("unchecked")
+    CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
+                        CodeBuildService codeBuildService, CodeDeployService codeDeployService,
+                        LambdaService lambdaService, S3Service s3Service,
+                        CodePipelineEventPublisher eventPublisher, long sourcePollIntervalMs,
+                        long runFinishWaitNanos, Runnable beforeOverrideTimeoutCleanup,
+                        long workerPollIntervalMs) {
         this.pipelineStore = storageFactory.create(
                 "codepipeline", "codepipeline-pipelines.json", new TypeReference<Map<String, CodePipelinePipeline>>() {});
         this.executionStore = storageFactory.create(
@@ -212,6 +231,7 @@ public class CodePipelineService {
         this.s3Service = s3Service;
         this.eventPublisher = eventPublisher;
         this.sourcePollIntervalMs = sourcePollIntervalMs;
+        this.workerPollIntervalMs = workerPollIntervalMs;
         this.runFinishWaitNanos = runFinishWaitNanos;
         this.beforeOverrideTimeoutCleanup = beforeOverrideTimeoutCleanup;
     }
@@ -2350,7 +2370,7 @@ public class CodePipelineService {
             if (abandonExternalActionIfRequested(execution, state)) {
                 return;
             }
-            TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
+            TimeUnit.MILLISECONDS.sleep(workerPollIntervalMs);
             build = codeBuildService.getBuild(execution.getRegion(), execution.getAccountId(), build.getId());
         }
         if (abandonExternalActionIfRequested(execution, state)) {
@@ -2383,7 +2403,7 @@ public class CodePipelineService {
             if (abandonExternalActionIfRequested(execution, state)) {
                 return;
             }
-            TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
+            TimeUnit.MILLISECONDS.sleep(workerPollIntervalMs);
             deployment = codeDeployService.getDeployment(execution.getRegion(), deploymentId);
         }
         if (abandonExternalActionIfRequested(execution, state)) {
@@ -2453,7 +2473,7 @@ public class CodePipelineService {
                     now() + TimeUnit.DAYS.toSeconds(7));
         }
         while ("InProgress".equals(state.getStatus()) && !execution.isStopRequested()) {
-            TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
+            TimeUnit.MILLISECONDS.sleep(workerPollIntervalMs);
         }
         if (execution.isStopRequested()) {
             state.setStatus(execution.isAbandon() ? "Abandoned" : "Stopped");
@@ -2508,7 +2528,7 @@ public class CodePipelineService {
                 }
                 throw new AwsException("ActionExecutionFailed", message, 400);
             }
-            TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
+            TimeUnit.MILLISECONDS.sleep(workerPollIntervalMs);
         }
         state.setStatus("Abandoned");
         state.setSummary("Action abandoned.");
@@ -2570,7 +2590,7 @@ public class CodePipelineService {
             if (enabled) {
                 return;
             }
-            TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
+            TimeUnit.MILLISECONDS.sleep(workerPollIntervalMs);
             pipeline = requirePipeline(execution.getAccountId(), execution.getRegion(), execution.getPipelineName());
         }
     }
