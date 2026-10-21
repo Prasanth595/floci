@@ -111,10 +111,10 @@ class RdsDataResourceResolver {
             throw new AwsException("BadRequestException",
                     "RDS resource runtime is not available for Data API execution.", 400);
         }
-        return new DatabaseTarget(arn, runtimeId, engine, host, port, username, password, databaseName);
+        return new DatabaseTarget(arn, runtimeId, engine, username, password, databaseName);
     }
 
-    record DatabaseTarget(String arn, String runtimeId, DatabaseEngine engine, String host, int port,
+    record DatabaseTarget(String arn, String runtimeId, DatabaseEngine engine,
                           String username, String password, String databaseName) {
     }
 }

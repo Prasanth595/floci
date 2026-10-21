@@ -55,7 +55,7 @@ import java.util.regex.Pattern;
  * v2 cluster with MinCapacity 0 knows when it is idle enough to pause and when to resume.
  */
 @ApplicationScoped
-public class RdsContainerManager implements RdsBackendGate, Resettable {
+public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointResolver, Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsContainerManager.class);
     private static final Pattern SAFE_STORAGE_COMPONENT = Pattern.compile("[A-Za-z0-9._-]+");
