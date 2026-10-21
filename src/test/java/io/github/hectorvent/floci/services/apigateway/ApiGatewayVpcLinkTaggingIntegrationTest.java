@@ -13,6 +13,7 @@ import software.amazon.awssdk.services.apigateway.model.CreateVpcLinkResponse;
 import software.amazon.awssdk.services.apigateway.model.NotFoundException;
 
 import java.net.URI;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -54,6 +55,29 @@ class ApiGatewayVpcLinkTaggingIntegrationTest {
             assertThrows(NotFoundException.class,
                     () -> client.tagResource(r -> r.resourceArn(arn).tags(Map.of("env", "test"))));
             assertThrows(NotFoundException.class, () -> client.untagResource(r -> r.resourceArn(arn).tagKeys("env")));
+        }
+    }
+
+    @Test
+    void reservedTagUpdatesAreRejectedWithoutChangingExistingTags() {
+        try (ApiGatewayClient client = client()) {
+            Map<String, String> original = Map.of("owner", "network");
+            CreateVpcLinkResponse link = client.createVpcLink(r -> r.name("reserved-tag-link")
+                    .targetArns("arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/net/test/123")
+                    .tags(original));
+            String arn = "arn:aws:apigateway:us-east-1::/vpclinks/" + link.id();
+            try {
+                for (String key : List.of("floci:custom-id", "floci:reserved", "_custom_id_")) {
+                    BadRequestException error = assertThrows(BadRequestException.class,
+                            () -> client.tagResource(r -> r.resourceArn(arn)
+                                    .tags(Map.of("owner", "changed", key, "reserved"))));
+                    assertEquals(400, error.statusCode());
+                    assertEquals(original, client.getTags(r -> r.resourceArn(arn)).tags());
+                    assertEquals(original, client.getVpcLink(r -> r.vpcLinkId(link.id())).tags());
+                }
+            } finally {
+                client.deleteVpcLink(r -> r.vpcLinkId(link.id()));
+            }
         }
     }
 
