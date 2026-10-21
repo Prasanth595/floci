@@ -195,6 +195,14 @@ class Ec2RepeatedFilterNamesTest {
                 return t.newVpcAttachment(t.newTransitGateway());
             }
         },
+        TRANSIT_GATEWAY_PEERING_ATTACHMENT("DescribeTransitGatewayPeeringAttachments", "transitGatewayAttachmentId") {
+            @Override
+            String create(Ec2RepeatedFilterNamesTest t) {
+                return t.first(t.ok("CreateTransitGatewayPeeringAttachment",
+                        "TransitGatewayId", t.newTransitGateway(), "PeerTransitGatewayId", t.newTransitGateway(),
+                        "PeerAccountId", "000000000000", "PeerRegion", REGION), "transitGatewayAttachmentId");
+            }
+        },
         VPC_PEERING_CONNECTION("DescribeVpcPeeringConnections", "vpcPeeringConnectionId") {
             @Override
             String create(Ec2RepeatedFilterNamesTest t) {
