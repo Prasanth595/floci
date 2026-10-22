@@ -52,7 +52,8 @@ class IamRestRouteCoverageTest {
             "DeleteBucketMetadataConfiguration", "s3:DeleteBucket");
 
     /** Models every operation of which is checked: the services whose routes the registry maps in full. */
-    private static final Set<String> FULLY_ROUTED_MODELS = Set.of("scheduler", "pipes", "lambda-microvms", "lambda-core");
+    private static final Set<String> FULLY_ROUTED_MODELS =
+            Set.of("scheduler", "pipes", "lambda", "lambda-microvms", "lambda-core");
 
     private final IamActionRegistry registry = new IamActionRegistry();
 

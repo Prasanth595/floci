@@ -159,6 +159,94 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
+    void lambdaFunctionSettingsRoutesAreCheckedAgainstTheFunction() {
+        // Each is checked as its own action against the function it names: a grant on another function
+        // does not cover it, and one on the function does. The request then reaches Lambda, which has no
+        // such function.
+        String user = user("route-lambda-settings");
+        String name = "route-settings-" + suffix();
+        String function = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:" + name;
+        String[][] routes = {
+            {"GET", "/2015-03-31/functions/" + name + "/configuration", "lambda:GetFunctionConfiguration"},
+            {"GET", "/2015-03-31/functions/" + name + "/versions", "lambda:ListVersionsByFunction"},
+            {"POST", "/2015-03-31/functions/" + name + "/versions", "lambda:PublishVersion"},
+            {"PUT", "/2017-10-31/functions/" + name + "/concurrency", "lambda:PutFunctionConcurrency"},
+            {"GET", "/2019-09-30/functions/" + name + "/concurrency", "lambda:GetFunctionConcurrency"},
+            {"PUT", "/2019-09-25/functions/" + name + "/event-invoke-config", "lambda:PutFunctionEventInvokeConfig"},
+            {"GET", "/2020-06-30/functions/" + name + "/code-signing-config", "lambda:GetFunctionCodeSigningConfig"},
+        };
+        for (String[] route : routes) {
+            policy(user, allow(route[2], function + "-other"));
+            refused(send(user, route[0], route[1]), route[2]);
+            policy(user, allow(route[2], function));
+            send(user, route[0], route[1]).statusCode(not(403));
+        }
+    }
+
+    @Test
+    void lambdaMappingConfigAndLayerRoutesAreCheckedAgainstWhatTheyName() {
+        // A grant on the same resource in another account does not cover the caller's own.
+        String user = user("route-lambda-resources");
+        String uuid = "14e0db71-5d35-4eb5-b481-8945cf9d10c2";
+        String layerName = "route-layer-" + suffix();
+        String mapping = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":event-source-mapping:" + uuid;
+        String config = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":code-signing-config:csc-0123456789abcdef0";
+        String layer = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":layer:" + layerName;
+        String[][] routes = {
+            {"GET", "/2015-03-31/event-source-mappings/" + uuid, "lambda:GetEventSourceMapping", mapping},
+            {"PUT", "/2015-03-31/event-source-mappings/" + uuid, "lambda:UpdateEventSourceMapping", mapping},
+            {"GET", "/2020-04-22/code-signing-configs/" + config, "lambda:GetCodeSigningConfig", config},
+            {"GET", "/2020-04-22/code-signing-configs/" + config + "/functions",
+                "lambda:ListFunctionsByCodeSigningConfig", config},
+            {"GET", "/2018-10-31/layers/" + layerName + "/versions/1", "lambda:GetLayerVersion", layer + ":1"},
+            {"DELETE", "/2018-10-31/layers/" + layerName + "/versions/1", "lambda:DeleteLayerVersion", layer + ":1"},
+            {"POST", "/2018-10-31/layers/" + layerName + "/versions", "lambda:PublishLayerVersion", layer},
+        };
+        for (String[] route : routes) {
+            policy(user, allow(route[2], route[3].replace(ACCOUNT, "111122223333")));
+            refused(send(user, route[0], route[1]), route[2]);
+            policy(user, allow(route[2], route[3]));
+            send(user, route[0], route[1]).statusCode(not(403));
+        }
+        // A config's function list ends in /functions, as ListFunctions does, and is not checked as it.
+        policy(user, allow("lambda:ListFunctions", "*"));
+        refused(send(user, "GET", "/2020-04-22/code-signing-configs/" + config + "/functions"),
+                "lambda:ListFunctionsByCodeSigningConfig");
+    }
+
+    @Test
+    void aLayerVersionIsCheckedAsLambdaReadsItsNameAndNumber() {
+        // Lambda parses version 01 as version 1, and the router keeps an encoded / inside the layer's name, so
+        // a Deny on that layer version applies however the request spells them.
+        String user = user("route-layer-spelling");
+        String name = "route-spelt-" + suffix();
+        String layer = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":layer:" + name;
+        policy(user, allow("lambda:GetLayerVersion", "*") + "," + deny("lambda:GetLayerVersion", layer + ":1")
+                + "," + deny("lambda:GetLayerVersion", layer + "/x:1"));
+        refused(as(user, "lambda").get("/2018-10-31/layers/" + name + "/versions/01").then(),
+                "lambda:GetLayerVersion");
+        refused(as(user, "lambda").queryParam("find", "LayerVersion").queryParam("Arn", layer + ":01")
+                .get("/2018-10-31/layers").then(), "lambda:GetLayerVersion");
+        refused(as(user, "lambda").urlEncodingEnabled(false).get("/2018-10-31/layers/" + name + "%2Fx/versions/1")
+                .then(), "lambda:GetLayerVersion");
+        // Allowed, each reaches Lambda, which looks up that version of that layer.
+        policy(user, allow("lambda:GetLayerVersion", "*"));
+        as(user, "lambda").get("/2018-10-31/layers/" + name + "/versions/01").then().statusCode(404)
+                .body("message", containsString("Layer version 1 for layer " + name + " not found"));
+        as(user, "lambda").urlEncodingEnabled(false).get("/2018-10-31/layers/" + name + "%2Fx/versions/1").then()
+                .statusCode(404).body("message", containsString("for layer " + name + "/x not found"));
+    }
+
+    @Test
+    void lambdaAccountSettingsAreChecked() {
+        String user = user("route-lambda-account");
+        policy(user, allow("lambda:ListFunctions", "*"));
+        refused(as(user, "lambda").get("/2016-08-19/account-settings").then(), "lambda:GetAccountSettings");
+        policy(user, allow("lambda:GetAccountSettings", "*"));
+        as(user, "lambda").get("/2016-08-19/account-settings").then().statusCode(200);
+    }
+
+    @Test
     void aMicrovmIsCheckedAgainstTheImageItRuns() {
         // RunMicrovm and the actions on a running MicroVM act on its image, so a Deny on the image applies to
         // them even where the action is allowed on every resource, and a grant on the image alone covers them.
@@ -236,6 +324,15 @@ class IamRestRouteEnforcementIntegrationTest {
 
     private RequestSpecification as(String user, String service) {
         return given().header("Authorization", auth(keys.get(user), service)).contentType("application/json");
+    }
+
+    /** A Lambda request as {@code user}, with an empty JSON body on a write. */
+    private ValidatableResponse send(String user, String method, String path) {
+        RequestSpecification request = as(user, "lambda");
+        if ("POST".equals(method) || "PUT".equals(method)) {
+            request.body("{}");
+        }
+        return request.request(method, path).then();
     }
 
     private static String suffix() {

@@ -1252,11 +1252,13 @@ still percent-encoded, as the router matches it, so an encoded `/` inside a para
 the route's rule miss.
 
 The REST routes mapped to an action are those of S3, Lambda, API Gateway, SES v2, RDS Data,
-Kinesis, EventBridge Scheduler and EventBridge Pipes. In Lambda they are the function, alias,
-event source mapping, function URL, durable execution, Web Function, MicroVM and network connector
-routes, `InvokeWithResponseStream` (checked as `lambda:InvokeFunction`) and `GetLayerVersionByArn`
-(`lambda:GetLayerVersion`); the other Lambda routes, such as layers, versions and concurrency, are
-not mapped yet. API Gateway's management API, v1 and v2, is checked as `apigateway:` and the HTTP
+Kinesis, EventBridge Scheduler and EventBridge Pipes. In Lambda that is every route of the function
+API, MicroVMs and network connectors, including those Floci does not serve yet, and the Web
+Functions routes, each checked as the action of its own name except `InvokeWithResponseStream`
+(checked as `lambda:InvokeFunction`) and `GetLayerVersionByArn` (`lambda:GetLayerVersion`). AWS also
+checks `lambda:AddPermission`, `lambda:GetPolicy` or `lambda:RemovePermission` for the resource
+policy operations, which Floci does not serve; their routes are checked as their own action alone.
+API Gateway's management API, v1 and v2, is checked as `apigateway:` and the HTTP
 method, `apigateway:GET`, `apigateway:POST` and so on, except `RejectDomainNameAccessAssociation`
 (`apigateway:RejectAccessAssociation`) and `PutRoutingRule` (`apigateway:UpdateRoutingRule`); the
 v2 routing rule, portal and portal product operations, which AWS checks as actions of their own
@@ -1269,10 +1271,16 @@ or network connector request is checked against `microvm-image:<name>` or `netwo
 in the request's account and Region, an identifier given as an ARN taken for its name, as the
 service looks it up. `RunMicrovm` is checked against the image its `imageIdentifier` names, an
 action on a running MicroVM against the image that MicroVM runs, and a managed image's versions
-against that image, which `aws` owns. A Lambda tagging request, at `/2017-03-31/tags/<arn>`, is
-checked against the caller's own function, MicroVM image or network connector of that ARN's Region
-and name, whatever account the ARN names, as Lambda looks it up, and an event source mapping's ARN
-as written.
+against that image, which `aws` owns. A Lambda event source mapping, code signing config or layer
+version request is checked against `event-source-mapping:<uuid>`, `code-signing-config:<id>` or
+`layer:<name>:<version>` in the request's account and Region, where Lambda looks them up: a config
+by the id that ends its ARN, and a layer by its name as given, even a name given as an ARN or
+holding an encoded `/`, and its version as the number Lambda parses, so `01` is checked as `1`.
+`PublishLayerVersion` is checked against `layer:<name>`, and `GetLayerVersionByArn` against the
+layer version its `Arn` names, its number read the same way. A Lambda tagging request, at
+`/2017-03-31/tags/<arn>`, is checked against the caller's own function, MicroVM image or network
+connector of that ARN's Region and name, whatever account the ARN names, as Lambda looks it up, and
+an event source mapping's ARN as written.
 
 The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service its ARN names,
 and it is checked as that service, against that ARN, whatever scope it is signed with. The ARN is

@@ -57,6 +57,14 @@ public class IamActionRegistry {
         rule("s3", "HEAD",   "^/[^/]+/.+",                       "s3:GetObject"),
 
         // ── Lambda ──────────────────────────────────────────────────────────────
+        // Code signing configs first: a config's function list ends in /functions, as ListFunctions does.
+        rule("lambda", "GET",    "^/2020-04-22/code-signing-configs/[^/]+/functions$",
+                "lambda:ListFunctionsByCodeSigningConfig"),
+        rule("lambda", "GET",    "^/2020-04-22/code-signing-configs/[^/]+$",  "lambda:GetCodeSigningConfig"),
+        rule("lambda", "PUT",    "^/2020-04-22/code-signing-configs/[^/]+$",  "lambda:UpdateCodeSigningConfig"),
+        rule("lambda", "DELETE", "^/2020-04-22/code-signing-configs/[^/]+$",  "lambda:DeleteCodeSigningConfig"),
+        rule("lambda", "GET",    "^/2020-04-22/code-signing-configs$",        "lambda:ListCodeSigningConfigs"),
+        rule("lambda", "POST",   "^/2020-04-22/code-signing-configs$",        "lambda:CreateCodeSigningConfig"),
         rule("lambda", "GET",    ".*/functions$",                          "lambda:ListFunctions"),
         rule("lambda", "POST",   ".*/functions$",                          "lambda:CreateFunction"),
         rule("lambda", "GET",    ".*/functions/[^/]+$",                    "lambda:GetFunction"),
@@ -90,6 +98,60 @@ public class IamActionRegistry {
         rule("lambda", "POST",   ".*/durable-execution-callbacks/.+/fail$", "lambda:SendDurableExecutionCallbackFailure"),
         rule("lambda", "POST",   ".*/durable-execution-callbacks/.+/heartbeat$",
                 "lambda:SendDurableExecutionCallbackHeartbeat"),
+        rule("lambda", "GET",    ".*/event-source-mappings/[^/]+$",        "lambda:GetEventSourceMapping"),
+        rule("lambda", "PUT",    ".*/event-source-mappings/[^/]+$",        "lambda:UpdateEventSourceMapping"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/configuration$",      "lambda:GetFunctionConfiguration"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/versions$",           "lambda:ListVersionsByFunction"),
+        rule("lambda", "POST",   ".*/functions/[^/]+/versions$",           "lambda:PublishVersion"),
+        rule("lambda", "POST",   ".*/functions/[^/]+/invoke-async$",       "lambda:InvokeAsync"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/urls$",               "lambda:ListFunctionUrlConfigs"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/concurrency$",        "lambda:GetFunctionConcurrency"),
+        rule("lambda", "PUT",    ".*/functions/[^/]+/concurrency$",        "lambda:PutFunctionConcurrency"),
+        rule("lambda", "DELETE", ".*/functions/[^/]+/concurrency$",        "lambda:DeleteFunctionConcurrency"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/provisioned-concurrency$", "List", "ALL",
+                "lambda:ListProvisionedConcurrencyConfigs"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/provisioned-concurrency$",
+                "lambda:GetProvisionedConcurrencyConfig"),
+        rule("lambda", "PUT",    ".*/functions/[^/]+/provisioned-concurrency$",
+                "lambda:PutProvisionedConcurrencyConfig"),
+        rule("lambda", "DELETE", ".*/functions/[^/]+/provisioned-concurrency$",
+                "lambda:DeleteProvisionedConcurrencyConfig"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/event-invoke-config/list$",
+                "lambda:ListFunctionEventInvokeConfigs"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/event-invoke-config$", "lambda:GetFunctionEventInvokeConfig"),
+        rule("lambda", "PUT",    ".*/functions/[^/]+/event-invoke-config$", "lambda:PutFunctionEventInvokeConfig"),
+        rule("lambda", "POST",   ".*/functions/[^/]+/event-invoke-config$", "lambda:UpdateFunctionEventInvokeConfig"),
+        rule("lambda", "DELETE", ".*/functions/[^/]+/event-invoke-config$", "lambda:DeleteFunctionEventInvokeConfig"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/code-signing-config$", "lambda:GetFunctionCodeSigningConfig"),
+        rule("lambda", "PUT",    ".*/functions/[^/]+/code-signing-config$", "lambda:PutFunctionCodeSigningConfig"),
+        rule("lambda", "DELETE", ".*/functions/[^/]+/code-signing-config$", "lambda:DeleteFunctionCodeSigningConfig"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/recursion-config$",   "lambda:GetFunctionRecursionConfig"),
+        rule("lambda", "PUT",    ".*/functions/[^/]+/recursion-config$",   "lambda:PutFunctionRecursionConfig"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/function-scaling-config$", "lambda:GetFunctionScalingConfig"),
+        rule("lambda", "PUT",    ".*/functions/[^/]+/function-scaling-config$", "lambda:PutFunctionScalingConfig"),
+        rule("lambda", "GET",    ".*/functions/[^/]+/runtime-management-config$", "lambda:GetRuntimeManagementConfig"),
+        rule("lambda", "PUT",    ".*/functions/[^/]+/runtime-management-config$", "lambda:PutRuntimeManagementConfig"),
+        rule("lambda", "GET",    "^/2016-08-19/account-settings/?$",       "lambda:GetAccountSettings"),
+        rule("lambda", "GET",    "^/2018-10-31/layers/[^/]+/versions/[^/]+/policy$", "lambda:GetLayerVersionPolicy"),
+        rule("lambda", "POST",   "^/2018-10-31/layers/[^/]+/versions/[^/]+/policy$",
+                "lambda:AddLayerVersionPermission"),
+        rule("lambda", "DELETE", "^/2018-10-31/layers/[^/]+/versions/[^/]+/policy/[^/]+$",
+                "lambda:RemoveLayerVersionPermission"),
+        rule("lambda", "GET",    "^/2018-10-31/layers/[^/]+/versions/[^/]+$", "lambda:GetLayerVersion"),
+        rule("lambda", "DELETE", "^/2018-10-31/layers/[^/]+/versions/[^/]+$", "lambda:DeleteLayerVersion"),
+        rule("lambda", "GET",    "^/2018-10-31/layers/[^/]+/versions$",    "lambda:ListLayerVersions"),
+        rule("lambda", "POST",   "^/2018-10-31/layers/[^/]+/versions$",    "lambda:PublishLayerVersion"),
+        rule("lambda", "GET",    "^/2025-11-30/capacity-providers/[^/]+/function-versions$",
+                "lambda:ListFunctionVersionsByCapacityProvider"),
+        rule("lambda", "GET",    "^/2025-11-30/capacity-providers/[^/]+$", "lambda:GetCapacityProvider"),
+        rule("lambda", "PUT",    "^/2025-11-30/capacity-providers/[^/]+$", "lambda:UpdateCapacityProvider"),
+        rule("lambda", "DELETE", "^/2025-11-30/capacity-providers/[^/]+$", "lambda:DeleteCapacityProvider"),
+        rule("lambda", "GET",    "^/2025-11-30/capacity-providers$",       "lambda:ListCapacityProviders"),
+        rule("lambda", "POST",   "^/2025-11-30/capacity-providers$",       "lambda:CreateCapacityProvider"),
+        // The resource policy routes of the function API (2026-07-09) and of Web Functions (2025-03-07).
+        rule("lambda", "PUT",    "^/2026-07-09/resource-policy/.+",        "lambda:PutResourcePolicy"),
+        rule("lambda", "GET",    "^/2026-07-09/resource-policy/.+",        "lambda:GetResourcePolicy"),
+        rule("lambda", "DELETE", "^/2026-07-09/resource-policy/.+",        "lambda:DeleteResourcePolicy"),
 
         // ── Lambda Web Functions (/2025-03-07, signs as lambda) ─────────────────
         rule("lambda", "PUT",    "^/2025-03-07/web-functions$",                       "lambda:CreateWebFunction"),
@@ -116,6 +178,7 @@ public class IamActionRegistry {
         // Invoke and GetLayerVersion (iam-authorized-actions.json).
         rule("lambda", "POST",   ".*/functions/[^/]+/response-streaming-invocations$", "lambda:InvokeFunction"),
         rule("lambda", "GET",    "^/2018-10-31/layers$", "find", "LayerVersion",     "lambda:GetLayerVersion"),
+        rule("lambda", "GET",    "^/2018-10-31/layers$",                              "lambda:ListLayers"),
         // Lambda MicroVMs (2025-09-09) and their tags, and network connectors (2026-04-04).
         rule("lambda", "POST",   "^/2025-09-09/microvms/[^/]+/auth-token$",            "lambda:CreateMicrovmAuthToken"),
         rule("lambda", "POST",   "^/2025-09-09/microvms/[^/]+/shell-auth-token$",      "lambda:CreateMicrovmShellAuthToken"),
@@ -425,7 +488,7 @@ public class IamActionRegistry {
      * The request path relative to the application root, as {@link UriInfo#getPath()} gives it, but
      * still percent-encoded.
      */
-    private static String rawPath(UriInfo uriInfo) {
+    static String rawPath(UriInfo uriInfo) {
         String path = uriInfo.getRequestUri().getRawPath();
         String base = uriInfo.getBaseUri().getRawPath();
         if (base != null && base.length() > 1 && path.startsWith(base)) {

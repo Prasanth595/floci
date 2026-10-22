@@ -23,6 +23,8 @@ import jakarta.ws.rs.core.MediaType;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -704,6 +706,10 @@ public class ResourceArnBuilder {
         if (executionArn != null) {
             return executionArn;
         }
+        String childArn = lambdaChildArn(path, ctx, region, accountId);
+        if (childArn != null) {
+            return childArn;
+        }
         // path: /2015-03-31/functions/name or similar
         String name = extractSegmentAfter(path, "functions");
         if (name == null) return "*";
@@ -730,6 +736,81 @@ public class ResourceArnBuilder {
         } catch (AwsException e) {
             // A reference Lambda refuses, which its handler answers with a 400 before acting on anything.
             return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
+        }
+    }
+
+    /**
+     * The resource of a Lambda event source mapping, code signing config or layer route, as the Service
+     * Reference gives it. A mapping is looked up by its UUID, a config by the id that ends its ARN and a
+     * layer version by its layer's name as given, an ARN included, and its number, each in the request's
+     * account and Region, so that is the resource checked. A layer route's path is split as the router
+     * splits it, before decoding, so an encoded {@code /} stays inside the layer's name, and its version
+     * number is read as Lambda parses it, so {@code 01} is version 1. {@code PublishLayerVersion} is checked
+     * against the layer and {@code GetLayerVersionByArn} against the version its {@code Arn} names, its
+     * number read the same way. Listing configs, layers or a layer's versions, and creating a config, name
+     * no resource, so they are {@code *}. Null for every other Lambda route.
+     */
+    private static String lambdaChildArn(String path, ContainerRequestContext ctx, String region, String accountId) {
+        String mapping = segmentAfterPrefix(path, "/2015-03-31/event-source-mappings/");
+        if (mapping != null) {
+            return AwsArnUtils.Arn.of("lambda", region, accountId, "event-source-mapping:" + mapping).toString();
+        }
+        if (path.startsWith("/2020-04-22/code-signing-configs")) {
+            String config = segmentAfterPrefix(path, "/2020-04-22/code-signing-configs/");
+            return config == null ? "*"
+                    : AwsArnUtils.Arn.of("lambda", region, accountId,
+                            "code-signing-config:" + trailingName(config)).toString();
+        }
+        if (path.equals("/2018-10-31/layers")) {
+            String arn = ctx.getUriInfo().getQueryParameters().getFirst("Arn");
+            boolean byArn = "LayerVersion".equals(ctx.getUriInfo().getQueryParameters().getFirst("find"));
+            return byArn && AwsArnUtils.isArnFor(arn, "lambda") ? layerVersionArn(arn) : "*";
+        }
+        String layers = "/2018-10-31/layers/";
+        if (!path.startsWith(layers)) {
+            return null;
+        }
+        String raw = IamActionRegistry.rawPath(ctx.getUriInfo());
+        if (!raw.startsWith(layers)) {
+            return "*";
+        }
+        String[] segments = raw.substring(layers.length()).split("/");
+        if (segments.length < 2 || !"versions".equals(segments[1])) {
+            return "*";
+        }
+        String layer = "layer:" + pathSegment(segments[0]);
+        if (segments.length == 2) {
+            return "POST".equalsIgnoreCase(ctx.getMethod())
+                    ? AwsArnUtils.Arn.of("lambda", region, accountId, layer).toString() : "*";
+        }
+        return AwsArnUtils.Arn.of("lambda", region, accountId,
+                layer + ":" + layerVersion(pathSegment(segments[2]))).toString();
+    }
+
+    /** A layer version ARN, its version number written as Lambda parses it. */
+    private static String layerVersionArn(String arn) {
+        int colon = arn.lastIndexOf(':');
+        return arn.substring(0, colon + 1) + layerVersion(arn.substring(colon + 1));
+    }
+
+    /** A layer version number as Lambda parses it, so {@code 01} is 1; as given when it is no number. */
+    private static String layerVersion(String version) {
+        try {
+            return Long.toString(Long.parseLong(version));
+        } catch (NumberFormatException e) {
+            return version;
+        }
+    }
+
+    /**
+     * A path segment as sent, decoded as a path parameter is: a {@code +} stays a {@code +}. A malformed
+     * escape is kept as sent.
+     */
+    private static String pathSegment(String raw) {
+        try {
+            return URLDecoder.decode(raw.replace("+", "%2B"), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return raw;
         }
     }
 

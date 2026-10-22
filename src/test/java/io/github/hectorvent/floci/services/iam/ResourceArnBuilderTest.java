@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
@@ -1257,6 +1258,88 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void lambdaMappingConfigAndLayerRoutesResolveTheResourceTheyName() {
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/2015-03-31/event-source-mappings/14e0db71-5d35-4eb5-b481-8945cf9d10c2");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:event-source-mapping:14e0db71-5d35-4eb5-b481-8945cf9d10c2",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        // A config is looked up by the id that ends its ARN, in the request's account and Region.
+        String config = "arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-0123456789abcdef0";
+        for (String path : new String[] {"/2020-04-22/code-signing-configs/" + config,
+                "/2020-04-22/code-signing-configs/" + config + "/functions",
+                "/2020-04-22/code-signing-configs/arn:aws:lambda:eu-west-1:111122223333:code-signing-config:"
+                        + "csc-0123456789abcdef0"}) {
+            request(path);
+            assertEquals(config, builder.build("lambda", ctx, "us-east-1", ACCOUNT), path);
+        }
+        // A layer version, its policy and its permissions.
+        String version = "arn:aws:lambda:us-east-1:000000000000:layer:my-layer:3";
+        for (String path : new String[] {"/2018-10-31/layers/my-layer/versions/3",
+                "/2018-10-31/layers/my-layer/versions/3/policy",
+                "/2018-10-31/layers/my-layer/versions/3/policy/statement-1"}) {
+            request(path);
+            assertEquals(version, builder.build("lambda", ctx, "us-east-1", ACCOUNT), path);
+        }
+        // Lambda looks a layer named by an ARN up by that name as given, not as the layer the ARN names, so
+        // the layer of that name is the one checked.
+        String named = "arn:aws:lambda:us-east-1:000000000000:layer:my-layer";
+        request("/2018-10-31/layers/" + named + "/versions/3");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:" + named + ":3",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        // GetLayerVersionByArn reads the version its Arn names.
+        request("/2018-10-31/layers");
+        queryParams.putSingle("find", "LayerVersion");
+        queryParams.putSingle("Arn", version);
+        assertEquals(version, builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        queryParams.clear();
+        // Listing layers, a layer's versions or configs, and creating a config, name no resource.
+        for (String path : new String[] {"/2018-10-31/layers", "/2018-10-31/layers/my-layer/versions",
+                "/2020-04-22/code-signing-configs"}) {
+            request(path);
+            assertEquals("*", builder.build("lambda", ctx, "us-east-1", ACCOUNT), path);
+        }
+        when(ctx.getMethod()).thenReturn("POST");
+        request("/2020-04-22/code-signing-configs");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        // PublishLayerVersion makes a version of the layer, so it is checked against the layer.
+        request("/2018-10-31/layers/my-layer/versions");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my-layer",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        // A function's own settings, such as its concurrency or versions, are checked against the function.
+        request("/2015-03-31/functions/my-function/versions");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        when(ctx.getMethod()).thenReturn("PUT");
+        request("/2017-10-31/functions/my-function/concurrency");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
+    void aLayerVersionIsReadAsLambdaReadsItsNameAndNumber() {
+        // Lambda parses the version number, so 01 is version 1, and the router keeps an encoded / inside the
+        // layer's name, so the layer checked is the one Lambda looks up.
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/2018-10-31/layers/my-layer/versions/01");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my-layer:1",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        request("/2018-10-31/layers/my%2Flayer/versions/3/policy");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my/layer:3",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        when(ctx.getMethod()).thenReturn("POST");
+        request("/2018-10-31/layers/my%2Flayer/versions");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my/layer",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        // GetLayerVersionByArn parses the number the same way.
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/2018-10-31/layers");
+        queryParams.putSingle("find", "LayerVersion");
+        queryParams.putSingle("Arn", "arn:aws:lambda:us-east-1:000000000000:layer:my-layer:01");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my-layer:1",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
     void anActionOnARunningMicrovmIsCheckedAgainstTheImageItRuns() {
         String image = "arn:aws:lambda:us-east-1:000000000000:microvm-image:img";
         LambdaMicrovmsService.Microvm vm = new LambdaMicrovmsService.Microvm();
@@ -1502,5 +1585,12 @@ class ResourceArnBuilderTest {
                 + "function:my-function:1/durable-execution/run-1/0b1c");
         String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function:1/durable-execution/run-1/0b1c", arn);
+    }
+
+    /** Stubs the request path as sent and, decoded, as {@link UriInfo#getPath()} gives it. */
+    private void request(String sent) {
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566" + sent));
+        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
+        when(uriInfo.getPath()).thenReturn(URI.create(sent).getPath());
     }
 }

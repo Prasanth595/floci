@@ -263,9 +263,9 @@ class IamActionRegistryTest {
                 mockCtx("GET", "/2018-10-31/layers", byArn, MediaType.APPLICATION_JSON_TYPE, "{}")));
         MultivaluedHashMap<String, String> other = new MultivaluedHashMap<>();
         other.putSingle("find", "Layer");
-        assertNull(registry.resolveRoute("lambda",
+        assertEquals("lambda:ListLayers", registry.resolveRoute("lambda",
                 mockCtx("GET", "/2018-10-31/layers", other, MediaType.APPLICATION_JSON_TYPE, "{}")));
-        assertNull(lambdaAction("GET", "/2018-10-31/layers"));
+        assertEquals("lambda:ListLayers", lambdaAction("GET", "/2018-10-31/layers"));
     }
 
     @Test
