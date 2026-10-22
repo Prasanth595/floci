@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.elb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
@@ -10,6 +12,7 @@ import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elb.model.ClassicHealthCheck;
 import io.github.hectorvent.floci.services.elb.model.ClassicListener;
 import io.github.hectorvent.floci.services.elb.model.ClassicLoadBalancer;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -454,6 +457,47 @@ class ElbClassicServiceTest {
         assertEquals(AwsRegionFacts.classicElbHostedZoneId(REGION).orElseThrow(), own.getCanonicalHostedZoneNameId());
         assertEquals("local", own.getAccountId());
         assertInstanceOf(ConcurrentHashMap.class, storage.getForAccount("local", REGION).orElseThrow());
+    }
+
+    /**
+     * The service is created on its first use, which can come inside another account's request, and
+     * an account id need not be 12 digits: the default one is configurable, and AssumeRole takes the
+     * account from the role ARN. Every region map still has to come back under its own key.
+     */
+    @Test
+    void restoreReadsEachRegionMapUnderTheAccountOfItsKey() {
+        RequestContext request = new RequestContext();
+        request.setAccountId(OTHER_ACCOUNT);
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> requests = mock(Instance.class);
+        // Lenient: the restore should not consult the request at all, but anything that does sees
+        // another account's.
+        lenient().when(requests.get()).thenReturn(request);
+        AccountAwareStorageBackend<Map<String, ClassicLoadBalancer>> storage =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requests, "local");
+        StorageFactory factory = mock(StorageFactory.class);
+        doReturn(storage).when(factory).create(eq("elb"), eq("elb-load-balancers.json"), any());
+        Map<String, ClassicLoadBalancer> byAccount = new LinkedHashMap<>();
+        for (String account : List.of("local", OTHER_ACCOUNT, "dev")) {
+            ClassicLoadBalancer lb = storedBalancer("web", List.of("i-" + account));
+            byAccount.put(account, lb);
+            storage.putForAccount(account, REGION, new LinkedHashMap<>(Map.of("web", lb)));
+        }
+
+        service = new ElbClassicService(ec2Service, healthChecker, factory, null);
+        service.initializeStorage();
+        service.restorePersistedRuntime();
+
+        String zone = AwsRegionFacts.classicElbHostedZoneId(REGION).orElseThrow();
+        for (Map.Entry<String, ClassicLoadBalancer> entry : byAccount.entrySet()) {
+            String account = entry.getKey();
+            ClassicLoadBalancer lb = entry.getValue();
+            assertEquals(Set.of(REGION), storage.keysForAccount(account), account);
+            assertInstanceOf(ConcurrentHashMap.class, storage.getForAccount(account, REGION).orElseThrow(), account);
+            verify(healthChecker, times(1)).startMonitoring(lb);
+            assertEquals(zone, lb.getCanonicalHostedZoneNameId(), account);
+            assertEquals(account, lb.getAccountId());
+        }
     }
 
     private static ClassicLoadBalancer storedBalancer(String name, List<String> instanceIds) {

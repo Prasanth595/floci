@@ -150,24 +150,26 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
     private record StoredRegion(String accountId, String region, Map<String, ClassicLoadBalancer> regionLbs) {}
 
     /**
-     * Every stored region map with the account that owns it. Startup runs outside any request,
-     * where {@code loadBalancers} shows only the default account's maps, so the other accounts
-     * come from a scan of the store. The scan recognizes only 12-digit account prefixes and the
-     * default account id is configurable, so the default account is never read from the scan.
+     * Every stored region map with the account that owns it, taken from its raw key,
+     * {@code <account>/<region>}. {@code loadBalancers} shows only the account of the current
+     * request, or the default one outside a request, and the service can first be created inside
+     * any account's request. The account-aware scans recognize only 12-digit account prefixes, but
+     * the default account id is configurable and AssumeRole takes the account from the role ARN.
+     * A region never contains a slash, so the account is everything before the last one; every
+     * key here has an account, since this store is younger than account-aware storage.
      */
     private List<StoredRegion> storedRegions() {
         List<StoredRegion> regions = new ArrayList<>();
-        String currentAccount = loadBalancerStore != null ? loadBalancerStore.accountId() : null;
-        loadBalancers.forEach((region, regionLbs) ->
-                regions.add(new StoredRegion(currentAccount, region, regionLbs)));
-        if (loadBalancerStore != null) {
-            for (AccountAwareStorageBackend.AccountEntry<Map<String, ClassicLoadBalancer>> entry
-                    : loadBalancerStore.scanAllAccountEntries(key -> true)) {
-                if (!entry.accountId().equals(currentAccount)) {
-                    regions.add(new StoredRegion(entry.accountId(), entry.key(), entry.value()));
-                }
-            }
+        if (loadBalancerStore == null) {
+            loadBalancers.forEach((region, regionLbs) -> regions.add(new StoredRegion(null, region, regionLbs)));
+            return regions;
         }
+        loadBalancerStore.scanAllAccountsWithRawKeys().forEach((rawKey, regionLbs) -> {
+            int slash = rawKey.lastIndexOf('/');
+            if (slash > 0) {
+                regions.add(new StoredRegion(rawKey.substring(0, slash), rawKey.substring(slash + 1), regionLbs));
+            }
+        });
         return regions;
     }
 
