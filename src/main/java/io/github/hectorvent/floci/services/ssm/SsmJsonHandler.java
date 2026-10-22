@@ -230,6 +230,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetParametersByPath(JsonNode request, String region) {
+        PageRequest pageRequest = pageRequest(request, GET_PARAMETERS_BY_PATH_MAX_RESULTS);
         String path = request.path("Path").asText();
         boolean recursive = request.path("Recursive").asBoolean(false);
 
@@ -237,9 +238,9 @@ public class SsmJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        PaginatedResult<Parameter> page = page(request, params, Parameter::getName,
-                GET_PARAMETERS_BY_PATH_MAX_RESULTS,
-                "GetParametersByPath:" + region + ":" + recursive + ":" + (path.endsWith("/") ? path : path + "/"));
+        PaginatedResult<Parameter> page = page(pageRequest, params, Parameter::getName,
+                GET_PARAMETERS_BY_PATH_TOKEN + region + ":" + recursive + ":"
+                        + (path.endsWith("/") ? path : path + "/"));
         for (Parameter p : page.items()) {
             parametersArray.add(parameterToNode(p));
         }
@@ -278,15 +279,15 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetParameterHistory(JsonNode request, String region) {
+        PageRequest pageRequest = pageRequest(request, GET_PARAMETER_HISTORY_MAX_RESULTS);
         String name = request.path("Name").asText();
         List<ParameterHistory> history = ssmService.getParameterHistory(name, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode historyArray = objectMapper.createArrayNode();
         // Zero-padded so the cursor's string order is version order ("10" would sort before "9").
-        PaginatedResult<ParameterHistory> page = page(request, history,
-                h -> String.format("%019d", h.getVersion()), GET_PARAMETER_HISTORY_MAX_RESULTS,
-                "GetParameterHistory:" + region + ":" + name);
+        PaginatedResult<ParameterHistory> page = page(pageRequest, history,
+                h -> String.format("%019d", h.getVersion()), GET_PARAMETER_HISTORY_TOKEN + region + ":" + name);
         for (ParameterHistory h : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", h.getName());
@@ -312,16 +313,18 @@ public class SsmJsonHandler {
     private static final int DESCRIBE_PARAMETERS_MAX_RESULTS = 50;
     private static final int GET_PARAMETERS_BY_PATH_MAX_RESULTS = 10;
     private static final int GET_PARAMETER_HISTORY_MAX_RESULTS = 50;
+    private static final String GET_PARAMETERS_BY_PATH_TOKEN = "GetParametersByPath:";
+    private static final String GET_PARAMETER_HISTORY_TOKEN = "GetParameterHistory:";
+
+    private record PageRequest(Integer maxResults, String nextToken) {
+    }
 
     /**
-     * Pages a listing by {@code MaxResults}/{@code NextToken}. An omitted {@code MaxResults}
-     * returns everything rather than AWS's single page, so callers that never follow
-     * {@code NextToken} still see every item. A token carries {@code namespace}, so one minted for
-     * another operation, region, path or parameter is refused instead of read as a position here.
+     * Reads {@code MaxResults}/{@code NextToken} before the operation runs, so a malformed field is
+     * reported as such rather than masked by, say, {@code ParameterNotFound}. A non-numeric
+     * {@code MaxResults} or non-string {@code NextToken} fails to deserialize, as on AWS.
      */
-    private static <T> PaginatedResult<T> page(JsonNode request, List<T> items,
-                                               Function<T, String> cursorOf, int maxPage, String namespace) {
-        // A non-numeric MaxResults or non-string NextToken fails to deserialize, as on AWS.
+    private static PageRequest pageRequest(JsonNode request, int maxPage) {
         Integer maxResults = request.hasNonNull("MaxResults")
                 ? SsmJsonDeserialization.optionalInteger(request.path("MaxResults"), 0) : null;
         if (maxResults != null && (maxResults < 1 || maxResults > maxPage)) {
@@ -329,8 +332,20 @@ public class SsmJsonHandler {
                     "Value '" + maxResults + "' at 'maxResults' failed to "
                             + "satisfy constraint: Member must have value between 1 and " + maxPage);
         }
+        return new PageRequest(maxResults, optionalString(request, "NextToken"));
+    }
+
+    /**
+     * Pages a listing. An omitted {@code MaxResults} returns everything rather than AWS's single
+     * page, so callers that never follow {@code NextToken} still see every item. A token carries
+     * {@code namespace}, so one minted for another operation, region, path or parameter is refused
+     * instead of read as a position here.
+     */
+    private static <T> PaginatedResult<T> page(PageRequest pageRequest, List<T> items,
+                                               Function<T, String> cursorOf, String namespace) {
+        Integer maxResults = pageRequest.maxResults();
         return Pagination.paginate(items, cursorOf, maxResults != null ? maxResults : Integer.MAX_VALUE,
-                optionalString(request, "NextToken"), namespace,
+                pageRequest.nextToken(), namespace,
                 token -> new AwsException("InvalidNextToken", "The specified token isn't valid.", 400));
     }
 

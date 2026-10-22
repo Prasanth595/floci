@@ -150,6 +150,14 @@ class SsmParameterPaginationIntegrationTest {
         error("GetParameterHistory", Map.of("Name", name, "NextToken", 5), "SerializationException");
     }
 
+    @Test
+    void reportsMalformedPaginationFieldsBeforeAMissingParameter() {
+        String missing = "/pagination-" + UUID.randomUUID() + "/missing";
+        error("GetParameterHistory", Map.of("Name", missing, "MaxResults", "2"), "SerializationException");
+        error("GetParameterHistory", Map.of("Name", missing, "NextToken", 5), "SerializationException");
+        error("GetParameterHistory", Map.of("Name", missing, "MaxResults", 51), "ValidationException");
+    }
+
     private void put(String name, String value) {
         ok("PutParameter", Map.of("Name", name, "Value", value, "Type", "String", "Overwrite", true));
     }
