@@ -114,47 +114,68 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         this.loadBalancers = new StorageBackedMap<>(loadBalancerStore);
         // Region maps read back from disk are plain maps; the name check in createLoadBalancer and
         // the certificate scan rely on concurrent ones, in every account.
-        for (AccountAwareStorageBackend.AccountEntry<Map<String, ClassicLoadBalancer>> entry
-                : loadBalancerStore.scanAllAccountEntries(key -> true)) {
-            if (!(entry.value() instanceof ConcurrentHashMap)) {
-                loadBalancerStore.putForAccount(entry.accountId(), entry.key(),
-                        new ConcurrentHashMap<>(entry.value()));
+        for (StoredRegion stored : storedRegions()) {
+            if (!(stored.regionLbs() instanceof ConcurrentHashMap)) {
+                storeRegion(stored.accountId(), stored.region(), new ConcurrentHashMap<>(stored.regionLbs()));
             }
         }
     }
 
     /**
      * Restarts health checking for the load balancers of every account restored from disk.
-     * Called from {@code EmulatorLifecycle} once the bean is constructed, like {@code ElbV2Service}
-     * does — nothing reachable from {@link #initializeStorage()} may touch an injected collaborator.
-     * Startup runs outside any request, where {@code loadBalancers} holds only the default
-     * account's, so this walks the store itself.
+     * Called from {@code EmulatorLifecycle} once the bean is constructed, because nothing
+     * reachable from {@link #initializeStorage()} may touch an injected collaborator.
      */
     public void restorePersistedRuntime() {
-        if (loadBalancerStore == null) {
-            loadBalancers.forEach((region, regionLbs) -> restoreRegion(null, region, regionLbs));
-            return;
-        }
-        for (AccountAwareStorageBackend.AccountEntry<Map<String, ClassicLoadBalancer>> entry
-                : loadBalancerStore.scanAllAccountEntries(key -> true)) {
-            restoreRegion(entry.accountId(), entry.key(), entry.value());
-            // Stores back the account and zone restoreRegion may have filled in.
-            loadBalancerStore.putForAccount(entry.accountId(), entry.key(), entry.value());
+        for (StoredRegion stored : storedRegions()) {
+            for (ClassicLoadBalancer lb : stored.regionLbs().values()) {
+                // A balancer stored before balancers recorded their account belongs to the account
+                // it is stored under, which its health state and instance lookups go by.
+                if (lb.getAccountId() == null) {
+                    lb.setAccountId(stored.accountId());
+                }
+                // A balancer stored before the zone was looked up per region still carries the one
+                // fixed zone every balancer used to report; take the region's zone again.
+                lb.setCanonicalHostedZoneNameId(
+                        AwsRegionFacts.classicElbHostedZoneId(stored.region()).orElse(null));
+                healthChecker.startMonitoring(lb);
+                healthChecker.registerInstances(lb, lb.getInstanceIds());
+            }
+            // Stores back the account and zone set above.
+            storeRegion(stored.accountId(), stored.region(), stored.regionLbs());
         }
     }
 
-    private void restoreRegion(String accountId, String region, Map<String, ClassicLoadBalancer> regionLbs) {
-        for (ClassicLoadBalancer lb : regionLbs.values()) {
-            // A balancer stored before balancers recorded their account belongs to the account
-            // it is stored under, which its health state and instance lookups go by.
-            if (lb.getAccountId() == null) {
-                lb.setAccountId(accountId);
+    /** One account's load balancers in one region, as stored. */
+    private record StoredRegion(String accountId, String region, Map<String, ClassicLoadBalancer> regionLbs) {}
+
+    /**
+     * Every stored region map with the account that owns it. Startup runs outside any request,
+     * where {@code loadBalancers} shows only the default account's maps, so the other accounts
+     * come from a scan of the store. The scan recognizes only 12-digit account prefixes and the
+     * default account id is configurable, so the default account is never read from the scan.
+     */
+    private List<StoredRegion> storedRegions() {
+        List<StoredRegion> regions = new ArrayList<>();
+        String currentAccount = loadBalancerStore != null ? loadBalancerStore.accountId() : null;
+        loadBalancers.forEach((region, regionLbs) ->
+                regions.add(new StoredRegion(currentAccount, region, regionLbs)));
+        if (loadBalancerStore != null) {
+            for (AccountAwareStorageBackend.AccountEntry<Map<String, ClassicLoadBalancer>> entry
+                    : loadBalancerStore.scanAllAccountEntries(key -> true)) {
+                if (!entry.accountId().equals(currentAccount)) {
+                    regions.add(new StoredRegion(entry.accountId(), entry.key(), entry.value()));
+                }
             }
-            // A balancer stored before the zone was looked up per region still carries the one
-            // fixed zone every balancer used to report; take the region's zone again.
-            lb.setCanonicalHostedZoneNameId(AwsRegionFacts.classicElbHostedZoneId(region).orElse(null));
-            healthChecker.startMonitoring(lb);
-            healthChecker.registerInstances(lb, lb.getInstanceIds());
+        }
+        return regions;
+    }
+
+    private void storeRegion(String accountId, String region, Map<String, ClassicLoadBalancer> regionLbs) {
+        if (loadBalancerStore != null) {
+            loadBalancerStore.putForAccount(accountId, region, regionLbs);
+        } else {
+            loadBalancers.put(region, regionLbs);
         }
     }
 

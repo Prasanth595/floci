@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -41,6 +42,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -423,6 +425,35 @@ class ElbClassicServiceTest {
         assertEquals(OTHER_ACCOUNT, foreign.getAccountId());
         assertInstanceOf(ConcurrentHashMap.class, storage.getForAccount(DEFAULT_ACCOUNT, REGION).orElseThrow());
         assertInstanceOf(ConcurrentHashMap.class, storage.getForAccount(OTHER_ACCOUNT, REGION).orElseThrow());
+    }
+
+    /**
+     * The default account id is configurable and need not be 12 digits, while a scan of every
+     * account recognizes only 12-digit prefixes. The default account's balancers must still keep
+     * their keys and zone, and be restored once.
+     */
+    @Test
+    void restoreKeepsTheKeysOfADefaultAccountWhoseIdIsNotTwelveDigits() {
+        AccountAwareStorageBackend<Map<String, ClassicLoadBalancer>> storage =
+                AccountAwareStorageBackend.inMemory("local");
+        StorageFactory factory = mock(StorageFactory.class);
+        doReturn(storage).when(factory).create(eq("elb"), eq("elb-load-balancers.json"), any());
+        ClassicLoadBalancer own = storedBalancer("web", List.of("i-own"));
+        ClassicLoadBalancer foreign = storedBalancer("web", List.of("i-foreign"));
+        storage.putForAccount("local", REGION, new LinkedHashMap<>(Map.of("web", own)));
+        storage.putForAccount(OTHER_ACCOUNT, REGION, new LinkedHashMap<>(Map.of("web", foreign)));
+
+        service = new ElbClassicService(ec2Service, healthChecker, factory, null);
+        service.initializeStorage();
+        service.restorePersistedRuntime();
+
+        assertEquals(Set.of(REGION), storage.keysForAccount("local"));
+        assertEquals(Set.of(REGION), storage.keysForAccount(OTHER_ACCOUNT));
+        verify(healthChecker, times(1)).startMonitoring(own);
+        verify(healthChecker, times(1)).startMonitoring(foreign);
+        assertEquals(AwsRegionFacts.classicElbHostedZoneId(REGION).orElseThrow(), own.getCanonicalHostedZoneNameId());
+        assertEquals("local", own.getAccountId());
+        assertInstanceOf(ConcurrentHashMap.class, storage.getForAccount("local", REGION).orElseThrow());
     }
 
     private static ClassicLoadBalancer storedBalancer(String name, List<String> instanceIds) {
