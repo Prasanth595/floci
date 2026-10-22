@@ -1175,6 +1175,43 @@ class KmsIntegrationTest {
 
     @ParameterizedTest
     @CsvSource({"ListKeys", "ListAliases"})
+    void listMarkerIsRejectedInAnotherAccount(String action) {
+        String issuer = "AWS4-HMAC-SHA256 Credential=000000000101/20260215/us-east-1/kms/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        String other = "AWS4-HMAC-SHA256 Credential=000000000102/20260215/us-east-1/kms/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        // Both accounts list the AWS managed keys and aliases, so the first page is truncated.
+        String marker = given()
+                .header("Authorization", issuer)
+                .header("X-Amz-Target", "TrentService." + action)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Limit\":1}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Truncated", equalTo(true))
+                .extract().path("NextMarker");
+
+        given()
+                .header("Authorization", other)
+                .header("X-Amz-Target", "TrentService." + action)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Limit\":1,\"Marker\":\"" + marker + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidMarkerException"));
+
+        given()
+                .header("Authorization", issuer)
+                .header("X-Amz-Target", "TrentService." + action)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Limit\":1,\"Marker\":\"" + marker + "\"}")
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ListKeys", "ListAliases"})
     void listKeysAndAliasesRejectBadMarker(String action) {
         given()
                 .header("X-Amz-Target", "TrentService." + action)

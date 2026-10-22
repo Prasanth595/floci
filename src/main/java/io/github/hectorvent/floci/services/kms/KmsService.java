@@ -690,7 +690,8 @@ public class KmsService implements ResourceProvider {
     static final int MAX_LIST_ALIASES_LIMIT = 100;
 
     public Page<KmsKey> listKeys(String region, String marker, Integer limit) {
-        return page(listKeys(region), KmsKey::getKeyId, "ListKeys\n" + region, marker, limit, MAX_LIST_KEYS_LIMIT);
+        return page(listKeys(region), KmsKey::getKeyId,
+                "ListKeys\n" + regionResolver.getAccountId() + "\n" + region, marker, limit, MAX_LIST_KEYS_LIMIT);
     }
 
     public Page<KmsAlias> listAliases(String keyId, String region, String marker, Integer limit) {
@@ -698,7 +699,7 @@ public class KmsService implements ResourceProvider {
         // leaving a page of one key's aliases with a marker signed for another.
         String filter = keyId == null || keyId.isBlank() ? null : resolveKey(keyId, region).getKeyId();
         return page(listAliases(filter, region), KmsAlias::getAliasName,
-                "ListAliases\n" + region + "\n" + (filter == null ? "" : filter),
+                "ListAliases\n" + regionResolver.getAccountId() + "\n" + region + "\n" + (filter == null ? "" : filter),
                 marker, limit, MAX_LIST_ALIASES_LIMIT);
     }
 
@@ -709,7 +710,7 @@ public class KmsService implements ResourceProvider {
      * Pages {@code items} sorted by id. Marker is a signed cursor naming the id of the last item
      * returned; the next page starts at the first id sorting after it, so deleting that item
      * between pages does not break the listing (as upstream IAM pagination does). The cursor also
-     * carries {@code context} (action, region and filter), so a marker is only accepted by the
+     * carries {@code context} (action, account, region and filter), so a marker is only accepted by the
      * listing that issued it. Any other marker is InvalidMarkerException. Limit is clamped to
      * [1..max]; without a Limit the whole remainder is returned, so callers that never page see
      * every entry.
