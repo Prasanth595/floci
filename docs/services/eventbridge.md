@@ -16,7 +16,7 @@
 | `PutRule` | Create or update a rule with a schedule or event pattern |
 | `DeleteRule` | Delete a rule |
 | `DescribeRule` | Get rule details |
-| `ListRules` | List rules |
+| `ListRules` | List rules, paged by `Limit` (1 to 100, default 100) and `NextToken` |
 | `EnableRule` | Enable a disabled rule |
 | `DisableRule` | Disable a rule |
 | `PutTargets` | Add targets to a rule |

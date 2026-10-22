@@ -13,6 +13,8 @@ import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -58,6 +60,7 @@ import java.util.regex.Pattern;
 public class EventBridgeService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
+    private static final int MAX_LIST_LIMIT = 100;
     private static final List<String> REQUIRED_ENTRY_FIELDS = List.of("Source", "DetailType", "Detail");
 
     private final StorageBackend<String, EventBus> busStore;
@@ -397,6 +400,29 @@ public class EventBridgeService implements ResourceProvider {
             String ruleName = k.substring(prefix.length());
             return ruleName.startsWith(namePrefix);
         });
+    }
+
+    /**
+     * One page of a bus's rules in name order. {@code limit} defaults to 100, the documented
+     * per-page maximum, and the token is the shared opaque cursor, so a page stays resumable
+     * when rules are added or removed between requests.
+     */
+    public PaginatedResult<Rule> listRules(String busName, String namePrefix, Integer limit,
+                                           String nextToken, String region) {
+        if (limit != null && (limit < 1 || limit > MAX_LIST_LIMIT)) {
+            throw limitOutOfRange(limit.toString(), limit < 1);
+        }
+        return Pagination.paginate(listRules(busName, namePrefix, region), Rule::getName,
+                limit != null ? limit : MAX_LIST_LIMIT, nextToken, "rule",
+                token -> new AwsException("InvalidToken", "Invalid NextToken: " + token, 400));
+    }
+
+    static AwsException limitOutOfRange(String value, boolean belowMinimum) {
+        String constraint = belowMinimum
+                ? "Member must have value greater than or equal to 1"
+                : "Member must have value less than or equal to " + MAX_LIST_LIMIT;
+        return SmithyValidationErrors.validationException(
+                "Value '" + value + "' at 'limit' failed to satisfy constraint: " + constraint);
     }
 
     public void enableRule(String name, String busName, String region) {

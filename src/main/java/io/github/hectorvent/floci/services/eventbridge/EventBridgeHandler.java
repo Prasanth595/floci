@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
 import io.github.hectorvent.floci.services.eventbridge.model.Archive;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
@@ -193,13 +194,37 @@ public class EventBridgeHandler {
     private Response handleListRules(JsonNode request, String region) {
         String busName = request.path("EventBusName").asText(null);
         String namePrefix = request.path("NamePrefix").asText(null);
-        List<Rule> rules = eventBridgeService.listRules(busName, namePrefix, region);
+        Integer limit = readLimit(request.path("Limit"));
+        String nextToken = request.path("NextToken").asText(null);
+        PaginatedResult<Rule> page = eventBridgeService.listRules(busName, namePrefix, limit, nextToken, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode rulesArray = response.putArray("Rules");
-        for (Rule rule : rules) {
+        for (Rule rule : page.items()) {
             rulesArray.add(buildRuleNode(rule));
         }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
+    }
+
+    /**
+     * Reads an integer {@code Limit} without coercion: a string, boolean or fractional value is
+     * a SerializationException, and an integral value wider than an int fails the range check
+     * instead of being truncated into it.
+     */
+    private static Integer readLimit(JsonNode limit) {
+        if (limit.isMissingNode() || limit.isNull()) {
+            return null;
+        }
+        if (!limit.isIntegralNumber()) {
+            throw new AwsException("SerializationException",
+                    "'" + limit.asText() + "' can not be converted to Integer", 400);
+        }
+        if (!limit.canConvertToInt()) {
+            throw EventBridgeService.limitOutOfRange(limit.asText(), limit.bigIntegerValue().signum() < 0);
+        }
+        return limit.intValue();
     }
 
     private Response handleEnableRule(JsonNode request, String region) {

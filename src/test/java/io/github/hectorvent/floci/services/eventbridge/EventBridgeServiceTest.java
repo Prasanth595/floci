@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -29,6 +30,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -443,6 +445,79 @@ class EventBridgeServiceTest {
 
         List<Rule> result = service.listRules(null, "prod-", REGION);
         assertEquals(2, result.size());
+    }
+
+    @Test
+    void listRulesPagesEachRuleExactlyOnceInNameOrder() {
+        for (String name : List.of("page-c", "page-a", "page-d", "page-b", "other")) {
+            service.putRule(name, null, null, "rate(1 minute)", RuleState.ENABLED,
+                    null, null, null, REGION);
+        }
+
+        List<String> seen = new ArrayList<>();
+        String token = null;
+        int pages = 0;
+        do {
+            PaginatedResult<Rule> page = service.listRules(null, "page-", 1, token, REGION);
+            assertEquals(1, page.items().size());
+            seen.add(page.items().get(0).getName());
+            token = page.nextToken();
+            pages++;
+        } while (token != null);
+
+        assertEquals(List.of("page-a", "page-b", "page-c", "page-d"), seen);
+        assertEquals(4, pages);
+    }
+
+    @Test
+    void listRulesOmitsNextTokenWhenEverythingFits() {
+        service.putRule("fit-a", null, null, "rate(1 minute)", RuleState.ENABLED, null, null, null, REGION);
+        service.putRule("fit-b", null, null, "rate(1 minute)", RuleState.ENABLED, null, null, null, REGION);
+
+        PaginatedResult<Rule> exact = service.listRules(null, null, 2, null, REGION);
+        assertEquals(2, exact.items().size());
+        assertNull(exact.nextToken());
+
+        PaginatedResult<Rule> unbounded = service.listRules(null, null, null, null, REGION);
+        assertEquals(2, unbounded.items().size());
+        assertNull(unbounded.nextToken());
+    }
+
+    @Test
+    void listRulesPagesOnACustomBusWithoutLeakingDefaultBusRules() {
+        service.createEventBus("paging-bus", null, null, REGION);
+        service.putRule("custom-1", "paging-bus", null, "rate(1 minute)", RuleState.ENABLED,
+                null, null, null, REGION);
+        service.putRule("custom-2", "paging-bus", null, "rate(1 minute)", RuleState.ENABLED,
+                null, null, null, REGION);
+        service.putRule("custom-3", null, null, "rate(1 minute)", RuleState.ENABLED,
+                null, null, null, REGION);
+
+        PaginatedResult<Rule> first = service.listRules("paging-bus", "custom-", 1, null, REGION);
+        assertEquals("custom-1", first.items().get(0).getName());
+        assertNotNull(first.nextToken());
+
+        PaginatedResult<Rule> second = service.listRules("paging-bus", "custom-", 1, first.nextToken(), REGION);
+        assertEquals("custom-2", second.items().get(0).getName());
+        assertNull(second.nextToken());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1, 101})
+    void listRulesRejectsOutOfRangeLimit(int limit) {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.listRules(null, null, limit, null, REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("'" + limit + "' at 'limit'"), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"not base64 !", "Zm9vOmJhcg"})
+    void listRulesRejectsATokenItDidNotMint(String token) {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.listRules(null, null, 1, token, REGION));
+        assertEquals("InvalidToken", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     // ──────────────────────────── Targets ────────────────────────────
