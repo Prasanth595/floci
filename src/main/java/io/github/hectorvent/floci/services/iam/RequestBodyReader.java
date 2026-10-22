@@ -75,10 +75,8 @@ public final class RequestBodyReader {
 
     static String documentField(ContainerRequestContext ctx, ObjectMapper objectMapper, String key) {
         MediaType mt = ctx.getMediaType();
-        boolean cbor = mt != null && ("cbor".equalsIgnoreCase(mt.getSubtype())
-                || "x-amz-cbor-1.1".equalsIgnoreCase(mt.getSubtype()));
         if (mt == null || !"application".equalsIgnoreCase(mt.getType())
-                || mt.getSubtype() == null || (!cbor && !mt.getSubtype().startsWith("x-amz-json"))) {
+                || mt.getSubtype() == null || (!isCbor(mt) && !mt.getSubtype().startsWith("x-amz-json"))) {
             return null;
         }
         byte[] body = buffer(ctx);
@@ -86,12 +84,24 @@ public final class RequestBodyReader {
             return null;
         }
         try {
-            JsonNode value = (cbor ? CBOR_MAPPER : objectMapper).readTree(body).path(key);
+            JsonNode value = readTree(body, mt, objectMapper).path(key);
             return value.isTextual() ? value.asText() : null;
         } catch (IOException e) {
             LOG.debugv(e, "Failed to parse request document for IAM enforcement");
             return null;
         }
+    }
+
+    /** Both CBOR wire protocols carry the same document members as JSON requests. */
+    static boolean isCbor(MediaType mediaType) {
+        return mediaType != null
+                && "application".equalsIgnoreCase(mediaType.getType())
+                && ("cbor".equalsIgnoreCase(mediaType.getSubtype())
+                        || "x-amz-cbor-1.1".equalsIgnoreCase(mediaType.getSubtype()));
+    }
+
+    static JsonNode readTree(byte[] body, MediaType mediaType, ObjectMapper json) throws IOException {
+        return (isCbor(mediaType) ? CBOR_MAPPER : json).readTree(body);
     }
 
     private static Charset resolveCharset(MediaType mt) {

@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
@@ -17,7 +16,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
-import jakarta.ws.rs.core.MediaType;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -47,9 +45,6 @@ public class ResourceArnBuilder {
 
     /** What a service-linked role deletion task identifier starts with; see its resolver. */
     private static final String DELETION_TASK_PREFIX = "task" + ServiceLinkedRoles.PATH;
-
-    /** Reads the CBOR bodies the RPC v2 and {@code x-amz-cbor-1.1} paths carry. */
-    private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
 
     /**
      * Stands in for the random suffix of a secret that {@code CreateSecret} has not made yet. Each
@@ -1212,24 +1207,12 @@ public class ResourceArnBuilder {
             return null;
         }
         try {
-            JsonNode node = (isCbor(ctx.getMediaType()) ? CBOR_MAPPER : objectMapper).readTree(body);
+            JsonNode node = RequestBodyReader.readTree(body, ctx.getMediaType(), objectMapper);
             ctx.setProperty("floci.bufferedJsonBody", node);
             return node;
         } catch (Exception e) {
             return null;
         }
-    }
-
-    /**
-     * A CBOR body, which names its resources in the same members a JSON body does. Both CBOR
-     * content types arrive as {@code application/cbor}: {@code AwsCborContentTypeFilter} rewrites
-     * {@code x-amz-cbor-1.1} before routing.
-     */
-    private static boolean isCbor(MediaType mediaType) {
-        return mediaType != null
-                && "application".equalsIgnoreCase(mediaType.getType())
-                && ("cbor".equalsIgnoreCase(mediaType.getSubtype())
-                        || "x-amz-cbor-1.1".equalsIgnoreCase(mediaType.getSubtype()));
     }
 
     private String extractSegmentAfter(String path, String segment) {
