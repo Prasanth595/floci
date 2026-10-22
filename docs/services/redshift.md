@@ -81,6 +81,11 @@ Parameters report `Source=engine-default` initially, `user` after modification, 
 `Source=engine-default` to filter the result. The implicit `default.redshift-1.0` group is readable
 but cannot be modified or reset.
 
+Creating a group named `default.redshift-1.0` is rejected. Earlier Floci versions allowed such a
+group to be stored: for those legacy groups, both describe operations return the stored values,
+and modify/reset remain available. The read-only built-in group is used only when no stored
+group exists under that name.
+
 The default catalog remains limited to Floci's existing `max_cursor_result_set_size=0` and
 `wlm_json_configuration={}` values, rather than the complete AWS engine catalog. Modifications to
 other names are stored as before; resetting those names removes their overrides and omits them

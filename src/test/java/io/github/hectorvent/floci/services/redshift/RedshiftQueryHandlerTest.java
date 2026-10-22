@@ -115,6 +115,52 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
+    void resetClusterParameterGroupRejectsBareParametersWithoutCallingService() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ParameterGroupName", "reset-pg");
+        params.putSingle("Parameters", "");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> handler.handle("ResetClusterParameterGroup", params));
+
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        verify(service, never()).resetClusterParameterGroup(any(), anyBoolean(), anyList());
+    }
+
+    @Test
+    void resetClusterParameterGroupRejectsTwentyOneRepeatedNamesWithoutCallingService() {
+        for (String prefix : List.of("Parameters.Parameter", "Parameters.member")) {
+            MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+            params.putSingle("ParameterGroupName", "reset-pg");
+            for (int index = 1; index <= 21; index++) {
+                params.putSingle(prefix + "." + index + ".ParameterName", "max_cursor_result_set_size");
+            }
+
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> handler.handle("ResetClusterParameterGroup", params));
+
+            assertEquals("InvalidParameterValue", failure.getErrorCode());
+        }
+        verify(service, never()).resetClusterParameterGroup(any(), anyBoolean(), anyList());
+    }
+
+    @Test
+    void resetClusterParameterGroupCountsMembersRatherThanFields() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ParameterGroupName", "reset-pg");
+        for (int index = 1; index <= 20; index++) {
+            params.putSingle("Parameters.Parameter." + index + ".ParameterName", "max_cursor_result_set_size");
+            params.putSingle("Parameters.Parameter." + index + ".ParameterValue", "ignored");
+        }
+
+        handler.handle("ResetClusterParameterGroup", params);
+
+        ArgumentCaptor<List<String>> names = ArgumentCaptor.captor();
+        verify(service).resetClusterParameterGroup(eq("reset-pg"), eq(false), names.capture());
+        assertEquals(20, names.getValue().size());
+    }
+
+    @Test
     void resetClusterParameterGroupRejectsMembersWithoutNamesBeforeChoosingResetAll() {
         for (String prefix : List.of("Parameters.Parameter", "Parameters.member")) {
             MultivaluedMap<String, String> params = new MultivaluedHashMap<>();

@@ -62,6 +62,7 @@ public class RedshiftService {
 
     // The group every cluster starts on until one is named.
     static final String DEFAULT_PARAMETER_GROUP_NAME = "default.redshift-1.0";
+    static final int MAX_RESET_PARAMETERS = 20;
 
     private final AccountAwareStorageBackend<Cluster> clusters;
     private final AccountAwareStorageBackend<Snapshot> snapshots;
@@ -1104,6 +1105,9 @@ public class RedshiftService {
     // ── Parameter Group Operations ───────────────────────────────────────────
 
     public ClusterParameterGroup createClusterParameterGroup(String parameterGroupName, String parameterGroupFamily, String description) {
+        if (DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)) {
+            throw new AwsException("InvalidParameterValue", "The default parameter group name is reserved.", 400);
+        }
         if (parameterGroups.get(parameterGroupName).isPresent()) {
             throw new AwsException("ClusterParameterGroupAlreadyExists", "Cluster parameter group " + parameterGroupName + " already exists", 400);
         }
@@ -1143,8 +1147,9 @@ public class RedshiftService {
     }
 
     public List<Parameter> describeClusterParameters(String parameterGroupName) {
-        ClusterParameterGroup group = DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)
-                ? defaultParameterGroup() : parameterGroups.get(parameterGroupName)
+        ClusterParameterGroup group = parameterGroups.get(parameterGroupName)
+                .or(() -> DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)
+                        ? Optional.of(defaultParameterGroup()) : Optional.empty())
                 .orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
                         "Cluster parameter group " + parameterGroupName + " not found", 404));
         return group.getParameters().stream().map(RedshiftService::copyParameterWithSource).toList();
@@ -1200,7 +1205,7 @@ public class RedshiftService {
             throw new AwsException("InvalidParameterCombination",
                     "At least one parameter is required when ResetAllParameters is false.", 400);
         }
-        if (parameterNames.size() > 20) {
+        if (parameterNames.size() > MAX_RESET_PARAMETERS) {
             throw new AwsException("InvalidParameterValue", "A maximum of 20 parameters can be reset.", 400);
         }
         ClusterParameterGroup group = parameterGroups.get(parameterGroupName)
@@ -1232,11 +1237,11 @@ public class RedshiftService {
         parameterGroups.flush();
     }
 
-    private static void requireMutableParameterGroup(String name) {
+    private void requireMutableParameterGroup(String name) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ParameterGroupName is required", 400);
         }
-        if (DEFAULT_PARAMETER_GROUP_NAME.equals(name)) {
+        if (DEFAULT_PARAMETER_GROUP_NAME.equals(name) && parameterGroups.get(name).isEmpty()) {
             throw new AwsException("InvalidParameterValue", "The default parameter group cannot be modified.", 400);
         }
     }

@@ -313,6 +313,9 @@ public class RedshiftQueryHandler {
         }
         case "ResetClusterParameterGroup" -> {
             List<String> parameterNames = resetParameterNames(params);
+            if (parameterNames.size() > RedshiftService.MAX_RESET_PARAMETERS) {
+                throw new AwsException("InvalidParameterValue", "A maximum of 20 parameters can be reset.", 400);
+            }
             String rawResetAll = params.getFirst("ResetAllParameters");
             if (rawResetAll != null && !"true".equalsIgnoreCase(rawResetAll) && !"false".equalsIgnoreCase(rawResetAll)) {
                 throw new AwsException("InvalidParameterValue", "ResetAllParameters must be a boolean.", 400);
