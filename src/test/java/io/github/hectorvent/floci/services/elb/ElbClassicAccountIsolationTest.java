@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elb.model.ClassicHealthCheck;
 import io.github.hectorvent.floci.services.elb.model.ClassicListener;
+import io.github.hectorvent.floci.services.elb.model.ClassicLoadBalancer;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import jakarta.enterprise.inject.Instance;
@@ -45,6 +46,7 @@ class ElbClassicAccountIsolationTest {
     private final RequestContext context = new RequestContext();
     private final AtomicInteger backendStatus = new AtomicInteger(200);
     private HttpServer backend;
+    private ElbClassicHealthChecker healthChecker;
     private ElbClassicService service;
 
     @BeforeEach
@@ -74,7 +76,7 @@ class ElbClassicAccountIsolationTest {
         when(ec2Service.findInstanceById(anyString(), eq(INSTANCE))).thenReturn(instance);
 
         // Without an EmulatorConfig the checker is not in mock mode, so it really probes.
-        ElbClassicHealthChecker healthChecker = new ElbClassicHealthChecker(vertx, null, ec2Service);
+        healthChecker = new ElbClassicHealthChecker(vertx, null, ec2Service);
         context.setAccountId(FIRST);
         service = new ElbClassicService(ec2Service, healthChecker, factory, null, resolver);
         service.initializeStorage();
@@ -111,7 +113,7 @@ class ElbClassicAccountIsolationTest {
 
         // The instance now fails its checks, which only the first account's own checks can notice.
         context.setAccountId(FIRST);
-        await().pollInSameThread().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+        await().pollInSameThread().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
             ElbClassicHealthChecker.InstanceHealth health = health();
             assertEquals("OutOfService", health.state());
             assertEquals("Instance", health.reasonCode());
@@ -129,19 +131,23 @@ class ElbClassicAccountIsolationTest {
     }
 
     /**
-     * Checks every 5 seconds, the shortest interval the API accepts. The first check runs at
-     * registration, so a healthy threshold of two is met one interval later.
+     * Gives the stored balancer a check every second and re-arms the checker, as
+     * ConfigureHealthCheck does but below the 5-second minimum that action enforces, so each test
+     * takes seconds. The first check runs at registration, so the healthy threshold of two is met
+     * one interval later.
      */
     private void registerHealthyInstance() {
         ClassicHealthCheck check = new ClassicHealthCheck();
         check.setTarget("HTTP:" + backend.actualPort() + "/");
-        check.setInterval(5);
-        check.setTimeout(2);
+        check.setInterval(1);
+        check.setTimeout(1);
         check.setHealthyThreshold(2);
         check.setUnhealthyThreshold(2);
-        service.configureHealthCheck(REGION, "web", check);
+        ClassicLoadBalancer lb = service.requireLoadBalancer(REGION, "web");
+        lb.setHealthCheck(check);
+        healthChecker.healthCheckChanged(lb);
         service.registerInstances(REGION, "web", List.of(INSTANCE));
-        await().pollInSameThread().atMost(Duration.ofSeconds(20))
+        await().pollInSameThread().atMost(Duration.ofSeconds(10))
                 .until(() -> "InService".equals(health().state()));
     }
 
