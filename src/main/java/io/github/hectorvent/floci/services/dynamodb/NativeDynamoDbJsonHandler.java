@@ -1980,6 +1980,9 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must satisfy enum value set: " + BACKUP_TYPE_FILTERS);
         }
         throwValidationErrors(violations);
+        if (exclusiveStartBackupArn != null) {
+            DynamoDbBackupArns.parse(exclusiveStartBackupArn);
+        }
         Instant lowerBound = timestampOrNull(request, "TimeRangeLowerBound");
         Instant upperBound = timestampOrNull(request, "TimeRangeUpperBound");
         if (lowerBound != null && upperBound != null && upperBound.isBefore(lowerBound)) {

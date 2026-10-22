@@ -346,6 +346,46 @@ class DynamoDbBackupIntegrationTest {
     }
 
     @Test
+    void listBackupsChecksTheExclusiveStartBackupArn() {
+        String table = "BackupIT-start";
+        String backup = "/backup/01700000000000-abcdef12";
+        String start = TABLE_ARN_PREFIX + table + backup;
+        String supplied = "Invalid Request: The supplied ExclusiveStartBackupArn ";
+
+        listBackupsFrom(table, TABLE_ARN_PREFIX + "tt" + backup)
+                .statusCode(400)
+                .body("message", equalTo("Invalid Backup ARN"));
+        listBackupsFrom(table, TABLE_ARN_PREFIX + table + "/backup/1700000000000-abcdef12")
+                .statusCode(400)
+                .body("message", equalTo(supplied + "is not a valid backup arn"));
+        listBackupsFrom(table, start.replace("000000000000", ""))
+                .statusCode(400)
+                .body("message", equalTo(supplied + "is not a valid backup arn"));
+        listBackupsFrom(table, start.replace("us-east-1:000000000000", "eu-west-2:123456789012"))
+                .statusCode(400)
+                .body("message", equalTo(supplied + "does not match the region"));
+        listBackupsFrom(table, start.replace("000000000000", "123456789012"))
+                .statusCode(400)
+                .body("message", equalTo(supplied + "does not match the account"));
+        listBackupsFrom(table, TABLE_ARN_PREFIX + "BackupIT-other" + backup)
+                .statusCode(400)
+                .body("message", equalTo(supplied + "does not match the table name predicate"));
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + TABLE_ARN_PREFIX + "BackupIT-other" + backup + "\"}")
+                .statusCode(200);
+
+        String reversedRange = "\"TimeRangeLowerBound\": 2, \"TimeRangeUpperBound\": 1";
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + TABLE_ARN_PREFIX + "tt" + backup + "\", "
+                + reversedRange + "}")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Backup ARN"));
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + start.replace("000000000000", "123456789012")
+                + "\", " + reversedRange + "}")
+                .statusCode(400)
+                .body("message", equalTo("One or more parameter values were invalid: "
+                        + "Time range lower bound must be less than or equal to upper bound"));
+    }
+
+    @Test
     void listBackupsReportsEveryViolation() {
         ddb("ListBackups", "{\"Limit\": 0, \"BackupType\": \"BAD\"}")
                 .statusCode(400)
@@ -863,5 +903,11 @@ class DynamoDbBackupIntegrationTest {
         return ddb("ListBackups", """
                 {"TimeRangeLowerBound": %s, "TimeRangeUpperBound": %s}
                 """.formatted(lowerBound, upperBound));
+    }
+
+    private static ValidatableResponse listBackupsFrom(String tableName, String exclusiveStartBackupArn) {
+        return ddb("ListBackups", """
+                {"TableName": "%s", "ExclusiveStartBackupArn": "%s"}
+                """.formatted(tableName, exclusiveStartBackupArn));
     }
 }
