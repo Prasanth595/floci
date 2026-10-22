@@ -1040,6 +1040,48 @@ class KmsIntegrationTest {
                 .body("NextMarker", notNullValue());
     }
 
+    @Test
+    void listMarkerIsRejectedOutsideTheListingThatIssuedIt() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+        String prefix = "alias/context-" + System.nanoTime() + "-";
+        for (int i = 0; i < 2; i++) {
+            given()
+                    .header("X-Amz-Target", "TrentService.CreateAlias")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"AliasName\":\"" + prefix + i + "\",\"TargetKeyId\":\"" + keyId + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200);
+        }
+        String marker = given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\",\"Limit\":1}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Truncated", equalTo(true))
+                .extract().path("NextMarker");
+
+        // Same action without the KeyId filter, and another action, must not accept it.
+        for (String[] reuse : new String[][] {
+                {"ListAliases", "{\"Marker\":\"" + marker + "\"}"},
+                {"ListKeys", "{\"Marker\":\"" + marker + "\"}"}}) {
+            given()
+                    .header("X-Amz-Target", "TrentService." + reuse[0])
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body(reuse[1])
+                    .when().post("/")
+                    .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidMarkerException"));
+        }
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
             "ListKeys|0|ValidationException",

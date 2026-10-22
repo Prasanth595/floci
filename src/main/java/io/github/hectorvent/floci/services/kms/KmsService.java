@@ -690,11 +690,14 @@ public class KmsService implements ResourceProvider {
     static final int MAX_LIST_ALIASES_LIMIT = 100;
 
     public Page<KmsKey> listKeys(String region, String marker, Integer limit) {
-        return page(listKeys(region), KmsKey::getKeyId, marker, limit, MAX_LIST_KEYS_LIMIT);
+        return page(listKeys(region), KmsKey::getKeyId, "ListKeys\n" + region, marker, limit, MAX_LIST_KEYS_LIMIT);
     }
 
     public Page<KmsAlias> listAliases(String keyId, String region, String marker, Integer limit) {
-        return page(listAliases(keyId, region), KmsAlias::getAliasName, marker, limit, MAX_LIST_ALIASES_LIMIT);
+        List<KmsAlias> aliases = listAliases(keyId, region);
+        String filter = keyId == null || keyId.isBlank() ? "" : resolveKey(keyId, region).getKeyId();
+        return page(aliases, KmsAlias::getAliasName, "ListAliases\n" + region + "\n" + filter,
+                marker, limit, MAX_LIST_ALIASES_LIMIT);
     }
 
     /** Signs each ListKeys/ListAliases Marker, so only a marker this service issued is accepted. */
@@ -703,20 +706,25 @@ public class KmsService implements ResourceProvider {
     /**
      * Pages {@code items} sorted by id. Marker is a signed cursor naming the id of the last item
      * returned; the next page starts at the first id sorting after it, so deleting that item
-     * between pages does not break the listing (as upstream IAM pagination does). A marker this
-     * service did not issue is InvalidMarkerException. Limit is clamped to [1..max]; without a
-     * Limit the whole remainder is returned, so callers that never page see every entry.
+     * between pages does not break the listing (as upstream IAM pagination does). The cursor also
+     * carries {@code context} (action, region and filter), so a marker is only accepted by the
+     * listing that issued it. Any other marker is InvalidMarkerException. Limit is clamped to
+     * [1..max]; without a Limit the whole remainder is returned, so callers that never page see
+     * every entry.
      */
-    private <T> Page<T> page(List<T> items, Function<T, String> id, String marker, Integer limit, int max) {
+    private <T> Page<T> page(List<T> items, Function<T, String> id, String context,
+                             String marker, Integer limit, int max) {
+        String scope = context + "\n";
         List<T> sorted = items.stream().sorted(Comparator.comparing(id)).toList();
         int startIndex = 0;
         if (marker != null) {
             // A blank marker was not issued here, so it is refused rather than restarting the listing.
-            String anchor = listMarkers.cursorOf(marker.trim());
-            if (anchor == null) {
+            String cursor = listMarkers.cursorOf(marker.trim());
+            if (cursor == null || !cursor.startsWith(scope)) {
                 throw new AwsException("InvalidMarkerException",
                         "The request was rejected because the marker that specifies where pagination should next begin is not valid.", 400);
             }
+            String anchor = cursor.substring(scope.length());
             while (startIndex < sorted.size() && id.apply(sorted.get(startIndex)).compareTo(anchor) <= 0) {
                 startIndex++;
             }
@@ -724,7 +732,7 @@ public class KmsService implements ResourceProvider {
         int endIndex = limit == null ? sorted.size()
                 : Math.min(startIndex + Math.clamp(limit, 1, max), sorted.size());
         List<T> pageItems = sorted.subList(startIndex, endIndex);
-        String nextMarker = endIndex < sorted.size() ? listMarkers.issue(id.apply(pageItems.getLast())) : null;
+        String nextMarker = endIndex < sorted.size() ? listMarkers.issue(scope + id.apply(pageItems.getLast())) : null;
         return new Page<>(pageItems, nextMarker);
     }
 
