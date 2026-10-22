@@ -148,8 +148,8 @@ public class StreamBatchFailures {
             LOG.infov("ESM {0}: sent the discarded batch of shard {1} to {2}",
                     esm.getUuid(), batch.shardId(), destinationArn);
         } catch (Exception e) {
-            LOG.errorv("ESM {0}: failed to send to OnFailure destination {1}, discarding the batch: {2}",
-                    esm.getUuid(), destinationArn, e.getMessage());
+            LOG.errorv(e, "ESM {0}: failed to send to OnFailure destination {1}, discarding the batch",
+                    esm.getUuid(), destinationArn);
         }
     }
 

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -22,10 +23,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -162,14 +165,22 @@ class StreamBatchFailuresTest {
     }
 
     @Test
-    void refusedSendIsLoggedNotThrown() {
+    void refusedSendIsLoggedWithItsCauseNotThrown() {
         EventSourceMapping esm = esm(0, null);
         esm.setDestinationConfig(destination("arn:aws:sqs:us-east-1:000000000000:gone"));
-        when(sqsService.sendMessage(anyString(), anyString(), anyInt(), anyString()))
-                .thenThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue", "The specified queue does not exist.", 400));
+        AwsException refusal = new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                "The specified queue does not exist.", 400);
+        when(sqsService.sendMessage(anyString(), anyString(), anyInt(), anyString())).thenThrow(refusal);
 
-        assertDoesNotThrow(() -> failures.sendToOnFailureDestination(esm, BATCH, new InvokeResult(), 1,
-                StreamBatchFailures.RETRY_ATTEMPTS_EXHAUSTED));
+        List<LogRecord> records = LogCapture.capture(StreamBatchFailures.class, () ->
+                failures.sendToOnFailureDestination(esm, BATCH, new InvokeResult(), 1,
+                        StreamBatchFailures.RETRY_ATTEMPTS_EXHAUSTED));
+
+        LogRecord error = records.stream()
+                .filter(record -> record.getLevel().intValue() >= Level.SEVERE.intValue())
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no error was logged: " + records));
+        assertSame(refusal, error.getThrown(), "the error log must keep the cause and its stack trace");
     }
 
     @ParameterizedTest
