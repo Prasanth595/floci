@@ -41,6 +41,9 @@ class FirehoseRedshiftTest {
     private static final String STREAM = "sdk-rs-shape-" + UUID.randomUUID().toString().substring(0, 8);
     private static final String JDBC_URL = "jdbc:redshift://c1.abc.us-east-1.redshift.amazonaws.com:5439/dev";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/firehose";
+    private static final int BUFFERING_INTERVAL_SECONDS = 5;
+    private static final long POLL_TIMEOUT_MILLIS = 240_000L;
+    private static final long POLL_INTERVAL_MILLIS = TestFixtures.isRealAws() ? 5_000L : 250L;
     private static FirehoseClient firehose;
 
     @BeforeAll
@@ -120,7 +123,7 @@ class FirehoseRedshiftTest {
                                     .roleARN(ROLE_ARN)
                                     .bucketARN("arn:aws:s3:::" + stream + "-stage")
                                     .bufferingHints(BufferingHints.builder()
-                                            .intervalInSeconds(60).sizeInMBs(1).build())
+                                            .intervalInSeconds(BUFFERING_INTERVAL_SECONDS).sizeInMBs(1).build())
                                     .build())
                             .build())
                     .build());
@@ -130,14 +133,14 @@ class FirehoseRedshiftTest {
                             StandardCharsets.UTF_8)).build())
                     .build());
 
-            Instant deadline = Instant.now().plus(Duration.ofSeconds(150));
+            Instant deadline = Instant.now().plus(Duration.ofMillis(POLL_TIMEOUT_MILLIS));
             long rows = 0;
             while (rows == 0 && Instant.now().isBefore(deadline)) {
                 String id = awaitFinished(data, execute(data, clusterId, "SELECT count(*) FROM " + table));
                 rows = data.getStatementResult(GetStatementResultRequest.builder().id(id).build())
                         .records().get(0).get(0).longValue();
                 if (rows == 0) {
-                    Thread.sleep(5000);
+                    Thread.sleep(POLL_INTERVAL_MILLIS);
                 }
             }
             assertThat(rows).isEqualTo(1L);
