@@ -247,6 +247,8 @@ public class DeliveryStreamDescription {
         private DataFormatConversionConfiguration dataFormatConversionConfiguration;
         @JsonProperty("ProcessingConfiguration")
         private ProcessingConfiguration processingConfiguration;
+        @JsonProperty("CloudWatchLoggingOptions")
+        private CloudWatchLoggingOptions cloudWatchLoggingOptions;
 
         public S3Destination() {}
         public String getRoleArn() { return roleArn; }
@@ -282,6 +284,8 @@ public class DeliveryStreamDescription {
         public void setProcessingConfiguration(ProcessingConfiguration processingConfiguration) {
             this.processingConfiguration = processingConfiguration;
         }
+        public CloudWatchLoggingOptions getCloudWatchLoggingOptions() { return cloudWatchLoggingOptions; }
+        public void setCloudWatchLoggingOptions(CloudWatchLoggingOptions options) { this.cloudWatchLoggingOptions = options; }
 
         /**
          * True when a transformation applies to deliveries: the configuration is present
@@ -355,6 +359,14 @@ public class DeliveryStreamDescription {
             // not inject from whatever role is current by then.
             if (processingConfiguration != null && processingConfiguration.getEnabled() == null) {
                 processingConfiguration.setEnabled(false);
+            }
+            // AWS describes a destination that never configured logging as {"Enabled": false},
+            // and an omitted Enabled as false (probed 2026-10-22).
+            if (cloudWatchLoggingOptions == null) {
+                cloudWatchLoggingOptions = new CloudWatchLoggingOptions();
+            }
+            if (cloudWatchLoggingOptions.getEnabled() == null) {
+                cloudWatchLoggingOptions.setEnabled(false);
             }
         }
 
@@ -436,6 +448,7 @@ public class DeliveryStreamDescription {
             view.compressionFormat = compressionFormat;
             view.bufferingHints = bufferingHints;
             view.encryptionConfiguration = encryptionConfiguration;
+            view.cloudWatchLoggingOptions = cloudWatchLoggingOptions;
             return view;
         }
 
@@ -467,6 +480,31 @@ public class DeliveryStreamDescription {
         public void setEnabled(Boolean enabled) { this.enabled = enabled; }
         public List<Processor> getProcessors() { return processors; }
         public void setProcessors(List<Processor> processors) { this.processors = processors; }
+    }
+
+    /**
+     * Stored and echoed as AWS models it. Floci writes no delivery error logs to the named
+     * group. UpdateDestination merges it a member at a time (probed).
+     */
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class CloudWatchLoggingOptions {
+        @JsonProperty("Enabled")
+        private Boolean enabled;
+        @JsonProperty("LogGroupName")
+        private String logGroupName;
+        @JsonProperty("LogStreamName")
+        private String logStreamName;
+
+        public CloudWatchLoggingOptions() {}
+
+        public Boolean getEnabled() { return enabled; }
+        public void setEnabled(Boolean enabled) { this.enabled = enabled; }
+        public String getLogGroupName() { return logGroupName; }
+        public void setLogGroupName(String logGroupName) { this.logGroupName = logGroupName; }
+        public String getLogStreamName() { return logStreamName; }
+        public void setLogStreamName(String logStreamName) { this.logStreamName = logStreamName; }
     }
 
     @RegisterForReflection

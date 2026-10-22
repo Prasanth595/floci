@@ -665,6 +665,10 @@ public class FirehoseService implements ResourceProvider {
         if (update.getBufferingHints() != null) current.setBufferingHints(update.getBufferingHints());
         if (update.getEncryptionConfiguration() != null) current.setEncryptionConfiguration(update.getEncryptionConfiguration());
         if (update.getS3BackupMode() != null) current.setS3BackupMode(update.getS3BackupMode());
+        if (update.getCloudWatchLoggingOptions() != null) {
+            current.setCloudWatchLoggingOptions(mergeLogging(
+                    current.getCloudWatchLoggingOptions(), update.getCloudWatchLoggingOptions()));
+        }
         // Replaced whole, not merged member-wise: an update carrying only
         // {"Enabled": false} leaves Processors empty on real AWS, where the same shape
         // preserves the conversion block's members (probed 2026-09-10).
@@ -700,6 +704,23 @@ public class FirehoseService implements ResourceProvider {
                 ? update.getInputFormatConfiguration() : current.getInputFormatConfiguration());
         merged.setOutputFormatConfiguration(update.getOutputFormatConfiguration() != null
                 ? update.getOutputFormatConfiguration() : current.getOutputFormatConfiguration());
+        return merged;
+    }
+
+    /**
+     * Member-wise, like the conversion block: an update carrying only {"Enabled": false} keeps the
+     * stored group and stream, and one naming only a group keeps Enabled (probed 2026-10-22).
+     */
+    private static DeliveryStreamDescription.CloudWatchLoggingOptions mergeLogging(
+            DeliveryStreamDescription.CloudWatchLoggingOptions current,
+            DeliveryStreamDescription.CloudWatchLoggingOptions update) {
+        if (current == null) {
+            return update;
+        }
+        DeliveryStreamDescription.CloudWatchLoggingOptions merged = new DeliveryStreamDescription.CloudWatchLoggingOptions();
+        merged.setEnabled(update.getEnabled() != null ? update.getEnabled() : current.getEnabled());
+        merged.setLogGroupName(update.getLogGroupName() != null ? update.getLogGroupName() : current.getLogGroupName());
+        merged.setLogStreamName(update.getLogStreamName() != null ? update.getLogStreamName() : current.getLogStreamName());
         return merged;
     }
 

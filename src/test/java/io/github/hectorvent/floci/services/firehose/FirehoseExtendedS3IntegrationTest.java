@@ -54,6 +54,11 @@ class FirehoseExtendedS3IntegrationTest {
                         "Prefix": "events/data/",
                         "ErrorOutputPrefix": "events/errors/",
                         "CompressionFormat": "GZIP",
+                        "CloudWatchLoggingOptions": {
+                          "Enabled": true,
+                          "LogGroupName": "/aws/kinesisfirehose/extended",
+                          "LogStreamName": "DestinationDelivery"
+                        },
                         "BufferingHints": { "SizeInMBs": 64, "IntervalInSeconds": 120 }
                       }
                     }
@@ -88,6 +93,10 @@ class FirehoseExtendedS3IntegrationTest {
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.SizeInMBs", equalTo(64))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.IntervalInSeconds", equalTo(120))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.EncryptionConfiguration.NoEncryptionConfig", equalTo("NoEncryption"))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CloudWatchLoggingOptions.Enabled", equalTo(true))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CloudWatchLoggingOptions.LogGroupName", equalTo("/aws/kinesisfirehose/extended"))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CloudWatchLoggingOptions.LogStreamName", equalTo("DestinationDelivery"))
+            .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.CloudWatchLoggingOptions.LogGroupName", equalTo("/aws/kinesisfirehose/extended"))
             .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.BucketARN", equalTo(BUCKET_ARN))
             .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.RoleARN", equalTo(ROLE_ARN));
     }
@@ -124,6 +133,8 @@ class FirehoseExtendedS3IntegrationTest {
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.SizeInMBs", equalTo(5))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.IntervalInSeconds", equalTo(300))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.EncryptionConfiguration.NoEncryptionConfig", equalTo("NoEncryption"))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CloudWatchLoggingOptions.Enabled", equalTo(false))
+            .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.CloudWatchLoggingOptions.Enabled", equalTo(false))
             // #2200: a create response that omits S3BackupMode, followed by a later describe
             // that fills it in, applied cleanly and then re-planned dirty forever in Terraform.
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.S3BackupMode", equalTo("Disabled"));

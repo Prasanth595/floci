@@ -388,6 +388,39 @@ class FirehoseServiceTest {
     }
 
     @Test
+    void cloudWatchLoggingOptionsDefaultToDisabledAndMergeMemberWise() {
+        S3Destination s3 = new S3Destination();
+        s3.setBucketArn("arn:aws:s3:::logging-bucket");
+        firehoseService.createDeliveryStream("logged-stream", s3);
+        DeliveryStreamDescription.CloudWatchLoggingOptions logging =
+                firehoseService.describeDeliveryStream("logged-stream").s3Destination().getCloudWatchLoggingOptions();
+        assertEquals(Boolean.FALSE, logging.getEnabled());
+        assertNull(logging.getLogGroupName());
+
+        S3Destination enable = new S3Destination();
+        enable.setCloudWatchLoggingOptions(logging(true, "group", "stream"));
+        firehoseService.updateDestination("logged-stream", "1", "destinationId-000000000001", enable);
+
+        S3Destination disableOnly = new S3Destination();
+        disableOnly.setCloudWatchLoggingOptions(logging(false, null, null));
+        firehoseService.updateDestination("logged-stream", "2", "destinationId-000000000001", disableOnly);
+
+        logging = firehoseService.describeDeliveryStream("logged-stream").s3Destination().getCloudWatchLoggingOptions();
+        assertEquals(Boolean.FALSE, logging.getEnabled());
+        assertEquals("group", logging.getLogGroupName(), "an update naming only Enabled keeps the stored group");
+        assertEquals("stream", logging.getLogStreamName());
+    }
+
+    private static DeliveryStreamDescription.CloudWatchLoggingOptions logging(Boolean enabled, String group,
+                                                                             String stream) {
+        DeliveryStreamDescription.CloudWatchLoggingOptions options = new DeliveryStreamDescription.CloudWatchLoggingOptions();
+        options.setEnabled(enabled);
+        options.setLogGroupName(group);
+        options.setLogStreamName(stream);
+        return options;
+    }
+
+    @Test
     void timeBasedFlushKeepsBufferWhileDefaultIntervalHasNotElapsed() {
         firehoseService.createDeliveryStream("idle-stream", null);
         putRecords("idle-stream", 2);
