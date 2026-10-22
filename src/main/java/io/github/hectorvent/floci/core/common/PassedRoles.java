@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
-import io.github.hectorvent.floci.services.redshift.RedshiftQueryHandler;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -372,12 +371,15 @@ final class PassedRoles {
         }
     }
 
-    /** The roles a Redshift request lists under {@code list}, every numbered member the Redshift handler reads. */
+    /**
+     * The roles a Redshift request lists under {@code list}, every member the Redshift handler reads: the
+     * list's shape names them {@code IamRoleArn}.
+     */
     private static List<PassedRole> redshiftRoles(ContainerRequestContext ctx, String list) {
-        String member = RedshiftQueryHandler.memberKeyRegex(list);
+        Pattern member = AwsQueryLists.memberKeys(list, "IamRoleArn");
         List<String> roles = new ArrayList<>();
         IamConditionContextResolver.formParameters(ctx).forEach((key, value) -> {
-            if (key.matches(member)) {
+            if (member.matcher(key).matches()) {
                 roles.add(value);
             }
         });

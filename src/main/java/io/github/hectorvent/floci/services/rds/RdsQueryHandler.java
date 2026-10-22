@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsErrorMessages;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsQueryLists;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
@@ -3533,49 +3534,33 @@ public class RdsQueryHandler {
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
-        return params.keySet().stream()
-                .filter(key -> key.matches(memberKeyRegex(baseName)))
-                .sorted(java.util.Comparator.comparingInt(RdsQueryHandler::numericSuffix))
-                .map(params::getFirst)
-                .filter(value -> value != null && !value.isBlank())
-                .toList();
+        return AwsQueryLists.values(params, baseName, memberName(baseName));
     }
 
     private static boolean hasMemberKeys(MultivaluedMap<String, String> params, String baseName) {
-        return params.keySet().stream().anyMatch(key -> key.matches(memberKeyRegex(baseName)));
+        Pattern keys = AwsQueryLists.memberKeys(baseName, memberName(baseName));
+        return params.keySet().stream().anyMatch(key -> keys.matcher(key).matches());
     }
 
-    private static String memberKeyRegex(String baseName) {
-        String quoted = java.util.regex.Pattern.quote(baseName);
+    /** The name the list {@code baseName}'s shape gives its members, or null for a list whose shape names none. */
+    private static String memberName(String baseName) {
         return switch (baseName) {
-            case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
-            case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
-            case "OptionsToRemove" -> quoted + "(\\.member|\\.OptionName)?\\.\\d+";
-            case "ValuesToAdd", "ValuesToRemove" -> quoted + "(\\.member|\\.AttributeValue)?\\.\\d+";
+            case "SubnetIds" -> "SubnetIdentifier";
+            case "VpcSecurityGroupIds" -> "VpcSecurityGroupId";
+            case "OptionsToRemove" -> "OptionName";
+            case "ValuesToAdd", "ValuesToRemove" -> "AttributeValue";
             default -> {
                 // Option configurations nest their membership lists under an indexed prefix,
                 // so the alternate member names have to be matched on the suffix.
                 if (baseName.endsWith("VpcSecurityGroupMemberships")) {
-                    yield quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
+                    yield "VpcSecurityGroupId";
                 }
                 if (baseName.endsWith("DBSecurityGroupMemberships")) {
-                    yield quoted + "(\\.member|\\.DBSecurityGroupName)?\\.\\d+";
+                    yield "DBSecurityGroupName";
                 }
-                yield quoted + "(\\.member)?\\.\\d+";
+                yield null;
             }
         };
-    }
-
-    private static int numericSuffix(String key) {
-        int dot = key.lastIndexOf('.');
-        if (dot < 0 || dot == key.length() - 1) {
-            return Integer.MAX_VALUE;
-        }
-        try {
-            return Integer.parseInt(key.substring(dot + 1));
-        } catch (NumberFormatException e) {
-            return Integer.MAX_VALUE;
-        }
     }
 
     private static List<DbProxyAuth> parseProxyAuth(MultivaluedMap<String, String> params) {
