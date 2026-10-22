@@ -20,6 +20,9 @@ import org.postgresql.util.PSQLException;
 import org.postgresql.util.PSQLWarning;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Socket;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -173,6 +176,39 @@ class DsqlDataPlaneIntegrationTest {
                 client.send(header('Q', length));
                 assertRefused(client, "invalid message length");
             }
+        }
+    }
+
+    /**
+     * Before TLS, DSQL reads no more of a packet than its length and code (measured): a startup
+     * packet is refused as not TLS whatever length it claims, after a GSSENCRequest too, and one
+     * under 8 bytes ends the connection without a word.
+     */
+    @Test
+    void aPacketBeforeTlsIsRefusedAsNotTlsWhateverItsLength() throws Exception {
+        for (int length : new int[] {9_999, 10_000, 20_000}) {
+            for (boolean gssFirst : new boolean[] {false, true}) {
+                try (Socket socket = new Socket("127.0.0.1", endpoint.port())) {
+                    InputStream in = socket.getInputStream();
+                    OutputStream out = socket.getOutputStream();
+                    if (gssFirst) {
+                        out.write(PostgresWire.int32(8));
+                        out.write(PostgresWire.int32(PostgresWire.GSSENC_REQUEST));
+                        assertEquals('N', in.read());
+                    }
+                    out.write(startupOfLength(length));
+                    PostgresWire.Message error = PostgresWire.read(in, Integer.MAX_VALUE, "message");
+                    Map<Character, String> fields = PostgresWire.parseFields(error.body(), 0);
+                    assertEquals("08P01", fields.get('C'), length + (gssFirst ? " after GSSENCRequest" : ""));
+                    assertEquals("unable to accept connection, SSL is mandatory. AWS Authentication is required.",
+                            fields.get('M'));
+                }
+            }
+        }
+        try (Socket socket = new Socket("127.0.0.1", endpoint.port())) {
+            socket.getOutputStream().write(PostgresWire.int32(7));
+            socket.getOutputStream().write(new byte[3]);
+            assertEquals(-1, socket.getInputStream().read());
         }
     }
 

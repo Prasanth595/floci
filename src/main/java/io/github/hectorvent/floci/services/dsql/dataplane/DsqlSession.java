@@ -108,7 +108,7 @@ final class DsqlSession {
         socket.setSoTimeout(endpoint.handshakeTimeoutMillis());
         InputStream rawIn = socket.getInputStream();
         OutputStream rawOut = socket.getOutputStream();
-        PostgresWire.Startup first = PostgresWire.readStartup(rawIn, MAX_STARTUP, "startup message");
+        PostgresWire.Startup first = readPlaintextPacket(rawIn);
         if (first.code() == PostgresWire.CANCEL_REQUEST) {
             endpoint.forwardCancel(first.body());
             return;
@@ -116,7 +116,7 @@ final class DsqlSession {
         if (first.code() == PostgresWire.GSSENC_REQUEST) {
             rawOut.write('N');
             rawOut.flush();
-            first = PostgresWire.readStartup(rawIn, MAX_STARTUP, "startup message");
+            first = readPlaintextPacket(rawIn);
         }
         if (first.code() != PostgresWire.SSL_REQUEST) {
             refuse(rawOut, "08P01", "unable to accept connection, SSL is mandatory. AWS Authentication is required.",
@@ -770,6 +770,23 @@ final class DsqlSession {
         Map<Character, String> fields = PostgresWire.parseFields(body, 0);
         fields.putIfAbsent('D', "Session Id: " + sessionId);
         return PostgresWire.fields(fields);
+    }
+
+    /**
+     * A packet sent before TLS. DSQL refuses one that is no SSLRequest, GSSENCRequest or
+     * CancelRequest as not TLS whatever length it claims, and ends the connection without a word on
+     * one under 8 bytes (measured). So a length past what a startup packet may hold is refused with
+     * its body left unread; a shorter body is read, so the refusal reaches the client in order.
+     */
+    private static PostgresWire.Startup readPlaintextPacket(InputStream in) throws IOException {
+        int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 8, Integer.MAX_VALUE, "startup message");
+        int code = PostgresWire.readInt32(in);
+        if (length > MAX_STARTUP) {
+            return new PostgresWire.Startup(code, new byte[0]);
+        }
+        byte[] body = new byte[length - 8];
+        PostgresWire.readFully(in, body);
+        return new PostgresWire.Startup(code, body);
     }
 
     /** An ErrorResponse body of {@code severity} (FATAL, ERROR), as DSQL orders its fields. */
