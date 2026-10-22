@@ -15,7 +15,13 @@ public record ReplicationGroupSettings(Boolean atRestEncryptionEnabled,
                                        String kmsKeyId,
                                        Integer snapshotRetentionLimit,
                                        String snapshotWindow,
-                                       String transitEncryptionMode) {
+                                       String transitEncryptionMode,
+                                       Boolean transitEncryptionEnabled) {
+
+    public ReplicationGroupSettings(Boolean atRestEncryptionEnabled, String kmsKeyId,
+                                    Integer snapshotRetentionLimit, String snapshotWindow, String transitEncryptionMode) {
+        this(atRestEncryptionEnabled, kmsKeyId, snapshotRetentionLimit, snapshotWindow, transitEncryptionMode, null);
+    }
 
     public ReplicationGroupSettings(Boolean atRestEncryptionEnabled, String kmsKeyId,
                                     Integer snapshotRetentionLimit, String snapshotWindow) {
@@ -90,10 +96,20 @@ public record ReplicationGroupSettings(Boolean atRestEncryptionEnabled,
 
     public ReplicationGroupSettings withKmsKeyId(String resolvedKmsKeyId) {
         return new ReplicationGroupSettings(atRestEncryptionEnabled, resolvedKmsKeyId,
-                snapshotRetentionLimit, snapshotWindow, transitEncryptionMode);
+                snapshotRetentionLimit, snapshotWindow, transitEncryptionMode, transitEncryptionEnabled);
+    }
+
+    public void validateTransitEncryption(boolean enabled) {
+        if (transitEncryptionMode != null && !enabled) {
+            throw new AwsException("InvalidParameterCombination",
+                    "TransitEncryptionMode requires transit encryption to be enabled.", 400);
+        }
     }
 
     public void applyTo(ReplicationGroup group) {
+        if (transitEncryptionEnabled != null) {
+            group.setTransitEncryptionEnabled(transitEncryptionEnabled);
+        }
         if (transitEncryptionMode != null) {
             group.setTransitEncryptionMode(transitEncryptionMode);
         }

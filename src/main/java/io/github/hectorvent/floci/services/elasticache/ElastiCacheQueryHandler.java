@@ -239,7 +239,9 @@ public class ElastiCacheQueryHandler {
             // AtRestEncryptionEnabled and KmsKeyId are fixed at create and not in the modify shape
             ReplicationGroupSettings settings = new ReplicationGroupSettings(null, null,
                     optionalInt(params.getFirst("SnapshotRetentionLimit")), params.getFirst("SnapshotWindow"),
-                    params.getFirst("TransitEncryptionMode"));
+                    params.getFirst("TransitEncryptionMode"),
+                    params.containsKey("TransitEncryptionEnabled")
+                            ? Boolean.parseBoolean(params.getFirst("TransitEncryptionEnabled")) : null);
             // AuthToken with ROTATE or SET is not modelled yet; DELETE moves the cache to user groups
             ReplicationGroup group = service.modifyReplicationGroup(groupId,
                     userGroupIdsToAdd.isEmpty() ? null : userGroupIdsToAdd,
