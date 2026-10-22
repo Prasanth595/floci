@@ -755,4 +755,39 @@ class S3VersioningIntegrationTest {
                 containsString("<Method>" + method + "</Method>"),
                 containsString("<ResourceType>DeleteMarker</ResourceType>"));
     }
+    @Test
+    @Order(28)
+    void versionedWritesAndMarkersPreserveComplianceLockedNullVersions() {
+        String bucket = "versioned-locked-null-preservation";
+        given().when().put("/" + bucket).then().statusCode(200);
+        for (String key : List.of("put", "copy", "marker")) {
+            given().body("original").when().put("/" + bucket + "/" + key).then().statusCode(200);
+        }
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>")
+                .when().put("/" + bucket + "?object-lock").then().statusCode(200);
+        for (String key : List.of("put", "copy", "marker")) {
+            given().queryParam("versionId", "null")
+                    .body("<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2031-01-01T00:00:00Z</RetainUntilDate></Retention>")
+                    .when().put("/" + bucket + "/" + key + "?retention").then().statusCode(200);
+        }
+
+        given().body("replacement").when().put("/" + bucket + "/put").then().statusCode(200);
+        given().header("x-amz-copy-source", "/" + bucket + "/put")
+                .when().put("/" + bucket + "/copy").then().statusCode(200);
+        given().when().delete("/" + bucket + "/marker").then().statusCode(204)
+                .header("x-amz-delete-marker", "true");
+
+        for (String key : List.of("put", "copy", "marker")) {
+            String path = "/" + bucket + "/" + key;
+            given().queryParam("versionId", "null").when().get(path)
+                    .then().statusCode(200).body(equalTo("original"));
+            given().queryParam("versionId", "null").when().get(path + "?retention")
+                    .then().statusCode(200).body(containsString("<Mode>COMPLIANCE</Mode>"));
+            given().queryParam("versionId", "null").header("x-amz-bypass-governance-retention", "true")
+                    .when().delete(path).then().statusCode(403).body(containsString("<Code>AccessDenied</Code>"));
+        }
+    }
+
 }

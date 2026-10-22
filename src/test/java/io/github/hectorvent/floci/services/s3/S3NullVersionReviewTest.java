@@ -1,0 +1,382 @@
+package io.github.hectorvent.floci.services.s3;
+
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.s3.model.Bucket;
+import io.github.hectorvent.floci.services.s3.model.CopyObjectOptions;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class S3NullVersionReviewTest {
+
+    @TempDir
+    Path tempDir;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void neverVersionedBodyReadsDoNotHoldTheBucketMonitor(boolean explicitNull) throws Exception {
+        InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<>();
+        S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir, true);
+        service.createBucket("bucket", "us-east-1");
+        service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+        Bucket bucket = buckets.get("bucket").orElseThrow();
+        AtomicInteger reads = new AtomicInteger();
+
+        readSnapshot(service, explicitNull, ignored -> {
+            assertFalse(Thread.holdsLock(bucket), "body reads must allow independent writes in never-versioned buckets");
+            reads.incrementAndGet();
+            return "body";
+        });
+
+        assertEquals(1, reads.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void aReadSpanningFirstEnableAndRollbackRetriesThePromotedNull(boolean explicitNull) throws Exception {
+        S3Service service = service(true, new InMemoryStorage<>());
+        service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+        String snapshot = service.snapshotBucketConfiguration("bucket");
+        AtomicInteger reads = new AtomicInteger();
+
+        Object result = readSnapshot(service, explicitNull, ignored -> {
+            if (reads.getAndIncrement() == 0) {
+                service.putBucketVersioning("bucket", "Enabled");
+                String version = service.putObject("bucket", "key", bytes("replacement"), "text/plain", Map.of())
+                        .getVersionId();
+                service.deleteObject("bucket", "key", version);
+                service.restoreBucketConfiguration("bucket", snapshot);
+                return "replacement";
+            }
+            return "original";
+        });
+
+        Method body = result.getClass().getDeclaredMethod("body");
+        body.setAccessible(true);
+        assertEquals("original", body.invoke(result));
+        assertEquals(2, reads.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void suspendedWritesAndDeletesPreserveLockedArchivedNulls(boolean memory) {
+        for (String lock : List.of("ON", "COMPLIANCE", "GOVERNANCE")) {
+            S3Service service = service(memory, new InMemoryStorage<>());
+            service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+            service.putBucketVersioning("bucket", "Enabled");
+            String current = service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of())
+                    .getVersionId();
+            service.setBucketObjectLockEnabled("bucket");
+            if ("ON".equals(lock)) {
+                service.putObjectLegalHold("bucket", "key", "null", "ON");
+            } else {
+                service.putObjectRetention("bucket", "key", "null", lock, Instant.now().plusSeconds(3600), false);
+            }
+            service.putBucketVersioning("bucket", "Suspended");
+
+            assertDenied(() -> service.putObject("bucket", "key", bytes("replacement"), "text/plain", Map.of()));
+            assertDenied(() -> service.copyObject("bucket", "key", "bucket", "key", current, new CopyObjectOptions()));
+            assertDenied(() -> service.deleteObject("bucket", "key", null, false));
+            assertArrayEquals(bytes("numbered"), service.getObject("bucket", "key").getData());
+            assertArrayEquals(bytes("original"), service.getObject("bucket", "key", "null").getData());
+            if ("GOVERNANCE".equals(lock)) {
+                service.deleteObject("bucket", "key", null, true);
+                AwsException missing = assertThrows(AwsException.class,
+                        () -> service.getObject("bucket", "key", "null"));
+                assertEquals("NoSuchVersion", missing.getErrorCode());
+            } else {
+                assertDenied(() -> service.deleteObject("bucket", "key", null, true));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void reservedKeysCannotReadOrMutateArchivedMetadata(boolean memory) throws IOException {
+        S3Service service = service(memory, new InMemoryStorage<>());
+        service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+        service.putBucketVersioning("bucket", "Enabled");
+        service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of());
+        String reserved = "\0null-version/key";
+        List<Runnable> requests = List.of(
+                () -> service.putObject("bucket", reserved, bytes("bad"), "text/plain", Map.of()),
+                () -> service.getObject("bucket", reserved),
+                () -> service.getObject("bucket", reserved, "null"),
+                () -> service.headObject("bucket", reserved),
+                () -> service.deleteObject("bucket", reserved),
+                () -> service.deleteObject("bucket", reserved, "null"),
+                () -> service.putObjectTagging("bucket", reserved, Map.of("bad", "tag")),
+                () -> service.copyObject("bucket", "key", "bucket", reserved),
+                () -> service.initiateMultipartUpload("bucket", reserved, "text/plain"),
+                () -> service.putObjectFromStream("bucket", reserved, new ByteArrayInputStream(bytes("bad")),
+                        "text/plain", Map.of()));
+        for (Runnable request : requests) {
+            AwsException error = assertThrows(AwsException.class, request::run);
+            assertEquals("InvalidArgument", error.getErrorCode());
+        }
+        assertArrayEquals(bytes("original"), service.getObject("bucket", "key", "null").getData());
+        assertEquals(2, service.listObjectVersions("bucket", null, 1000, null).versions().size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void failedNullReplacementRestoresBodyMetadataAndLockAtEachPublication(boolean memory) throws Exception {
+        for (boolean marker : List.of(false, true)) {
+            for (boolean afterPut : List.of(false, true)) {
+                for (int failAt = 1; failAt <= 3; failAt++) {
+                    PublicationFailureStore objects = new PublicationFailureStore();
+                    S3Service service = service(memory, objects);
+                    service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of("original", "metadata"));
+                    service.putObjectAnnotation("bucket", "key", "note", null, bytes("annotation"), null, null);
+                    service.setBucketObjectLockEnabled("bucket");
+                    service.putObjectLegalHold("bucket", "key", "null", "ON");
+                    service.putObjectTagging("bucket", "key", Map.of("original", "tag"));
+                    service.putBucketVersioning("bucket", "Enabled");
+                    objects.remaining = failAt;
+                    objects.afterPut = afterPut;
+
+                    assertThrows(IllegalStateException.class, () -> {
+                        if (marker) {
+                            service.deleteObject("bucket", "key");
+                        } else {
+                            service.putObject("bucket", "key", bytes("replacement"), "text/plain", Map.of());
+                        }
+                    });
+
+                    S3Object original = service.getObject("bucket", "key");
+                    assertArrayEquals(bytes("original"), original.getData());
+                    assertEquals(Map.of("original", "metadata"), original.getMetadata());
+                    assertEquals("ON", original.getLegalHoldStatus());
+                    assertArrayEquals(bytes("annotation"), service.readObjectAnnotationPayload(
+                            service.getObjectAnnotation("bucket", "key", "note", "null")));
+                    assertEquals(Map.of("original", "tag"), service.getObjectTagging("bucket", "key", "null"));
+                    assertEquals(1, service.listObjectVersions("bucket", null, 1000, null).versions().size());
+                    assertFalse(objects.get("bucket/\0null-version/key").isPresent());
+                    if (!memory) {
+                        try (Stream<Path> files = Files.walk(tempDir.resolve("s3"))) {
+                            assertEquals(1, files.filter(Files::isRegularFile)
+                                    .filter(file -> file.toString().endsWith(".s3data")).count());
+                        }
+                    }
+                    if (memory) {
+                        assertEquals(1, memoryBodies(service).size());
+                    }
+                    service.putObjectLegalHold("bucket", "key", "null", "OFF");
+                    service.deleteObject("bucket", "key", "null");
+                    if (!memory) {
+                        try (Stream<Path> files = Files.walk(tempDir.resolve("s3"))) {
+                            assertEquals(0, files.filter(Files::isRegularFile).count());
+                        }
+                    } else {
+                        assertEquals(0, memoryBodies(service).size());
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void failedStreamBodyWriteRemovesUnpublishedNullLink() throws IOException {
+        MissingStagedBodyStore objects = new MissingStagedBodyStore(tempDir.resolve("s3"));
+        S3Service service = service(false, objects);
+        service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+        service.putBucketVersioning("bucket", "Enabled");
+        objects.armed = true;
+
+        assertThrows(UncheckedIOException.class, () -> service.putObjectFromStream("bucket", "key",
+                new ByteArrayInputStream(bytes("replacement")), "text/plain", Map.of()));
+
+        assertArrayEquals(bytes("original"), service.getObject("bucket", "key").getData());
+        service.deleteObject("bucket", "key", "null");
+        try (Stream<Path> files = Files.walk(tempDir.resolve("s3"))) {
+            assertEquals(0, files.filter(Files::isRegularFile).count());
+        }
+        service.putObject("bucket", "key", bytes("retry"), "text/plain", Map.of());
+        assertArrayEquals(bytes("retry"), service.getObject("bucket", "key").getData());
+    }
+
+    @Test
+    void deletingNullHistoryUnderAMarkerRemovesAllBodyFiles() throws IOException {
+        S3Service service = service(false, new InMemoryStorage<>());
+        service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+        service.putBucketVersioning("bucket", "Enabled");
+        String marker = service.deleteObject("bucket", "key").getVersionId();
+        Path canonical = tempDir.resolve("s3/.accounts/000000000000/bucket/key.s3data");
+        assertFalse(Files.exists(canonical));
+        assertArrayEquals(bytes("original"), service.getObject("bucket", "key", "null").getData());
+
+        service.deleteObject("bucket", "key", "null");
+
+        assertTrue(service.listObjectVersions("bucket", "key", 1000, null).versions().stream()
+                .anyMatch(version -> marker.equals(version.getVersionId()) && version.isDeleteMarker()));
+        try (Stream<Path> files = Files.walk(tempDir.resolve("s3"))) {
+            assertEquals(0, files.filter(Files::isRegularFile).count());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"get", "open", "copy"})
+    void readsRetryWhenADeleteMarkerUnlinksTheCanonicalBody(String operation) {
+        DeleteDuringReadStore objects = new DeleteDuringReadStore();
+        S3Service service = service(false, objects);
+        service.putBucketVersioning("bucket", "Enabled");
+        service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of());
+        objects.service = service;
+        objects.remaining = "copy".equals(operation) ? 2 : 1;
+
+        AwsException missing = assertThrows(AwsException.class, () -> {
+            switch (operation) {
+                case "get" -> service.getObject("bucket", "key");
+                case "open" -> {
+                    try (S3Service.ObjectRead ignored = service.openObject("bucket", "key", null)) {
+                        fail("the concurrent marker must make the key absent");
+                    }
+                }
+                case "copy" -> service.copyObject("bucket", "key", "bucket", "destination");
+                default -> throw new IllegalArgumentException(operation);
+            }
+        });
+        assertEquals("NoSuchKey", missing.getErrorCode());
+        assertEquals(0, objects.remaining);
+    }
+
+    @Test
+    void unchangedMissingCanonicalBodyRemainsAStorageError() throws IOException {
+        S3Service service = service(false, new InMemoryStorage<>());
+        service.putBucketVersioning("bucket", "Enabled");
+        service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of());
+        Files.delete(tempDir.resolve("s3/.accounts/000000000000/bucket/key.s3data"));
+        assertThrows(UncheckedIOException.class, () -> service.getObject("bucket", "key"));
+        assertThrows(UncheckedIOException.class, () -> service.openObject("bucket", "key", null));
+        assertThrows(UncheckedIOException.class, () -> service.copyObject("bucket", "key", "bucket", "destination"));
+    }
+
+    @Test
+    void enabledMarkersNeverOverrideGovernanceButSuspendedArchivedBypassFailsClosed() {
+        S3Service service = service(true, new InMemoryStorage<>());
+        service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+        service.setBucketObjectLockEnabled("bucket");
+        service.putObjectRetention("bucket", "key", "null", "GOVERNANCE", Instant.now().plusSeconds(3600), false);
+        service.putBucketVersioning("bucket", "Enabled");
+        assertFalse(service.deleteOverridesGovernanceRetention("bucket", "key", null));
+        service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of());
+        service.putBucketVersioning("bucket", "Suspended");
+        boolean overrides = service.deleteOverridesGovernanceRetention("bucket", "key", null);
+        assertFalse(overrides);
+        for (boolean s3Enforced : List.of(false, true)) {
+            boolean bypass = S3Controller.effectiveBypass(true, overrides, s3Enforced, false);
+            assertFalse(bypass);
+            assertDenied(() -> service.deleteObject("bucket", "key", null, bypass));
+        }
+    }
+
+    private static Map<?, ?> memoryBodies(S3Service service) throws Exception {
+        Field bodies = S3Service.class.getDeclaredField("memoryDataStore");
+        bodies.setAccessible(true);
+        return (Map<?, ?>) bodies.get(service);
+    }
+
+    private static final class DeleteDuringReadStore extends InMemoryStorage<String, S3Object> {
+        private S3Service service;
+        private int remaining;
+
+        @Override
+        public Optional<S3Object> get(String key) {
+            Optional<S3Object> object = super.get(key);
+            if ("bucket/key".equals(key) && remaining > 0 && --remaining == 0) {
+                service.deleteObject("bucket", "key");
+            }
+            return object;
+        }
+    }
+
+    private S3Service service(boolean memory, InMemoryStorage<String, S3Object> objects) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), objects, tempDir.resolve("s3"), memory);
+        service.createBucket("bucket", "us-east-1");
+        return service;
+    }
+
+    private static Object readSnapshot(S3Service service, boolean explicitNull, Function<Object, String> reader)
+            throws Exception {
+        Method method = explicitNull
+                ? S3Service.class.getDeclaredMethod("readNullVersionSnapshot", String.class, String.class,
+                        Function.class, Consumer.class)
+                : S3Service.class.getDeclaredMethod("readLatestSnapshot", String.class, String.class, String.class,
+                        Function.class, Consumer.class);
+        method.setAccessible(true);
+        Consumer<String> discard = ignored -> { };
+        return explicitNull ? method.invoke(service, "bucket", "key", reader, discard)
+                : method.invoke(service, "bucket", "key", null, reader, discard);
+    }
+
+    private static void assertDenied(Runnable request) {
+        assertEquals("AccessDenied", assertThrows(AwsException.class, request::run).getErrorCode());
+    }
+
+    private static byte[] bytes(String text) {
+        return text.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static final class PublicationFailureStore extends InMemoryStorage<String, S3Object> {
+        private int remaining;
+        private boolean afterPut;
+
+        @Override
+        public void put(String key, S3Object value) {
+            boolean fail = remaining > 0 && --remaining == 0;
+            if (fail && !afterPut) {
+                throw new IllegalStateException("injected metadata publication failure");
+            }
+            super.put(key, value);
+            if (fail) {
+                throw new IllegalStateException("injected failure after metadata publication");
+            }
+        }
+    }
+
+    private static final class MissingStagedBodyStore extends InMemoryStorage<String, S3Object> {
+        private final Path root;
+        private boolean armed;
+
+        private MissingStagedBodyStore(Path root) {
+            this.root = root;
+        }
+
+        @Override
+        public Optional<S3Object> get(String key) {
+            if (armed && "bucket/key".equals(key)) {
+                armed = false;
+                try (Stream<Path> staged = Files.walk(root.resolve(".multipart"))) {
+                    for (Path file : staged.filter(Files::isRegularFile).toList()) {
+                        Files.delete(file);
+                    }
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }
+            return super.get(key);
+        }
+    }
+}
