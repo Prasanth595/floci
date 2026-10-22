@@ -1008,10 +1008,9 @@ public class S3Service implements Resettable, ResourceProvider {
                     writeFile(bucketOwnerAccount, bucketName, key, data);
                 }
                 if (previous != null && previous.getVersionId() != null) {
-                    S3Object demoted = copyObject(previous);
-                    demoted.setLatest(false);
+                    previous.setLatest(false);
                     putObjectForAccount(bucketOwnerAccount,
-                            versionedKey(bucketName, key, previous.getVersionId()), demoted);
+                            versionedKey(bucketName, key, previous.getVersionId()), previous);
                 }
                 if (nullVersionToArchive != null) {
                     nullVersionToArchive.setLatest(false);
@@ -2404,9 +2403,8 @@ public class S3Service implements Resettable, ResourceProvider {
                     archivedNull.setLatest(false);
                     objectStore.put(versionedKey(bucketName, key, "null"), archivedNull);
                 } else if (previous != null && previous.getVersionId() != null) {
-                    S3Object demoted = copyObject(previous);
-                    demoted.setLatest(false);
-                    objectStore.put(versionedKey(bucketName, key, previous.getVersionId()), demoted);
+                    previous.setLatest(false);
+                    objectStore.put(versionedKey(bucketName, key, previous.getVersionId()), previous);
                 }
                 objectStore.put(versionedKey(bucketName, key, markerId), deleteMarker);
                 objectStore.put(objectKey(bucketName, key), deleteMarker);
@@ -4348,53 +4346,57 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void putObjectRetention(String bucketName, String key, String versionId,
                                    String mode, Instant retainUntil, boolean bypassGovernance) {
-        AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
-                getLockableObjectEntry(bucketName, key, versionId);
-        S3Object obj = ownedObject.value();
+        Bucket bucket = resolveBucket(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        synchronized (bucket) {
+            AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
+                    getLockableObjectEntry(bucketName, key, versionId);
+            S3Object obj = ownedObject.value();
 
-        // A mode without a date, or a mode S3 does not know, is malformed, as S3 was recorded
-        // answering; a date without a mode is refused the same way, since GetObjectRetention reads a
-        // retention by its mode. A retention naming neither removes it.
-        if ((mode == null) != (retainUntil == null)
-                || (mode != null && !"GOVERNANCE".equals(mode) && !"COMPLIANCE".equals(mode))) {
-            throw new AwsException("MalformedXML",
-                    "The XML you provided was not well-formed or did not validate against our published schema", 400);
-        }
-
-        boolean activeComplianceRetention = "COMPLIANCE".equals(obj.getObjectLockMode())
-                && obj.getRetainUntilDate() != null
-                && Instant.now().isBefore(obj.getRetainUntilDate());
-
-        // Active COMPLIANCE mode cannot be changed or removed, even when the
-        // retention date is unchanged or extended.
-        if (activeComplianceRetention && !"COMPLIANCE".equals(mode)) {
-            throw new AwsException("AccessDenied",
-                    "COMPLIANCE retention mode cannot be changed", 403);
-        }
-
-        // Active COMPLIANCE mode: retainUntil cannot be shortened.
-        if (activeComplianceRetention
-                && retainUntil != null
-                && retainUntil.isBefore(obj.getRetainUntilDate())) {
-            throw new AwsException("AccessDenied",
-                    "COMPLIANCE retention period cannot be shortened", 403);
-        }
-
-        // Check bypass permission for existing governance lock when shortening/removing
-        if ("GOVERNANCE".equals(obj.getObjectLockMode())
-                && obj.getRetainUntilDate() != null
-                && Instant.now().isBefore(obj.getRetainUntilDate())
-                && !bypassGovernance) {
-            if (retainUntil == null || retainUntil.isBefore(obj.getRetainUntilDate())) {
-                throw new AwsException("AccessDenied",
-                        "Object is protected by GOVERNANCE retention", 403);
+            // A mode without a date, or a mode S3 does not know, is malformed, as S3 was recorded
+            // answering; a date without a mode is refused the same way, since GetObjectRetention reads a
+            // retention by its mode. A retention naming neither removes it.
+            if ((mode == null) != (retainUntil == null)
+                    || (mode != null && !"GOVERNANCE".equals(mode) && !"COMPLIANCE".equals(mode))) {
+                throw new AwsException("MalformedXML",
+                        "The XML you provided was not well-formed or did not validate against our published schema", 400);
             }
-        }
 
-        obj.setObjectLockMode(mode);
-        obj.setRetainUntilDate(retainUntil);
-        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
-        LOG.debugv("Set retention on {0}/{1}: mode={2}, until={3}", bucketName, key, mode, retainUntil);
+            boolean activeComplianceRetention = "COMPLIANCE".equals(obj.getObjectLockMode())
+                    && obj.getRetainUntilDate() != null
+                    && Instant.now().isBefore(obj.getRetainUntilDate());
+
+            // Active COMPLIANCE mode cannot be changed or removed, even when the
+            // retention date is unchanged or extended.
+            if (activeComplianceRetention && !"COMPLIANCE".equals(mode)) {
+                throw new AwsException("AccessDenied",
+                        "COMPLIANCE retention mode cannot be changed", 403);
+            }
+
+            // Active COMPLIANCE mode: retainUntil cannot be shortened.
+            if (activeComplianceRetention
+                    && retainUntil != null
+                    && retainUntil.isBefore(obj.getRetainUntilDate())) {
+                throw new AwsException("AccessDenied",
+                        "COMPLIANCE retention period cannot be shortened", 403);
+            }
+
+            // Check bypass permission for existing governance lock when shortening/removing
+            if ("GOVERNANCE".equals(obj.getObjectLockMode())
+                    && obj.getRetainUntilDate() != null
+                    && Instant.now().isBefore(obj.getRetainUntilDate())
+                    && !bypassGovernance) {
+                if (retainUntil == null || retainUntil.isBefore(obj.getRetainUntilDate())) {
+                    throw new AwsException("AccessDenied",
+                            "Object is protected by GOVERNANCE retention", 403);
+                }
+            }
+
+            obj.setObjectLockMode(mode);
+            obj.setRetainUntilDate(retainUntil);
+            putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
+            LOG.debugv("Set retention on {0}/{1}: mode={2}, until={3}", bucketName, key, mode, retainUntil);
+        }
     }
 
     public S3Object getObjectRetention(String bucketName, String key, String versionId) {
@@ -4412,12 +4414,16 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public void putObjectLegalHold(String bucketName, String key, String versionId, String status) {
-        AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
-                getLockableObjectEntry(bucketName, key, versionId);
-        S3Object obj = ownedObject.value();
-        obj.setLegalHoldStatus(status);
-        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
-        LOG.debugv("Set legal hold on {0}/{1}: {2}", bucketName, key, status);
+        Bucket bucket = resolveBucket(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        synchronized (bucket) {
+            AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
+                    getLockableObjectEntry(bucketName, key, versionId);
+            S3Object obj = ownedObject.value();
+            obj.setLegalHoldStatus(status);
+            putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
+            LOG.debugv("Set legal hold on {0}/{1}: {2}", bucketName, key, status);
+        }
     }
 
     public S3Object getObjectLegalHold(String bucketName, String key, String versionId) {
@@ -5934,18 +5940,20 @@ public class S3Service implements Resettable, ResourceProvider {
     public void putObjectAcl(String bucketName, String key, String versionId, String bodyAcl, String cannedAcl,
                               String grantRead, String grantWrite, String grantFullControl,
                               String grantReadAcp, String grantWriteAcp) {
-        AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
-                getStoredObjectEntry(bucketName, key, versionId);
-        S3Object obj = ownedObject.value();
         Bucket bucket = resolveBucket(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        rejectAclWhenOwnershipEnforced(bucket);
-        String resolvedAcl = resolveObjectAclXml(ownedObject.account(), cannedAcl, grantRead,
-                grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
-        String newAcl = resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl);
-        rejectPublicAclWhenBlocked(bucketName, newAcl);
-        obj.setAcl(newAcl);
-        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
+        synchronized (bucket) {
+            AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
+                    getStoredObjectEntry(bucketName, key, versionId);
+            S3Object obj = ownedObject.value();
+            rejectAclWhenOwnershipEnforced(bucket);
+            String resolvedAcl = resolveObjectAclXml(ownedObject.account(), cannedAcl, grantRead,
+                    grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
+            String newAcl = resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl);
+            rejectPublicAclWhenBlocked(bucketName, newAcl);
+            obj.setAcl(newAcl);
+            putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
+        }
     }
 
     private static void rejectAclWhenOwnershipEnforced(Bucket bucket) {
