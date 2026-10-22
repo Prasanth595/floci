@@ -4695,6 +4695,18 @@ public class S3Service implements Resettable, ResourceProvider {
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
                                             Map<Integer, String> partETags, Map<Integer, S3Checksum> partChecksums,
                                             String checksumType, S3Checksum expectedChecksum, Long expectedObjectSize) {
+        return completeMultipartUpload(bucket, key, uploadId, partNumbers, partETags, partChecksums,
+                checksumType, expectedChecksum, expectedObjectSize, null, null);
+    }
+
+    /**
+     * {@code ifMatch} and {@code ifNoneMatch} are judged by storeObject under the bucket's monitor,
+     * together with the write, so concurrent conditional completions on one key cannot all succeed.
+     */
+    public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
+                                            Map<Integer, String> partETags, Map<Integer, S3Checksum> partChecksums,
+                                            String checksumType, S3Checksum expectedChecksum, Long expectedObjectSize,
+                                            String ifMatch, String ifNoneMatch) {
         S3Object completed = withMultipartOperationLock(bucket, uploadId, () -> {
             MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
 
@@ -4788,7 +4800,9 @@ public class S3Service implements Resettable, ResourceProvider {
                                     .withObjectLockMode(upload.getObjectLockMode())
                                     .withRetainUntilDate(upload.getRetainUntilDate())
                                     .withLegalHoldStatus(upload.getLegalHoldStatus())
-                                    .withTagging(upload.getTagging()),
+                                    .withTagging(upload.getTagging())
+                                    .withIfMatch(ifMatch)
+                                    .withIfNoneMatch(ifNoneMatch),
                             compositeETag,
                             upload.getInitiatorAccountId() != null ? upload.getInitiatorAccountId() : ownerId());
                 } finally {
