@@ -75,6 +75,13 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     private static final Set<String> IDEMPOTENT_METHODS = Set.of("GET", "HEAD");
     static final int MAX_CONNECTIONS = 100;
 
+    /**
+     * The connect timeout of the request being sent, for the TLS handshake its connection makes.
+     * The pool resolves the TLS configuration of a connection while the request that opens it runs,
+     * on the same thread, so the handshake answers within the connect timeout of that request.
+     */
+    private static final ThreadLocal<Duration> HANDSHAKE_TIMEOUT = new ThreadLocal<>();
+
     private final CloseableHttpClient client;
 
     CloudFrontOriginHttpClient(Collection<String> allowedPrivateOriginHosts) {
@@ -113,6 +120,9 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                         .setDnsResolver(resolver)
                         .setDefaultConnectionConfig(connectionConfig)
                         .setDefaultTlsConfig(tlsConfig)
+                        // The handshake of a connection answers within the connect timeout of the
+                        // request that opens it, so it cannot outlive the completion timeout.
+                        .setTlsConfigResolver(host -> tlsConfig(handshakeTimeout()))
                         // CloudFront has no per-origin connection limit, and a streamed response holds its
                         // connection for the whole transfer, so one origin may use the whole pool.
                         .setMaxConnTotal(MAX_CONNECTIONS)
@@ -294,10 +304,12 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         HttpUriRequestBase originRequest = originRequest(request, forwardedHeaders, originHeaders,
                 requestBody != null ? new InputStreamEntity(requestBody, requestBodyLength, null) : null);
         ClassicHttpResponse response;
+        OriginTimeouts effective = effectiveTimeouts(timeouts, budget);
         long attemptStart = System.nanoTime();
+        HANDSHAKE_TIMEOUT.set(effective.connectTimeout());
         try {
             response = client.executeOpen(RoutingSupport.determineHost(originRequest), originRequest,
-                    context(timeouts, budget));
+                    context(effective));
         } catch (HttpException e) {
             throw new IOException("CloudFront origin request has no target host", e);
         } catch (InterruptedIOException e) {
@@ -306,6 +318,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
             }
             throw e;
         } finally {
+            HANDSHAKE_TIMEOUT.remove();
             // The time the origin took to connect and to answer is part of the time CloudFront
             // waits for it.
             budget.spend(System.nanoTime() - attemptStart);
@@ -562,27 +575,52 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         return builder;
     }
 
-    private static HttpClientContext context(OriginTimeouts timeouts, CompletionBudget budget)
+    /**
+     * The TLS configuration of a connection: the handshake answers within {@code handshakeTimeout},
+     * so it cannot outlive the request that opens the connection.
+     */
+    private static TlsConfig tlsConfig(Duration handshakeTimeout) {
+        return TlsConfig.custom()
+                .setHandshakeTimeout(Timeout.of(handshakeTimeout))
+                .setVersionPolicy(HttpVersionPolicy.FORCE_HTTP_1)
+                .build();
+    }
+
+    /** The handshake timeout of the request being sent, or the default connect timeout. */
+    private static Duration handshakeTimeout() {
+        Duration timeout = HANDSHAKE_TIMEOUT.get();
+        return timeout != null ? timeout : CONNECT_TIMEOUT;
+    }
+
+    /**
+     * The timeouts of an attempt: neither the connection nor the response outlives the completion
+     * timeout, so the origin runs out of time before the request does.
+     */
+    private static OriginTimeouts effectiveTimeouts(OriginTimeouts timeouts, CompletionBudget budget)
             throws CloudFrontOriginTimeoutException {
-        HttpClientContext context = HttpClientContext.create();
-        Duration connectTimeout = timeouts.connectTimeout();
-        Duration responseTimeout = timeouts.responseTimeout();
-        if (!budget.unlimited()) {
-            if (budget.expired()) {
-                throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE);
-            }
-            // Neither the connection nor the response outlives the completion timeout: the origin
-            // runs out of time before the request does.
-            long remainingMillis = Math.max(1L, budget.remainingNanos() / 1_000_000L);
-            connectTimeout = Duration.ofMillis(Math.min(connectTimeout.toMillis(), remainingMillis));
-            responseTimeout = Duration.ofMillis(Math.min(responseTimeout.toMillis(), remainingMillis));
+        if (budget.unlimited()) {
+            return timeouts;
         }
+        if (budget.expired()) {
+            throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE);
+        }
+        long remainingMillis = Math.max(1L, budget.remainingNanos() / 1_000_000L);
+        return new OriginTimeouts(
+                Duration.ofMillis(Math.min(timeouts.connectTimeout().toMillis(), remainingMillis)),
+                Duration.ofMillis(Math.min(timeouts.responseTimeout().toMillis(), remainingMillis)),
+                timeouts.connectionAttempts(),
+                timeouts.responseCompletionTimeout(),
+                timeouts.keepAliveTimeout());
+    }
+
+    private static HttpClientContext context(OriginTimeouts timeouts) {
+        HttpClientContext context = HttpClientContext.create();
         context.setRequestConfig(RequestConfig.custom()
-                .setConnectTimeout(Timeout.of(connectTimeout))
+                .setConnectTimeout(Timeout.of(timeouts.connectTimeout()))
                 // Waiting for a free pooled connection is emulator-side backpressure, not an origin
                 // setting, so it keeps the fixed default rather than the origin's connect timeout.
                 .setConnectionRequestTimeout(Timeout.of(CONNECT_TIMEOUT))
-                .setResponseTimeout(Timeout.of(responseTimeout))
+                .setResponseTimeout(Timeout.of(timeouts.responseTimeout()))
                 .setRedirectsEnabled(false)
                 .setContentCompressionEnabled(false)
                 .setProtocolUpgradeEnabled(false)

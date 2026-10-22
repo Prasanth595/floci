@@ -797,6 +797,41 @@ class CloudFrontOriginHttpClientTest {
         }
     }
 
+    @Test
+    void theCompletionTimeoutBoundsTheTlsHandshake() throws Exception {
+        // An origin that accepts the connection and never answers the handshake.
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        try (ServerSocket socket = new ServerSocket(0, 1, loopback)) {
+            Thread acceptor = new Thread(() -> {
+                try (Socket accepted = socket.accept()) {
+                    Thread.sleep(30_000);
+                } catch (IOException | InterruptedException expected) {
+                    // The client gave up on the handshake.
+                }
+            });
+            acceptor.setDaemon(true);
+            acceptor.start();
+
+            try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                    resolver(loopback), List.of("origin.invalid"))) {
+                CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                        new CloudFrontOriginHttpClient.OriginTimeouts(
+                                Duration.ofSeconds(10), Duration.ofSeconds(30), 1,
+                                Duration.ofMillis(500),
+                                CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
+                HttpRequest request = request("https://origin.invalid:" + socket.getLocalPort() + "/");
+
+                long started = System.nanoTime();
+                assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
+                long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+                assertTrue(elapsedMillis < 5000,
+                        "expected the 500 ms completion timeout to end the handshake, not the 10 s "
+                                + "connect timeout, took " + elapsedMillis + " ms");
+            }
+        }
+    }
+
     /**
      * Whether a connection to {@code address} hangs, as a blackholed address does: the attempt has
      * to be dropped rather than answered for the origin connect timeout to be the one under test.
