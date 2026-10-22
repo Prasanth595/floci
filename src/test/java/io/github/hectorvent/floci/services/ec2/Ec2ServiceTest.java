@@ -4163,6 +4163,26 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void anAddressAnotherAccountHoldsIsNotHandedOutWhenTheWalkRunsTheNetworkDry() {
+        // The walk skips the only address the shared network still offers, which another account's
+        // interface holds, and the synthesised fallback's own scan sees only the caller's account.
+        RequestContext context = new RequestContext();
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = accountAwareService(context, vpcNetworks);
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        context.setAccountId("111122223333");
+        service.describeSubnets("us-east-1", List.of(), Map.of());
+        service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.10",
+                List.of(), List.of(), List.of());
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("172.31.0.10"), Optional.empty());
+
+        context.setAccountId("000000000000");
+
+        assertEquals(List.of("172.31.0.11"), launchAddresses(service, subnetId, 1));
+    }
+
+    @Test
     void anAddressALaunchNamedWithoutLeasingItIsNotHandedOutAgain() {
         // A failed launch is marked terminated before its container is detached and its lease given
         // back. A launch that names the address in between finds nothing holding it and keeps it
@@ -4222,6 +4242,17 @@ class Ec2ServiceTest {
         return new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class), images,
                 mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(stores, contexts),
                 contexts, new VpcNetworkManager(config, docker, null), null, null, null);
+    }
+
+    /** Ec2Service in mock mode over {@code vpcNetworks}, with the caller's account taken from {@code context}. */
+    private static Ec2Service accountAwareService(RequestContext context, VpcNetworkManager vpcNetworks) {
+        @SuppressWarnings("unchecked")
+        jakarta.enterprise.inject.Instance<RequestContext> contexts = mock(jakarta.enterprise.inject.Instance.class);
+        when(contexts.isResolvable()).thenReturn(true);
+        when(contexts.get()).thenReturn(context);
+        return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of(), contexts), contexts, vpcNetworks, null, null, null);
     }
 
     private static Instance defaultSubnetInstance(String instanceId, String privateIp, InstanceState state) {

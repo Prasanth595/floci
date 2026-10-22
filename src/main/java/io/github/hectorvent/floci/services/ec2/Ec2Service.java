@@ -4213,12 +4213,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // A Docker-backed subnet allocates the real thing: an address on the network the
         // instance's container will actually hold. Only when there is no such network does
         // this fall back to the synthesised address below, which nothing can connect to.
+        Set<String> held = Set.of();
         if (vpcNetworkManager != null) {
             Optional<String> allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
             // The network's lease table is not the whole story: an interface created with its
             // own address never takes a lease, and a launch that names an address while a
             // failed launch is still giving it back keeps it without one.
-            Set<String> held = allocated.isPresent() ? privateIpsHeldOnVpcNetwork(region, subnetId) : Set.of();
+            if (allocated.isPresent()) {
+                held = privateIpsHeldOnVpcNetwork(region, subnetId);
+            }
             List<String> skipped = new ArrayList<>();
             while (allocated.isPresent() && held.contains(allocated.get())) {
                 skipped.add(allocated.get());
@@ -4250,6 +4253,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // cursor, never hands out an address that is still in use.
             Set<String> inUse = privateIpsTaken(region, subnetId);
             inUse.addAll(pending);
+            // A walk that ran the network dry skipped only held addresses, other accounts' among
+            // them, so none of those is handed out here instead.
+            inUse.addAll(held);
             long start = Math.clamp(subnetIpCursors.getOrDefault(cursorKey, SYNTHETIC_FIRST_OFFSET), first, last);
             long span = last - first + 1;
             for (long step = 0; step < span; step++) {
