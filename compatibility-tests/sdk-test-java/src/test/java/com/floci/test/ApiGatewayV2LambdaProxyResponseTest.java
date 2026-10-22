@@ -130,7 +130,7 @@ class ApiGatewayV2LambdaProxyResponseTest {
         assertThat(response.body()).isEqualTo(body);
     }
 
-    @ParameterizedTest(name = "{0} in payload {1}")
+    @ParameterizedTest(name = "payload {0}")
     @ValueSource(strings = {"1.0", "2.0"})
     void aResultWithoutAContentTypeIsAnsweredAsTextPlain(String format) throws Exception {
         // Measured on AWS (eu-west-1, 2026-10-19): a result with a statusCode and a body but no
@@ -145,7 +145,8 @@ class ApiGatewayV2LambdaProxyResponseTest {
                 });
     }
 
-    private static HttpResponse<String> get(String format, String mode) throws IOException {        HttpRequest request = HttpRequest.newBuilder()
+    private static HttpResponse<String> get(String format, String mode) throws IOException {
+        HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/" + STAGE + "/v"
                         + format.charAt(0) + "/" + mode))
                 .timeout(Duration.ofSeconds(30))
