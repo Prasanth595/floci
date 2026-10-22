@@ -312,10 +312,7 @@ public class RedshiftQueryHandler {
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
         case "ResetClusterParameterGroup" -> {
-            List<String> parameterNames = resetParameterNames(params);
-            if (parameterNames.size() > RedshiftService.MAX_RESET_PARAMETERS) {
-                throw new AwsException("InvalidParameterValue", "A maximum of 20 parameters can be reset.", 400);
-            }
+            List<String> parameterNames = parseParameters(params).stream().map(Parameter::getParameterName).toList();
             String rawResetAll = params.getFirst("ResetAllParameters");
             if (rawResetAll != null && !"true".equalsIgnoreCase(rawResetAll) && !"false".equalsIgnoreCase(rawResetAll)) {
                 throw new AwsException("InvalidParameterValue", "ResetAllParameters must be a boolean.", 400);
@@ -1392,10 +1389,16 @@ public class RedshiftQueryHandler {
         }
     }
 
-    private static List<String> resetParameterNames(MultivaluedMap<String, String> params) {
-        Map<String, String> names = new LinkedHashMap<>();
+    private static List<Parameter> parseParameters(MultivaluedMap<String, String> params) {
+        Map<String, Parameter> parsed = new LinkedHashMap<>();
         for (String key : params.keySet().stream().sorted().toList()) {
-            if (!"Parameters".equals(key) && !key.startsWith("Parameters.")) {
+            if ("Parameters".equals(key)) {
+                if (!"".equals(params.getFirst(key))) {
+                    throw new AwsException("InvalidParameterValue", "Parameters must be an indexed list or empty.", 400);
+                }
+                continue;
+            }
+            if (!key.startsWith("Parameters.")) {
                 continue;
             }
             if (!key.matches("Parameters\\.(?:member|Parameter)\\.[1-9]\\d*\\.[A-Za-z]+")) {
@@ -1406,27 +1409,11 @@ public class RedshiftQueryHandler {
             if (name == null || name.isBlank()) {
                 throw new AwsException("InvalidParameterValue", "Each parameter must have a ParameterName.", 400);
             }
-            names.put(prefix, name);
+            parsed.putIfAbsent(prefix, new Parameter(name, params.getFirst(prefix + ".ParameterValue")));
         }
-        return new ArrayList<>(names.values());
-    }
-
-    private static List<Parameter> parseParameters(MultivaluedMap<String, String> params) {
-        List<Parameter> parsed = new ArrayList<>();
-        readParameters(params, "Parameters.member", parsed);
-        readParameters(params, "Parameters.Parameter", parsed);
-        return parsed;
-    }
-
-    private static void readParameters(MultivaluedMap<String, String> params, String prefix, List<Parameter> parsed) {
-        for (int i = 1; ; i++) {
-            String name = params.getFirst(prefix + "." + i + ".ParameterName");
-            if (name == null) {
-                break;
-            }
-            String value = params.getFirst(prefix + "." + i + ".ParameterValue");
-            parsed.add(new Parameter(name, value));
-        }
+        return parsed.entrySet().stream()
+                .sorted(Comparator.comparingInt(entry -> numericSuffix(entry.getKey())))
+                .map(Map.Entry::getValue).toList();
     }
 
     private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {

@@ -62,7 +62,7 @@ public class RedshiftService {
 
     // The group every cluster starts on until one is named.
     static final String DEFAULT_PARAMETER_GROUP_NAME = "default.redshift-1.0";
-    static final int MAX_RESET_PARAMETERS = 20;
+    private static final int MAX_RESET_PARAMETERS = 20;
 
     private final AccountAwareStorageBackend<Cluster> clusters;
     private final AccountAwareStorageBackend<Snapshot> snapshots;

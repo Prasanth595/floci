@@ -1205,8 +1205,11 @@ public class RedshiftOperationsTest {
         try {
             service.modifyClusterParameterGroup(name, List.of(new Parameter("max_cursor_result_set_size", "1000")));
 
-            assertFault(redshift("ResetClusterParameterGroup", "ParameterGroupName", name, "Parameters", ""),
+            assertFault(redshift("ResetClusterParameterGroup", "ParameterGroupName", name, "Parameters", "invalid"),
                     400, "InvalidParameterValue");
+            assertEquals("1000", service.describeClusterParameters(name).getFirst().getParameterValue());
+            assertFault(redshift("ResetClusterParameterGroup", "ParameterGroupName", name,
+                    "ResetAllParameters", "false", "Parameters", ""), 400, "InvalidParameterCombination");
             assertEquals("1000", service.describeClusterParameters(name).getFirst().getParameterValue());
 
             for (String prefix : List.of("Parameters.Parameter", "Parameters.member")) {
@@ -1262,5 +1265,28 @@ public class RedshiftOperationsTest {
         redshift("DescribeClusterParameterGroups", "ParameterGroupName", name).then().statusCode(200)
                 .body(not(containsString("legacy custom group")));
         assertFault(redshift("ResetClusterParameterGroup", "ParameterGroupName", name), 400, "InvalidParameterValue");
+    }
+
+    @Test
+    @Order(14)
+    void botocoreEmptyListResetsAllParameters() {
+        String name = "reset-empty-list";
+        service.createClusterParameterGroup(name, "redshift-1.0", "empty list test");
+        try {
+            service.modifyClusterParameterGroup(name, List.of(new Parameter("max_cursor_result_set_size", "1000")));
+
+            redshift("ResetClusterParameterGroup", "ParameterGroupName", name,
+                    "ResetAllParameters", "true", "Parameters", "").then().statusCode(200);
+
+            assertEquals("0", service.describeClusterParameters(name).getFirst().getParameterValue());
+            assertEquals("engine-default", service.describeClusterParameters(name).getFirst().getSource());
+            service.modifyClusterParameterGroup(name, List.of(new Parameter("max_cursor_result_set_size", "1000")));
+
+            redshift("ResetClusterParameterGroup", "ParameterGroupName", name, "Parameters", "").then().statusCode(200);
+
+            assertEquals("0", service.describeClusterParameters(name).getFirst().getParameterValue());
+        } finally {
+            service.deleteClusterParameterGroup(name);
+        }
     }
 }

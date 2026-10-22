@@ -71,7 +71,8 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 parameters with `ResetAllParameters=false` and a `Parameters` list. Each list entry needs only
 `ParameterName`, and at most 20 entries are accepted. When the flag is omitted, Floci resets the
 supplied names, or all parameters if no names were supplied. An explicit `true` cannot be combined
-with a list, and an explicit `false` requires one. The API reference describes the omitted flag as
+with a nonempty list, and an explicit `false` requires at least one name. An empty Query list,
+encoded as `Parameters=`, is treated like an omitted list. The API reference describes the omitted flag as
 defaulting to `true` but also describes supplying names without the flag; Floci resolves that
 ambiguity by using whether names were supplied. These combinations have not been verified against
 a live AWS cluster.
