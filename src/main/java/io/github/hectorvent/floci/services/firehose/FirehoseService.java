@@ -1192,8 +1192,8 @@ public class FirehoseService implements ResourceProvider {
     }
 
     /**
-     * A batch already staged in S3 and waiting for its COPY. {@code failingSince} is set on the first failure and
-     * {@code nextAttempt} spaces the retries out by 5 minutes, so a failing load neither floods the log nor holds the
+     * A batch already staged in S3 and waiting for its COPY. {@code failingSince} marks when the initial attempt began
+     * and {@code nextAttempt} spaces the retries out by 5 minutes, so a failing load neither floods the log nor holds the
      * shared tick thread for a connection attempt on every tick.
      */
     private static final class PendingRedshiftCopy {
@@ -1296,6 +1296,7 @@ public class FirehoseService implements ResourceProvider {
                     + "the batch stays in s3://{3}/{4}", table, streamKey, window, pending.bucket, pending.key);
             return true;
         }
+        Instant attemptStart = now;
         try {
             String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
                     regionResolver.getDefaultRegion());
@@ -1306,7 +1307,7 @@ public class FirehoseService implements ResourceProvider {
             boolean expected = e instanceof AwsException || e instanceof IllegalStateException
                     || e instanceof IllegalArgumentException;
             if (pending.failingSince == null) {
-                pending.failingSince = failedAt;
+                pending.failingSince = attemptStart;
             }
             pending.failures++;
             if (window > 0 && failedAt.isBefore(pending.failingSince.plusSeconds(window))) {
