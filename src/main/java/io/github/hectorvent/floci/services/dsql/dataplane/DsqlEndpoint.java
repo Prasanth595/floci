@@ -276,9 +276,8 @@ public class DsqlEndpoint {
 
     /**
      * Whether {@code token} lets {@code user} in, checked in the order DSQL reports: the cluster
-     * the client asked for by name (or, without a name, the one the token is for), the action
-     * the user needs, the token's expiry, then its signature and, for a role other than
-     * {@code admin}, the IAM role mapped to it.
+     * the client named as its TLS server, the action the user needs, the token's expiry, then its
+     * signature and, for a role other than {@code admin}, the IAM role mapped to it.
      */
     Admission admit(String token, String user, String serverName) {
         URI uri;
@@ -294,8 +293,7 @@ public class DsqlEndpoint {
             return Admission.refused(null);
         }
         host = host.toLowerCase(Locale.ROOT);
-        String target = serverName == null ? host : serverName.toLowerCase(Locale.ROOT);
-        Route route = routes.get(target);
+        Route route = routes.get(serverName.toLowerCase(Locale.ROOT));
         if (route == null || !route.host().equals(host)) {
             return Admission.refused(null);
         }

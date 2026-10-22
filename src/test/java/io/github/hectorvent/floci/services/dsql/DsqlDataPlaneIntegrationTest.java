@@ -109,6 +109,19 @@ class DsqlDataPlaneIntegrationTest {
         assertEquals("08P01", plain.getSQLState());
         assertTrue(plain.getServerErrorMessage().getDetail().startsWith("Session Id: "));
 
+        // Measured: a connection that names no server is refused once its password is in, whatever it is.
+        for (String password : List.of(cluster.adminToken(), "not-a-token")) {
+            PSQLException unnamed = assertThrows(PSQLException.class, () -> {
+                Properties properties = cluster.properties("admin", password);
+                properties.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory");
+                DriverManager.getConnection(cluster.url(), properties).close();
+            });
+            assertEquals("unable to accept connection, sni was not received",
+                    unnamed.getServerErrorMessage().getMessage());
+            assertEquals("08P01", unnamed.getSQLState());
+            assertTrue(unnamed.getServerErrorMessage().getDetail().startsWith("Session Id: "));
+        }
+
         PSQLException wrongAction = assertThrows(PSQLException.class, () ->
                 cluster.connect("admin", cluster.token("DbConnect", "test", "test", Instant.now(), 900, null)).close());
         assertEquals("unable to accept connection, access denied", wrongAction.getServerErrorMessage().getMessage());

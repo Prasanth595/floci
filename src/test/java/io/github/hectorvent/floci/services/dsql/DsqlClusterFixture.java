@@ -69,13 +69,17 @@ public final class DsqlClusterFixture {
         return "jdbc:postgresql://127.0.0.1:" + endpoint.port() + "/postgres";
     }
 
-    /** What JDBC needs to sign in as {@code user}: TLS, without checking Floci's certificate. */
+    /**
+     * What JDBC needs to sign in as {@code user}: TLS naming the cluster as its server, as DSQL
+     * requires, without checking Floci's certificate.
+     */
     public Properties properties(String user, String password) {
         Properties properties = new Properties();
         properties.setProperty("user", user);
         properties.setProperty("password", password);
         properties.setProperty("sslmode", "require");
-        properties.setProperty("sslfactory", "org.postgresql.ssl.NonValidatingFactory");
+        properties.setProperty("sslfactory", DsqlServerNameSocketFactory.class.getName());
+        properties.setProperty(DsqlServerNameSocketFactory.SERVER_NAME, host);
         return properties;
     }
 

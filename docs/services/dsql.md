@@ -41,7 +41,9 @@ them. A customer-managed KMS key is recorded and reported; nothing is encrypted 
 A cluster's endpoint is `<cluster-id>.dsql.<region>.localhost.floci.io`, port `5432`.
 `localhost.floci.io` resolves to `127.0.0.1` on the host, and to Floci inside the containers Floci
 starts, so the same endpoint works from both. All clusters share the port: the TLS server name a
-client sends picks the cluster, as DNS does on AWS.
+client sends picks the cluster, as DNS does on AWS. A connection that sends no server name is
+refused once its password is in, with `FATAL 08P01 unable to accept connection, sni was not
+received`, as DSQL refuses it.
 
 TLS is mandatory. The certificate covers `*.dsql.<region>.localhost.floci.io` for every Region and
 is signed by Floci's local CA (`GET /_floci/ca.pem`, see [TLS](../configuration/tls.md)), which the

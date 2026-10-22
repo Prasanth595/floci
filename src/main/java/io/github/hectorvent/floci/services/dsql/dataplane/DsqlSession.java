@@ -159,6 +159,12 @@ final class DsqlSession {
             refuse(out, "08006", ACCESS_DENIED, null);
             return;
         }
+        if (serverName[0] == null) {
+            // DSQL knows the cluster only by the TLS server name, and refuses a connection that sends
+            // none once its password is in, whatever the password (measured).
+            refuse(out, "08P01", "unable to accept connection, sni was not received", null);
+            return;
+        }
         String token = PostgresWire.cString(password.body(), 0).value();
         DsqlEndpoint.Admission admission = endpoint.admit(token, user, serverName[0]);
         if (!admission.allowed()) {
