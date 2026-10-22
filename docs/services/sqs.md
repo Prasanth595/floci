@@ -108,7 +108,7 @@ A message older than the queue's `MessageRetentionPeriod` is no longer returned 
 
 ## CloudWatch Metrics
 
-Floci publishes the `AWS/SQS` metrics of every active queue to CloudWatch once a minute, on the single `QueueName` dimension, as SQS does. Each publication runs just after a minute boundary and is stamped with the minute that ended, so a call counts in the minute it was made. Alarms, `GetMetricData`, `GetMetricStatistics` and `ListMetrics` see them with no `PutMetricData`. A queue is active while it holds a message, and for six hours after `CreateQueue`, `SendMessage`, `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility`, `PurgeQueue`, `GetQueueAttributes` or `SetQueueAttributes` on it, batch forms included. Publication stops when the CloudWatch Metrics service is disabled.
+Floci publishes the `AWS/SQS` metrics of every active queue to CloudWatch once a minute, on the single `QueueName` dimension, as SQS does. Each publication runs just after a minute boundary and is stamped with the minute that ended, so a call counts in the minute it was made. Alarms, `GetMetricData`, `GetMetricStatistics` and `ListMetrics` see them with no `PutMetricData`. A queue is active while it holds a message, and for six hours after `CreateQueue`, `SendMessage`, `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility`, `PurgeQueue`, `GetQueueAttributes` or `SetQueueAttributes` on it, batch forms included. Publication stops when `FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED` is `false` or the CloudWatch Metrics service is disabled.
 
 | Metric | Unit | Samples each minute |
 |---|---|---|
@@ -138,6 +138,7 @@ Known differences: a `SendMessageBatch` or `DeleteMessageBatch` call adds one sa
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` also clears the FIFO deduplication cache for the queue and any SNS FIFO topics subscribed to it |
 | `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles, so a handle that was edited or built by hand is rejected |
 | `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `floci` | Shape of the returned `QueueUrl`, see [Queue URL Format](#queue-url-format) |
+| `FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED` | `true` | Publish the `AWS/SQS` metrics of active queues to CloudWatch once a minute, see [CloudWatch Metrics](#cloudwatch-metrics) |
 
 ## Examples
 

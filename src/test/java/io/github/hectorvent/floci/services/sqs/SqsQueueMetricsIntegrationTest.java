@@ -24,8 +24,8 @@ import static org.hamcrest.Matchers.equalTo;
  *
  * <p>The alarm has the 5 minute period of a typical queue-depth alarm. Each publication is the
  * publisher's tick, run 10 and 5 minutes before the queue was created, so the evaluator sees two
- * complete periods at once, whatever minute the test starts in, and the publisher's own scheduled
- * ticks, which stamp the minute the queue was created in or a later one, cannot land in them.
+ * complete periods at once whatever minute the test starts in. The test configuration turns the
+ * scheduled tick off, so these two are the only publications for the queue.
  */
 @QuarkusTest
 class SqsQueueMetricsIntegrationTest {

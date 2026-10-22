@@ -48,7 +48,8 @@ public class SqsMetricsPublisher {
     public SqsMetricsPublisher(SqsService sqsService, CloudWatchMetricsService metricsService, EmulatorConfig config) {
         this.sqsService = sqsService;
         this.metricsService = metricsService;
-        this.enabled = config.services().sqs().enabled() && config.services().cloudwatchmetrics().enabled();
+        this.enabled = config.services().sqs().enabled() && config.services().sqs().cloudwatchMetricsEnabled()
+                && config.services().cloudwatchmetrics().enabled();
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "sqs-metrics-publisher");
             t.setDaemon(true);

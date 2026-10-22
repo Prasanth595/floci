@@ -208,6 +208,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message body size in bytes (1 MiB) |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | Reset the deduplication cache when a FIFO queue is purged |
 | `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles |
+| `FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED` | `true` | Publish the `AWS/SQS` metrics of active queues to CloudWatch once a minute |
 | `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `floci` | Shape of the returned `QueueUrl`. `floci` gives `<FLOCI_BASE_URL>/<account>/<name>` and `aws` gives the AWS form `https://sqs.<region>.<dns-suffix>/<account>/<name>`. Both forms are accepted as input |
 
 ### SNS

@@ -1370,6 +1370,13 @@ public interface EmulatorConfig {
         String receiptHandleSecret();
 
         /**
+         * Publish the AWS/SQS CloudWatch metrics of every active queue once a minute, as SQS does.
+         * Env: FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED
+         */
+        @WithDefault("true")
+        boolean cloudwatchMetricsEnabled();
+
+        /**
          * Shape of the QueueUrl returned by CreateQueue, GetQueueUrl, ListQueues and
          * ListDeadLetterSourceQueues.
          * <ul>
