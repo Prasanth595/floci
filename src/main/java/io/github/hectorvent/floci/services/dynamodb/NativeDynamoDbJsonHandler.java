@@ -61,6 +61,7 @@ public class NativeDynamoDbJsonHandler {
     // The order AWS prints the enum constraint in.
     private static final List<String> BACKUP_TYPE_FILTERS = List.of("ALL", "AWS_BACKUP", "USER", "SYSTEM");
     private static final int MAX_LIST_BACKUPS_LIMIT = 100;
+    private static final Instant MAX_TIME_RANGE_BOUND = Instant.ofEpochMilli(99_999_999_999_999L);
     private static final int MAX_RECOVERY_PERIOD_DAYS = 35;
 
     private final DynamoDbService dynamoDbService;
@@ -1974,6 +1975,8 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException", "One or more parameter values were invalid: "
                     + "Time range lower bound must be less than or equal to upper bound", 400);
         }
+        checkTimeRangeBound("TimeRangeLowerBound", lowerBound);
+        checkTimeRangeBound("TimeRangeUpperBound", upperBound);
 
         DynamoDbService.ListBackupsResult result = dynamoDbService.listBackups(tableName, limit, lowerBound,
                 upperBound, textOrNull(request, "ExclusiveStartBackupArn"), backupType, region);
@@ -2210,6 +2213,17 @@ public class NativeDynamoDbJsonHandler {
 
     private static String textOrNull(JsonNode node, String member) {
         return node.hasNonNull(member) ? node.get(member).asText() : null;
+    }
+
+    private static void checkTimeRangeBound(String member, Instant bound) {
+        if (bound != null && bound.isBefore(Instant.EPOCH)) {
+            throw new AwsException("ValidationException",
+                    "Invalid Request: The supplied " + member + " must not be before " + Instant.EPOCH, 400);
+        }
+        if (bound != null && MAX_TIME_RANGE_BOUND.isBefore(bound)) {
+            throw new AwsException("ValidationException",
+                    "Invalid Request: The supplied " + member + " must not be after " + MAX_TIME_RANGE_BOUND, 400);
+        }
     }
 
     private static Instant timestampOrNull(JsonNode request, String member) {
