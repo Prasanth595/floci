@@ -751,7 +751,7 @@ class CodeArtifactPypiDockerIntegrationTest {
             byte[] content = ("many-versions-sdist-bytes-" + i).getBytes(StandardCharsets.UTF_8);
             given().header("Authorization", "Bearer " + bearerToken)
                     .contentType("multipart/form-data; boundary=boundary123")
-                    .body(twineUploadBody("boundary123", packageName, filename, content))
+                    .body(twineUploadBody("boundary123", packageName, version, filename, content, null))
                     .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
                     .then().statusCode(200);
         }
@@ -851,7 +851,7 @@ class CodeArtifactPypiDockerIntegrationTest {
      * {@code name} and the {@code content} file part, so the rest are included for realism only.
      */
     private static byte[] twineUploadBody(String boundary, String packageName, String filename, byte[] content) {
-        return twineUploadBody(boundary, packageName, filename, content, null);
+        return twineUploadBody(boundary, packageName, "1.0.0", filename, content, null);
     }
 
     /**
@@ -861,6 +861,19 @@ class CodeArtifactPypiDockerIntegrationTest {
      */
     private static byte[] twineUploadBody(String boundary, String packageName, String filename, byte[] content,
             String description) {
+        return twineUploadBody(boundary, packageName, "1.0.0", filename, content, description);
+    }
+
+    /**
+     * Full shape, with an explicit {@code version} field: every other overload above hardcodes
+     * {@code 1.0.0}, which happens to match every other test's own fixed filename in this class,
+     * but {@code CodeArtifactPypiController#upload} now checks the version field against the
+     * real filename (Greptile's review of this PR), so a caller whose filename embeds a different
+     * version (see {@link #listPackageVersionsFetchesManyVersionsPublishTimesCorrectly}'s own
+     * loop) must pass the matching one here instead.
+     */
+    private static byte[] twineUploadBody(String boundary, String packageName, String version, String filename,
+            byte[] content, String description) {
         String preamble = "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\":action\"\r\n\r\n"
                 + "file_upload\r\n"
@@ -872,7 +885,7 @@ class CodeArtifactPypiDockerIntegrationTest {
                 + packageName + "\r\n"
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"version\"\r\n\r\n"
-                + "1.0.0\r\n"
+                + version + "\r\n"
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"filetype\"\r\n\r\n"
                 + "sdist\r\n"

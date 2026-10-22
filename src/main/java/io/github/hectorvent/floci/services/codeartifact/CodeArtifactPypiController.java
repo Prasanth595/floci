@@ -169,9 +169,42 @@ public class CodeArtifactPypiController {
         if (packageName == null || packageName.isBlank() || file.isEmpty()) {
             return Response.status(400).entity("Upload must include name and content fields.").build();
         }
+        // Raised by Greptile's review: pypiserver files an upload under the identity its own
+        // filename embeds, not under whatever this form's name/version fields happen to say
+        // (PypiserverSidecarClient#filenameEmbedsVersion's own javadoc explains why that
+        // boundary check, not these fields, is the real source of truth). Everything below this
+        // point, the Archived/Disposed guard included, runs against these fields; a mismatched
+        // version field would let the guard see an unrelated, harmless coordinate while the real
+        // upload still lands under whatever the filename actually names.
+        if (version != null && !version.isBlank()
+                && !PypiserverSidecarClient.filenameEmbedsVersion(file.get().filename(), packageName, version)) {
+            return Response.status(400)
+                    .entity("The upload's name and version fields do not match its filename.")
+                    .build();
+        }
 
         Object lock = uploadLocks.computeIfAbsent(handle.repoId(), k -> new Object());
         synchronized (lock) {
+            // Raised by hectorvent's review: a real twine upload to a coordinate
+            // updatePackageVersionsStatus/disposePackageVersions left Archived or Disposed must be
+            // refused outright, the same way PublishPackageVersion already refuses it for the
+            // generic format, not accepted and then have forgetContainerBackedStatusOverride below
+            // silently un-block it afterward. Checked ahead of the byte-identical shortcut right
+            // below too, not just the real write: archiving leaves the stored bytes themselves
+            // unchanged, so a byte-identical re-upload of an archived version would otherwise
+            // short-circuit to 200 before ever reaching this guard (Greptile review). A
+            // missing/blank version is the same case the override-clearing call below already
+            // skips: no coordinate to block either way.
+            String beforeRevision = null;
+            if (version != null && !version.isBlank()) {
+                try {
+                    beforeRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(handle.region(),
+                            domain, handle.owner(), repository, "pypi", null, packageName, version);
+                } catch (AwsException e) {
+                    return Response.status(409).entity(e.getMessage()).build();
+                }
+            }
+
             Optional<byte[]> existing = existingFileContent(handle.baseUrl(), packageName, file.get().filename());
             if (existing.isPresent()) {
                 if (Arrays.equals(existing.get(), file.get().content())) {
@@ -193,6 +226,17 @@ public class CodeArtifactPypiController {
             if (uploadSucceeded) {
                 service.recordContainerBackedAssetBytes(handle.region(), domain, handle.owner(), repository,
                         "pypi", null, packageName, file.get().content().length, fenceSnapshot);
+                // Found by Qodo review: a real twine upload that republishes a coordinate an
+                // earlier updatePackageVersionsStatus/disposePackageVersions call left Archived or
+                // Disposed would otherwise still have its fresh content blocked by that stale
+                // override. A missing/blank version is the same case the readme capture below
+                // already skips: no coordinate to clear an override for. Cleared only if still
+                // unchanged since the guard above ran (Greptile review): a status change that
+                // landed while forwardUpload was in flight must not be erased by this.
+                if (version != null && !version.isBlank()) {
+                    service.forgetContainerBackedStatusOverrideIfUnchanged(handle.region(), domain, handle.owner(),
+                            repository, "pypi", null, packageName, version, beforeRevision);
+                }
             }
             // Only for a real new publish, never the byte-identical-retry short-circuit above
             // (nothing new was written there either): the "description" field is the real PyPI
