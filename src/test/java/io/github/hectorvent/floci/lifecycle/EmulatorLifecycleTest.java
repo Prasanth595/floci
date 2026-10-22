@@ -216,12 +216,13 @@ class EmulatorLifecycleTest {
     }
 
     @Test
-    void stopsDynamoDbStreamConsumersBeforeTheFlushAndTheBackendBeforeStorageShutdown() {
+    void stopsStreamConsumersBeforeTheFlushAndTheBackendBeforeStorageShutdown() {
         emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
 
-        InOrder inOrder = Mockito.inOrder(dynamodbStreamsPoller, redshiftZeroEtlConsumer, storageFactory,
-                flociUiManager, dynamoDbRuntime);
+        InOrder inOrder = Mockito.inOrder(dynamodbStreamsPoller, kinesisPoller, redshiftZeroEtlConsumer,
+                storageFactory, flociUiManager, dynamoDbRuntime);
         inOrder.verify(dynamodbStreamsPoller).shutdown();
+        inOrder.verify(kinesisPoller).shutdown();
         inOrder.verify(redshiftZeroEtlConsumer).shutdown();
         inOrder.verify(storageFactory).flushAll();
         inOrder.verify(flociUiManager).shutdown();
