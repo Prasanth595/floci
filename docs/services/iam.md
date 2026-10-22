@@ -1436,7 +1436,8 @@ role each passes:
 - **Glue:** `CreateJob`, `CreateCrawler` and `UpdateCrawler` pass `Role`, `UpdateJob` the
   `JobUpdate`'s `Role`, and `PutDataCatalogEncryptionSettings` the `EncryptionAtRest`
   `CatalogEncryptionServiceRole`, to `glue.amazonaws.com` when the request names one. A role given
-  by its name is the role of that name, with any path, in the caller's account.
+  by its name is the role of that name in the caller's account, as for ECS: a role with a path is
+  named with its path, as `service-role/etl`, and `etl` alone names the role at `/`.
 
 Launching an instance from a launch template does not check the template's role, as on AWS: the EC2
 user guide warns that a user who can create launch template versions "can potentially update a launch
