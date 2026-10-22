@@ -803,6 +803,24 @@ class LambdaWebServiceTest {
     }
 
     @Test
+    void declaredSizesAddUpWithoutWrappingAround() {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        when(s3.openObject("code", "app.zip", null))
+                .thenReturn(object(LambdaWebZips.declaring(Long.MAX_VALUE, 1)));
+        WebFunctionRevision signed = service.createFunction(REGION, createRequest("app")).revisions.values()
+                .iterator().next();
+        when(s3.openObject("code", "app.zip", null))
+                .thenReturn(object(LambdaWebZips.declaring(Long.MAX_VALUE, Long.MAX_VALUE, 2)));
+        WebFunctionRevision unsigned = service.createRevision(REGION, "app", revisionConfig(30));
+
+        assertEquals("Uncompressed code size 9223372036854775808 bytes exceeds the maximum allowed size of "
+                + "536870912 bytes", signed.failureReason);
+        assertEquals("Uncompressed code size 18446744073709551615 bytes exceeds the maximum allowed size of "
+                + "536870912 bytes", unsigned.failureReason);
+    }
+
+    @Test
     void anObjectPastTheZippedLimitIsRefusedAndCreatesNothing() throws IOException {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);

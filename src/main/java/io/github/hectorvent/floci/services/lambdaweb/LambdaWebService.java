@@ -613,8 +613,8 @@ public class LambdaWebService implements Resettable {
         OptionalLong unzipped = code.unzippedSize(accountId, region, fn.functionName, revision.revisionId);
         if (unzipped.isEmpty()) {
             revision.failureReason = NOT_A_ZIP;
-        } else if (LambdaWebCode.MAX_BYTES < unzipped.getAsLong()) {
-            revision.failureReason = "Uncompressed code size " + unzipped.getAsLong()
+        } else if (Long.compareUnsigned(LambdaWebCode.MAX_BYTES, unzipped.getAsLong()) < 0) {
+            revision.failureReason = "Uncompressed code size " + Long.toUnsignedString(unzipped.getAsLong())
                     + " bytes exceeds the maximum allowed size of " + LambdaWebCode.MAX_BYTES + " bytes";
         }
         if (revision.failureReason != null) {

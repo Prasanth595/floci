@@ -64,16 +64,22 @@ public class LambdaWebCode {
         }
     }
 
-    /** The sum of the sizes the zip declares for its files, or empty when the code is not a zip. */
+    /** The unsigned sum of the sizes the zip declares for its files, or empty when the code is not a zip. */
     OptionalLong unzippedSize(String accountId, String region, String functionName, String revisionId) {
         try (ZipFile zip = new ZipFile(file(accountId, region, functionName, revisionId).toFile())) {
-            return OptionalLong.of(zip.stream().mapToLong(ZipEntry::getSize).sum());
+            return OptionalLong.of(zip.stream().mapToLong(ZipEntry::getSize).reduce(0, LambdaWebCode::addSaturating));
         } catch (ZipException e) {
             return OptionalLong.empty();
         } catch (IOException e) {
             deleteRevision(accountId, region, functionName, revisionId);
             throw new UncheckedIOException("Could not read the code of " + functionName + " revision " + revisionId, e);
         }
+    }
+
+    /** AWS adds the sizes as unsigned 64-bit numbers and stops at the largest one. */
+    private static long addSaturating(long total, long size) {
+        long sum = total + size;
+        return Long.compareUnsigned(sum, total) < 0 ? -1L : sum;
     }
 
     void deleteRevision(String accountId, String region, String functionName, String revisionId) {
