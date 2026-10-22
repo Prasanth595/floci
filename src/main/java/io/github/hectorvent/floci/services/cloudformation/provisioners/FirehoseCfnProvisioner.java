@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.S3DestinationValidator;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import jakarta.enterprise.context.ApplicationScoped;
 
@@ -70,6 +71,8 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
                         parseIntProp(hints, "IntervalInSeconds", ctx, DEFAULT_BUFFER_INTERVAL_SECONDS));
                 s3.setBufferingHints(bufferingHints);
             }
+            S3DestinationValidator.validateWireShape(s3,
+                    extended ? "extendedS3DestinationConfiguration" : "s3DestinationConfiguration");
         }
 
         List<DeliveryStreamDescription.Tag> tags = new ArrayList<>();
@@ -141,12 +144,13 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * A structured destination member with its intrinsics resolved, read into the type
-     * CreateDeliveryStream reads it into. Null when the template leaves it out, which on an update
-     * keeps the stored value, as UpdateDestination does.
+     * CreateDeliveryStream reads it into. Null when the template leaves it out or AWS::NoValue
+     * drops it, which on an update keeps the stored value, as UpdateDestination does. A member
+     * present as anything but an object fails the resource, as CloudFormation rejects it.
      */
     private static <T> T structured(JsonNode destination, String name, Class<T> type, ProvisionContext ctx) {
         JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(destination.get(name));
-        if (resolved == null || !resolved.isObject()) {
+        if (resolved == null || resolved.isMissingNode()) {
             return null;
         }
         try {

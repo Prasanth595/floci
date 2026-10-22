@@ -423,6 +423,42 @@ class LeafCfnProvisionerTest {
         }
 
         @Test
+        void aBlockThatIsNotAnObjectFailsTheResource() {
+            AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(
+                    resource("Stream", "AWS::KinesisFirehose::DeliveryStream"), props("""
+                    {
+                      "DeliveryStreamName": "s",
+                      "ExtendedS3DestinationConfiguration": {
+                        "BucketARN": "arn:bucket",
+                        "ProcessingConfiguration": []
+                      }
+                    }
+                    """), ctx));
+            assertEquals("ValidationError", error.getErrorCode());
+        }
+
+        @Test
+        void anUnknownProcessorTypeFailsTheResource() {
+            AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(
+                    resource("Stream", "AWS::KinesisFirehose::DeliveryStream"), props("""
+                    {
+                      "DeliveryStreamName": "s",
+                      "ExtendedS3DestinationConfiguration": {
+                        "BucketARN": "arn:bucket",
+                        "ProcessingConfiguration": {
+                          "Enabled": true,
+                          "Processors": [{"Type": "Lambd", "Parameters": [
+                            {"ParameterName": "LambdaArn", "ParameterValue": "arn:aws:lambda:us-east-1:000000000000:function:f"}
+                          ]}]
+                        }
+                      }
+                    }
+                    """), ctx));
+            assertEquals("ValidationException", error.getErrorCode());
+            verify(firehose, never()).createDeliveryStream(anyString(), any(), any());
+        }
+
+        @Test
         void deleteReachesTheService() {
             provisioner.delete("AWS::KinesisFirehose::DeliveryStream", "s", REGION);
             verify(firehose).deleteDeliveryStream("s");

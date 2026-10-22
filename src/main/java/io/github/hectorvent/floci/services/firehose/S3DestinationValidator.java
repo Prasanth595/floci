@@ -37,7 +37,7 @@ import java.util.regex.Pattern;
  * Smithy layer does (probe 2026-09-07: both ParquetSerDe bounds violated at
  * once report "2 validation errors detected: ...; ...").
  */
-final class S3DestinationValidator {
+public final class S3DestinationValidator {
 
     /** Listed in the order AWS prints it, which is neither declaration order nor alphabetical. */
     private static final String ENUM_VALUE_SET = "[ZIP, HADOOP_SNAPPY, Snappy, GZIP, UNCOMPRESSED]";
@@ -78,7 +78,7 @@ final class S3DestinationValidator {
 
     private S3DestinationValidator() {}
 
-    static void validateWireShape(S3Destination config, String shapeName) {
+    public static void validateWireShape(S3Destination config, String shapeName) {
         if (config == null) {
             return;
         }
