@@ -42,7 +42,7 @@ class FirehoseRedshiftTest {
     private static final String JDBC_URL = "jdbc:redshift://c1.abc.us-east-1.redshift.amazonaws.com:5439/dev";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/firehose";
     private static final int BUFFERING_INTERVAL_SECONDS = 5;
-    private static final long POLL_TIMEOUT_MILLIS = 240_000L;
+    private static final long POLL_TIMEOUT_MILLIS = 150_000L;
     private static final long POLL_INTERVAL_MILLIS = TestFixtures.isRealAws() ? 5_000L : 250L;
     private static FirehoseClient firehose;
 
