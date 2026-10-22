@@ -5,6 +5,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -16,6 +17,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -129,7 +131,7 @@ class PartitionedFileStorageTest {
     @Test
     void aShardCountBelowOneIsRejected() {
         assertThrows(IllegalArgumentException.class, () -> new PartitionedFileStorage<>(tempDir.resolve("items"),
-                null, String.class, 0, PartitionedFileStorage.Mode.SYNC, 60_000));
+                (Path) null, String.class, 0, PartitionedFileStorage.Mode.SYNC, 60_000));
     }
 
     @Test
@@ -179,7 +181,7 @@ class PartitionedFileStorageTest {
         try {
             // A root user writes through the read-only mode, so there is nothing to test there.
             assumeFalse(Files.isWritable(directory), "the directory stays writable for this user");
-            storage.flush();
+            assertThrows(UncheckedIOException.class, storage::flush, "a failed flush is reported");
             assertFalse(Files.exists(storage.fileFor("busy")));
         } finally {
             Files.setPosixFilePermissions(directory, original);
@@ -188,6 +190,24 @@ class PartitionedFileStorageTest {
         storage.flush();
 
         assertEquals(Map.of("node-1", "beat-1"), open(PartitionedFileStorage.Mode.PERIODIC).get("busy").orElseThrow());
+    }
+
+    @Test
+    void aSyncWriteThatCannotReachDiskFailsAndIsWrittenByTheNextFlush() throws Exception {
+        PartitionedFileStorage<String> storage = open(PartitionedFileStorage.Mode.SYNC);
+        Path file = storage.fileFor("table");
+        // A non-empty directory where the write's temporary file goes makes that write fail.
+        Path blocker = file.resolveSibling(file.getFileName() + ".tmp");
+        Files.createDirectories(blocker);
+        Files.writeString(blocker.resolve("child"), "x");
+
+        assertThrows(UncheckedIOException.class, () -> storage.putEntry("table", "a", "1"));
+
+        assertEquals(Map.of("a", "1"), storage.get("table").orElseThrow(), "the change stays in memory");
+        Files.delete(blocker.resolve("child"));
+        Files.delete(blocker);
+        storage.flush();
+        assertEquals(Map.of("a", "1"), open(PartitionedFileStorage.Mode.SYNC).get("table").orElseThrow());
     }
 
     @Test
@@ -245,6 +265,115 @@ class PartitionedFileStorageTest {
                 "migration writes the files at once, not on the next flush");
         assertEquals(Map.of("k2", "v2"),
                 open(PartitionedFileStorage.Mode.SYNC).get("000000000000/us-east-1::b").orElseThrow());
+    }
+
+    @Test
+    void aMigrationThatCrashedInStagingIsRedoneInFull() throws Exception {
+        Path legacy = tempDir.resolve("items.json");
+        new ObjectMapper().writeValue(legacy.toFile(), Map.of("a", Map.of("k", "1"), "b", Map.of("k", "2")));
+        // What a crash mid-migration leaves: one key staged, nothing moved in place.
+        Path staging = Files.createDirectories(tempDir.resolve("items" + PartitionedFileStorage.MIGRATING_SUFFIX));
+        Files.writeString(staging.resolve("a.json"), "{\"key\":\"a\",\"entries\":{\"k\":\"1\"}}");
+
+        PartitionedFileStorage<String> storage = open(PartitionedFileStorage.Mode.SYNC);
+
+        assertEquals(Map.of("k", "1"), storage.get("a").orElseThrow());
+        assertEquals(Map.of("k", "2"), storage.get("b").orElseThrow());
+        assertFalse(Files.exists(staging));
+        assertFalse(Files.exists(legacy));
+    }
+
+    @Test
+    void anEmptyDirectoryLeftBehindStillMigratesTheLegacyFile() throws Exception {
+        Path legacy = tempDir.resolve("items.json");
+        new ObjectMapper().writeValue(legacy.toFile(), Map.of("a", Map.of("k", "1")));
+        Files.createDirectories(tempDir.resolve("items"));
+        Files.createFile(tempDir.resolve("items").resolve(PartitionedFileStorage.JOURNAL_FILE));
+
+        assertEquals(Map.of("k", "1"), open(PartitionedFileStorage.Mode.SYNC).get("a").orElseThrow());
+        assertTrue(Files.exists(tempDir.resolve("items.json.migrated")));
+    }
+
+    @Test
+    void aMigrationThatCannotWriteFailsAndKeepsTheLegacyFile() throws Exception {
+        Path legacy = tempDir.resolve("items.json");
+        new ObjectMapper().writeValue(legacy.toFile(), Map.of("a", Map.of("k", "1")));
+        Set<PosixFilePermission> original = Files.getPosixFilePermissions(tempDir);
+        Files.setPosixFilePermissions(tempDir, PosixFilePermissions.fromString("r-xr-xr-x"));
+        try {
+            // A root user writes through the read-only mode, so there is nothing to test there.
+            assumeFalse(Files.isWritable(tempDir), "the directory stays writable for this user");
+            PartitionedFileStorage<String> storage = new PartitionedFileStorage<>(tempDir.resolve("items"),
+                    legacy, String.class, 4, PartitionedFileStorage.Mode.SYNC, 60_000);
+
+            assertThrows(UncheckedIOException.class, storage::load);
+            storage.shutdown();
+        } finally {
+            Files.setPosixFilePermissions(tempDir, original);
+        }
+        assertTrue(Files.exists(legacy));
+        assertFalse(Files.exists(tempDir.resolve("items")));
+        assertEquals(Map.of("k", "1"), open(4, PartitionedFileStorage.Mode.SYNC).get("a").orElseThrow());
+    }
+
+    @Test
+    void aLegacyFileIsIgnoredOnceTheDirectoryHoldsData() throws Exception {
+        PartitionedFileStorage<String> storage = open(PartitionedFileStorage.Mode.SYNC);
+        storage.put("a", Map.of("k", "new"));
+        Path legacy = tempDir.resolve("items.json");
+        new ObjectMapper().writeValue(legacy.toFile(), Map.of("a", Map.of("k", "old"), "b", Map.of("k", "old")));
+
+        PartitionedFileStorage<String> reloaded = open(PartitionedFileStorage.Mode.SYNC);
+
+        assertEquals(Map.of("k", "new"), reloaded.get("a").orElseThrow());
+        assertTrue(reloaded.get("b").isEmpty());
+        assertTrue(Files.exists(legacy), "a legacy file that was not migrated is left alone");
+    }
+
+    @Test
+    void aSupersededFileThatCannotBeRewrittenStopsTheLoad() throws Exception {
+        PartitionedFileStorage<String> storage = open(PartitionedFileStorage.Mode.SYNC);
+        storage.put("key", Map.of("a", "1", "b", "2"));
+        Path current = storage.fileFor("key");
+        Path old = current.resolveSibling("old-name.json");
+        Files.move(current, old);
+        // A non-empty directory where the rewrite's temporary file goes makes the rewrite fail.
+        Path blocker = current.resolveSibling(current.getFileName() + ".tmp");
+        Files.createDirectories(blocker);
+        Files.writeString(blocker.resolve("child"), "x");
+
+        PartitionedFileStorage<String> blocked = new PartitionedFileStorage<>(tempDir.resolve("items"),
+                tempDir.resolve("items.json"), String.class, 1, PartitionedFileStorage.Mode.SYNC, 60_000);
+        opened.add(blocked);
+        // Running on would let later writes change only the current file, and the next load
+        // would merge the old file back in and revive what they removed.
+        assertThrows(IllegalStateException.class, blocked::load);
+
+        assertTrue(Files.exists(old));
+        Files.delete(blocker.resolve("child"));
+        Files.delete(blocker);
+        assertEquals(Map.of("a", "1", "b", "2"), open(PartitionedFileStorage.Mode.SYNC).get("key").orElseThrow());
+        assertFalse(Files.exists(old));
+    }
+
+    @Test
+    void aWriteThatReadItsShardBeforeAClearDoesNotBringItBack() throws Exception {
+        PartitionedFileStorage<String> storage = open(PartitionedFileStorage.Mode.PERIODIC);
+        storage.putEntry("table", "a", "1");
+        Thread[] clearer = new Thread[1];
+        storage.setBeforeShardWrite(() -> {
+            // The shard is read and its file is about to be written: a clear now must wait for
+            // the write, or the write puts the cleared file back.
+            storage.setBeforeShardWrite(() -> { });
+            clearer[0] = Thread.ofPlatform().start(storage::clear);
+            StorageTestThreads.awaitParkedOrDone(clearer[0]);
+        });
+
+        storage.flush();
+        clearer[0].join(TimeUnit.SECONDS.toMillis(10));
+
+        assertFalse(clearer[0].isAlive());
+        assertTrue(open(PartitionedFileStorage.Mode.SYNC).get("table").isEmpty());
     }
 
     @Test

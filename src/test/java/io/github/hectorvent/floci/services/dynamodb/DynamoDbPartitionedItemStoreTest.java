@@ -31,8 +31,11 @@ import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -141,6 +144,27 @@ class DynamoDbPartitionedItemStoreTest {
         DynamoDbService restarted = restart();
         assertNull(restarted.getItem("Nodes", key("node-1"), REGION));
         assertEquals("beat-1", value(restarted.getItem("Nodes", key("node-2"), REGION)));
+    }
+
+    @Test
+    void aWriteRightAfterTheSweeperRemovesAnItemSurvivesARestart() {
+        DynamoDbStreamService streams = mock(DynamoDbStreamService.class);
+        DynamoDbService swept = new DynamoDbService(tableStore, openItemStore(), resolver, streams, null);
+        swept.updateTimeToLive("Nodes", "expires", true, REGION);
+        ObjectNode expired = item("node-1", "beat-1");
+        expired.set("expires", mapper.createObjectNode().put("N", "1"));
+        swept.putItem("Nodes", expired, REGION);
+        // The REMOVE event fires after the sweeper drops the item and releases its lock: the
+        // moment a new write of the same key can land before the removal reaches disk.
+        doAnswer(invocation -> {
+            swept.putItem("Nodes", item("node-1", "beat-2"), REGION);
+            return null;
+        }).when(streams).captureEvent(eq("REMOVE"), any(), any(), any(), any(), eq(true));
+
+        swept.deleteScannedItems(swept.scanExpiredItems());
+
+        assertEquals("beat-2", value(swept.getItem("Nodes", key("node-1"), REGION)));
+        assertEquals("beat-2", value(restart().getItem("Nodes", key("node-1"), REGION)));
     }
 
     @Test
@@ -273,7 +297,7 @@ class DynamoDbPartitionedItemStoreTest {
     }
 
     private AccountAwareStorageBackend<Map<String, JsonNode>> openItemStore(Path directory, int shards) {
-        PartitionedFileStorage<JsonNode> inner = new PartitionedFileStorage<>(directory, null,
+        PartitionedFileStorage<JsonNode> inner = new PartitionedFileStorage<>(directory, (Path) null,
                 JsonNode.class, shards, PartitionedFileStorage.Mode.SYNC, 60_000);
         inner.load();
         opened.add(inner);

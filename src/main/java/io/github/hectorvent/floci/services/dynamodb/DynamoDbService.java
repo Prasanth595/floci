@@ -3017,7 +3017,10 @@ public class DynamoDbService {
             ConcurrentSkipListMap<String, JsonNode> items = scan.items();
 
             int deletedForTable = 0;
-            List<String> removedKeys = new ArrayList<>();
+            // A store that writes single entries drops each item under its item lock, so a write
+            // that replaces the item right after cannot be overtaken by this removal.
+            AccountAwareStorageBackend<Map<String, JsonNode>> entryStore =
+                    scan.accountId() == null ? null : entryWritingItemStore();
             for (String itemKey : scan.itemKeys()) {
                 // A table deleted, or deleted and recreated, since the scan or during this sweep: its items are not this scan's.
                 if (itemsByTable.get(scan.rawKey()) != items) {
@@ -3029,13 +3032,23 @@ public class DynamoDbService {
                         return null;
                     }
                     pointInTimeRecovery.recordItem(scan.accountId(), scan.storageKey(), scan.table(), itemKey, current);
-                    return items.remove(itemKey);
+                    JsonNode gone = items.remove(itemKey);
+                    if (entryStore != null) {
+                        // Under the table entry's lock, so a DeleteTable and a recreate cannot slip
+                        // in and have this removal drop the new table's item of the same key.
+                        itemsByTable.computeIfPresent(scan.rawKey(), (key, live) -> {
+                            if (live == items) {
+                                entryStore.removeEntryForAccount(scan.accountId(), scan.storageKey(), itemKey);
+                            }
+                            return live;
+                        });
+                    }
+                    return gone;
                 });
                 if (removed == null) {
                     continue;
                 }
                 deletedForTable++;
-                removedKeys.add(itemKey);
                 if (streamService != null) {
                     streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region(), true);
                 }
@@ -3046,38 +3059,22 @@ public class DynamoDbService {
                             true);
                 }
             }
-            if (deletedForTable > 0) {
+            if (deletedForTable > 0 && entryStore == null) {
                 // A DeleteTable during the loop detached this map; writing it back would revive its items.
                 // Persisting under the entry's lock holds off DeleteTable, which removes the entry before
                 // it deletes the stored items.
                 itemsByTable.computeIfPresent(scan.rawKey(), (key, live) -> {
                     if (live == items) {
-                        persistRemovedItemsForAccount(scan.accountId(), scan.storageKey(), items, removedKeys);
+                        persistItemsForAccount(scan.accountId(), scan.storageKey(), items);
                     }
                     return live;
                 });
-                totalDeleted += deletedForTable;
             }
+            totalDeleted += deletedForTable;
         }
         if (totalDeleted > 0) {
             LOG.infov("TTL sweeper removed {0} expired items", totalDeleted);
         }
-    }
-
-    /**
-     * Persists items the sweeper removed, for a caller with no ambient request account. A store
-     * that writes single map entries drops just those items; any other store gets the whole table.
-     */
-    private void persistRemovedItemsForAccount(String accountId, String storageKey, Map<String, JsonNode> items,
-                                               List<String> removedKeys) {
-        AccountAwareStorageBackend<Map<String, JsonNode>> entryStore = entryWritingItemStore();
-        if (accountId != null && entryStore != null) {
-            for (String itemKey : removedKeys) {
-                entryStore.removeEntryForAccount(accountId, storageKey, itemKey);
-            }
-            return;
-        }
-        persistItemsForAccount(accountId, storageKey, items);
     }
 
     /** Like {@link #persistItems}, but for callers with no ambient request account to rely on. */

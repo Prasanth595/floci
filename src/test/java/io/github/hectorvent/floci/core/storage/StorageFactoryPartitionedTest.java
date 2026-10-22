@@ -11,10 +11,14 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
 import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -103,6 +107,103 @@ class StorageFactoryPartitionedTest {
         assertEquals(Map.of("k", "only-in-the-log"), store.get("table-b").orElseThrow());
         assertFalse(Files.exists(tempDir.resolve("svc-items.wal")));
         assertTrue(Files.exists(tempDir.resolve("svc-items-snapshot.json.migrated")));
+    }
+
+    @Test
+    void hybridModeMigratesALegacyWalStoreIncludingItsUncompactedLog() {
+        WalStorage<String, Map<String, String>> legacy = new WalStorage<>(tempDir.resolve("svc-items-snapshot.json"),
+                tempDir.resolve("svc-items.wal"), TYPE, Long.MAX_VALUE);
+        legacy.load();
+        legacy.put("000000000000/table-a", Map.of("k", "v"));
+        legacy.flush();
+        legacy.put("000000000000/table-b", Map.of("k", "only-in-the-log"));
+
+        AccountAwareStorageBackend<Map<String, String>> store = newFactory("hybrid")
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
+
+        assertEquals(Map.of("k", "v"), store.get("table-a").orElseThrow());
+        assertEquals(Map.of("k", "only-in-the-log"), store.get("table-b").orElseThrow());
+        assertTrue(Files.exists(tempDir.resolve("svc-items.wal.migrated")));
+    }
+
+    @Test
+    void anEmptyDirectoryLeftBehindStillMigratesALegacyWalStore() throws Exception {
+        WalStorage<String, Map<String, String>> legacy = new WalStorage<>(tempDir.resolve("svc-items-snapshot.json"),
+                tempDir.resolve("svc-items.wal"), TYPE, Long.MAX_VALUE);
+        legacy.load();
+        legacy.put("000000000000/table-a", Map.of("k", "v"));
+        legacy.shutdown();
+        // What a crash right after the directory was created leaves behind.
+        Files.createDirectories(tempDir.resolve("svc-items"));
+
+        AccountAwareStorageBackend<Map<String, String>> store = newFactory("wal")
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
+
+        assertEquals(Map.of("k", "v"), store.get("table-a").orElseThrow());
+    }
+
+    @Test
+    void theLegacyStoreWrittenLastIsTheOneMigrated() throws Exception {
+        WalStorage<String, Map<String, String>> legacy = new WalStorage<>(tempDir.resolve("svc-items-snapshot.json"),
+                tempDir.resolve("svc-items.wal"), TYPE, Long.MAX_VALUE);
+        legacy.load();
+        legacy.put("000000000000/table-a", Map.of("k", "from-wal"));
+        legacy.shutdown();
+        Path plain = tempDir.resolve("svc-items.json");
+        new ObjectMapper().writeValue(plain.toFile(), Map.of("000000000000/table-a", Map.of("k", "from-plain")));
+        FileTime older = FileTime.from(Instant.parse("2020-01-01T00:00:00Z"));
+        Files.setLastModifiedTime(tempDir.resolve("svc-items-snapshot.json"), older);
+        Files.setLastModifiedTime(tempDir.resolve("svc-items.wal"), older);
+
+        AccountAwareStorageBackend<Map<String, String>> store = newFactory("wal")
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
+
+        assertEquals(Map.of("k", "from-plain"), store.get("table-a").orElseThrow());
+        assertTrue(Files.exists(tempDir.resolve("svc-items-snapshot.json")), "the older store is left alone");
+    }
+
+    @Test
+    void aMigrationThatCannotWriteLeavesTheLegacyLogInPlace() throws Exception {
+        WalStorage<String, Map<String, String>> legacy = new WalStorage<>(tempDir.resolve("svc-items-snapshot.json"),
+                tempDir.resolve("svc-items.wal"), TYPE, Long.MAX_VALUE);
+        legacy.load();
+        legacy.put("000000000000/table-a", Map.of("k", "only-in-the-log"));
+        Path log = tempDir.resolve("svc-items.wal");
+        byte[] logged = Files.readAllBytes(log);
+        // A non-empty file where the staging directory goes makes the migration's first write fail.
+        Path staging = tempDir.resolve("svc-items" + PartitionedFileStorage.MIGRATING_SUFFIX);
+        Files.createDirectories(staging.resolve("blocker"));
+        Files.setPosixFilePermissions(staging, PosixFilePermissions.fromString("r-xr-xr-x"));
+        try {
+            assumeFalse(Files.isWritable(staging), "the directory stays writable for this user");
+            assertThrows(UncheckedIOException.class, () -> newFactory("wal")
+                    .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1));
+        } finally {
+            Files.setPosixFilePermissions(staging, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
+
+        assertArrayEquals(logged, Files.readAllBytes(log));
+        assertEquals(Map.of("k", "only-in-the-log"), newFactory("wal")
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1).get("table-a").orElseThrow());
+        legacy.shutdown();
+    }
+
+    @Test
+    void aBackendThatFailsToFlushDoesNotStopTheOthersShuttingDown() throws Exception {
+        StorageFactory factory = newFactory("hybrid");
+        AccountAwareStorageBackend<Map<String, String>> failing =
+                factory.createPartitioned("svc", "svc-a.json", TYPE, String.class, 1);
+        AccountAwareStorageBackend<Map<String, String>> healthy =
+                factory.createPartitioned("svc", "svc-b.json", TYPE, String.class, 1);
+        failing.putEntry("table", "k", "v");
+        healthy.putEntry("table", "k", "v");
+        Path blocker = tempDir.resolve("svc-a")
+                .resolve(PartitionedFileStorage.fileNameFor("000000000000/table", 0, 1) + ".tmp");
+        Files.createDirectories(blocker.resolve("child"));
+
+        assertThrows(UncheckedIOException.class, factory::shutdownAll);
+
+        assertEquals(1, fileCount(tempDir.resolve("svc-b")));
     }
 
     @Test

@@ -4,6 +4,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -94,6 +96,55 @@ class PartitionedFileStorageJournalTest {
 
         assertEquals(Map.of("b", "2", "c", "3", "d", "4"), restarted.get("table").orElseThrow());
         assertTrue(restarted.get("gone").isEmpty());
+    }
+
+    @Test
+    void aCompactionBeforeTheFirstLoadKeepsTheJournal() {
+        PartitionedFileStorage<String> crashed = open(1);
+        crashed.putEntry("table", "a", "1");
+
+        // The compaction schedule starts with the constructor, so it can run before load().
+        PartitionedFileStorage<String> restarting = new PartitionedFileStorage<>(tempDir.resolve("items"),
+                tempDir.resolve("items.json"), String.class, 1, PartitionedFileStorage.Mode.JOURNAL, Long.MAX_VALUE);
+        opened.add(restarting);
+        restarting.flush();
+        restarting.load();
+
+        assertEquals(Map.of("a", "1"), restarting.get("table").orElseThrow());
+    }
+
+    @Test
+    void aRecordThatDecodesToNullEndsReplayInsteadOfFailingLoad() throws Exception {
+        byte[] cborNull = {(byte) 0xF6};
+        byte[] mapWithNullValue = {(byte) 0xA1, 0x61, 'k', (byte) 0xF6};
+        List<byte[]> badRecords = List.of(
+                record(EntryJournal.OP_PUT_ENTRY, "table".getBytes(), "k".getBytes(), cborNull),
+                record(EntryJournal.OP_PUT, "table".getBytes(), cborNull),
+                record(EntryJournal.OP_PUT, "table".getBytes(), mapWithNullValue));
+        open(1).putEntry("table", "a", "1");
+
+        for (byte[] bad : badRecords) {
+            long goodLength = Files.size(journal());
+            Files.write(journal(), bad, StandardOpenOption.APPEND);
+
+            PartitionedFileStorage<String> restarted = open(1);
+
+            assertEquals(Map.of("a", "1"), restarted.get("table").orElseThrow());
+            assertEquals(goodLength, Files.size(journal()), "the unreadable record is cut off");
+        }
+    }
+
+    /** One journal record: the op byte, then each part as a length-prefixed frame. */
+    private static byte[] record(byte op, byte[]... parts) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(bytes);
+        out.writeByte(op);
+        for (byte[] part : parts) {
+            out.writeInt(part.length);
+            out.write(part);
+        }
+        out.flush();
+        return bytes.toByteArray();
     }
 
     @Test
@@ -200,7 +251,7 @@ class PartitionedFileStorageJournalTest {
             // The shards are written and the journal is about to be emptied. A write now must
             // wait for the compaction to finish, or its journal record is dropped unwritten.
             writer[0] = Thread.ofPlatform().start(() -> live.putEntry("table", "late", "2"));
-            awaitParkedOrDone(writer[0]);
+            StorageTestThreads.awaitParkedOrDone(writer[0]);
         });
 
         live.flush();
@@ -209,19 +260,6 @@ class PartitionedFileStorageJournalTest {
 
         assertFalse(writer[0].isAlive());
         assertEquals(Map.of("early", "1", "late", "2"), recoverCopy().get("table").orElseThrow());
-    }
-
-    /** Waits until the thread has finished or is parked, on a lock for instance. */
-    private static void awaitParkedOrDone(Thread thread) {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (System.nanoTime() < deadline) {
-            Thread.State state = thread.getState();
-            if (state == Thread.State.TERMINATED || state == Thread.State.WAITING) {
-                return;
-            }
-            Thread.onSpinWait();
-        }
-        fail("the writer neither finished nor waited: " + thread.getState());
     }
 
     /**
@@ -236,11 +274,27 @@ class PartitionedFileStorageJournalTest {
                 Files.copy(file, copy.resolve(file.getFileName()));
             }
         }
-        PartitionedFileStorage<String> recovered = new PartitionedFileStorage<>(copy, null, String.class, 1,
+        PartitionedFileStorage<String> recovered = new PartitionedFileStorage<>(copy, (Path) null, String.class, 1,
                 PartitionedFileStorage.Mode.JOURNAL, Long.MAX_VALUE);
         recovered.load();
         opened.add(recovered);
         return recovered;
+    }
+
+    @Test
+    void aChangeTheJournalCannotTakeIsCompactedIntoItsShardAtOnce() throws Exception {
+        // An empty directory where the journal goes: it cannot be opened, so the first append
+        // fails, while the compaction that follows can remove it and start a real journal.
+        Files.createDirectories(journal());
+        PartitionedFileStorage<String> storage = open(1);
+
+        storage.putEntry("table", "a", "1");
+
+        assertTrue(Files.exists(storage.fileFor("table")), "the change reached its shard file");
+        assertTrue(Files.isRegularFile(journal()));
+        storage.putEntry("table", "b", "2");
+        assertTrue(Files.size(journal()) > 0, "later changes are journaled again");
+        assertEquals(Map.of("a", "1", "b", "2"), recoverCopy().get("table").orElseThrow());
     }
 
     @Test
@@ -252,7 +306,7 @@ class PartitionedFileStorageJournalTest {
         Files.createDirectories(blocker);
         Files.writeString(blocker.resolve("child"), "x");
 
-        crashed.flush();
+        assertThrows(UncheckedIOException.class, crashed::flush, "a shard left unwritten is reported");
 
         assertTrue(Files.size(journal()) > 0, "the journal still holds the unwritten change");
         Files.delete(blocker.resolve("child"));
@@ -275,9 +329,9 @@ class PartitionedFileStorageJournalTest {
             }
         });
         try {
-            crashed.flush();
             // A root user writes through the read-only mode, so there is nothing to test there.
             assumeFalse(Files.isWritable(directory), "the directory stays writable for this user");
+            assertThrows(UncheckedIOException.class, crashed::flush, "a journal left unemptied is reported");
         } finally {
             crashed.setBeforeJournalTruncate(() -> { });
             Files.setPosixFilePermissions(directory, original);

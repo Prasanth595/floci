@@ -76,20 +76,22 @@ final class EntryJournal<E> {
         this.mapper.registerModule(new JavaTimeModule());
     }
 
-    void putEntry(String key, String entryKey, E value) {
-        append(OP_PUT_ENTRY, key, entryKey, value);
+    // Each append returns whether its record reached the journal file.
+
+    boolean putEntry(String key, String entryKey, E value) {
+        return append(OP_PUT_ENTRY, key, entryKey, value);
     }
 
-    void removeEntry(String key, String entryKey) {
-        append(OP_REMOVE_ENTRY, key, entryKey, null);
+    boolean removeEntry(String key, String entryKey) {
+        return append(OP_REMOVE_ENTRY, key, entryKey, null);
     }
 
-    void put(String key, Map<String, E> value) {
-        append(OP_PUT, key, null, value);
+    boolean put(String key, Map<String, E> value) {
+        return append(OP_PUT, key, null, value);
     }
 
-    void delete(String key) {
-        append(OP_DELETE, key, null, null);
+    boolean delete(String key) {
+        return append(OP_DELETE, key, null, null);
     }
 
     /** Whether the journal holds any record. */
@@ -126,8 +128,9 @@ final class EntryJournal<E> {
                     case OP_PUT_ENTRY -> {
                         String entryKey = readString(in, fileSize, position);
                         byte[] value = readFrame(in, fileSize, position);
-                        yield value == null || entryKey == null || key == null
-                                ? null : new PutEntry<>(key, entryKey, mapper.readValue(value, entryType));
+                        E decoded = value == null ? null : mapper.readValue(value, entryType);
+                        yield decoded == null || entryKey == null || key == null
+                                ? null : new PutEntry<>(key, entryKey, decoded);
                     }
                     case OP_REMOVE_ENTRY -> {
                         String entryKey = readString(in, fileSize, position);
@@ -135,7 +138,10 @@ final class EntryJournal<E> {
                     }
                     case OP_PUT -> {
                         byte[] value = readFrame(in, fileSize, position);
-                        yield value == null || key == null ? null : new Put<>(key, mapper.readValue(value, entriesType));
+                        Map<String, E> decoded = value == null ? null : mapper.readValue(value, entriesType);
+                        // A null map, or one holding a null key or value, cannot be stored: the
+                        // record is as unreadable as a torn one.
+                        yield decoded == null || key == null || hasNull(decoded) ? null : new Put<>(key, decoded);
                     }
                     case OP_DELETE -> key == null ? null : new Delete<>(key);
                     default -> null;
@@ -203,12 +209,11 @@ final class EntryJournal<E> {
         }
     }
 
-    private void append(byte op, String key, String entryKey, Object value) {
+    private boolean append(byte op, String key, String entryKey, Object value) {
         DataOutputStream out = writer;
         if (out == null) {
-            LOG.errorv("Journal {0} is not open; a change to {1} is only in memory until the next compaction",
-                    path, key);
-            return;
+            LOG.errorv("Journal {0} is not open; a change to {1} was not journaled", path, key);
+            return false;
         }
         try {
             // Encode off the shared writer so the lock is held for one write.
@@ -227,14 +232,25 @@ final class EntryJournal<E> {
                 bytes.writeTo(out);
                 out.flush();
             }
+            return true;
         } catch (IOException e) {
             LOG.errorv(e, "Failed to append to journal {0}", path);
+            return false;
         }
     }
 
     private static void writeFrame(DataOutputStream out, byte[] bytes) throws IOException {
         out.writeInt(bytes.length);
         out.write(bytes);
+    }
+
+    private static boolean hasNull(Map<?, ?> map) {
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String readString(DataInputStream in, long fileSize, long[] position) throws IOException {
