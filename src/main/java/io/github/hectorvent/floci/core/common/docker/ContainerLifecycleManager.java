@@ -35,8 +35,10 @@ import org.jboss.logging.Logger;
 import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -93,6 +95,8 @@ public class ContainerLifecycleManager {
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
+    /** CA bundle volumes this process has filled; a volume's name carries its content's digest. */
+    private final Set<String> filledCaBundleVolumes = ConcurrentHashMap.newKeySet();
 
     /** Daemon CPU count, resolved on first use. Null until then, so that empty can mean "unknown". */
     private final AtomicReference<OptionalInt> hostCpuCount = new AtomicReference<>();
@@ -196,6 +200,20 @@ public class ContainerLifecycleManager {
         Optional<Path> caBundle = ContainerCaBundle.hostPath(config);
         if (caBundle.isEmpty()) {
             return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
+        }
+        if (spec.readonlyRootfs()) {
+            // Docker refuses a copy into a read-only root filesystem, so the bundle goes in a volume mounted
+            // read-only. Without one, the container keeps its own trust store, as after a failed copy.
+            Optional<String> volume = caBundleVolume(caBundle.get(), resolvedImage, platform);
+            if (volume.isEmpty()) {
+                return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
+            }
+            List<Mount> mounts = new ArrayList<>(hostConfig.getMounts() == null ? List.of() : hostConfig.getMounts());
+            mounts.add(new Mount().withType(MountType.VOLUME).withSource(volume.get())
+                    .withTarget(ContainerCaBundle.VOLUME_DIR).withReadOnly(true));
+            hostConfig.withMounts(mounts);
+            return createContainer(spec, resolvedImage, platform, hostConfig,
+                    ContainerCaBundle.appendEnv(spec.env(), ContainerCaBundle.VOLUME_PATH));
         }
         String containerId = createContainer(spec, resolvedImage, platform, hostConfig,
                 ContainerCaBundle.appendEnv(spec.env()));
@@ -327,6 +345,53 @@ public class ContainerLifecycleManager {
         @JsonProperty("LinkLocalIPs")
         public List<String> getLinkLocalIps() {
             return linkLocalIps;
+        }
+    }
+
+    /**
+     * The named volume holding the CA bundle, for containers whose root filesystem is read-only. Its
+     * name carries a digest of the bundle, so a changed bundle never reaches a container through a
+     * stale volume, and two Floci processes with different CAs never share one. Filled once per
+     * process through a helper container that is created from the workload's own image (nothing
+     * extra is pulled) and never started: Docker copies into a stopped container's volume mounts.
+     * Labelled like Floci's other volumes, so the usual label sweeps remove it. Empty, after logging
+     * why, when the volume could not be made.
+     */
+    private synchronized Optional<String> caBundleVolume(Path bundle, String image, String platform) {
+        try {
+            byte[] content = Files.readAllBytes(bundle);
+            String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+            String volume = ContainerCaBundle.VOLUME_PREFIX + digest.substring(0, 16);
+            if (filledCaBundleVolumes.contains(volume)) {
+                return Optional.of(volume);
+            }
+            ensureVolume(volume);
+            String mount = "/floci-ca-bundle";
+            CreateContainerCmd command = dockerClient.createContainerCmd(image)
+                    .withHostConfig(HostConfig.newHostConfig().withMounts(List.of(
+                            new Mount().withType(MountType.VOLUME).withSource(volume).withTarget(mount))))
+                    .withLabels(ContainerStorageHelper.defaultLabels(config));
+            if (platform != null && !platform.isBlank()) {
+                command.withPlatform(platform);
+            }
+            String helperId = command.exec().getId();
+            try {
+                RetryingTarCopier.copyBytes(dockerClient, helperId, mount, ContainerCaBundle.FILE_NAME, content,
+                        0644, RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
+            } finally {
+                try {
+                    dockerClient.removeContainerCmd(helperId).withForce(true).exec();
+                } catch (Exception e) {
+                    LOG.warnv("Failed to remove the CA bundle volume helper {0}: {1}", helperId, e.getMessage());
+                }
+            }
+            filledCaBundleVolumes.add(volume);
+            LOG.debugv("Filled the CA bundle volume {0}", volume);
+            return Optional.of(volume);
+        } catch (Exception e) {
+            LOG.warnv(e, "Could not put the CA bundle in a volume for a container with a read-only root filesystem;"
+                    + " it keeps its own trust store and will not trust Floci HTTPS: {0}", e.getMessage());
+            return Optional.empty();
         }
     }
 

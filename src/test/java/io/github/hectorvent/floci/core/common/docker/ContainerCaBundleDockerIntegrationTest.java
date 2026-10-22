@@ -100,6 +100,43 @@ class ContainerCaBundleDockerIntegrationTest {
         }
     }
 
+    @Test
+    void aContainerWithAReadOnlyRootFilesystemTrustsFlociThroughTheBundleVolume() throws Exception {
+        // Docker refuses a copy into a read-only root filesystem, so the bundle is mounted from a volume.
+        String script = """
+                import os, urllib.request
+                bundle = "/etc/floci-ca/floci-ca-bundle.pem"
+                for var in ("SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "AWS_CA_BUNDLE"):
+                    assert os.environ.get(var) == bundle, (var, os.environ.get(var))
+                try:
+                    open("/etc/floci-ca/written", "w")
+                    raise AssertionError("the bundle volume must be mounted read-only")
+                except OSError:
+                    pass
+                ca = urllib.request.urlopen("https://host.docker.internal:%d/_floci/ca.pem", timeout=20).read()
+                assert b"BEGIN CERTIFICATE" in ca, ca[:80]
+                print("ok")
+                """.formatted(testSslPort);
+
+        ContainerSpec spec = containerBuilder.newContainer(IMAGE)
+                .withName("floci-ca-bundle-readonly-test-" + Long.toString(System.nanoTime(), 36))
+                .withHostDockerInternalOnLinux()
+                .withReadonlyRootfs()
+                .withEnv("SSL_CERT_DIR", "/nonexistent")
+                .withEntrypoint(List.of("python3", "-c", script))
+                .build();
+
+        ContainerLifecycleManager.ContainerInfo info = lifecycle.createAndStart(spec);
+        try {
+            Integer status = dockerClient.waitContainerCmd(info.containerId())
+                    .exec(new WaitContainerResultCallback())
+                    .awaitStatusCode(120, TimeUnit.SECONDS);
+            assertEquals(0, status, () -> logs(info.containerId()));
+        } finally {
+            dockerClient.removeContainerCmd(info.containerId()).withForce(true).exec();
+        }
+    }
+
     private String logs(String containerId) {
         StringBuilder out = new StringBuilder();
         try {

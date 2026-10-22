@@ -4,8 +4,13 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
+import com.github.dockerjava.api.command.CreateVolumeCmd;
+import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.MountType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
@@ -36,6 +41,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -255,6 +261,133 @@ class ContainerLifecycleManagerCaBundleTest {
         assertEquals(6, env.getAllValues().get(0).size(), "the first attempt carried the trust variables");
         assertEquals(List.of("FOO=bar"), env.getAllValues().get(1), "the retry carries only the spec's own");
         verify(dockerClient, times(1)).copyArchiveToContainerCmd(anyString());
+    }
+
+    @Test
+    void aReadOnlyRootFilesystemGetsTheBundleFromAVolumeMountedReadOnly() throws Exception {
+        // Docker refuses a copy into a read-only root filesystem: the bundle reaches the container in a
+        // volume instead, filled through a helper container that is never started.
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+        CreateVolumeCmd createVolume = stubMissingVolume();
+        CreateContainerCmd createCmd = stubCreateContainers("helper-id", "container-id");
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("helper-id")).thenReturn(copyCmd);
+        List<InputStream> streams = new ArrayList<>();
+        when(copyCmd.withTarInputStream(any(InputStream.class))).thenAnswer(invocation -> {
+            streams.add(invocation.getArgument(0));
+            return copyCmd;
+        });
+        when(copyCmd.exec()).thenAnswer(invocation -> {
+            assertBundleArchive(streams.getLast());
+            return null;
+        });
+        RemoveContainerCmd removeHelper = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("helper-id")).thenReturn(removeHelper);
+
+        assertEquals("container-id", manager().create(readOnlySpecWithEnv(List.of("FOO=bar"))));
+
+        ArgumentCaptor<String> volumeName = ArgumentCaptor.forClass(String.class);
+        verify(createVolume).withName(volumeName.capture());
+        assertTrue(volumeName.getValue().matches("floci-ca-bundle-[0-9a-f]{16}"), volumeName.getValue());
+        verify(copyCmd).withRemotePath("/floci-ca-bundle");
+        verify(removeHelper).exec();
+        verify(dockerClient, never()).copyArchiveToContainerCmd("container-id");
+
+        ArgumentCaptor<HostConfig> hostConfigs = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd, times(2)).withHostConfig(hostConfigs.capture());
+        HostConfig container = hostConfigs.getAllValues().get(1);
+        assertTrue(container.getReadonlyRootfs());
+        Mount bundle = container.getMounts().stream()
+                .filter(m -> "/etc/floci-ca".equals(m.getTarget())).findFirst().orElseThrow();
+        assertEquals(MountType.VOLUME, bundle.getType());
+        assertEquals(volumeName.getValue(), bundle.getSource());
+        assertTrue(bundle.getReadOnly());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> env = ArgumentCaptor.forClass((Class<List<String>>) (Class<?>) List.class);
+        verify(createCmd).withEnv(env.capture());
+        assertEquals(List.of("FOO=bar",
+                "SSL_CERT_FILE=/etc/floci-ca/floci-ca-bundle.pem",
+                "CURL_CA_BUNDLE=/etc/floci-ca/floci-ca-bundle.pem",
+                "REQUESTS_CA_BUNDLE=/etc/floci-ca/floci-ca-bundle.pem",
+                "NODE_EXTRA_CA_CERTS=/etc/floci-ca/floci-ca-bundle.pem",
+                "AWS_CA_BUNDLE=/etc/floci-ca/floci-ca-bundle.pem"), env.getValue());
+    }
+
+    @Test
+    void theBundleVolumeIsFilledOnceForEveryContainerThatNeedsIt() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+        CreateVolumeCmd createVolume = stubMissingVolume();
+        stubCreateContainers("helper-id", "container-id", "container-id-2");
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("helper-id")).thenReturn(copyCmd);
+        when(dockerClient.removeContainerCmd("helper-id")).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+        ContainerLifecycleManager manager = manager();
+
+        assertEquals("container-id", manager.create(readOnlySpecWithEnv(List.of())));
+        assertEquals("container-id-2", manager.create(readOnlySpecWithEnv(List.of())));
+
+        verify(createVolume, times(1)).exec();
+        verify(copyCmd, times(1)).exec();
+    }
+
+    @Test
+    void aBundleVolumeThatCannotBeFilledLeavesTheContainerItsOwnTrust() throws Exception {
+        // As after a failed copy: SSL_CERT_FILE and friends must never name a file that is not there.
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+        stubMissingVolume();
+        CreateContainerCmd createCmd = stubCreateContainers("helper-id", "container-id");
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("helper-id")).thenReturn(copyCmd);
+        when(copyCmd.exec()).thenThrow(new NotFoundException("Could not find the file /floci-ca-bundle"));
+        RemoveContainerCmd removeHelper = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("helper-id")).thenReturn(removeHelper);
+
+        assertEquals("container-id", manager().create(readOnlySpecWithEnv(List.of("FOO=bar"))));
+
+        verify(removeHelper).exec();
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> env = ArgumentCaptor.forClass((Class<List<String>>) (Class<?>) List.class);
+        verify(createCmd).withEnv(env.capture());
+        assertEquals(List.of("FOO=bar"), env.getValue());
+        ArgumentCaptor<HostConfig> hostConfigs = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd, times(2)).withHostConfig(hostConfigs.capture());
+        HostConfig container = hostConfigs.getAllValues().get(1);
+        assertFalse(container.getMounts() != null
+                && container.getMounts().stream().anyMatch(m -> "/etc/floci-ca".equals(m.getTarget())));
+    }
+
+    private CreateVolumeCmd stubMissingVolume() {
+        InspectVolumeCmd inspect = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd(anyString())).thenReturn(inspect);
+        when(inspect.exec()).thenThrow(new NotFoundException("missing"));
+        CreateVolumeCmd create = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(create);
+        return create;
+    }
+
+    /** One create command for busybox:stable whose successive calls answer each id in turn. */
+    private CreateContainerCmd stubCreateContainers(String... ids) {
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        List<CreateContainerResponse> responses = new ArrayList<>();
+        for (String id : ids) {
+            CreateContainerResponse response = mock(CreateContainerResponse.class);
+            when(response.getId()).thenReturn(id);
+            responses.add(response);
+        }
+        when(createCmd.exec()).thenReturn(responses.getFirst(),
+                responses.subList(1, responses.size()).toArray(new CreateContainerResponse[0]));
+        return createCmd;
+    }
+
+    private static ContainerSpec readOnlySpecWithEnv(List<String> env) {
+        return new ContainerSpec("busybox:stable", null, env, null, null, null, Map.of(), List.of(), List.of(),
+                null, List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null,
+                null, List.of(), List.of(), null, null, true, List.of(), Map.of(), false);
     }
 
     private Path writeBundle() throws Exception {

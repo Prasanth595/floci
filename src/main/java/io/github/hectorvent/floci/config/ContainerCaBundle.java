@@ -49,6 +49,14 @@ public final class ContainerCaBundle {
     public static final String FILE_NAME = "floci-ca-bundle.pem";
     public static final String CONTAINER_DIR = "/etc";
     public static final String CONTAINER_PATH = CONTAINER_DIR + "/" + FILE_NAME;
+    /**
+     * Where a container whose root filesystem is read-only finds the bundle: Docker refuses a copy into
+     * such a container, so the bundle reaches it in a volume mounted read-only here instead.
+     */
+    public static final String VOLUME_DIR = "/etc/floci-ca";
+    public static final String VOLUME_PATH = VOLUME_DIR + "/" + FILE_NAME;
+    /** The named volume holding a bundle starts with this, followed by a digest of the bundle's content. */
+    public static final String VOLUME_PREFIX = "floci-ca-bundle-";
 
     static final List<String> ENV_KEYS = List.of(
             "SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "AWS_CA_BUNDLE");
@@ -147,10 +155,15 @@ public final class ContainerCaBundle {
      * without a value), so a value from a function or task definition always wins.
      */
     public static List<String> appendEnv(List<String> env) {
+        return appendEnv(env, CONTAINER_PATH);
+    }
+
+    /** {@link #appendEnv(List)} for a bundle at {@code path}, such as {@link #VOLUME_PATH}. */
+    public static List<String> appendEnv(List<String> env, String path) {
         List<String> merged = new ArrayList<>(env == null ? List.of() : env);
         for (String key : ENV_KEYS) {
             if (merged.stream().noneMatch(entry -> entry.equals(key) || entry.startsWith(key + "="))) {
-                merged.add(key + "=" + CONTAINER_PATH);
+                merged.add(key + "=" + path);
             }
         }
         return merged;
