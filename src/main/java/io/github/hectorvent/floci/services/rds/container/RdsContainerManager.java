@@ -51,7 +51,7 @@ import java.util.regex.Pattern;
 /**
  * Manages backend Docker container lifecycle for RDS DB instances and clusters.
  * Starts postgres/mysql/mariadb containers and resolves the backend host:port for the auth proxy.
- * Every client of a container enters it through {@link #enter}, which is how an Aurora Serverless
+ * Every client of a container enters it through {@link #enterRuntime(String)}, which is how an Aurora Serverless
  * v2 cluster with MinCapacity 0 knows when it is idle enough to pause and when to resume.
  */
 @ApplicationScoped
