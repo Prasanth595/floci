@@ -205,9 +205,9 @@ public final class SigV4RequestValidator {
 
     /**
      * When a token stops being valid, before any grace its service allows: its {@code X-Amz-Date}
-     * plus {@code X-Amz-Expires} seconds, or empty when either is missing or does not parse. A
-     * caller that reports the expiry, as Aurora DSQL's hint does, reads it here, so it reports the
-     * one {@link #validate} judged.
+     * plus {@code X-Amz-Expires} seconds, or empty when either is missing or does not parse, the
+     * seconds as an {@code int}. A caller that reports the expiry, as Aurora DSQL's hint does, reads
+     * it here, so it reports the one {@link #validate} judged.
      */
     public static Optional<Instant> expiry(String rawQuery) {
         List<QueryParameter> parameters = decodeQuery(rawQuery);
@@ -219,10 +219,10 @@ public final class SigV4RequestValidator {
             return Optional.empty();
         }
         try {
-            return Optional.of(Instant.from(DATETIME_FMT.parse(dateTime)).plusSeconds(Long.parseLong(expires)));
-        } catch (DateTimeException | ArithmeticException | NumberFormatException ignored) {
-            // A date or an expiry that does not parse, or one past what an Instant holds, sets no
-            // expiry: the token it came with is refused.
+            return Optional.of(Instant.from(DATETIME_FMT.parse(dateTime)).plusSeconds(Integer.parseInt(expires)));
+        } catch (DateTimeException | NumberFormatException ignored) {
+            // A date or an expiry that does not parse sets no expiry, so the token it came with is
+            // refused: one of more seconds than an int holds included, as validate always refused it.
             return Optional.empty();
         }
     }

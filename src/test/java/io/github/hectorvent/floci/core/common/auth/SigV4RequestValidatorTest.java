@@ -188,10 +188,29 @@ class SigV4RequestValidatorTest {
             "X-Amz-Expires=900",
             "X-Amz-Date=20261022T101530Z&X-Amz-Expires=soon",
             "X-Amz-Date=yesterday&X-Amz-Expires=900",
-            "X-Amz-Date=20261022T101530Z&X-Amz-Expires=99999999999999999999",
+            "X-Amz-Date=20261022T101530Z&X-Amz-Expires=2147483648",
             "X-Amz-Date=20261022T101530Z&X-Amz-Expires=9223372036854775807"})
     void expiryIsEmptyWithoutADateAndAnExpiryThatParse(String rawQuery) {
         assertEquals(Optional.empty(), SigV4RequestValidator.expiry(rawQuery));
+    }
+
+    /**
+     * A signed token whose expiry is more seconds than an int holds is refused, as it always was,
+     * while the same token one second shorter is taken.
+     */
+    @Test
+    void validateRefusesASignedTokenWhoseExpiryIsPastAnInt() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDDSQL", "secret-dsql");
+        SigV4RequestValidator validator = new SigV4RequestValidator(iamService);
+        String host = "abc.dsql.eu-west-1.localhost.floci.io";
+        for (long expires : new long[] {Integer.MAX_VALUE, Integer.MAX_VALUE + 1L}) {
+            String token = SigV4TokenTestHelper.createDsqlToken(host, "eu-west-1", "DbConnectAdmin", "AKIDDSQL",
+                    "secret-dsql", Instant.now(), expires, null);
+            String rawQuery = token.substring(token.indexOf('?') + 1);
+
+            assertEquals(expires == Integer.MAX_VALUE, validator.validate(rawQuery, host, "DbConnectAdmin", "DBUser",
+                    false, null, "DSQL IAM token", null, Duration.ofSeconds(5)), "X-Amz-Expires=" + expires);
+        }
     }
 
     private static boolean validate(IamService iamService, String token) {
