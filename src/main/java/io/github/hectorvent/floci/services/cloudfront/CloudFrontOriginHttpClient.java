@@ -189,7 +189,9 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
      * attempted once for it, as CloudFront does not retry it. When the attempts run out, a timeout
      * raises {@link CloudFrontOriginTimeoutException} so the viewer is answered 504 rather than
      * 502, while a refused connection propagates unchanged, as a bad gateway. The completion
-     * timeout bounds the whole request, retries included, and is never retried.
+     * timeout bounds the time the origin takes, connecting, answering and streaming the body
+     * included, over every attempt, and is never retried. The time a slow viewer takes to receive
+     * the response is not part of it: the origin answered in time, so the request did not expire.
      */
     OpenResponse open(HttpRequest request,
                       List<CloudFrontOriginRequestBuilder.Header> forwardedHeaders,
@@ -202,21 +204,35 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                 CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
                 CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
         int attempts = Math.max(1, effective.connectionAttempts());
-        long deadlineNanos = completionDeadline(effective.responseCompletionTimeout());
+        CompletionBudget budget = new CompletionBudget(effective.responseCompletionTimeout());
         IOException lastFailure = null;
         for (int attempt = 1; attempt <= attempts; attempt++) {
+            if (budget.expired()) {
+                // The origin already took the time the completion timeout allows: another attempt
+                // would only push the viewer further past it.
+                throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE);
+            }
+            boolean responseTimeout = false;
             try {
                 return send(request, forwardedHeaders, originHeaders, requestBody, requestBodyLength,
-                        effective, deadlineNanos);
+                        effective, budget);
             } catch (ConnectTimeoutException e) {
+                // A connection attempt counts for every method, so a connect timeout is retried.
                 lastFailure = e;
             } catch (SocketTimeoutException e) {
-                if (!idempotent(request.method())) {
-                    throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE, e);
-                }
                 lastFailure = e;
+                responseTimeout = true;
             } catch (ConnectException e) {
                 lastFailure = e;
+            }
+            if (budget.expired()) {
+                // The origin took the time the completion timeout allows, so the request is
+                // expired rather than merely slow.
+                throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE, lastFailure);
+            }
+            if (responseTimeout && !idempotent(request.method())) {
+                // A response timeout on a method CloudFront does not retry ends the request.
+                throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE, lastFailure);
             }
             if (attempt < attempts) {
                 LOG.debugv("CloudFront origin connection attempt {0} of {1} failed; retrying",
@@ -230,29 +246,58 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     }
 
     /**
-     * The instant the origin request has to be complete by, or 0 when the origin may take as long
-     * as it wants. The deadline covers the whole request to the origin, not each read of it.
+     * The time CloudFront waits for the origin, bounded by the completion timeout. The budget
+     * counts the time the origin itself takes: connecting, sending the response, and streaming the
+     * body. The time a slow viewer takes to receive what the origin sent is not part of it, so a
+     * viewer that reads slowly never expires a response the origin finished on time. A budget with
+     * no limit is the origin's own pace.
      */
-    private static long completionDeadline(Duration responseCompletionTimeout) {
-        if (responseCompletionTimeout == null || responseCompletionTimeout.isZero()
-                || responseCompletionTimeout.isNegative()) {
-            return 0;
+    private static final class CompletionBudget {
+
+        /** The time the origin may take, in nanoseconds, or 0 when it may take as long as it wants. */
+        private final long limitNanos;
+        /** The time the origin has taken so far, in nanoseconds. */
+        private long spentNanos;
+
+        CompletionBudget(Duration responseCompletionTimeout) {
+            this.limitNanos = responseCompletionTimeout == null || responseCompletionTimeout.isZero()
+                    || responseCompletionTimeout.isNegative() ? 0 : responseCompletionTimeout.toNanos();
         }
-        return System.nanoTime() + responseCompletionTimeout.toNanos();
+
+        /** Whether the origin may take as long as it wants. */
+        boolean unlimited() {
+            return limitNanos == 0;
+        }
+
+        /** Adds the time the origin just took. */
+        void spend(long nanos) {
+            spentNanos += nanos;
+        }
+
+        /** Whether the origin has taken the whole time the completion timeout allows. */
+        boolean expired() {
+            return limitNanos > 0 && spentNanos >= limitNanos;
+        }
+
+        /** How much of the budget is left, in nanoseconds. */
+        long remainingNanos() {
+            return limitNanos > 0 ? Math.max(0L, limitNanos - spentNanos) : 0L;
+        }
     }
 
     private OpenResponse send(HttpRequest request,
                               List<CloudFrontOriginRequestBuilder.Header> forwardedHeaders,
                               Map<String, String> originHeaders, InputStream requestBody, long requestBodyLength,
-                              OriginTimeouts timeouts, long deadlineNanos)
+                              OriginTimeouts timeouts, CompletionBudget budget)
             throws IOException, InterruptedException {
         // No entity content type: the caller's Content-Type request header is sent as is.
         HttpUriRequestBase originRequest = originRequest(request, forwardedHeaders, originHeaders,
                 requestBody != null ? new InputStreamEntity(requestBody, requestBodyLength, null) : null);
         ClassicHttpResponse response;
+        long attemptStart = System.nanoTime();
         try {
             response = client.executeOpen(RoutingSupport.determineHost(originRequest), originRequest,
-                    context(timeouts, deadlineNanos));
+                    context(timeouts, budget));
         } catch (HttpException e) {
             throw new IOException("CloudFront origin request has no target host", e);
         } catch (InterruptedIOException e) {
@@ -260,6 +305,10 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                 throw new InterruptedException("CloudFront origin request interrupted");
             }
             throw e;
+        } finally {
+            // The time the origin took to connect and to answer is part of the time CloudFront
+            // waits for it.
+            budget.spend(System.nanoTime() - attemptStart);
         }
         try {
             HttpEntity entity = response.getEntity();
@@ -269,13 +318,13 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
             // The entity's length follows the framing the body arrives with; with no entity, as for a
             // HEAD, the header describes the body a GET would get.
             long contentLength = entity != null ? entity.getContentLength() : headerContentLength(response);
-            if (deadlineNanos > 0) {
-                if (System.nanoTime() > deadlineNanos) {
-                    // The origin answered, but too late: the request has already expired.
-                    body.close();
-                    throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE);
-                }
-                body = new CompletionTimeoutInputStream(body, deadlineNanos);
+            if (budget.expired()) {
+                // The origin answered, but too late: the request has already expired.
+                body.close();
+                throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE);
+            }
+            if (!budget.unlimited()) {
+                body = new CompletionTimeoutInputStream(body, budget);
             }
             return new OpenResponse(response.getCode(), responseHeaders(response), contentLength, body);
         } catch (IOException | RuntimeException e) {
@@ -339,20 +388,21 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
      * An origin response body that gives up when the origin's completion timeout expires, so a
      * response that trickles in forever does not hold the viewer request open. The origin
      * connection goes with it: CloudFront ends the connection when the origin does not complete
-     * the response in time.
+     * the response in time. Only the time the origin takes counts against the timeout, so a viewer
+     * that reads slowly never loses a response the origin finished on time.
      */
     private static final class CompletionTimeoutInputStream extends FilterInputStream {
 
-        private final long deadlineNanos;
+        private final CompletionBudget budget;
         private boolean closed;
 
-        CompletionTimeoutInputStream(InputStream delegate, long deadlineNanos) {
+        CompletionTimeoutInputStream(InputStream delegate, CompletionBudget budget) {
             super(delegate);
-            this.deadlineNanos = deadlineNanos;
+            this.budget = budget;
         }
 
-        private void checkDeadline() throws IOException {
-            if (System.nanoTime() > deadlineNanos) {
+        private void checkExpired() throws IOException {
+            if (budget.expired()) {
                 close();
                 throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE);
             }
@@ -360,22 +410,44 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
 
         @Override
         public int read() throws IOException {
-            checkDeadline();
-            int value = super.read();
-            if (value >= 0) {
-                checkDeadline();
+            checkExpired();
+            long start = System.nanoTime();
+            try {
+                int value = super.read();
+                budget.spend(System.nanoTime() - start);
+                if (value >= 0) {
+                    checkExpired();
+                }
+                return value;
+            } catch (SocketTimeoutException e) {
+                budget.spend(System.nanoTime() - start);
+                if (budget.expired()) {
+                    close();
+                    throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE, e);
+                }
+                throw e;
             }
-            return value;
         }
 
         @Override
         public int read(byte[] buffer, int offset, int length) throws IOException {
-            checkDeadline();
-            int read = super.read(buffer, offset, length);
-            if (read >= 0) {
-                checkDeadline();
+            checkExpired();
+            long start = System.nanoTime();
+            try {
+                int read = super.read(buffer, offset, length);
+                budget.spend(System.nanoTime() - start);
+                if (read >= 0) {
+                    checkExpired();
+                }
+                return read;
+            } catch (SocketTimeoutException e) {
+                budget.spend(System.nanoTime() - start);
+                if (budget.expired()) {
+                    close();
+                    throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE, e);
+                }
+                throw e;
             }
-            return read;
         }
 
         @Override
@@ -490,21 +562,23 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         return builder;
     }
 
-    private static HttpClientContext context(OriginTimeouts timeouts, long deadlineNanos)
+    private static HttpClientContext context(OriginTimeouts timeouts, CompletionBudget budget)
             throws CloudFrontOriginTimeoutException {
         HttpClientContext context = HttpClientContext.create();
+        Duration connectTimeout = timeouts.connectTimeout();
         Duration responseTimeout = timeouts.responseTimeout();
-        if (deadlineNanos > 0) {
-            long remainingNanos = deadlineNanos - System.nanoTime();
-            if (remainingNanos <= 0) {
+        if (!budget.unlimited()) {
+            if (budget.expired()) {
                 throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE);
             }
-            // The read timeout never outlives the completion timeout: the request expires first.
-            long remainingMillis = Math.max(1L, remainingNanos / 1_000_000L);
+            // Neither the connection nor the response outlives the completion timeout: the origin
+            // runs out of time before the request does.
+            long remainingMillis = Math.max(1L, budget.remainingNanos() / 1_000_000L);
+            connectTimeout = Duration.ofMillis(Math.min(connectTimeout.toMillis(), remainingMillis));
             responseTimeout = Duration.ofMillis(Math.min(responseTimeout.toMillis(), remainingMillis));
         }
         context.setRequestConfig(RequestConfig.custom()
-                .setConnectTimeout(Timeout.of(timeouts.connectTimeout()))
+                .setConnectTimeout(Timeout.of(connectTimeout))
                 // Waiting for a free pooled connection is emulator-side backpressure, not an origin
                 // setting, so it keeps the fixed default rather than the origin's connect timeout.
                 .setConnectionRequestTimeout(Timeout.of(CONNECT_TIMEOUT))

@@ -827,6 +827,34 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void updateDistributionRejectsAResponseCompletionTimeoutShorterThanTheReadTimeout() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        Distribution existing = service.createDistribution(
+                distributionWithCustomOrigin(origin -> { }), Map.of());
+
+        AwsException below = assertAws("InvalidArgument", () -> service.updateDistribution(
+                existing.getId(), existing.getEtag(),
+                distributionWithCustomOrigin(origin -> {
+                    origin.getCustomOriginConfig().put("OriginReadTimeout", 30);
+                    origin.setResponseCompletionTimeout(29);
+                })));
+        assertEquals("The parameter ResponseCompletionTimeout must be greater than or equal to"
+                + " OriginReadTimeout.", below.getMessage());
+        assertEquals(400, below.getHttpStatus());
+
+        AwsException negative = assertAws("InvalidArgument", () -> service.updateDistribution(
+                existing.getId(), existing.getEtag(),
+                distributionWithCustomOrigin(origin -> origin.setResponseCompletionTimeout(-1))));
+        assertEquals("The parameter ResponseCompletionTimeout must be a non-negative integer.",
+                negative.getMessage());
+        assertEquals(400, negative.getHttpStatus());
+
+        // The rejected updates left the distribution as it was.
+        Origin origin = service.getDistribution(existing.getId()).getConfig().getOrigins().getFirst();
+        assertNull(origin.getResponseCompletionTimeout());
+    }
+
+    @Test
     void createDistributionAcceptsOriginSettingsWithinTheAwsRange() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
 
