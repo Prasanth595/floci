@@ -14,7 +14,9 @@ and a group remains encrypted when its last user group is removed. Serverless Re
 endpoints also require TLS. Unencrypted caches and Memcached retain their existing transport.
 
 The cache listener uses a server certificate issued by Floci's shared local CA, including
-`localhost`, `127.0.0.1`, the configured Floci hostname and cluster-announce hostname.
+the default Floci endpoint names, IPv4 and IPv6 loopback, `host.docker.internal`,
+the `floci.base-url` host, and the configured Floci and cluster-announce hostnames.
+The listener renews its leaf certificate before expiry while retaining the same trusted CA.
 Trust `{persistent-path}/tls/floci-root-ca.crt` or the CA from `GET /_floci/ca.pem`.
 The main HTTP listener's TLS setting does not disable cache transit encryption.
 

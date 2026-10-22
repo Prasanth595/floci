@@ -16,7 +16,7 @@ import java.net.Socket;
 import java.security.KeyStore;
 
 /** Real CA validation for cache data-plane tests; never uses a trust-all manager. */
-final class ElastiCacheTestConnections {
+public final class ElastiCacheTestConnections {
     private ElastiCacheTestConnections() {}
 
     static Socket openSocket(String host, int port) throws IOException {
@@ -49,13 +49,7 @@ final class ElastiCacheTestConnections {
         }
         try {
             FlociCertificateAuthority authority = CDI.current().select(FlociCertificateAuthority.class).get();
-            KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
-            trust.load(null, null);
-            trust.setCertificateEntry("floci", authority.certificate());
-            TrustManagerFactory managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            managers.init(trust);
-            SSLContext context = SSLContext.getInstance("TLS");
-            context.init(null, managers.getTrustManagers(), null);
+            SSLContext context = trustedContext(authority);
             SSLSocket socket = (SSLSocket) context.getSocketFactory().createSocket(host, port);
             SSLParameters parameters = socket.getSSLParameters();
             parameters.setEndpointIdentificationAlgorithm("HTTPS");
@@ -66,5 +60,16 @@ final class ElastiCacheTestConnections {
         } catch (Exception e) {
             throw new IOException("Could not establish a trusted cache TLS connection", e);
         }
+    }
+
+    public static SSLContext trustedContext(FlociCertificateAuthority authority) throws Exception {
+        KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
+        trust.load(null, null);
+        trust.setCertificateEntry("floci", authority.certificate());
+        TrustManagerFactory managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        managers.init(trust);
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, managers.getTrustManagers(), null);
+        return context;
     }
 }

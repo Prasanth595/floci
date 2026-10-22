@@ -2,14 +2,16 @@ package io.github.hectorvent.floci.services.elasticache.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
-import javax.net.ssl.TrustManagerFactory;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -18,11 +20,11 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.security.KeyStore;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static io.github.hectorvent.floci.services.elasticache.ElastiCacheTestConnections.trustedContext;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -34,22 +36,12 @@ class ElastiCacheTlsProxyTest {
     @TempDir
     Path directory;
 
-    private static SSLContext trusted(FlociCertificateAuthority authority) throws Exception {
-        KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
-        trust.load(null, null);
-        trust.setCertificateEntry("floci", authority.certificate());
-        TrustManagerFactory managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        managers.init(trust);
-        SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, managers.getTrustManagers(), null);
-        return context;
-    }
-
     private ElastiCacheAuthProxy proxy(FlociCertificateAuthority authority, int backendPort) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.hostname()).thenReturn(Optional.of("cache.test"));
+        when(config.baseUrl()).thenReturn("https://base.test:4566");
         when(config.services().elasticache().clusterAnnounceHostname()).thenReturn(Optional.of("nodes.test"));
-        ElastiCacheTlsCertificates certificates = new ElastiCacheTlsCertificates(authority, config);
+        ElastiCacheTlsCertificates certificates = new ElastiCacheTlsCertificates(authority, config, new CertificateGenerator());
         return new ElastiCacheAuthProxy("tls-test", AuthMode.PASSWORD, "127.0.0.1", backendPort,
                 new ElastiCacheAuthProxy.PasswordValidator() {
                     @Override
@@ -64,8 +56,10 @@ class ElastiCacheTlsProxyTest {
                 }, mock(SigV4Validator.class), certificates::sslContext);
     }
 
-    @Test
-    void tlsVerifiesTheSharedCaAndEndpointNameThenAuthenticatesAndRelays() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"cache.test", "nodes.test", "base.test", "host.docker.internal",
+            "localhost", "127.0.0.1", "0.0.0.0", "::1", "localhost.floci.io"})
+    void tlsVerifiesTheSharedCaAndEndpointNameThenAuthenticatesAndRelays(String hostname) throws Exception {
         FlociCertificateAuthority authority = FlociCertificateAuthority.loadOrCreate(directory);
         try (ServerSocket backend = new ServerSocket(0)) {
             CompletableFuture<String> received = CompletableFuture.supplyAsync(() -> {
@@ -83,8 +77,8 @@ class ElastiCacheTlsProxyTest {
             proxy.start(0);
             int port = proxy.localPort();
             try (Socket tcp = new Socket("127.0.0.1", port);
-                    SSLSocket client = (SSLSocket) trusted(authority).getSocketFactory()
-                            .createSocket(tcp, "cache.test", port, true)) {
+                    SSLSocket client = (SSLSocket) trustedContext(authority).getSocketFactory()
+                            .createSocket(tcp, hostname, port, true)) {
                 SSLParameters parameters = client.getSSLParameters();
                 parameters.setEndpointIdentificationAlgorithm("HTTPS");
                 client.setSSLParameters(parameters);
@@ -137,7 +131,7 @@ class ElastiCacheTlsProxyTest {
             int port = proxy.localPort();
             try {
                 for (boolean wrongName : new boolean[]{false, true}) {
-                    SSLContext context = trusted(wrongName ? authority : wrong);
+                    SSLContext context = trustedContext(wrongName ? authority : wrong);
                     try (Socket tcp = new Socket("127.0.0.1", port);
                             SSLSocket client = (SSLSocket) context.getSocketFactory().createSocket(tcp,
                                     wrongName ? "wrong.test" : "cache.test", port, true)) {
