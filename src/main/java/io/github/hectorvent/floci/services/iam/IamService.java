@@ -817,6 +817,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return accessKeys.get(accessKeyId).map(AccessKey::getUserName);
     }
 
+    /** The account this request's IAM entities are read from, or null outside account-aware storage. */
+    public String requestAccountId() {
+        return users instanceof AccountAwareStorageBackend<IamUser> aware ? aware.accountId() : null;
+    }
+
     /**
      * The owner of a key in the calling account, for a read that is not the owner's own request.
      * Unlike {@link #findUserNameByAccessKeyId}, this never migrates: an unprefixed

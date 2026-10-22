@@ -109,7 +109,7 @@ A role `Description` is held to the shape AWS publishes for it on every action t
 omitted and reject a value outside 1 to 1000. `PathPrefix` and `Scope` filter before paging, and
 roles, users, groups and customer managed policies are listed in name order so a `Marker` resumes
 where the previous page stopped. `ListUsers`, `ListGroups` and the attached and inline policy lists
-accept only a `Marker` issued by the same action for the same principal; any other value, a bare
+accept only a `Marker` issued by the same action for the same principal in the same account; any other value, a bare
 number included, is `InvalidInput`.
 `ListPolicies` does not yet apply `OnlyAttached` or `PolicyUsageFilter`.
 

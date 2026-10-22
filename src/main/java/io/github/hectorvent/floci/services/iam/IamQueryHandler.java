@@ -2805,14 +2805,15 @@ public class IamQueryHandler {
 
     /**
      * {@link #paginate} for a listing whose markers this handler has only ever issued signed. The
-     * marker's cursor carries {@code scope} (the action, and the principal for a per-principal
-     * list), so only a marker issued by this same listing resumes it: an unsigned marker, or one
-     * issued by another action or for another principal, is {@code InvalidInput} rather than an
-     * offset or a cursor into a list it never described.
+     * marker's cursor carries the request's account and {@code scope} (the action, and the
+     * principal for a per-principal list), so only a marker issued by this same listing resumes
+     * it: an unsigned marker, or one issued in another account, by another action or for another
+     * principal, is {@code InvalidInput} rather than an offset or a cursor into a list it never
+     * described.
      */
     private <T> Page<T> paginateScoped(List<T> items, Function<T, String> keyOf,
                                        MultivaluedMap<String, String> params, String scope) {
-        String prefix = scope + "\0";
+        String prefix = iamService.requestAccountId() + "\0" + scope + "\0";
         String marker = params.getFirst("Marker");
         if (marker != null && !marker.isBlank()) {
             String cursor = markers.cursorOf(marker.trim());

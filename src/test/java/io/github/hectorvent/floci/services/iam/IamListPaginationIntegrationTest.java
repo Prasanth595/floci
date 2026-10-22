@@ -620,4 +620,59 @@ class IamListPaginationIntegrationTest {
             deleteRole(roleB);
         }
     }
+
+    /** IAM is per account, so a marker from one account's listing does not resume another's. */
+    @Test
+    void aMarkerFromAnotherAccountIsRejected() {
+        String accountA = "AWS4-HMAC-SHA256 Credential=111111111111/20260227/us-east-1/iam/aws4_request";
+        String accountB = "AWS4-HMAC-SHA256 Credential=222222222222/20260227/us-east-1/iam/aws4_request";
+        String tag = suffix();
+        String path = "/pg-account-" + tag + "/";
+        List<String> names = List.of("pg-account-" + tag + "-0", "pg-account-" + tag + "-1");
+        for (String account : List.of(accountA, accountB)) {
+            for (String name : names) {
+                given().header("Authorization", account).formParam("Action", "CreateUser")
+                        .formParam("UserName", name).formParam("Path", path)
+                .when().post("/").then().statusCode(200);
+                given().header("Authorization", account).formParam("Action", "PutUserPolicy")
+                        .formParam("UserName", names.getFirst()).formParam("PolicyName", name)
+                        .formParam("PolicyDocument", POLICY_DOCUMENT)
+                .when().post("/").then().statusCode(200);
+            }
+        }
+        try {
+            String usersMarker = page("ListUsers", "Users", "UserName", given().header("Authorization", accountA)
+                    .formParam("Action", "ListUsers").formParam("PathPrefix", path).formParam("MaxItems", "1")).marker();
+            String inlineMarker = given().header("Authorization", accountA).formParam("Action", "ListUserPolicies")
+                    .formParam("UserName", names.getFirst()).formParam("MaxItems", "1")
+                .when().post("/").then().statusCode(200).extract()
+                    .path("ListUserPoliciesResponse.ListUserPoliciesResult.Marker");
+            assertNotNull(usersMarker);
+            assertNotNull(inlineMarker);
+
+            given().header("Authorization", accountB).formParam("Action", "ListUsers")
+                    .formParam("PathPrefix", path).formParam("Marker", usersMarker)
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+            given().header("Authorization", accountB).formParam("Action", "ListUserPolicies")
+                    .formParam("UserName", names.getFirst()).formParam("Marker", inlineMarker)
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+        } finally {
+            for (String account : List.of(accountA, accountB)) {
+                for (String name : names) {
+                    given().header("Authorization", account).formParam("Action", "DeleteUserPolicy")
+                            .formParam("UserName", names.getFirst()).formParam("PolicyName", name)
+                    .when().post("/").then().statusCode(200);
+                }
+                for (String name : names) {
+                    given().header("Authorization", account).formParam("Action", "DeleteUser")
+                            .formParam("UserName", name)
+                    .when().post("/").then().statusCode(200);
+                }
+            }
+        }
+    }
 }
