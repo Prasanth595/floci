@@ -28,13 +28,7 @@ public final class DsqlWireClient implements AutoCloseable {
 
     /** Signs in to the endpoint on {@code port} as {@code user}, naming {@code host} as the server. */
     public DsqlWireClient(int port, String host, String user, String password) throws Exception {
-        Socket plain = new Socket("127.0.0.1", port);
-        plain.getOutputStream().write(PostgresWire.int32(8));
-        plain.getOutputStream().write(PostgresWire.int32(PostgresWire.SSL_REQUEST));
-        assertEquals('S', plain.getInputStream().read());
-        socket = new NonValidatingFactory(null).createSocket(plain, host, port, true);
-        in = new BufferedInputStream(socket.getInputStream());
-        out = socket.getOutputStream();
+        this(port, host);
         Map<String, String> startup = new LinkedHashMap<>();
         startup.put("user", user);
         startup.put("database", "postgres");
@@ -42,6 +36,26 @@ public final class DsqlWireClient implements AutoCloseable {
         assertEquals('R', PostgresWire.read(in, Integer.MAX_VALUE, "message").type());
         send(message('p', PostgresWire.cStringBytes(password)));
         untilReady();
+    }
+
+    private DsqlWireClient(int port, String host) throws Exception {
+        Socket plain = new Socket("127.0.0.1", port);
+        plain.getOutputStream().write(PostgresWire.int32(8));
+        plain.getOutputStream().write(PostgresWire.int32(PostgresWire.SSL_REQUEST));
+        assertEquals('S', plain.getInputStream().read());
+        socket = new NonValidatingFactory(null).createSocket(plain, host, port, true);
+        in = new BufferedInputStream(socket.getInputStream());
+        out = socket.getOutputStream();
+    }
+
+    /** TLS to the endpoint on {@code port}, naming {@code host}, and nothing sent on it yet: no startup packet. */
+    public static DsqlWireClient tls(int port, String host) throws Exception {
+        return new DsqlWireClient(port, host);
+    }
+
+    /** The next message the endpoint sends; an {@link IOException} once it has closed the connection. */
+    public PostgresWire.Message next() throws IOException {
+        return PostgresWire.read(in, Integer.MAX_VALUE, "message");
     }
 
     public void send(byte[]... messages) throws IOException {

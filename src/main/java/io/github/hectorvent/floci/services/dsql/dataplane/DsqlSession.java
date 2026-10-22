@@ -43,9 +43,14 @@ import java.util.stream.Stream;
 final class DsqlSession {
 
     static final Duration CONNECTION_LIFETIME = Duration.ofHours(1);
-    // A startup packet is refused above PostgreSQL's own limit, 10,000 bytes, and a message above 64 MB.
-    private static final int MAX_STARTUP = 10_000;
-    private static final int MAX_MESSAGE = 64 * 1024 * 1024;
+    // DSQL's (measured): a startup packet of 10,000 bytes or more, and a client message over 10 MiB,
+    // are refused with a FATAL before the connection closes. What the database sends is not DSQL's
+    // limit to apply, and is read up to 64 MB.
+    private static final int MAX_STARTUP = 9_999;
+    private static final int MAX_CLIENT_MESSAGE = 10 * 1024 * 1024;
+    private static final int MAX_DATABASE_MESSAGE = 64 * 1024 * 1024;
+    private static final String INVALID_STARTUP_LENGTH = "invalid length of startup packet";
+    private static final String INVALID_MESSAGE_LENGTH = "invalid message length";
     private static final String SERIALIZATION_FAILURE = "40001";
     private static final String QUERY_CANCELED = "57014";
     private static final String ACCESS_DENIED = "unable to accept connection, access denied";
@@ -139,7 +144,13 @@ final class DsqlSession {
 
         InputStream in = new BufferedInputStream(tls.getInputStream());
         OutputStream out = new BufferedOutputStream(tls.getOutputStream());
-        PostgresWire.Startup startup = PostgresWire.readStartup(in, MAX_STARTUP, "startup message");
+        PostgresWire.Startup startup;
+        try {
+            startup = PostgresWire.readStartup(in, MAX_STARTUP, "startup message");
+        } catch (PostgresWire.InvalidLengthException e) {
+            refuse(out, "08P01", INVALID_STARTUP_LENGTH, null);
+            return;
+        }
         if (startup.code() == PostgresWire.CANCEL_REQUEST) {
             endpoint.forwardCancel(startup.body());
             return;
@@ -154,7 +165,13 @@ final class DsqlSession {
 
         PostgresWire.write(out, (byte) 'R', PostgresWire.int32(3));
         out.flush();
-        PostgresWire.Message password = PostgresWire.read(in, MAX_MESSAGE, "message");
+        PostgresWire.Message password;
+        try {
+            password = PostgresWire.read(in, MAX_CLIENT_MESSAGE, "message");
+        } catch (PostgresWire.InvalidLengthException e) {
+            refuse(out, "08P01", INVALID_MESSAGE_LENGTH, null);
+            return;
+        }
         if (password.type() != 'p') {
             refuse(out, "08006", ACCESS_DENIED, null);
             return;
@@ -228,7 +245,13 @@ final class DsqlSession {
 
     private void relayToBackend(InputStream in, OutputStream backendOut) throws IOException {
         while (true) {
-            PostgresWire.Message message = PostgresWire.read(in, MAX_MESSAGE, "message");
+            PostgresWire.Message message;
+            try {
+                message = PostgresWire.read(in, MAX_CLIENT_MESSAGE, "message");
+            } catch (PostgresWire.InvalidLengthException e) {
+                close("FATAL", "08P01", INVALID_MESSAGE_LENGTH, "Session Id: " + sessionId);
+                return;
+            }
             if (message.type() != 'X') {
                 lastClientMessage = now();
                 if (transactionStatus == 'T' && pastAgeLimit()) {
@@ -579,7 +602,7 @@ final class DsqlSession {
             List<PostgresWire.Message> startup = new ArrayList<>();
             boolean started = false;
             while (true) {
-                PostgresWire.Message message = PostgresWire.read(backendIn, MAX_MESSAGE, "message");
+                PostgresWire.Message message = PostgresWire.read(backendIn, MAX_DATABASE_MESSAGE, "message");
                 if (!started) {
                     // DSQL refuses a connection instead of authenticating it, so what the database
                     // answers the startup waits for its ReadyForQuery, and a refusal takes its place.

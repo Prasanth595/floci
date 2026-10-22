@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.dsql;
 
 import com.github.dockerjava.api.DockerClient;
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.dsql.dataplane.DsqlEndpoint;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
@@ -18,13 +19,16 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.postgresql.util.PSQLException;
 import org.postgresql.util.PSQLWarning;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -135,6 +139,52 @@ class DsqlDataPlaneIntegrationTest {
         assertEquals("database \"other\" is not currently accepting connections",
                 otherDatabase.getServerErrorMessage().getMessage());
         assertEquals("55000", otherDatabase.getSQLState());
+    }
+
+    /**
+     * DSQL's limits (measured): a startup packet of 10,000 bytes or more, or under 8, and a client
+     * message over 10 MiB or under 4, are refused as soon as their length arrives, before signing in
+     * and after, and the connection closes.
+     */
+    @Test
+    void aPacketOutsideDsqlsLimitsIsRefusedAsItsLengthArrives() throws Exception {
+        try (DsqlWireClient client = DsqlWireClient.tls(endpoint.port(), cluster.host())) {
+            client.send(startupOfLength(9_999));
+            PostgresWire.Message password = client.next();
+            assertEquals('R', password.type());
+            assertEquals(3, PostgresWire.int32(password.body(), 0));
+        }
+        try (DsqlWireClient client = DsqlWireClient.tls(endpoint.port(), cluster.host())) {
+            client.send(startupOfLength(10_000));
+            assertRefused(client, "invalid length of startup packet");
+        }
+        try (DsqlWireClient client = DsqlWireClient.tls(endpoint.port(), cluster.host())) {
+            client.send(PostgresWire.int32(7), new byte[3]);
+            assertRefused(client, "invalid length of startup packet");
+        }
+        try (DsqlWireClient client = DsqlWireClient.tls(endpoint.port(), cluster.host())) {
+            client.send(startupOfLength(100));
+            assertEquals('R', client.next().type());
+            client.send(header('p', 10 * 1024 * 1024 + 1));
+            assertRefused(client, "invalid message length");
+        }
+        for (int length : new int[] {10 * 1024 * 1024 + 1, 3}) {
+            try (DsqlWireClient client = cluster.wireClient("admin", cluster.adminToken())) {
+                client.send(header('Q', length));
+                assertRefused(client, "invalid message length");
+            }
+        }
+    }
+
+    @Test
+    void aMessageOfTenMibIsTaken() throws Exception {
+        try (DsqlWireClient client = cluster.wireClient("admin", cluster.adminToken())) {
+            String padding = "x".repeat(10 * 1024 * 1024 - 4 - 1 - "SELECT 1 /**/".length());
+            client.send(query("SELECT 1 /*" + padding + "*/"));
+            assertEquals(List.of("SELECT 1"), client.untilReady());
+            client.send(query("SELECT 2"));
+            assertEquals(List.of("SELECT 1"), client.untilReady());
+        }
     }
 
     @Test
@@ -626,5 +676,35 @@ class DsqlDataPlaneIntegrationTest {
     private EnforcementFixtures.UserCredentials accessKey(String account) {
         return EnforcementFixtures.createUser(cleanup, httpPort, EnforcementFixtures.auth(account, "iam"),
                 "dsql-" + System.nanoTime());
+    }
+
+    /** A startup packet signing in as {@code admin}, its application_name padded to make {@code length} bytes. */
+    private static byte[] startupOfLength(int length) {
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("user", "admin");
+        parameters.put("database", "postgres");
+        parameters.put("application_name", "");
+        parameters.put("application_name", "a".repeat(length - PostgresWire.startupMessage(parameters).length));
+        return PostgresWire.startupMessage(parameters);
+    }
+
+    /** A message's type and the length it announces, without any of its body. */
+    private static byte[] header(char type, int length) {
+        byte[] header = new byte[5];
+        header[0] = (byte) type;
+        System.arraycopy(PostgresWire.int32(length), 0, header, 1, 4);
+        return header;
+    }
+
+    /** The endpoint answers DSQL's FATAL with {@code message} and the session's id, then closes. */
+    private static void assertRefused(DsqlWireClient client, String message) throws IOException {
+        PostgresWire.Message error = client.next();
+        assertEquals('E', error.type());
+        Map<Character, String> fields = PostgresWire.parseFields(error.body(), 0);
+        assertEquals("FATAL", fields.get('S'));
+        assertEquals("08P01", fields.get('C'));
+        assertEquals(message, fields.get('M'));
+        assertTrue(fields.get('D').startsWith("Session Id: "), fields.get('D'));
+        assertThrows(IOException.class, client::next);
     }
 }
