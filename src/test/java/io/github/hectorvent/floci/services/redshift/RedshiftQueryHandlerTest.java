@@ -39,6 +39,118 @@ class RedshiftQueryHandlerTest {
     private RedshiftIamDbUserResolver iamDbUserResolver;
     private RegionResolver regionResolver;
 
+    @Test
+    void resetClusterParameterGroupReturnsAwsQueryResponse() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ParameterGroupName", "reset-pg");
+        params.putSingle("ResetAllParameters", "true");
+
+        Response response = handler.handle("ResetClusterParameterGroup", params);
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<ResetClusterParameterGroupResult>"));
+        assertTrue(xml.contains("<ParameterGroupName>reset-pg</ParameterGroupName>"));
+        assertTrue(xml.contains("<ParameterGroupStatus>"));
+        verify(service).resetClusterParameterGroup("reset-pg", true, List.of());
+    }
+
+    @Test
+    void resetClusterParameterGroupDefaultsToAllWithoutNames() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ParameterGroupName", "reset-pg");
+
+        handler.handle("ResetClusterParameterGroup", params);
+
+        verify(service).resetClusterParameterGroup("reset-pg", true, List.of());
+    }
+
+    @Test
+    void resetClusterParameterGroupAcceptsBothQueryMemberFormatsWithoutValues() {
+        for (String prefix : List.of("Parameters.Parameter", "Parameters.member")) {
+            MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+            params.putSingle("ParameterGroupName", "reset-pg");
+            params.putSingle("ResetAllParameters", "false");
+            params.putSingle(prefix + ".1.ParameterName", "wlm_json_configuration");
+
+            handler.handle("ResetClusterParameterGroup", params);
+        }
+
+        verify(service, times(2)).resetClusterParameterGroup("reset-pg", false, List.of("wlm_json_configuration"));
+    }
+
+    @Test
+    void resetClusterParameterGroupDefaultsToSelectedNamesWhenNamesAreGiven() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ParameterGroupName", "reset-pg");
+        params.putSingle("Parameters.Parameter.1.ParameterName", "wlm_json_configuration");
+
+        handler.handle("ResetClusterParameterGroup", params);
+
+        verify(service).resetClusterParameterGroup("reset-pg", false, List.of("wlm_json_configuration"));
+    }
+
+    @Test
+    void resetClusterParameterGroupDoesNotTreatSparseNamesAsResetAll() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ParameterGroupName", "reset-pg");
+        params.putSingle("Parameters.Parameter.2.ParameterName", "wlm_json_configuration");
+
+        handler.handle("ResetClusterParameterGroup", params);
+
+        verify(service).resetClusterParameterGroup("reset-pg", false, List.of("wlm_json_configuration"));
+    }
+
+    @Test
+    void resetClusterParameterGroupRejectsInvalidBoolean() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ParameterGroupName", "reset-pg");
+        params.putSingle("ResetAllParameters", "invalid");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> handler.handle("ResetClusterParameterGroup", params));
+
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        verify(service, never()).resetClusterParameterGroup(any(), anyBoolean(), anyList());
+    }
+
+    @Test
+    void resetClusterParameterGroupRejectsMembersWithoutNamesBeforeChoosingResetAll() {
+        for (String prefix : List.of("Parameters.Parameter", "Parameters.member")) {
+            MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+            params.putSingle("ParameterGroupName", "reset-pg");
+            params.putSingle(prefix + ".1.ParameterValue", "1000");
+
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> handler.handle("ResetClusterParameterGroup", params));
+
+            assertEquals("InvalidParameterValue", failure.getErrorCode());
+            params.putSingle(prefix + ".2.ParameterName", "wlm_json_configuration");
+            assertThrows(AwsException.class, () -> handler.handle("ResetClusterParameterGroup", params));
+            params.putSingle(prefix + ".1.ParameterName", " ");
+            assertThrows(AwsException.class, () -> handler.handle("ResetClusterParameterGroup", params));
+        }
+        verify(service, never()).resetClusterParameterGroup(any(), anyBoolean(), anyList());
+    }
+
+    @Test
+    void describeClusterParametersFiltersAndSerializesSource() {
+        Parameter overridden = new Parameter("max_cursor_result_set_size", "1000");
+        overridden.setSource("user");
+        Parameter engineDefault = new Parameter("wlm_json_configuration", "{}");
+        engineDefault.setSource("engine-default");
+        when(service.describeClusterParameters("reset-pg")).thenReturn(List.of(overridden, engineDefault));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ParameterGroupName", "reset-pg");
+        params.putSingle("Source", "user");
+
+        Response response = handler.handle("DescribeClusterParameters", params);
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<Source>user</Source>"));
+        assertFalse(xml.contains("wlm_json_configuration"));
+    }
+
     @BeforeEach
     void setUp() {
         service = mock(RedshiftService.class);
