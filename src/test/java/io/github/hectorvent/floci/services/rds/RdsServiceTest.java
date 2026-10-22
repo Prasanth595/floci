@@ -4341,6 +4341,17 @@ class RdsServiceTest {
         assertEquals(before, after);
     }
 
+    @ParameterizedTest
+    @CsvSource({"us-east-1,aws", "eu-west-2,aws", "cn-north-1,aws-cn", "us-gov-west-1,aws-us-gov"})
+    void managedClusterParameterGroupsCarryRegionAndPartitionScopedArns(String region, String partition) {
+        for (DbClusterParameterGroup group : rdsService.listDbClusterParameterGroups(null, region)) {
+            String name = group.getDbClusterParameterGroupName();
+            String expectedArn = "arn:" + partition + ":rds:" + region + ":123456789012:cluster-pg:" + name;
+            assertEquals(expectedArn, group.getDbClusterParameterGroupArn());
+            assertEquals(expectedArn, rdsService.getDbClusterParameterGroup(name, region).getDbClusterParameterGroupArn());
+        }
+    }
+
     @Test
     void unsupportedManagedDefaultNamesAreNotFabricatedByReads() {
         List<String> before = rdsService.listDbClusterParameterGroups(null).stream()

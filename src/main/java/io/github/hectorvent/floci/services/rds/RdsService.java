@@ -6958,7 +6958,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (group == null) {
             ManagedClusterParameterGroup managed = managedClusterParameterGroup(name);
             if (managed != null) {
-                group = managed.toModel(effectiveRegion(region));
+                group = managed.toModel(effectiveRegion(region), regionResolver);
             }
         }
         if (group == null) {
@@ -6988,7 +6988,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         Map<String, DbClusterParameterGroup> unique = new LinkedHashMap<>();
         for (ManagedClusterParameterGroup managed : MANAGED_CLUSTER_PARAMETER_GROUPS) {
-            DbClusterParameterGroup group = managed.toModel(effectiveRegion);
+            DbClusterParameterGroup group = managed.toModel(effectiveRegion, regionResolver);
             unique.put(group.getDbClusterParameterGroupName(), group);
         }
         List<DbClusterParameterGroup> storedGroups;
@@ -7036,9 +7036,10 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private record ManagedClusterParameterGroup(String name, String family, String description) {
-        private DbClusterParameterGroup toModel(String region) {
+        private DbClusterParameterGroup toModel(String region, RegionResolver regionResolver) {
             DbClusterParameterGroup group = new DbClusterParameterGroup(name, family, description);
             group.setRegion(region);
+            group.setDbClusterParameterGroupArn(regionResolver.buildArn("rds", region, "cluster-pg:" + name));
             return group;
         }
     }
