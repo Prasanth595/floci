@@ -4203,6 +4203,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * Callers must hold {@link #privateIpAllocationLock}, so an address found free here cannot be
+     * taken before the resource it is handed to is stored.
+     *
      * @param pending addresses already handed out to resources that are not stored yet, which the
      *                synthesised fallback must not hand out again
      */
@@ -4212,6 +4215,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // this fall back to the synthesised address below, which nothing can connect to.
         if (vpcNetworkManager != null) {
             Optional<String> allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
+            // The network's lease table is not the whole story: an interface created with its
+            // own address never takes a lease, and a launch that names an address while a
+            // failed launch is still giving it back keeps it without one.
+            Set<String> held = allocated.isPresent() ? privateIpsHeldOnVpcNetwork(region, subnetId) : Set.of();
+            List<String> skipped = new ArrayList<>();
+            while (allocated.isPresent() && held.contains(allocated.get())) {
+                skipped.add(allocated.get());
+                allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
+            }
+            // Given back only once the walk is over, or the network would offer them again. Their
+            // holders took no lease, and deleting an interface or NAT gateway returns none, so a
+            // lease kept here would outlive the holder.
+            for (String address : skipped) {
+                vpcNetworkManager.releasePrivateIp(region, subnetId, address);
+            }
             if (allocated.isPresent()) {
                 return allocated.get();
             }
@@ -4291,10 +4309,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * account's instance, network interface or NAT gateway there may hold the address with no
      * lease to show for it: an interface created with its own address never takes one, and a
      * restart re-leases only instances. Any other subnet id belongs to one account, so for it the
-     * wider scan finds nothing more. A lease with nothing in any account behind it is stale
-     * (DeleteNetworkInterface and DeleteNatGateway never return theirs) and does not fail the
-     * launch, and an address outside a substituted subnet's effective range is never leased at
-     * all, in which case the instance keeps it the way it keeps a synthesised address.
+     * wider scan finds nothing more. A lease with nothing in any account behind it does not fail
+     * the launch: it is stale (DeleteNetworkInterface and DeleteNatGateway never return theirs),
+     * or it belongs to a launch that failed and has not given the address back yet, which it does
+     * once its container is detached. Either way the instance keeps the address without a lease of
+     * its own, and {@link #assignPrivateIp} still skips it, because the stored instance holds it.
+     * An address outside a substituted subnet's effective range is never leased at all, in which
+     * case the instance keeps it the way it keeps a synthesised address.
      */
     private void claimRequestedPrivateIp(String region, String subnetId, String address) {
         if (privateIpsTaken(region, subnetId).contains(address)) {
@@ -4322,6 +4343,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 valuesOfEveryAccount(instances, regionPrefix),
                 valuesOfEveryAccount(natGateways, regionPrefix))
                 .getOrDefault(subnetId, Set.of());
+    }
+
+    /**
+     * Every address a stored resource holds in the subnet: {@link #privateIpsTaken}, plus what the
+     * instances, network interfaces and NAT gateways of every account hold there. Default subnet
+     * ids are the same in every account, so their Docker network, and its lease table, is shared.
+     */
+    private Set<String> privateIpsHeldOnVpcNetwork(String region, String subnetId) {
+        Set<String> held = privateIpsTaken(region, subnetId);
+        held.addAll(privateIpsInUseInEveryAccount(region, subnetId));
+        return held;
     }
 
     private static <T> List<T> valuesOfEveryAccount(StorageBackend<String, T> store, String keyPrefix) {

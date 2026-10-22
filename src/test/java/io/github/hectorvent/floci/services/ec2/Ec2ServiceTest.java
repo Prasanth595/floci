@@ -4113,6 +4113,75 @@ class Ec2ServiceTest {
         assertTrue(instancesIn(service, subnetId).isEmpty());
     }
 
+    @Test
+    void anAddressAnInterfaceWasCreatedWithIsNotHandedOutByTheRealVpcNetwork() {
+        // CreateNetworkInterface with its own address takes no lease, and the network's allocator
+        // reads only its lease table, so it would hand a fresh /24's first address, offset 10, to
+        // the next launch as well.
+        Ec2Service service = realVpcNetworkService(new RequestContext());
+        String subnetId = privateIpSubnet(service);
+        service.createNetworkInterface("us-east-1", subnetId, "holder", "10.50.1.10",
+                List.of(), List.of(), List.of());
+
+        assertEquals(List.of("10.50.1.11"), launchAddresses(service, subnetId, 1));
+    }
+
+    @Test
+    void anAddressAnotherAccountsInterfaceWasCreatedWithIsNotHandedOutOnASharedVpcNetwork() {
+        // Default subnet ids are the same in every account, so their Docker network is shared, and
+        // only the other account's stored interface says its address is held.
+        RequestContext context = new RequestContext();
+        Ec2Service service = realVpcNetworkService(context);
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        context.setAccountId("111122223333");
+        service.describeSubnets("us-east-1", List.of(), Map.of());
+        service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.10",
+                List.of(), List.of(), List.of());
+
+        context.setAccountId("000000000000");
+
+        assertEquals(List.of("172.31.0.11"), launchAddresses(service, subnetId, 1));
+    }
+
+    @Test
+    void anAddressTheWalkSkipsIsGivenBackToTheVpcNetwork() {
+        // Its holder took no lease, and deleting an interface or NAT gateway returns none, so a
+        // lease the walk kept would outlive the holder.
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), vpcNetworks);
+        String subnetId = privateIpSubnet(service);
+        service.createNetworkInterface("us-east-1", subnetId, "holder", "10.50.1.10",
+                List.of(), List.of(), List.of());
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("10.50.1.10"), Optional.of("10.50.1.11"), Optional.empty());
+
+        assertEquals(List.of("10.50.1.11"), launchAddresses(service, subnetId, 1));
+        verify(vpcNetworks).releasePrivateIp("us-east-1", subnetId, "10.50.1.10");
+        verify(vpcNetworks, never()).releasePrivateIp("us-east-1", subnetId, "10.50.1.11");
+    }
+
+    @Test
+    void anAddressALaunchNamedWithoutLeasingItIsNotHandedOutAgain() {
+        // A failed launch is marked terminated before its container is detached and its lease given
+        // back. A launch that names the address in between finds nothing holding it and keeps it
+        // although the lease is refused, and the late release then leaves the network offering an
+        // address that launch's instance holds.
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), vpcNetworks);
+        String subnetId = privateIpSubnet(service);
+        when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.0/24"));
+        when(vpcNetworks.claimPrivateIp("us-east-1", subnetId, "10.50.1.50")).thenReturn(false);
+        launchWithPrivateIp(service, subnetId, 1, "10.50.1.50");
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("10.50.1.50"), Optional.of("10.50.1.51"), Optional.empty());
+
+        assertEquals(List.of("10.50.1.51"), launchAddresses(service, subnetId, 1));
+    }
+
     private static String privateIpSubnet(Ec2Service service) {
         String vpcId = service.createVpc("us-east-1", "10.50.0.0/16", false).getVpcId();
         return service.createSubnet("us-east-1", vpcId, "10.50.1.0/24", "us-east-1a").getSubnetId();

@@ -1135,6 +1135,10 @@ network per subnet would manufacture a partition AWS does not have. Per-subnet a
 anyway: the network's IPAM pool is the whole VPC CIDR and each subnet allocates static addresses
 out of its own slice of it.
 
+An address a subnet picks on its own is never one that an instance, network interface or NAT
+gateway in the subnet already holds. Default subnet ids are the same in every account, so those
+subnets share a network, and what any account holds there counts.
+
 The declared CIDR is used verbatim whenever it can be. It cannot be when it is absent, malformed,
 outside RFC 1918, or already claimed on the Docker daemon, including by another Floci VPC, since
 two VPCs may legally declare the same CIDR in AWS but one daemon cannot route two identical
