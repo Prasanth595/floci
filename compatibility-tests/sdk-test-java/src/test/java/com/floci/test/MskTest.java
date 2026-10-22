@@ -1,12 +1,15 @@
 package com.floci.test;
 
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.kafka.KafkaClient;
 import software.amazon.awssdk.services.kafka.model.*;
 import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.kms.model.CreateKeyRequest;
+import software.amazon.awssdk.services.kms.model.NotFoundException;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.CreateSecretResponse;
+import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
 
 import java.util.Map;
 
@@ -16,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class MskTest {
 
+    private static final Logger LOG = Logger.getLogger(MskTest.class);
     private static KafkaClient kafka;
     private static String clusterArn;
     private static String scramSecretArn;
@@ -40,12 +44,20 @@ class MskTest {
         if (scramSecretArn != null) {
             try (SecretsManagerClient secrets = TestFixtures.secretsManagerClient()) {
                 secrets.deleteSecret(request -> request.secretId(scramSecretArn).forceDeleteWithoutRecovery(true));
-            } catch (Exception ignored) {}
+            } catch (ResourceNotFoundException expected) {
+                // An already-absent secret needs no further cleanup.
+            } catch (Exception e) {
+                LOG.warnv(e, "Failed to delete SCRAM secret {0} during test cleanup", scramSecretArn);
+            }
         }
         if (scramKeyId != null) {
             try (KmsClient kms = TestFixtures.kmsClient()) {
                 kms.scheduleKeyDeletion(request -> request.keyId(scramKeyId).pendingWindowInDays(7));
-            } catch (Exception ignored) {}
+            } catch (NotFoundException expected) {
+                // An already-absent key needs no further cleanup.
+            } catch (Exception e) {
+                LOG.warnv(e, "Failed to schedule deletion of SCRAM KMS key {0} during test cleanup", scramKeyId);
+            }
         }
     }
 
