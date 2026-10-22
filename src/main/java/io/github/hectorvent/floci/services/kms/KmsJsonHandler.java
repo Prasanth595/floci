@@ -190,9 +190,21 @@ public class KmsJsonHandler {
         return request.path("Marker").isMissingNode() ? null : request.path("Marker").asText(null);
     }
 
+    /**
+     * The model types Limit as an integer in LimitType [1..1000], so anything else is refused
+     * rather than coerced. A Limit above an action's documented page size is clamped by the service.
+     */
     private static Integer limit(JsonNode request) {
-        return request.path("Limit").isMissingNode() || request.path("Limit").isNull()
-                ? null : request.path("Limit").asInt();
+        JsonNode limit = request.path("Limit");
+        if (limit.isMissingNode() || limit.isNull()) {
+            return null;
+        }
+        if (!limit.isIntegralNumber() || !limit.canConvertToInt()) {
+            throw new AwsException("SerializationException",
+                    (limit.isNumber() ? "NUMBER_VALUE" : "STRING_VALUE") + " can not be converted to an Integer", 400);
+        }
+        validateRange("limit", limit.intValue(), 1, 1000);
+        return limit.intValue();
     }
 
     private static void putTruncation(ObjectNode response, KmsService.Page<?> page) {

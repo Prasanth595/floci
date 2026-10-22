@@ -1041,6 +1041,24 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "ListKeys|0|ValidationException",
+            "ListAliases|-1|ValidationException",
+            "ListAliases|1001|ValidationException",
+            "ListKeys|\"abc\"|SerializationException",
+            "ListAliases|1.5|SerializationException"})
+    void listKeysAndAliasesRejectLimitOutsideTheModel(String action, String limit, String errorType) {
+        given()
+                .header("X-Amz-Target", "TrentService." + action)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Limit\":" + limit + "}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo(errorType));
+    }
+
+    @ParameterizedTest
     @CsvSource({"ListKeys", "ListAliases"})
     void listKeysAndAliasesRejectBadMarker(String action) {
         given()
