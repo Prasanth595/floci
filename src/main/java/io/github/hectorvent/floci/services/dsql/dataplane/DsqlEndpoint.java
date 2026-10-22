@@ -39,6 +39,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -77,9 +78,13 @@ public class DsqlEndpoint {
     private final Map<String, Set<Socket>> connections = new ConcurrentHashMap<>();
     private volatile ServerSocket server;
     private final Clock clock;
-    // The sessions' age checks, each due by the clock, on one thread for the whole endpoint.
+    // The sessions' age checks, timed by the clock on one thread for the whole endpoint. Each runs on a
+    // thread of its own: ending a session waits for its client to take what it is sent, and for its
+    // database, and a client that stops reading must not hold back the other sessions' checks.
     private final ScheduledExecutorService ageChecks = Executors.newSingleThreadScheduledExecutor(
             Thread.ofVirtual().name("dsql-age-checks").factory());
+    private final ExecutorService ageCheckRuns = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("dsql-age-check-", 0).factory());
     private final Set<ScheduledCheck> pendingChecks = ConcurrentHashMap.newKeySet();
     // DSQL's (measured): a transaction lives 300 seconds, and one idle past that is ended 15 later.
     private static final Duration TRANSACTION_AGE_LIMIT = Duration.ofSeconds(300);
@@ -143,6 +148,7 @@ public class DsqlEndpoint {
     @PreDestroy
     public synchronized void stop() {
         ageChecks.shutdownNow();
+        ageCheckRuns.shutdownNow();
         pendingChecks.clear();
         ServerSocket listening = server;
         server = null;
@@ -234,7 +240,7 @@ public class DsqlEndpoint {
         pendingChecks.add(scheduled);
         // toMillis drops what is below a millisecond, which would run the check just before it is due.
         long delay = Math.max(0, Duration.between(clock.instant(), due).toMillis() + 1);
-        scheduled.future = ageChecks.schedule(scheduled::run, delay, TimeUnit.MILLISECONDS);
+        scheduled.future = ageChecks.schedule(() -> ageCheckRuns.execute(scheduled::run), delay, TimeUnit.MILLISECONDS);
         return scheduled;
     }
 
