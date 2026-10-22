@@ -2250,7 +2250,8 @@ public class SqsService implements Resettable, ResourceProvider {
             int separator = storageKey.indexOf("::");
             String queueUrl = baseUrl + storageKey.substring(separator + 2);
             Queue queue = getQueueByUrl(storageKey, queueUrl).orElse(null);
-            if (queue == null) {
+            // A queue deleted and created again meanwhile has a new message queue; this one is gone.
+            if (queue == null || messagesByQueue.get(storageKey) != messages) {
                 return;
             }
             messages.removeExpired(retentionCutoff(queue));

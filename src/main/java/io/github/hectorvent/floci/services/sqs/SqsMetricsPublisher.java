@@ -12,6 +12,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -20,16 +21,18 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Sends the AWS/SQS metrics of every active queue to CloudWatch once a minute, shaped as SQS sends
- * them: one sample of each depth gauge, and for each counter one sample per call since the previous
- * minute plus the zero sample AWS adds to every minute. SentMessageSize has one sample per message
- * and no zero sample.
+ * them: one sample of each depth gauge, and for each counter one sample per call in the minute plus
+ * the zero sample AWS adds to every minute. SentMessageSize has one sample per message and no zero
+ * sample. A tick runs just after each minute boundary and stamps its samples with the minute that
+ * ended, so a call lands in the minute it was made, as on AWS.
  */
 @ApplicationScoped
 public class SqsMetricsPublisher {
 
     static final String NAMESPACE = "AWS/SQS";
     private static final Logger LOG = Logger.getLogger(SqsMetricsPublisher.class);
-    private static final long PUBLISH_INTERVAL_SECONDS = 60;
+    private static final long MINUTE_MILLIS = 60_000;
+    private static final long TICK_OFFSET_MILLIS = 1_000;
     private static final String COUNT = "Count";
 
     private final SqsService sqsService;
@@ -53,23 +56,43 @@ public class SqsMetricsPublisher {
         if (!enabled) {
             return;
         }
-        scheduler.scheduleAtFixedRate(() -> publish(Instant.now()), PUBLISH_INTERVAL_SECONDS,
-                PUBLISH_INTERVAL_SECONDS, TimeUnit.SECONDS);
+        long untilNextMinute = MINUTE_MILLIS - System.currentTimeMillis() % MINUTE_MILLIS;
+        scheduler.scheduleAtFixedRate(() -> publish(Instant.now()), untilNextMinute + TICK_OFFSET_MILLIS,
+                MINUTE_MILLIS, TimeUnit.MILLISECONDS);
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
         scheduler.shutdownNow();
     }
 
+    /**
+     * Nothing may escape: the scheduler stops for good after a tick throws. One queue's failed write
+     * drops only that queue's samples for the minute.
+     */
     void publish(Instant now) {
+        List<SqsService.QueueMetrics> queues;
         try {
-            for (SqsService.QueueMetrics queue : sqsService.collectQueueMetrics(now)) {
-                metricsService.putMetricDataForAccount(queue.accountId(), NAMESPACE,
-                        datums(queue, now.getEpochSecond()), queue.region());
-            }
+            queues = sqsService.collectQueueMetrics(now);
         } catch (RuntimeException e) {
-            LOG.warnv(e, "Publishing AWS/SQS queue metrics failed; this minute's samples are dropped");
+            LOG.warnv(e, "Collecting AWS/SQS queue metrics failed; this minute's samples are dropped");
+            return;
         }
+        long minute = endedMinute(now);
+        for (SqsService.QueueMetrics queue : queues) {
+            try {
+                metricsService.putMetricDataForAccount(queue.accountId(), NAMESPACE, datums(queue, minute),
+                        queue.region());
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Publishing AWS/SQS metrics for queue {0} of account {1} in {2} failed; its samples "
+                        + "for this minute are dropped", queue.queueName(), queue.accountId(), queue.region());
+            }
+        }
+    }
+
+    /** The minute a tick's samples belong to. Reading it half a minute back absorbs any drift of the
+     *  fixed-rate schedule away from the minute boundary. */
+    private static long endedMinute(Instant tick) {
+        return tick.minusSeconds(30).truncatedTo(ChronoUnit.MINUTES).getEpochSecond();
     }
 
     private static List<MetricDatum> datums(SqsService.QueueMetrics queue, long timestamp) {

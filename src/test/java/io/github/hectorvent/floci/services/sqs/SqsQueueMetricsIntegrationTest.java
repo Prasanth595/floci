@@ -22,9 +22,10 @@ import static org.hamcrest.Matchers.equalTo;
  * The acceptance of AWS/SQS queue metrics: an alarm on a queue's ApproximateNumberOfMessagesVisible
  * goes to ALARM after one message is sent and back to OK after a purge, with no PutMetricData.
  *
- * <p>Each publication is the publisher's minute tick, stamped one and two minutes before the queue
- * was created, so the evaluator sees complete periods at once and the publisher's own scheduled
- * tick, which stamps the current minute, cannot land in them.
+ * <p>The alarm has the 5 minute period of a typical queue-depth alarm. Each publication is the
+ * publisher's tick, run 10 and 5 minutes before the queue was created, so the evaluator sees two
+ * complete periods at once, whatever minute the test starts in, and the publisher's own scheduled
+ * ticks, which stamp the minute the queue was created in or a later one, cannot land in them.
  */
 @QuarkusTest
 class SqsQueueMetricsIntegrationTest {
@@ -45,46 +46,35 @@ class SqsQueueMetricsIntegrationTest {
     }
 
     @Test
-    void queueDepthAlarmFiresOnASentMessageAndClearsAfterAPurge() throws InterruptedException {
-        Instant created = nowWithTheMinuteNotAboutToEnd();
+    void queueDepthAlarmFiresOnASentMessageAndClearsAfterAPurge() {
+        Instant created = Instant.now();
         String queueUrl = call("AmazonSQS.CreateQueue", "{\"QueueName\":\"" + QUEUE + "\"}")
                 .jsonPath().getString("QueueUrl");
         call("GraniteServiceVersion20100801.PutMetricAlarm", """
                 {"AlarmName":"%s","Namespace":"AWS/SQS","MetricName":"ApproximateNumberOfMessagesVisible",
-                 "Dimensions":[{"Name":"QueueName","Value":"%s"}],"Statistic":"Maximum","Period":60,
+                 "Dimensions":[{"Name":"QueueName","Value":"%s"}],"Statistic":"Maximum","Period":300,
                  "EvaluationPeriods":1,"Threshold":1,"ComparisonOperator":"GreaterThanOrEqualToThreshold"}
                 """.formatted(ALARM, QUEUE));
 
         call("AmazonSQS.SendMessage", "{\"QueueUrl\":\"" + queueUrl + "\",\"MessageBody\":\"held\"}");
-        publisher.publish(created.minusSeconds(120));
+        publisher.publish(created.minusSeconds(600));
         awaitAlarmState("ALARM");
 
         call("AmazonSQS.PurgeQueue", "{\"QueueUrl\":\"" + queueUrl + "\"}");
-        publisher.publish(created.minusSeconds(60));
+        publisher.publish(created.minusSeconds(300));
         awaitAlarmState("OK");
 
         Response data = call("GraniteServiceVersion20100801.GetMetricData", """
                 {"StartTime":%d,"EndTime":%d,"ScanBy":"TimestampAscending","MetricDataQueries":[{"Id":"visible",
                  "MetricStat":{"Metric":{"Namespace":"AWS/SQS","MetricName":"ApproximateNumberOfMessagesVisible",
-                 "Dimensions":[{"Name":"QueueName","Value":"%s"}]},"Period":60,"Stat":"Maximum"}}]}
-                """.formatted(created.minusSeconds(180).getEpochSecond(), created.getEpochSecond() / 60 * 60 - 1,
+                 "Dimensions":[{"Name":"QueueName","Value":"%s"}]},"Period":300,"Stat":"Maximum"}}]}
+                """.formatted(created.minusSeconds(1200).getEpochSecond(), created.getEpochSecond() / 300 * 300 - 1,
                 QUEUE));
         assertThat(data.jsonPath().getList("MetricDataResults[0].Values", Double.class), contains(1.0, 0.0));
     }
 
-    /** A minute boundary inside the test would move which periods the evaluator reads. */
-    private static Instant nowWithTheMinuteNotAboutToEnd() throws InterruptedException {
-        Instant now = Instant.now();
-        long secondOfMinute = now.getEpochSecond() % 60;
-        if (secondOfMinute >= 55) {
-            Thread.sleep((60 - secondOfMinute) * 1000);
-            now = Instant.now();
-        }
-        return now;
-    }
-
-    /** The scheduled evaluator may finish a pass that read the data before the last publication;
-     *  the next pass corrects it. */
+    /** The scheduled evaluator runs on its own thread and may finish a pass that read the data
+     *  before the last publication; the next pass corrects it. */
     private void awaitAlarmState(String expected) {
         await().atMost(Duration.ofSeconds(15)).pollInterval(Duration.ofMillis(200)).untilAsserted(() -> {
             AlarmEvaluatorTestAccess.evaluateNow(alarmEvaluator);

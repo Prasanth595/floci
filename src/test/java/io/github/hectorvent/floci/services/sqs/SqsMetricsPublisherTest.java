@@ -15,6 +15,7 @@ import org.mockito.Answers;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 
@@ -216,6 +217,37 @@ class SqsMetricsPublisherTest {
     }
 
     @Test
+    void aTickStampsItsSamplesWithTheMinuteThatJustEnded() {
+        sqs.createQueue("stamped", null, REGION);
+
+        publisher.publish(Instant.parse("2026-10-22T12:01:01Z"));
+
+        Instant ended = Instant.parse("2026-10-22T12:00:00Z");
+        List<Datapoint> points = cloudWatch.getMetricStatistics("AWS/SQS", "NumberOfMessagesSent",
+                List.of(new Dimension("QueueName", "stamped")), ended, ended, 60, List.of("Sum"), null, REGION);
+        assertEquals(1, points.size());
+        assertEquals(ended, points.getFirst().timestamp());
+    }
+
+    @Test
+    void aQueueWhosePublicationFailsDoesNotStopTheOthers() {
+        sqs.createQueue("first", null, REGION);
+        sqs.createQueue("second", null, REGION);
+        CloudWatchMetricsService failingOnce = spy(cloudWatch);
+        doThrow(new IllegalStateException("store failed")).doCallRealMethod()
+                .when(failingOnce).putMetricDataForAccount(any(), any(), any(), any());
+        Instant now = Instant.now();
+
+        new SqsMetricsPublisher(sqs, failingOnce, mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS))
+                .publish(now);
+
+        long published = List.of("first", "second").stream()
+                .filter(queue -> datapoint(queue, "ApproximateNumberOfMessagesVisible", now) != null)
+                .count();
+        assertEquals(1, published);
+    }
+
+    @Test
     void aFailingPublicationDoesNotEscapeTheScheduledTask() {
         SqsService failing = mock(SqsService.class);
         when(failing.collectQueueMetrics(any())).thenThrow(new IllegalStateException("collect failed"));
@@ -225,9 +257,11 @@ class SqsMetricsPublisherTest {
         assertDoesNotThrow(() -> failingPublisher.publish(Instant.now()));
     }
 
-    private Datapoint datapoint(String queueName, String metricName, Instant at) {
+    /** The datapoint a tick at {@code tick} published, under the minute that had just ended. */
+    private Datapoint datapoint(String queueName, String metricName, Instant tick) {
+        Instant minute = tick.minusSeconds(30).truncatedTo(ChronoUnit.MINUTES);
         List<Datapoint> points = cloudWatch.getMetricStatistics("AWS/SQS", metricName,
-                List.of(new Dimension("QueueName", queueName)), at, at, 60, List.of("Sum"), null, REGION);
+                List.of(new Dimension("QueueName", queueName)), minute, minute, 60, List.of("Sum"), null, REGION);
         assertTrue(points.size() <= 1, metricName + " has " + points.size() + " datapoints");
         return points.isEmpty() ? null : points.getFirst();
     }

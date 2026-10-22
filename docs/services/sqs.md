@@ -108,7 +108,7 @@ A message older than the queue's `MessageRetentionPeriod` is no longer returned 
 
 ## CloudWatch Metrics
 
-Floci publishes the `AWS/SQS` metrics of every active queue to CloudWatch once a minute, on the single `QueueName` dimension, as SQS does. Alarms, `GetMetricData`, `GetMetricStatistics` and `ListMetrics` see them with no `PutMetricData`. A queue is active while it holds a message, and for six hours after `CreateQueue`, `SendMessage`, `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility`, `PurgeQueue`, `GetQueueAttributes` or `SetQueueAttributes` on it, batch forms included. Publication stops when the CloudWatch Metrics service is disabled.
+Floci publishes the `AWS/SQS` metrics of every active queue to CloudWatch once a minute, on the single `QueueName` dimension, as SQS does. Each publication runs just after a minute boundary and is stamped with the minute that ended, so a call counts in the minute it was made. Alarms, `GetMetricData`, `GetMetricStatistics` and `ListMetrics` see them with no `PutMetricData`. A queue is active while it holds a message, and for six hours after `CreateQueue`, `SendMessage`, `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility`, `PurgeQueue`, `GetQueueAttributes` or `SetQueueAttributes` on it, batch forms included. Publication stops when the CloudWatch Metrics service is disabled.
 
 | Metric | Unit | Samples each minute |
 |---|---|---|
