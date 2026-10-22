@@ -279,6 +279,7 @@ class SamTransformIntegrationTest {
                   FunctionName: sam-code-sha-func
                   Handler: index.handler
                   Runtime: nodejs20.x
+                  Description: Release
                   AutoPublishAlias: live
                   AutoPublishCodeSha256: "%s"
                   InlineCode: "exports.handler = async () => ({ release: '%s' });"
@@ -310,6 +311,20 @@ class SamTransformIntegrationTest {
             .then().statusCode(200).body("FunctionVersion", equalTo("2"));
         given().when().get("/2015-03-31/functions/" + function + "/versions")
             .then().statusCode(200).body("Versions.Version", equalTo(List.of("$LATEST", "1", "2")));
+
+        // A new hash alone publishes too: SAM appends it to the function's Description, so the
+        // function changes even though its code does not.
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("cccccccccc", "second"))
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when().post("/").then().statusCode(200);
+        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+        given().when().get("/2015-03-31/functions/" + function + "/aliases/live")
+            .then().statusCode(200).body("FunctionVersion", equalTo("3"));
+        given().queryParam("Qualifier", "live")
+        .when().get("/2015-03-31/functions/" + function + "/configuration")
+            .then().statusCode(200).body("Version", equalTo("3")).body("Description", equalTo("Release cccccccccc"));
     }
 
     /** Under AutoPublishAliasAllProperties a property outside the default hash, here Timeout, publishes. */
