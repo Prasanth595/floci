@@ -36,6 +36,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.services.ssm.SsmJsonDeserialization.serializationException;
@@ -236,10 +237,13 @@ public class SsmJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        for (Parameter p : params) {
+        PaginatedResult<Parameter> page = page(request, params, Parameter::getName,
+                GET_PARAMETERS_BY_PATH_MAX_RESULTS);
+        for (Parameter p : page.items()) {
             parametersArray.add(parameterToNode(p));
         }
         response.set("Parameters", parametersArray);
+        putNextToken(response, page);
         return Response.ok(response).build();
     }
 
@@ -278,7 +282,10 @@ public class SsmJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode historyArray = objectMapper.createArrayNode();
-        for (ParameterHistory h : history) {
+        // Zero-padded so the cursor's string order is version order ("10" would sort before "9").
+        PaginatedResult<ParameterHistory> page = page(request, history,
+                h -> String.format("%019d", h.getVersion()), GET_PARAMETER_HISTORY_MAX_RESULTS);
+        for (ParameterHistory h : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", h.getName());
             node.put("Version", h.getVersion());
@@ -296,10 +303,36 @@ public class SsmJsonHandler {
             historyArray.add(node);
         }
         response.set("Parameters", historyArray);
+        putNextToken(response, page);
         return Response.ok(response).build();
     }
 
     private static final int DESCRIBE_PARAMETERS_MAX_RESULTS = 50;
+    private static final int GET_PARAMETERS_BY_PATH_MAX_RESULTS = 10;
+    private static final int GET_PARAMETER_HISTORY_MAX_RESULTS = 50;
+
+    /**
+     * Pages a listing by {@code MaxResults}/{@code NextToken}. An omitted {@code MaxResults}
+     * returns everything rather than AWS's single page, so callers that never follow
+     * {@code NextToken} still see every item.
+     */
+    private static <T> PaginatedResult<T> page(JsonNode request, List<T> items,
+                                               Function<T, String> cursorOf, int maxPage) {
+        Integer maxResults = request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
+        if (maxResults != null && (maxResults < 1 || maxResults > maxPage)) {
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + maxResults + "' at 'maxResults' failed to "
+                            + "satisfy constraint: Member must have value between 1 and " + maxPage);
+        }
+        return Pagination.paginate(items, cursorOf, maxResults, request.path("NextToken").asText(null),
+                Integer.MAX_VALUE, maxPage, "InvalidNextToken");
+    }
+
+    private static void putNextToken(ObjectNode response, PaginatedResult<?> page) {
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+    }
 
     private Response handleDescribeParameters(JsonNode request, String region) {
         List<ParameterStringFilter> filters = parameterFilters(request);
