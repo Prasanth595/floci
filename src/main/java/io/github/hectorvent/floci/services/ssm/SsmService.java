@@ -673,9 +673,7 @@ public class SsmService implements ResourceProvider {
                     : "Name".equals(key) ? Set.of("Equals", "BeginsWith", "Contains")
                     : Set.of("Equals", "BeginsWith");
             if (!options.contains(filter.option())) {
-                throw new AwsException("InvalidFilterOption",
-                        "The specified filter option isn't valid. Valid options are Equals and BeginsWith. "
-                                + "For Path filter, valid options are Recursive and OneLevel.", 400);
+                throw invalidFilterOption();
             }
         }
         // Every key but a tag needs at least one value, and a path value must be absolute.
@@ -697,12 +695,18 @@ public class SsmService implements ResourceProvider {
             return;
         }
         if (filter.option() != null && !"Equals".equals(filter.option())) {
-            throw new AwsException("InvalidFilterOption", "Label filters support only Equals.", 400);
+            throw invalidFilterOption();
         }
         if (filter.values().isEmpty()) {
             throw new AwsException("InvalidFilterValue",
                     "The filter value isn't valid. Verify the value and try again.", 400);
         }
+    }
+
+    private static AwsException invalidFilterOption() {
+        return new AwsException("InvalidFilterOption",
+                "The specified filter option isn't valid. Valid options are Equals and BeginsWith. "
+                        + "For Path filter, valid options are Recursive and OneLevel.", 400);
     }
 
     private static boolean matchesParameterFilter(Parameter parameter, ParameterStringFilter filter) {

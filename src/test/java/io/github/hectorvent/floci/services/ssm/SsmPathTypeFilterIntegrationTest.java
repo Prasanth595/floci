@@ -146,6 +146,9 @@ class SsmPathTypeFilterIntegrationTest {
                         "ParameterFilters", List.of(filterForKey(key, "Contains", "value"))), REGION)
                 .then().statusCode(400).extract().response();
         assertTrue(response.jsonPath().getString("__type").endsWith("InvalidFilterOption"));
+        assertEquals("The specified filter option isn't valid. Valid options are Equals and BeginsWith. "
+                        + "For Path filter, valid options are Recursive and OneLevel.",
+                response.jsonPath().getString("message"));
     }
 
     @Test
@@ -154,6 +157,9 @@ class SsmPathTypeFilterIntegrationTest {
                         "ParameterFilters", List.of(filterForKey("Label", "BeginsWith", "value"))), REGION)
                 .then().statusCode(400).extract().response();
         assertTrue(response.jsonPath().getString("__type").endsWith("InvalidFilterOption"));
+        assertEquals("The specified filter option isn't valid. Valid options are Equals and BeginsWith. "
+                        + "For Path filter, valid options are Recursive and OneLevel.",
+                response.jsonPath().getString("message"));
     }
 
     @ParameterizedTest
