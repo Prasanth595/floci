@@ -10,8 +10,11 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -31,11 +34,99 @@ class PartitionedFileStorageTest {
     }
 
     private PartitionedFileStorage<String> open(PartitionedFileStorage.Mode mode) {
+        return open(1, mode);
+    }
+
+    private PartitionedFileStorage<String> open(int shards, PartitionedFileStorage.Mode mode) {
         PartitionedFileStorage<String> storage = new PartitionedFileStorage<>(tempDir.resolve("items"),
-                tempDir.resolve("items.json"), String.class, mode, 60_000);
+                tempDir.resolve("items.json"), String.class, shards, mode, 60_000);
         storage.load();
         opened.add(storage);
         return storage;
+    }
+
+    private Set<String> fileNames() throws Exception {
+        try (Stream<Path> files = Files.list(tempDir.resolve("items"))) {
+            return files.map(f -> f.getFileName().toString()).collect(Collectors.toSet());
+        }
+    }
+
+    private static Map<String, String> entries(int count) {
+        Map<String, String> entries = new HashMap<>();
+        for (int i = 0; i < count; i++) {
+            entries.put("entry-" + i, "value-" + i);
+        }
+        return entries;
+    }
+
+    @Test
+    void anEntryWriteRewritesOnlyItsOwnShardFile() throws Exception {
+        PartitionedFileStorage<String> storage = open(8, PartitionedFileStorage.Mode.SYNC);
+        storage.put("big", entries(200));
+        assertEquals(8, fileNames().size());
+        for (String name : fileNames()) {
+            Files.setLastModifiedTime(tempDir.resolve("items").resolve(name), LONG_AGO);
+        }
+        Path touched = storage.fileFor("big", "entry-7");
+
+        storage.putEntry("big", "entry-7", "changed");
+        storage.removeEntry("big", "entry-7");
+        storage.putEntry("big", "entry-7", "changed-again");
+
+        for (String name : fileNames()) {
+            Path file = tempDir.resolve("items").resolve(name);
+            assertEquals(file.equals(touched), !LONG_AGO.equals(Files.getLastModifiedTime(file)), name);
+        }
+        Map<String, String> expected = entries(200);
+        expected.put("entry-7", "changed-again");
+        assertEquals(expected, open(8, PartitionedFileStorage.Mode.SYNC).get("big").orElseThrow());
+    }
+
+    @Test
+    void anEmptyShardHasNoFile() throws Exception {
+        PartitionedFileStorage<String> storage = open(16, PartitionedFileStorage.Mode.SYNC);
+        storage.putEntry("small", "only", "1");
+        assertEquals(Set.of(storage.fileFor("small", "only").getFileName().toString()), fileNames());
+
+        storage.removeEntry("small", "only");
+
+        assertTrue(fileNames().isEmpty());
+    }
+
+    @Test
+    void deletingAKeyRemovesEveryShardFile() throws Exception {
+        PartitionedFileStorage<String> storage = open(4, PartitionedFileStorage.Mode.PERIODIC);
+        storage.put("gone", entries(50));
+        storage.put("kept", entries(1));
+        storage.flush();
+        Set<String> keptFiles = Set.of(storage.fileFor("kept", "entry-0").getFileName().toString());
+
+        storage.delete("gone");
+        storage.flush();
+
+        assertEquals(keptFiles, fileNames());
+    }
+
+    @Test
+    void changingTheShardCountKeepsEveryEntryAndDropsTheOldFiles() throws Exception {
+        open(1, PartitionedFileStorage.Mode.SYNC).put("big", entries(100));
+
+        PartitionedFileStorage<String> four = open(4, PartitionedFileStorage.Mode.SYNC);
+        assertEquals(entries(100), four.get("big").orElseThrow());
+        assertEquals(4, fileNames().size());
+        assertTrue(fileNames().stream().allMatch(name -> name.contains("-of-4")), fileNames().toString());
+
+        PartitionedFileStorage<String> two = open(2, PartitionedFileStorage.Mode.PERIODIC);
+        assertEquals(entries(100), two.get("big").orElseThrow());
+        assertEquals(2, fileNames().size());
+        assertTrue(fileNames().stream().allMatch(name -> name.contains("-of-2")), fileNames().toString());
+        assertEquals(entries(100), open(2, PartitionedFileStorage.Mode.SYNC).get("big").orElseThrow());
+    }
+
+    @Test
+    void aShardCountBelowOneIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> new PartitionedFileStorage<>(tempDir.resolve("items"),
+                null, String.class, 0, PartitionedFileStorage.Mode.SYNC, 60_000));
     }
 
     @Test

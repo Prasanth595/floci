@@ -145,9 +145,9 @@ public class StorageFactory {
     }
 
     /**
-     * Create an account-aware store whose values are maps, persisted one file per key under a
-     * directory named after {@code fileName} (without {@code .json}), so a change to one key
-     * rewrites that key's file only. Writers that change one map entry at a time use
+     * Create an account-aware store whose values are maps, persisted under a directory named
+     * after {@code fileName} (without {@code .json}) as {@code shardCount} files per key, so a
+     * change to one entry rewrites only the file of its shard. Writers that change one map entry at a time use
      * {@link AccountAwareStorageBackend#putEntry} and {@link AccountAwareStorageBackend#removeEntry}
      * when {@link AccountAwareStorageBackend#writesEntries()} is true.
      *
@@ -158,7 +158,7 @@ public class StorageFactory {
      */
     public synchronized <E> AccountAwareStorageBackend<Map<String, E>> createPartitioned(
             String serviceName, String fileName, TypeReference<Map<String, Map<String, E>>> typeReference,
-            Class<E> entryType) {
+            Class<E> entryType, int shardCount) {
         String mode = resolveMode(serviceName);
         if (!"persistent".equals(mode) && !"hybrid".equals(mode)) {
             return create(serviceName, fileName, typeReference);
@@ -175,9 +175,10 @@ public class StorageFactory {
         PartitionedFileStorage.Mode writeMode = "persistent".equals(mode)
                 ? PartitionedFileStorage.Mode.SYNC : PartitionedFileStorage.Mode.PERIODIC;
         PartitionedFileStorage<E> inner = new PartitionedFileStorage<>(directory, legacyFile, entryType,
-                writeMode, resolveFlushInterval(serviceName));
+                shardCount, writeMode, resolveFlushInterval(serviceName));
         partitionedBackends.add(inner);
-        LOG.infov("Storing {0} for service {1} one file per key in {2}", fileName, serviceName, directory);
+        LOG.infov("Storing {0} for service {1} in {2}, {3} file(s) per key", fileName, serviceName, directory,
+                shardCount);
         AccountAwareStorageBackend<Map<String, E>> backend = new AccountAwareStorageBackend<>(
                 inner, requestContextInstance, config.defaultAccountId());
         loadOnce(backend);

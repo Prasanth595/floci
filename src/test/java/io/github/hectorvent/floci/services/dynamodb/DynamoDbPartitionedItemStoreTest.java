@@ -15,6 +15,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -133,9 +135,44 @@ class DynamoDbPartitionedItemStoreTest {
         assertEquals("beat-1", value(restarted.getItem("Nodes", key("node-2"), REGION)));
     }
 
+    @Test
+    void aWriteToAShardedTableRewritesOneOfItsFiles() throws Exception {
+        Path directory = tempDir.resolve("sharded");
+        DynamoDbService sharded = new DynamoDbService(tableStore, openItemStore(directory, 8), resolver);
+        for (int i = 0; i < 200; i++) {
+            sharded.putItem("Logs", item("entry-" + i, "payload"), REGION);
+        }
+        List<Path> files;
+        try (Stream<Path> listed = Files.list(directory)) {
+            files = listed.toList();
+        }
+        assertEquals(8, files.size());
+        for (Path file : files) {
+            Files.setLastModifiedTime(file, LONG_AGO);
+        }
+
+        sharded.putItem("Logs", item("entry-200", "payload"), REGION);
+
+        assertEquals(1, files.stream().filter(f -> !isUntouched(f)).count());
+        DynamoDbService restarted = new DynamoDbService(tableStore, openItemStore(directory, 8), resolver);
+        assertEquals(201, restarted.scan("Logs", null, null, null, null, null, null, REGION).items().size());
+    }
+
+    private static boolean isUntouched(Path file) {
+        try {
+            return LONG_AGO.equals(Files.getLastModifiedTime(file));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     private AccountAwareStorageBackend<Map<String, JsonNode>> openItemStore() {
-        PartitionedFileStorage<JsonNode> inner = new PartitionedFileStorage<>(tempDir.resolve("items"), null,
-                JsonNode.class, PartitionedFileStorage.Mode.SYNC, 60_000);
+        return openItemStore(tempDir.resolve("items"), 1);
+    }
+
+    private AccountAwareStorageBackend<Map<String, JsonNode>> openItemStore(Path directory, int shards) {
+        PartitionedFileStorage<JsonNode> inner = new PartitionedFileStorage<>(directory, null,
+                JsonNode.class, shards, PartitionedFileStorage.Mode.SYNC, 60_000);
         inner.load();
         opened.add(inner);
         return new AccountAwareStorageBackend<>(inner, null, ACCOUNT);

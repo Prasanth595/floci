@@ -192,7 +192,7 @@ public class DynamoDbService {
         return switch (layout) {
             case "single-file" -> storageFactory.create("dynamodb", "dynamodb-items.json", type);
             case "per-table" -> storageFactory.createPartitioned("dynamodb", "dynamodb-items.json", type,
-                    JsonNode.class);
+                    JsonNode.class, config.storage().services().dynamodb().itemShards());
             default -> throw new IllegalArgumentException(
                     "Unknown floci.storage.services.dynamodb.item-layout: " + layout);
         };

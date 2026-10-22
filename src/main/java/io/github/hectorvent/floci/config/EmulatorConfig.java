@@ -443,6 +443,13 @@ public interface EmulatorConfig {
          */
         @WithDefault("single-file")
         String itemLayout();
+
+        /**
+         * With the {@code per-table} layout, how many files each table is split into. An item's
+         * write rewrites only its own file. Changing it rewrites the files on the next start.
+         */
+        @WithDefault("1")
+        int itemShards();
     }
 
     interface SnsStorageConfig {

@@ -32,7 +32,7 @@ class StorageFactoryPartitionedTest {
     void persistentModeWritesOneFilePerKeyAsItChanges() {
         StorageFactory factory = newFactory("persistent");
         AccountAwareStorageBackend<Map<String, String>> store =
-                factory.createPartitioned("svc", "svc-items.json", TYPE, String.class);
+                factory.createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
 
         assertTrue(store.writesEntries());
         store.putEntry("table-a", "k", "v");
@@ -47,7 +47,7 @@ class StorageFactoryPartitionedTest {
     void hybridModeWritesDirtyKeysOnFlushAndShutdown() {
         StorageFactory factory = newFactory("hybrid");
         AccountAwareStorageBackend<Map<String, String>> store =
-                factory.createPartitioned("svc", "svc-items.json", TYPE, String.class);
+                factory.createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
 
         store.putEntry("table-a", "k", "v");
         assertEquals(0, fileCount(tempDir.resolve("svc-items")));
@@ -55,7 +55,7 @@ class StorageFactoryPartitionedTest {
         factory.shutdownAll();
         assertEquals(1, fileCount(tempDir.resolve("svc-items")));
         AccountAwareStorageBackend<Map<String, String>> reopened = newFactory("hybrid")
-                .createPartitioned("svc", "svc-items.json", TYPE, String.class);
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
         assertEquals(Map.of("k", "v"), reopened.get("table-a").orElseThrow());
     }
 
@@ -65,7 +65,7 @@ class StorageFactoryPartitionedTest {
                 Map.of("000000000000/table-a", Map.of("k", "v")));
 
         AccountAwareStorageBackend<Map<String, String>> store = newFactory("persistent")
-                .createPartitioned("svc", "svc-items.json", TYPE, String.class);
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
 
         assertEquals(Map.of("k", "v"), store.get("table-a").orElseThrow());
         assertTrue(Files.exists(tempDir.resolve("svc-items.json.migrated")));
@@ -74,7 +74,7 @@ class StorageFactoryPartitionedTest {
     @Test
     void memoryModeKeepsTheSingleValueStore() {
         AccountAwareStorageBackend<Map<String, String>> store = newFactory("memory")
-                .createPartitioned("svc", "svc-items.json", TYPE, String.class);
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
 
         assertFalse(store.writesEntries());
         store.put("table-a", Map.of("k", "v"));
@@ -84,8 +84,8 @@ class StorageFactoryPartitionedTest {
     @Test
     void repeatCallsShareOneBackend() {
         StorageFactory factory = newFactory("persistent");
-        assertSame(factory.createPartitioned("svc", "svc-items.json", TYPE, String.class),
-                factory.createPartitioned("svc", "svc-items.json", TYPE, String.class));
+        assertSame(factory.createPartitioned("svc", "svc-items.json", TYPE, String.class, 1),
+                factory.createPartitioned("svc", "svc-items.json", TYPE, String.class, 1));
     }
 
     private static long fileCount(Path directory) {

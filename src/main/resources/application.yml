@@ -213,6 +213,9 @@ floci:
         # per-table: one file per table under dynamodb-items/; an existing dynamodb-items.json
         # is migrated on first start. Applies to persistent and hybrid modes.
         item-layout: single-file          # FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT
+        # per-table only: files per table. A write rewrites only its item's file; changing the
+        # count rewrites the files on the next start.
+        item-shards: 1                    # FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_SHARDS
       sns:
         flush-interval-ms: 5000
       lambda:
