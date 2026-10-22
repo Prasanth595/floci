@@ -21,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ListRoles and ListPolicies page through {@code MaxItems} and {@code Marker}. Both requests model
+ * ListRoles, ListPolicies, ListUsers, ListGroups and the attached and inline policy lists of users,
+ * groups and roles page through {@code MaxItems} and {@code Marker}. Every one of these requests models
  * {@code MaxItems} with a range of 1 to 1000 and document that an omitted value "defaults to 100".
  *
  * <p>IAM state is shared across the suite, so each test scopes its listing to a path of its own
@@ -214,8 +215,8 @@ class IamListPaginationIntegrationTest {
     }
 
     @Test
-    void listRolesAndListPoliciesRejectMaxItemsOutsideOneToOneThousand() {
-        for (String action : List.of("ListRoles", "ListPolicies")) {
+    void pagedListsRejectMaxItemsOutsideOneToOneThousand() {
+        for (String action : List.of("ListRoles", "ListPolicies", "ListUsers", "ListGroups")) {
             iam(action).formParam("MaxItems", "0")
             .when().post("/").then()
                 .statusCode(400)
@@ -237,8 +238,8 @@ class IamListPaginationIntegrationTest {
     }
 
     @Test
-    void listRolesAndListPoliciesRejectAMarkerTheyDidNotIssue() {
-        for (String action : List.of("ListRoles", "ListPolicies")) {
+    void pagedListsRejectAMarkerTheyDidNotIssue() {
+        for (String action : List.of("ListRoles", "ListPolicies", "ListUsers", "ListGroups")) {
             iam(action).formParam("Marker", "not-a-marker")
             .when().post("/").then()
                 .statusCode(400)
@@ -361,5 +362,139 @@ class IamListPaginationIntegrationTest {
             names.add("pg-anchor-" + tag + "-" + i);
         }
         return names;
+    }
+
+    private static Page listPage(String action, String listElement, String nameElement,
+                                 String entityParam, String entity, String maxItems, String marker) {
+        RequestSpecification request = iam(action);
+        if (entityParam != null) {
+            request.formParam(entityParam, entity);
+        }
+        if (maxItems != null) {
+            request.formParam("MaxItems", maxItems);
+        }
+        if (marker != null) {
+            request.formParam("Marker", marker);
+        }
+        return page(action, listElement, nameElement, request);
+    }
+
+    private static void call(String action, String... pairs) {
+        RequestSpecification request = iam(action);
+        for (int i = 0; i < pairs.length; i += 2) {
+            request.formParam(pairs[i], pairs[i + 1]);
+        }
+        request.when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void listUsersAndListGroupsPageThroughThePathPrefixInNameOrder() {
+        String tag = suffix();
+        String path = "/pg-principals-" + tag + "/";
+        List<String> expected = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            expected.add("pg-principal-" + tag + "-" + i);
+        }
+        // Created out of name order, so the listing has to sort rather than echo creation order.
+        for (String name : expected.reversed()) {
+            call("CreateUser", "UserName", name, "Path", path);
+            call("CreateGroup", "GroupName", name, "Path", path);
+        }
+        try {
+            List<Page> users = walk(marker -> page("ListUsers", "Users", "UserName",
+                    withMarker(iam("ListUsers").formParam("PathPrefix", path).formParam("MaxItems", "2"), marker)));
+            List<Page> groups = walk(marker -> page("ListGroups", "Groups", "GroupName",
+                    withMarker(iam("ListGroups").formParam("PathPrefix", path).formParam("MaxItems", "2"), marker)));
+
+            for (List<Page> pages : List.of(users, groups)) {
+                assertEquals(List.of(2, 2, 1), pages.stream().map(p -> p.names().size()).toList());
+                assertEquals(List.of(true, true, false), pages.stream().map(Page::truncated).toList());
+                assertEquals(expected, flatten(pages), "every entry once, in name order");
+            }
+            assertEquals(expected, page("ListUsers", "Users", "UserName",
+                    iam("ListUsers").formParam("PathPrefix", path)).names(), "no MaxItems lists them all");
+        } finally {
+            for (String name : expected) {
+                call("DeleteUser", "UserName", name);
+                call("DeleteGroup", "GroupName", name);
+            }
+        }
+    }
+
+    private static RequestSpecification withMarker(RequestSpecification request, String marker) {
+        return marker == null ? request : request.formParam("Marker", marker);
+    }
+
+    @Test
+    void attachedAndInlinePolicyListsPageThroughMaxItemsAndMarker() {
+        String tag = suffix();
+        String name = "pg-holder-" + tag;
+        createRole(name, "/");
+        call("CreateUser", "UserName", name);
+        call("CreateGroup", "GroupName", name);
+        List<String> arns = new ArrayList<>();
+        List<String> inline = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            arns.add(createPolicy("pg-attached-" + tag + "-" + i, "/"));
+            inline.add("pg-inline-" + tag + "-" + i);
+        }
+        List<String[]> holders = List.of(new String[]{"Role", "RoleName"},
+                new String[]{"User", "UserName"}, new String[]{"Group", "GroupName"});
+        try {
+            for (String[] h : holders) {
+                for (int i = 2; i >= 0; i--) {
+                    call("Attach" + h[0] + "Policy", h[1], name, "PolicyArn", arns.get(i));
+                    call("Put" + h[0] + "Policy", h[1], name, "PolicyName", inline.get(i),
+                            "PolicyDocument", POLICY_DOCUMENT);
+                }
+            }
+            for (String[] h : holders) {
+                List<Page> attached = walk(marker -> listPage("ListAttached" + h[0] + "Policies",
+                        "AttachedPolicies", "PolicyArn", h[1], name, "2", marker));
+                assertEquals(List.of(2, 1), attached.stream().map(p -> p.names().size()).toList(), h[0]);
+                assertEquals(arns, flatten(attached), h[0] + " attached policies, each once");
+
+                List<Page> names = walk(marker -> {
+                    String action = "List" + h[0] + "Policies";
+                    XmlPath xml = withMarker(iam(action).formParam(h[1], name).formParam("MaxItems", "2"), marker)
+                            .when().post("/").then().statusCode(200).extract().xmlPath();
+                    String result = action + "Response." + action + "Result.";
+                    String next = xml.getString(result + "Marker");
+                    return new Page(xml.getList(result + "PolicyNames.member", String.class),
+                            Boolean.parseBoolean(xml.getString(result + "IsTruncated")),
+                            next == null || next.isEmpty() ? null : next);
+                });
+                assertEquals(List.of(2, 1), names.stream().map(p -> p.names().size()).toList(), h[0]);
+                assertEquals(inline, flatten(names), h[0] + " inline policies, each once");
+            }
+
+            // The policy a marker names, detached before the next page, skips nothing after it.
+            Page first = listPage("ListAttachedRolePolicies", "AttachedPolicies", "PolicyArn",
+                    "RoleName", name, "2", null);
+            call("DetachRolePolicy", "RoleName", name, "PolicyArn", arns.get(1));
+            assertEquals(List.of(arns.get(2)), listPage("ListAttachedRolePolicies", "AttachedPolicies",
+                    "PolicyArn", "RoleName", name, "2", first.marker()).names());
+            call("AttachRolePolicy", "RoleName", name, "PolicyArn", arns.get(1));
+
+            iam("ListRolePolicies").formParam("RoleName", name).formParam("MaxItems", "1001")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+            iam("ListAttachedRolePolicies").formParam("RoleName", name).formParam("Marker", "not-a-marker")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+        } finally {
+            for (String[] h : holders) {
+                for (int i = 0; i < 3; i++) {
+                    call("Detach" + h[0] + "Policy", h[1], name, "PolicyArn", arns.get(i));
+                    call("Delete" + h[0] + "Policy", h[1], name, "PolicyName", inline.get(i));
+                }
+            }
+            arns.forEach(IamListPaginationIntegrationTest::deletePolicy);
+            deleteRole(name);
+            call("DeleteUser", "UserName", name);
+            call("DeleteGroup", "GroupName", name);
+        }
     }
 }

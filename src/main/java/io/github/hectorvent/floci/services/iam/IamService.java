@@ -904,6 +904,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String prefix = pathPrefix != null ? pathPrefix : "/";
         return users.scan(k -> true).stream()
                 .filter(u -> u.getPath().startsWith(prefix))
+                .sorted(Comparator.comparing(IamUser::getUserName))
                 .toList();
     }
 
@@ -1125,6 +1126,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String prefix = pathPrefix != null ? pathPrefix : "/";
         return groups.scan(k -> true).stream()
                 .filter(g -> g.getPath().startsWith(prefix))
+                .sorted(Comparator.comparing(IamGroup::getGroupName))
                 .toList();
     }
 

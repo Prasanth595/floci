@@ -396,12 +396,15 @@ public class IamQueryHandler {
 
     private Response handleListUsers(MultivaluedMap<String, String> params) {
         String pathPrefix = getParam(params, "PathPrefix");
-        List<IamUser> userList = iamService.listUsers(pathPrefix);
+        Page<IamUser> page = paginate(iamService.listUsers(pathPrefix), IamUser::getUserName, params);
         XmlBuilder xml = new XmlBuilder().start("Users");
-        for (IamUser u : userList) {
+        for (IamUser u : page.items()) {
             xml.start("member").raw(userXml(u, false)).end("member");
         }
-        xml.end("Users").elem("IsTruncated", false);
+        xml.end("Users").elem("IsTruncated", page.truncated());
+        if (page.truncated()) {
+            xml.elem("Marker", page.marker());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListUsers", AwsNamespaces.IAM, xml.build())).build();
     }
 
@@ -1334,12 +1337,16 @@ public class IamQueryHandler {
     }
 
     private Response handleListGroups(MultivaluedMap<String, String> params) {
-        List<IamGroup> groupList = iamService.listGroups(getParam(params, "PathPrefix"));
+        Page<IamGroup> page = paginate(iamService.listGroups(getParam(params, "PathPrefix")),
+                IamGroup::getGroupName, params);
         XmlBuilder xml = new XmlBuilder().start("Groups");
-        for (IamGroup g : groupList) {
+        for (IamGroup g : page.items()) {
             xml.start("member").raw(groupXml(g)).end("member");
         }
-        xml.end("Groups").elem("IsTruncated", false);
+        xml.end("Groups").elem("IsTruncated", page.truncated());
+        if (page.truncated()) {
+            xml.elem("Marker", page.marker());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListGroups", AwsNamespaces.IAM, xml.build())).build();
     }
 
@@ -1828,7 +1835,7 @@ public class IamQueryHandler {
         List<IamPolicy> policyList = iamService.listAttachedUserPolicies(
                 getParam(params, "UserName"), getParam(params, "PathPrefix"));
         return Response.ok(AwsQueryResponse.envelope("ListAttachedUserPolicies", AwsNamespaces.IAM,
-                attachedPoliciesXml(policyList))).build();
+                attachedPoliciesXml(policyList, params))).build();
     }
 
     // =========================================================================
@@ -1849,7 +1856,7 @@ public class IamQueryHandler {
         List<IamPolicy> policyList = iamService.listAttachedGroupPolicies(
                 getParam(params, "GroupName"), getParam(params, "PathPrefix"));
         return Response.ok(AwsQueryResponse.envelope("ListAttachedGroupPolicies", AwsNamespaces.IAM,
-                attachedPoliciesXml(policyList))).build();
+                attachedPoliciesXml(policyList, params))).build();
     }
 
     // =========================================================================
@@ -1870,7 +1877,7 @@ public class IamQueryHandler {
         List<IamPolicy> policyList = iamService.listAttachedRolePolicies(
                 getParam(params, "RoleName"), getParam(params, "PathPrefix"));
         return Response.ok(AwsQueryResponse.envelope("ListAttachedRolePolicies", AwsNamespaces.IAM,
-                attachedPoliciesXml(policyList))).build();
+                attachedPoliciesXml(policyList, params))).build();
     }
 
     // =========================================================================
@@ -1901,7 +1908,7 @@ public class IamQueryHandler {
     private Response handleListUserPolicies(MultivaluedMap<String, String> params) {
         List<String> names = iamService.listUserPolicies(getParam(params, "UserName"));
         return Response.ok(AwsQueryResponse.envelope("ListUserPolicies", AwsNamespaces.IAM,
-                inlinePolicyNamesXml(names))).build();
+                inlinePolicyNamesXml(names, params))).build();
     }
 
     // =========================================================================
@@ -1932,7 +1939,7 @@ public class IamQueryHandler {
     private Response handleListGroupPolicies(MultivaluedMap<String, String> params) {
         List<String> names = iamService.listGroupPolicies(getParam(params, "GroupName"));
         return Response.ok(AwsQueryResponse.envelope("ListGroupPolicies", AwsNamespaces.IAM,
-                inlinePolicyNamesXml(names))).build();
+                inlinePolicyNamesXml(names, params))).build();
     }
 
     // =========================================================================
@@ -1963,7 +1970,7 @@ public class IamQueryHandler {
     private Response handleListRolePolicies(MultivaluedMap<String, String> params) {
         List<String> names = iamService.listRolePolicies(getParam(params, "RoleName"));
         return Response.ok(AwsQueryResponse.envelope("ListRolePolicies", AwsNamespaces.IAM,
-                inlinePolicyNamesXml(names))).build();
+                inlinePolicyNamesXml(names, params))).build();
     }
 
     // =========================================================================
@@ -3247,23 +3254,39 @@ public class IamQueryHandler {
         return xml.raw(detailed ? tagsElement(p.getTags()) : "").build();
     }
 
-    private String attachedPoliciesXml(List<IamPolicy> policyList) {
+    /**
+     * Pages the attached policies in ARN order, so a Marker resumes in the right place even when
+     * the policy it names was detached in between. The ARN, not the name, is the key: a
+     * customer-managed policy may share its name with an AWS-managed one.
+     */
+    private String attachedPoliciesXml(List<IamPolicy> policyList, MultivaluedMap<String, String> params) {
+        Page<IamPolicy> page = paginate(policyList.stream().sorted(Comparator.comparing(IamPolicy::getArn)).toList(),
+                IamPolicy::getArn, params);
         XmlBuilder xml = new XmlBuilder().start("AttachedPolicies");
-        for (IamPolicy p : policyList) {
+        for (IamPolicy p : page.items()) {
             xml.start("member")
                .elem("PolicyName", p.getPolicyName())
                .elem("PolicyArn", p.getArn())
                .end("member");
         }
-        return xml.end("AttachedPolicies").elem("IsTruncated", false).build();
+        xml.end("AttachedPolicies").elem("IsTruncated", page.truncated());
+        if (page.truncated()) {
+            xml.elem("Marker", page.marker());
+        }
+        return xml.build();
     }
 
-    private String inlinePolicyNamesXml(List<String> names) {
+    private String inlinePolicyNamesXml(List<String> names, MultivaluedMap<String, String> params) {
+        Page<String> page = paginate(names.stream().sorted().toList(), Function.identity(), params);
         XmlBuilder xml = new XmlBuilder().start("PolicyNames");
-        for (String name : names) {
+        for (String name : page.items()) {
             xml.elem("member", name);
         }
-        return xml.end("PolicyNames").elem("IsTruncated", false).build();
+        xml.end("PolicyNames").elem("IsTruncated", page.truncated());
+        if (page.truncated()) {
+            xml.elem("Marker", page.marker());
+        }
+        return xml.build();
     }
 
     /**
