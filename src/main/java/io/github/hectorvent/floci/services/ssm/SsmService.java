@@ -56,6 +56,7 @@ public class SsmService implements ResourceProvider {
     // Label is a ParameterStringFilter key too, but only GetParametersByPath accepts it.
     private static final Set<String> DESCRIBE_PARAMETERS_FILTER_KEYS =
             Set.of("Name", "Type", "KeyId", "Path", "Tier", "DataType");
+    private static final Set<String> GET_PARAMETERS_BY_PATH_FILTER_KEYS = Set.of("Type", "KeyId", "Label");
     private static final String DEFAULT_SSM_KEY_ID = "alias/aws/ssm";
     private static final int STANDARD_TIER_MAX_VALUE_BYTES = 4096;
     private static final Set<String> PARAMETER_TIERS = Set.of("Standard", "Advanced", "Intelligent-Tiering");
@@ -563,10 +564,10 @@ public class SsmService implements ResourceProvider {
 
     public List<Parameter> getParametersByPath(String path, boolean recursive,
                                               List<ParameterStringFilter> filters, String region) {
-        List<ParameterStringFilter> typeFilters = filters.stream().filter(filter -> "Type".equals(filter.key())).toList();
-        typeFilters.forEach(SsmService::validateDescribeParametersFilter);
+        filters.forEach(SsmService::validateGetParametersByPathFilter);
+        List<ParameterStringFilter> matchingFilters = filters.stream().filter(filter -> !"Label".equals(filter.key())).toList();
         return getParametersByPath(path, recursive, region).stream()
-                .filter(parameter -> typeFilters.stream().allMatch(filter -> matchesParameterFilter(parameter, filter)))
+                .filter(parameter -> matchingFilters.stream().allMatch(filter -> matchesParameterFilter(parameter, filter)))
                 .toList();
     }
 
@@ -681,6 +682,24 @@ public class SsmService implements ResourceProvider {
         boolean invalidValues = !tag && filter.values().isEmpty()
                 || "Path".equals(key) && filter.values().stream().anyMatch(v -> !v.startsWith("/"));
         if (invalidValues) {
+            throw new AwsException("InvalidFilterValue",
+                    "The filter value isn't valid. Verify the value and try again.", 400);
+        }
+    }
+
+    private static void validateGetParametersByPathFilter(ParameterStringFilter filter) {
+        String key = filter.key();
+        if (key == null || !GET_PARAMETERS_BY_PATH_FILTER_KEYS.contains(key)) {
+            throw new AwsException("InvalidFilterKey", "The specified key isn't valid.", 400);
+        }
+        if (!"Label".equals(key)) {
+            validateDescribeParametersFilter(filter);
+            return;
+        }
+        if (filter.option() != null && !"Equals".equals(filter.option())) {
+            throw new AwsException("InvalidFilterOption", "Label filters support only Equals.", 400);
+        }
+        if (filter.values().isEmpty()) {
             throw new AwsException("InvalidFilterValue",
                     "The filter value isn't valid. Verify the value and try again.", 400);
         }

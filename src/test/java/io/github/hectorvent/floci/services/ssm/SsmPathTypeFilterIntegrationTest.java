@@ -10,8 +10,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -99,9 +101,84 @@ class SsmPathTypeFilterIntegrationTest {
         assertTrue(response.jsonPath().getString("__type").endsWith("InvalidFilterValue"));
     }
 
+    @ParameterizedTest
+    @MethodSource("keyIdFilters")
+    void appliesKeyIdAndCombinedFilters(List<Map<String, Object>> filters, List<String> expected) {
+        putKeyedParameter("key-one", "alias/key-one");
+        putKeyedParameter("key-two", "alias/key-two");
+        Response response = ssm("GetParametersByPath", Map.of("Path", path, "ParameterFilters", filters), REGION)
+                .then().statusCode(200).extract().response();
+        assertNames(response, expected);
+    }
+
+    static Stream<Arguments> keyIdFilters() {
+        return Stream.of(
+                Arguments.of(List.of(filterForKey("KeyId", null, "alias/aws/ssm")), List.of("secret")),
+                Arguments.of(List.of(filterForKey("KeyId", "Equals", "alias/key-one")), List.of("key-one")),
+                Arguments.of(List.of(filterForKey("KeyId", "BeginsWith", "alias/key-")), List.of("key-one", "key-two")),
+                Arguments.of(List.of(filterForKey("KeyId", null, "alias/aws/ssm", "alias/key-two")),
+                        List.of("secret", "key-two")),
+                Arguments.of(List.of(filter(null, "String"), filterForKey("KeyId", null, "alias/key-one")), List.of()),
+                Arguments.of(List.of(filter(null, "SecureString"), filterForKey("KeyId", null, "alias/key-one")),
+                        List.of("key-one")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Name", "Path", "Tier", "DataType", "tag:env", "Unknown", "missing", "null"})
+    void rejectsInvalidFilterKeysBeforeReturningPathResults(String key) {
+        Map<String, Object> invalidFilter = new HashMap<>();
+        if (!"missing".equals(key)) {
+            invalidFilter.put("Key", "null".equals(key) ? null : key);
+        }
+        invalidFilter.put("Values", List.of("text"));
+        for (String requestedPath : List.of(path, path + "/empty")) {
+            Response response = ssm("GetParametersByPath", Map.of("Path", requestedPath,
+                            "ParameterFilters", List.of(invalidFilter)), REGION)
+                    .then().statusCode(400).extract().response();
+            assertTrue(response.jsonPath().getString("__type").endsWith("InvalidFilterKey"));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"KeyId", "Label"})
+    void rejectsInvalidOptionsForOtherAllowedKeys(String key) {
+        Response response = ssm("GetParametersByPath", Map.of("Path", path + "/empty",
+                        "ParameterFilters", List.of(filterForKey(key, "Contains", "value"))), REGION)
+                .then().statusCode(400).extract().response();
+        assertTrue(response.jsonPath().getString("__type").endsWith("InvalidFilterOption"));
+    }
+
+    @Test
+    void rejectsBeginsWithForLabelFilters() {
+        Response response = ssm("GetParametersByPath", Map.of("Path", path + "/empty",
+                        "ParameterFilters", List.of(filterForKey("Label", "BeginsWith", "value"))), REGION)
+                .then().statusCode(400).extract().response();
+        assertTrue(response.jsonPath().getString("__type").endsWith("InvalidFilterOption"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"KeyId", "Label"})
+    void rejectsEmptyValuesForOtherAllowedKeys(String key) {
+        Response response = ssm("GetParametersByPath", Map.of("Path", path + "/empty",
+                        "ParameterFilters", List.of(filterForKey(key, null))), REGION)
+                .then().statusCode(400).extract().response();
+        assertTrue(response.jsonPath().getString("__type").endsWith("InvalidFilterValue"));
+    }
+
+    private void putKeyedParameter(String suffix, String keyId) {
+        String name = path + "/" + suffix;
+        ssm("PutParameter", Map.of("Name", name, "Type", "SecureString", "Value", "value", "KeyId", keyId), REGION)
+                .then().statusCode(200);
+        owned.add(new OwnedParameter(name, REGION));
+    }
+
     private static Map<String, Object> filter(String option, String... values) {
-        return option == null ? Map.of("Key", "Type", "Values", List.of(values))
-                : Map.of("Key", "Type", "Option", option, "Values", List.of(values));
+        return filterForKey("Type", option, values);
+    }
+
+    private static Map<String, Object> filterForKey(String key, String option, String... values) {
+        return option == null ? Map.of("Key", key, "Values", List.of(values))
+                : Map.of("Key", key, "Option", option, "Values", List.of(values));
     }
 
     private void put(String suffix, String type, String region) {
