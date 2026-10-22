@@ -174,16 +174,32 @@ public class KmsJsonHandler {
     }
 
     private Response handleListKeys(JsonNode request, String region) {
-        List<KmsKey> keys = service.listKeys(region);
+        KmsService.Page<KmsKey> page = service.listKeys(region, marker(request), limit(request));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("Keys");
-        for (KmsKey k : keys) {
+        for (KmsKey k : page.items()) {
             ObjectNode entry = array.addObject();
             entry.put("KeyId", k.getKeyId());
             entry.put("KeyArn", k.getArn());
         }
-        response.put("Truncated", false);
+        putTruncation(response, page);
         return Response.ok(response).build();
+    }
+
+    private static String marker(JsonNode request) {
+        return request.path("Marker").isMissingNode() ? null : request.path("Marker").asText(null);
+    }
+
+    private static Integer limit(JsonNode request) {
+        return request.path("Limit").isMissingNode() || request.path("Limit").isNull()
+                ? null : request.path("Limit").asInt();
+    }
+
+    private static void putTruncation(ObjectNode response, KmsService.Page<?> page) {
+        response.put("Truncated", page.truncated());
+        if (page.truncated()) {
+            response.put("NextMarker", page.nextMarker());
+        }
     }
 
     private Response handleListGrants(JsonNode request, String region) {
@@ -467,17 +483,17 @@ public class KmsJsonHandler {
     private Response handleListAliases(JsonNode request, String region) {
         JsonNode keyIdNode = request.path("KeyId");
         String keyId = (keyIdNode.isMissingNode() || keyIdNode.isNull()) ? null : keyIdNode.asText();
-        List<KmsAlias> aliases = service.listAliases(keyId, region);
+        KmsService.Page<KmsAlias> page = service.listAliases(keyId, region, marker(request), limit(request));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("Aliases");
-        for (KmsAlias a : aliases) {
+        for (KmsAlias a : page.items()) {
             ObjectNode entry = array.addObject();
             entry.put("AliasName", a.getAliasName());
             entry.put("AliasArn", a.getAliasArn());
             entry.put("TargetKeyId", a.getTargetKeyId());
             entry.put("CreationDate", a.getCreationDate());
         }
-        response.put("Truncated", false);
+        putTruncation(response, page);
         return Response.ok(response).build();
     }
 

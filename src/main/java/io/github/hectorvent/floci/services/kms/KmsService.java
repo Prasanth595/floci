@@ -35,6 +35,7 @@ import java.security.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
@@ -675,6 +676,62 @@ public class KmsService implements ResourceProvider {
             result.put("NextMarker", nextMarker);
         }
         return result;
+    }
+
+    public record Page<T>(List<T> items, String nextMarker) {
+        public boolean truncated() {
+            return nextMarker != null;
+        }
+    }
+
+    // LimitType in the model is [1..1000]; the ListKeys docs allow up to 1000, ListAliases up to 100.
+    static final int MAX_LIST_KEYS_LIMIT = 1000;
+    static final int MAX_LIST_ALIASES_LIMIT = 100;
+
+    public Page<KmsKey> listKeys(String region, String marker, Integer limit) {
+        return page(listKeys(region), KmsKey::getKeyId, marker, limit, MAX_LIST_KEYS_LIMIT);
+    }
+
+    public Page<KmsAlias> listAliases(String keyId, String region, String marker, Integer limit) {
+        return page(listAliases(keyId, region), KmsAlias::getAliasName, marker, limit, MAX_LIST_ALIASES_LIMIT);
+    }
+
+    /**
+     * Pages {@code items} the way {@link #paginateGrants} does: sorted by id, Marker is the
+     * base64 id of the last item returned, Limit is clamped to [1..max]. Without a Limit the
+     * whole remainder is returned, so callers that never page see every entry as before.
+     */
+    private static <T> Page<T> page(List<T> items, Function<T, String> id,
+                                    String marker, Integer limit, int max) {
+        List<T> sorted = items.stream().sorted(Comparator.comparing(id)).toList();
+        int startIndex = 0;
+        if (marker != null && !marker.isBlank()) {
+            String lastId;
+            try {
+                lastId = new String(Base64.getDecoder().decode(marker), StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidMarkerException",
+                        "The request was rejected because the marker is not valid.", 400);
+            }
+            startIndex = -1;
+            for (int i = 0; i < sorted.size(); i++) {
+                if (id.apply(sorted.get(i)).equals(lastId)) {
+                    startIndex = i + 1;
+                    break;
+                }
+            }
+            if (startIndex < 0) {
+                throw new AwsException("InvalidMarkerException",
+                        "The request was rejected because the marker that specifies where pagination should next begin is not valid.", 400);
+            }
+        }
+        int endIndex = limit == null ? sorted.size()
+                : Math.min(startIndex + Math.clamp(limit, 1, max), sorted.size());
+        List<T> pageItems = sorted.subList(startIndex, endIndex);
+        String nextMarker = endIndex < sorted.size()
+                ? Base64.getEncoder().encodeToString(id.apply(pageItems.getLast()).getBytes(StandardCharsets.UTF_8))
+                : null;
+        return new Page<>(pageItems, nextMarker);
     }
 
     private Map<String, Object> grantToMap(KmsGrant grant) {
