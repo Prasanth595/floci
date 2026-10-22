@@ -188,8 +188,19 @@ public class KmsJsonHandler {
 
     /** MarkerType has length >= 1 in the model, so a present but empty Marker is refused, not ignored. */
     private static String marker(JsonNode request) {
-        String marker = request.path("Marker").isMissingNode() ? null : request.path("Marker").asText(null);
-        if (marker != null && marker.isEmpty()) {
+        JsonNode node = request.path("Marker");
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isTextual()) {
+            // MarkerType is a string; any other JSON value is refused rather than coerced.
+            String token = node.isNumber() ? "NUMBER_VALUE"
+                    : node.isBoolean() ? (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
+                    : node.isArray() ? "START_ARRAY" : "START_OBJECT";
+            throw new AwsException("SerializationException", token + " can not be converted to a String", 400);
+        }
+        String marker = node.textValue();
+        if (marker.isEmpty()) {
             throw SmithyValidationErrors.validationException("Value '' at 'marker' failed to satisfy constraint: "
                     + "Member must have length greater than or equal to 1");
         }

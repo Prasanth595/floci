@@ -1159,6 +1159,21 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "ListKeys|{}", "ListKeys|[]", "ListKeys|1", "ListKeys|true",
+            "ListAliases|{}", "ListAliases|[]", "ListAliases|1", "ListAliases|true"})
+    void listKeysAndAliasesRejectNonStringMarker(String action, String marker) {
+        given()
+                .header("X-Amz-Target", "TrentService." + action)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Marker\":" + marker + "}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+    }
+
+    @ParameterizedTest
     @CsvSource({"ListKeys", "ListAliases"})
     void listKeysAndAliasesRejectBadMarker(String action) {
         given()
