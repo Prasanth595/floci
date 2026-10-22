@@ -127,6 +127,8 @@ public class FirehoseService implements ResourceProvider {
     // Per stream, the batches staged in S3 whose COPY has not succeeded yet, oldest first. A failed COPY is
     // retried against the object already staged instead of staging the batch again.
     private final Map<String, Deque<PendingRedshiftCopy>> redshiftPending = new ConcurrentHashMap<>();
+    // Tracks streams that currently have a drain task queued or running on redshiftDeliveryExecutor.
+    private final Set<String> activeRedshiftDrains = ConcurrentHashMap.newKeySet();
     // Serialises the read, version check, merge and write of a Redshift UpdateDestination per stream.
     private final Map<String, Object> redshiftUpdateLocks = new ConcurrentHashMap<>();
     private final Clock clock;
@@ -850,6 +852,7 @@ public class FirehoseService implements ResourceProvider {
         buffers.remove(streamKey);
         bufferSince.remove(streamKey);
         redshiftPending.remove(streamKey);
+        activeRedshiftDrains.remove(streamKey);
         pendingSourceIterators.remove(streamKey);
         iteratorDelete(streamKey);
         LOG.infov("Deleted Firehose delivery stream: {0}", name);
@@ -1180,17 +1183,12 @@ public class FirehoseService implements ResourceProvider {
             LOG.errorv(e, "Could not persist the source checkpoint of stream {0} after its batch was staged; the "
                     + "source records may be read again: {1}", streamName, describe(e));
         }
-        redshiftPending.computeIfAbsent(streamName, k -> new ConcurrentLinkedDeque<>())
-                .addLast(new PendingRedshiftCopy(bucket, key));
-        try {
-            redshiftDeliveryExecutor.execute(() -> {
-                RequestScopes.runAs(stream.getAccountId(), () -> drainRedshiftCopies(streamName, stream));
-            });
-        } catch (RejectedExecutionException e) {
-            LOG.errorv("Redshift delivery executor rejected task for s3://{0}/{1} into table {2} on stream {3}; "
-                    + "the batch stays in s3://{0}/{1}: {4}", bucket, key,
-                    redshift.getCopyCommand().getDataTableName(), streamName, describe(e));
-        }
+        redshiftPending.compute(streamName, (k, existing) -> {
+            Deque<PendingRedshiftCopy> queue = existing != null ? existing : new ConcurrentLinkedDeque<>();
+            queue.addLast(new PendingRedshiftCopy(bucket, key));
+            return queue;
+        });
+        submitRedshiftDrain(streamName, stream);
     }
 
     /**
@@ -1211,23 +1209,48 @@ public class FirehoseService implements ResourceProvider {
         }
     }
 
-    /** Retries the COPY of every stream that still has staged batches waiting. Called on each tick. */
+    /** Retries the COPY of every stream that still has staged batches waiting and due. Called on each tick. */
     void retryPendingRedshiftCopies() {
         for (String streamKey : redshiftPending.keySet()) {
+            if (!isRedshiftDrainDue(streamKey)) {
+                continue;
+            }
             Optional<DeliveryStreamDescription> stream = streamGet(streamKey);
             if (stream.isEmpty()) {
                 redshiftPending.remove(streamKey);
                 continue;
             }
-            synchronized (flushLocks.computeIfAbsent(streamKey, k -> new Object())) {
+            submitRedshiftDrain(streamKey, stream.get());
+        }
+    }
+
+    private boolean isRedshiftDrainDue(String streamKey) {
+        Deque<PendingRedshiftCopy> queue = redshiftPending.get(streamKey);
+        if (queue == null || queue.isEmpty()) {
+            return false;
+        }
+        PendingRedshiftCopy head = queue.peekFirst();
+        return head != null && (head.nextAttempt == null || !clock.instant().isBefore(head.nextAttempt));
+    }
+
+    private void submitRedshiftDrain(String streamKey, DeliveryStreamDescription stream) {
+        if (!activeRedshiftDrains.add(streamKey)) {
+            return;
+        }
+        try {
+            redshiftDeliveryExecutor.execute(() -> {
                 try {
-                    redshiftDeliveryExecutor.execute(() -> {
-                        RequestScopes.runAs(stream.get().getAccountId(), () -> drainRedshiftCopies(streamKey, stream.get()));
-                    });
-                } catch (RejectedExecutionException e) {
-                    LOG.errorv("Redshift delivery executor rejected retry task for stream {0}: {1}", streamKey, describe(e));
+                    RequestScopes.runAs(stream.getAccountId(), () -> drainRedshiftCopies(streamKey, stream));
+                } finally {
+                    activeRedshiftDrains.remove(streamKey);
+                    if (redshiftPending.containsKey(streamKey) && isRedshiftDrainDue(streamKey)) {
+                        submitRedshiftDrain(streamKey, stream);
+                    }
                 }
-            }
+            });
+        } catch (RejectedExecutionException e) {
+            activeRedshiftDrains.remove(streamKey);
+            LOG.errorv("Redshift delivery executor rejected task for stream {0}: {1}", streamKey, describe(e));
         }
     }
 
@@ -1238,10 +1261,10 @@ public class FirehoseService implements ResourceProvider {
             return;
         }
         RedshiftDestination redshift = stream.getDestinations().get(0).getRedshiftDestinationDescription();
-        PendingRedshiftCopy next = queue.peekFirst();
-        while (next != null && copyStaged(streamKey, stream, redshift, next)) {
+        PendingRedshiftCopy next;
+        while (redshiftPending.containsKey(streamKey) && (next = queue.peekFirst()) != null
+                && copyStaged(streamKey, stream, redshift, next)) {
             queue.pollFirst();
-            next = queue.peekFirst();
         }
         redshiftPending.computeIfPresent(streamKey, (k, remaining) -> remaining.isEmpty() ? null : remaining);
     }
@@ -1262,22 +1285,28 @@ public class FirehoseService implements ResourceProvider {
         if (pending.nextAttempt != null && now.isBefore(pending.nextAttempt)) {
             return false;
         }
+        int window = redshift.getRetryOptions() != null && redshift.getRetryOptions().getDurationInSeconds() != null
+                ? redshift.getRetryOptions().getDurationInSeconds() : DEFAULT_REDSHIFT_RETRY_SECONDS;
+        if (pending.failingSince != null && window > 0 && !now.isBefore(pending.failingSince.plusSeconds(window))) {
+            LOG.errorv("Redshift delivery into table {0} failed for stream {1} and the retry window of {2}s is over; "
+                    + "the batch stays in s3://{3}/{4}", table, streamKey, window, pending.bucket, pending.key);
+            return true;
+        }
         try {
             String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
                     regionResolver.getDefaultRegion());
             redshiftDelivery.copy(stream.getAccountId(), region, redshift, pending.bucket, pending.key);
             return true;
         } catch (RuntimeException e) {
+            Instant failedAt = clock.instant();
             boolean expected = e instanceof AwsException || e instanceof IllegalStateException
                     || e instanceof IllegalArgumentException;
             if (pending.failingSince == null) {
-                pending.failingSince = now;
+                pending.failingSince = failedAt;
             }
             pending.failures++;
-            int window = redshift.getRetryOptions() != null && redshift.getRetryOptions().getDurationInSeconds() != null
-                    ? redshift.getRetryOptions().getDurationInSeconds() : DEFAULT_REDSHIFT_RETRY_SECONDS;
-            if (window > 0 && now.isBefore(pending.failingSince.plusSeconds(window))) {
-                pending.nextAttempt = now.plusSeconds(REDSHIFT_RETRY_INTERVAL_SECONDS);
+            if (window > 0 && failedAt.isBefore(pending.failingSince.plusSeconds(window))) {
+                pending.nextAttempt = failedAt.plusSeconds(REDSHIFT_RETRY_INTERVAL_SECONDS);
                 String reason = describe(e);
                 if (!expected) {
                     LOG.errorv(e, "Unexpected failure delivering s3://{0}/{1} into table {2} for stream {3}; "

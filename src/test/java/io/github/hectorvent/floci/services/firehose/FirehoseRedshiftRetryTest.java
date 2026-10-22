@@ -170,17 +170,48 @@ class FirehoseRedshiftRetryTest {
 
     @Test
     void failedCopyIsDroppedAfterTheRetryWindowButTheStagedObjectStays() throws Exception {
-        createStream(", \"RetryOptions\": {\"DurationInSeconds\": 10}");
+        createStream(", \"RetryOptions\": {\"DurationInSeconds\": 350}");
         copyFails();
 
         service.flush(STREAM);
-        clock.advance(Duration.ofSeconds(11));
+        pastBackoff();
         service.retryPendingRedshiftCopies();
-        clock.advance(Duration.ofSeconds(301));
+        pastBackoff();
         service.retryPendingRedshiftCopies();
 
         verify(delivery, times(2)).copy(anyString(), anyString(), any(), anyString(), anyString());
         verifyStagedTimes(1);
+    }
+
+    @Test
+    void retryWindowShorterThanBackoffExpiresWithoutRetrying() throws Exception {
+        createStream(", \"RetryOptions\": {\"DurationInSeconds\": 10}");
+        copyFails();
+
+        service.flush(STREAM);
+        pastBackoff();
+        service.retryPendingRedshiftCopies();
+
+        verify(delivery, times(1)).copy(anyString(), anyString(), any(), anyString(), anyString());
+        verifyStagedTimes(1);
+    }
+
+    @Test
+    void slowFailureMeasuresNextAttemptFromFailureTime() throws Exception {
+        createStream("");
+        Mockito.doAnswer(invocation -> {
+            clock.advance(Duration.ofSeconds(150));
+            throw new IllegalStateException("slow connection failure");
+        }).when(delivery).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        service.flush(STREAM);
+        clock.advance(Duration.ofSeconds(151));
+        service.retryPendingRedshiftCopies();
+        verify(delivery, times(1)).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        clock.advance(Duration.ofSeconds(150));
+        service.retryPendingRedshiftCopies();
+        verify(delivery, times(2)).copy(anyString(), anyString(), any(), anyString(), anyString());
     }
 
     @Test
@@ -231,6 +262,39 @@ class FirehoseRedshiftRetryTest {
         service.deleteDeliveryStream(STREAM);
         pastBackoff();
         service.retryPendingRedshiftCopies();
+
+        verify(delivery, times(1)).copy(anyString(), anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void deletingStreamWhileDrainIteratesStopsFurtherCopies() throws Exception {
+        createStream("");
+        copyFails();
+        service.flush(STREAM);
+        service.putRecord(STREAM, new Record("{\"id\":2}".getBytes(StandardCharsets.UTF_8)));
+        service.flush(STREAM);
+
+        Mockito.reset(delivery);
+        Mockito.doAnswer(invocation -> {
+            service.deleteDeliveryStream(STREAM);
+            return null;
+        }).when(delivery).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        pastBackoff();
+        service.retryPendingRedshiftCopies();
+
+        verify(delivery, times(1)).copy(anyString(), anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void retryPendingRedshiftCopiesDoesNotRunWhenHeadIsNotDue() throws Exception {
+        createStream("");
+        copyFails();
+
+        service.flush(STREAM);
+        for (int i = 0; i < 5; i++) {
+            service.retryPendingRedshiftCopies();
+        }
 
         verify(delivery, times(1)).copy(anyString(), anyString(), any(), anyString(), anyString());
     }
