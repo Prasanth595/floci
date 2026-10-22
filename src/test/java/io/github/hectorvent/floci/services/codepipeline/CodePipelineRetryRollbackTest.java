@@ -86,7 +86,7 @@ class CodePipelineRetryRollbackTest {
                                            EventBridgeService eventBridge) {
         return new CodePipelineService(storage, mapper, mock(CodeBuildService.class),
                 mock(CodeDeployService.class), lambda, s3,
-                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L,
+                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L, 100L,
                 TimeUnit.SECONDS.toNanos(5), () -> { });
     }
 
