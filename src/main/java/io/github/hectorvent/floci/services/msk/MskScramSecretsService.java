@@ -165,11 +165,14 @@ public class MskScramSecretsService {
         String region = AwsArnUtils.parse(secretArn).region();
         Secret secret = secretsManagerService.describeSecret(secretArn, region);
         String keyId = secret.getKmsKeyId();
-        if (keyId != null && keyId.startsWith("alias/")) {
+        boolean hasAliasPrefix = keyId != null && keyId.startsWith("alias/");
+        boolean hasAliasArn = AwsArnUtils.isArnFor(keyId, "kms") && AwsArnUtils.parse(keyId).resource().startsWith("alias/");
+        if (hasAliasPrefix || hasAliasArn) {
             throw new AwsException("BadRequestException",
-                    "SCRAM secrets must reference a KMS key ID instead of an alias name.", 400,
+                    "SCRAM secrets must reference a KMS key ID or key ARN instead of an alias.", 400,
                     Map.of("invalidParameter", "secretArnList"));
         }
+        
         if (keyId != null && !keyId.isBlank()) {
             KmsKey key = kmsService.describeKey(keyId, region);
             if ("CUSTOMER".equals(key.getKeyManager())

@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService.
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -25,6 +27,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class MskScramServiceTest {
@@ -35,6 +40,7 @@ class MskScramServiceTest {
             "arn:aws:secretsmanager:us-east-1:000000000000:secret:AmazonMSK_alice";
     private AccountAwareStorageBackend<MskScramAssociations> associations;
     private SecretsManagerService secrets;
+    private KmsService kms;
     private MskScramSecretsService service;
 
     @BeforeEach
@@ -51,7 +57,7 @@ class MskScramServiceTest {
         Secret metadata = new Secret();
         metadata.setKmsKeyId("customer-key");
         when(secrets.describeSecret(anyString(), eq("us-east-1"))).thenReturn(metadata);
-        KmsService kms = mock(KmsService.class);
+        kms = mock(KmsService.class);
         when(kms.describeKey("customer-key", "us-east-1")).thenReturn(new KmsKey());
         service = new MskScramSecretsService(storageFactory, clusters, secrets, kms, new ObjectMapper());
         secretValue(SECRET, "{\"username\":\"alice\",\"password\":\"password\"}");
@@ -73,6 +79,37 @@ class MskScramServiceTest {
         assertTrue(service.batchDisassociateScramSecret(CLUSTER, List.of(SECRET)).isEmpty());
         assertTrue(service.listScramSecrets(CLUSTER, null, null).items().isEmpty());
         assertTrue(associations.getForAccount(ACCOUNT, CLUSTER).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"alias/msk-scram",
+            "arn:aws:kms:us-east-1:000000000000:alias/msk-scram"})
+    void rejectsKmsAliasReferencesBeforeKeyLookup(String keyReference) {
+        Secret metadata = new Secret();
+        metadata.setKmsKeyId(keyReference);
+        when(secrets.describeSecret(SECRET, "us-east-1")).thenReturn(metadata);
+
+        List<Map<String, String>> failures = service.batchAssociateScramSecret(CLUSTER, List.of(SECRET));
+
+        assertEquals("BadRequestException", failures.getFirst().get("errorCode"));
+        assertTrue(service.listScramSecrets(CLUSTER, null, null).items().isEmpty());
+        verifyNoInteractions(kms);
+        verify(secrets, never()).batchGetSecretValue(any(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"12345678-1234-1234-1234-123456789012",
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012"})
+    void acceptsKmsKeyIdsAndKeyArns(String keyReference) {
+        Secret metadata = new Secret();
+        metadata.setKmsKeyId(keyReference);
+        when(secrets.describeSecret(SECRET, "us-east-1")).thenReturn(metadata);
+        when(kms.describeKey(keyReference, "us-east-1")).thenReturn(new KmsKey());
+
+        assertTrue(service.batchAssociateScramSecret(CLUSTER, List.of(SECRET)).isEmpty());
+
+        verify(kms).describeKey(keyReference, "us-east-1");
+        assertEquals(List.of(SECRET), service.listScramSecrets(CLUSTER, null, null).items());
     }
 
     @Test
