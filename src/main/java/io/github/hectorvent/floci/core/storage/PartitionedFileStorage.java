@@ -137,6 +137,9 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     // Runs inside a shard write after the shard was read and before its file is replaced: the
     // moment a clear() that slipped past the lock would be undone. Tests use it to stage that.
     private volatile Runnable beforeShardWrite = () -> { };
+    // Runs on load after superseded files were rewritten under their current names and before
+    // the old files are removed. Tests use it to make only the removal fail.
+    private volatile Runnable beforeSupersededDelete = () -> { };
     // Set once load() has replayed the journal; compaction waits for it.
     private volatile boolean loaded;
 
@@ -480,6 +483,10 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
         this.beforeShardWrite = hook;
     }
 
+    void setBeforeSupersededDelete(Runnable hook) {
+        this.beforeSupersededDelete = hook;
+    }
+
     /** The file that holds {@code entryKey} of {@code key}. */
     Path fileFor(String key, String entryKey) {
         return fileFor(new ShardId(key, shardOf(entryKey)));
@@ -642,6 +649,7 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
             throw new IllegalStateException("Could not rewrite " + dirty.size() + " shards of " + directory
                     + " from superseded files; they are kept, fix the cause and restart");
         }
+        beforeSupersededDelete.run();
         for (Path file : superseded) {
             try {
                 Files.deleteIfExists(file);

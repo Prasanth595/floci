@@ -5,6 +5,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -352,6 +353,44 @@ class PartitionedFileStorageTest {
         assertTrue(Files.exists(old));
         Files.delete(blocker.resolve("child"));
         Files.delete(blocker);
+        assertEquals(Map.of("a", "1", "b", "2"), open(PartitionedFileStorage.Mode.SYNC).get("key").orElseThrow());
+        assertFalse(Files.exists(old));
+    }
+
+    @Test
+    void aSupersededFileThatCannotBeRemovedStopsTheLoad() throws Exception {
+        PartitionedFileStorage<String> storage = open(PartitionedFileStorage.Mode.SYNC);
+        storage.put("key", Map.of("a", "1", "b", "2"));
+        Path current = storage.fileFor("key");
+        Path old = current.resolveSibling("old-name.json");
+        Files.move(current, old);
+        Path directory = tempDir.resolve("items");
+        Set<PosixFilePermission> original = Files.getPosixFilePermissions(directory);
+
+        PartitionedFileStorage<String> blocked = new PartitionedFileStorage<>(directory,
+                tempDir.resolve("items.json"), String.class, 1, PartitionedFileStorage.Mode.SYNC, 60_000);
+        opened.add(blocked);
+        blocked.setBeforeSupersededDelete(() -> {
+            // The keys are rewritten under their current names; now make removing the old file fail.
+            try {
+                Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("r-xr-xr-x"));
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+        try {
+            Throwable failure = assertThrows(RuntimeException.class, blocked::load);
+            // A root user deletes through the read-only mode, so there is nothing to test there.
+            assumeFalse(Files.isWritable(directory), "the directory stays writable for this user");
+            // Running on would let later writes change only the current file, and the next load
+            // would merge the old file back in and revive what they removed.
+            assertInstanceOf(UncheckedIOException.class, failure);
+            assertTrue(Files.exists(current), "the rewrite landed before the removal failed");
+            assertTrue(Files.exists(old));
+        } finally {
+            Files.setPosixFilePermissions(directory, original);
+        }
+
         assertEquals(Map.of("a", "1", "b", "2"), open(PartitionedFileStorage.Mode.SYNC).get("key").orElseThrow());
         assertFalse(Files.exists(old));
     }
