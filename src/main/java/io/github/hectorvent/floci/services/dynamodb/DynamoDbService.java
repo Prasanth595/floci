@@ -5067,10 +5067,17 @@ public class DynamoDbService {
         return backup;
     }
 
-    public TableBackup describeBackup(String backupArn, String region) {
-        DynamoDbBackupArns.BackupArn arn = DynamoDbBackupArns.parse(backupArn);
-        if (!arn.accountId().equals(regionResolver.getAccountId())) {
+    /** AWS checks the account of a backup ARN before the rest of it. */
+    DynamoDbBackupArns.BackupArn requireOwnBackupArn(String backupArn) {
+        if (!DynamoDbBackupArns.split(backupArn).accountId().equals(regionResolver.getAccountId())) {
             throw new AwsException("AccessDeniedException", "Access is denied", 400);
+        }
+        return DynamoDbBackupArns.parse(backupArn);
+    }
+
+    public TableBackup describeBackup(String backupArn, String region) {
+        if (!requireOwnBackupArn(backupArn).isValid()) {
+            throw invalidBackupArnValue();
         }
         return backupStore.get(backupArn)
                 .filter(backup -> backup.getRegion().equals(region))
@@ -5099,6 +5106,9 @@ public class DynamoDbService {
                                          String exclusiveStartBackupArn, String backupType, String region) {
         DynamoDbBackupArns.BackupArn start = exclusiveStartBackupArn != null
                 ? DynamoDbBackupArns.parse(exclusiveStartBackupArn) : null;
+        if (start != null && !start.isValid()) {
+            throw invalidBackupArnValue();
+        }
         Set<String> types = "ALL".equals(backupType) ? Set.of("USER", "SYSTEM") : Set.of(backupType);
         List<TableBackup> matching = backupStore.scan(key -> true).stream()
                 .filter(backup -> backup.getRegion().equals(region))
@@ -5159,6 +5169,10 @@ public class DynamoDbService {
 
     private boolean isUnexpired(TableBackup backup) {
         return backup.getExpiryDateTime() == null || clock.instant().isBefore(backup.getExpiryDateTime());
+    }
+
+    private static AwsException invalidBackupArnValue() {
+        return new AwsException("ValidationException", "Invalid Request: BackupArn is not valid", 400);
     }
 
     private static boolean isAfter(TableBackup backup, DynamoDbBackupArns.BackupArn start) {

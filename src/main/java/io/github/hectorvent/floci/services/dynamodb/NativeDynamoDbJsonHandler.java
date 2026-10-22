@@ -2009,7 +2009,7 @@ public class NativeDynamoDbJsonHandler {
      */
     private Response handleRestoreTableFromBackup(JsonNode request, String region) {
         String backupArn = textOrNull(request, "BackupArn");
-        DynamoDbBackupArns.parse(backupArn);
+        dynamoDbService.requireOwnBackupArn(backupArn);
         String targetTableName = requireTableNameParameter(request, "TargetTableName");
         throwValidationErrors(restoreViolations(request, targetTableName));
 

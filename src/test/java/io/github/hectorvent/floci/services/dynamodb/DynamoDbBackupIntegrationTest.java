@@ -154,6 +154,33 @@ class DynamoDbBackupIntegrationTest {
     }
 
     @Test
+    void backupArnOfAnotherAccountIsDeniedOnceItSplitsIntoFields() {
+        String id = "01700000000000-abcdef12";
+        String other = "arn:aws:dynamodb:us-east-1:123456789012:";
+        for (String arn : List.of(other + "table/BackupIT-none/backup/xy", other + "table/BackupIT-none",
+                "arn:aws:s3:nowhere-1:123456789012:table/BackupIT-none/backup/1700000000000-abcdef12",
+                "arn:aws:dynamodb:us-east-1::table/BackupIT-none/backup/" + id)) {
+            for (String action : List.of("DescribeBackup", "DeleteBackup")) {
+                ddb(action, "{\"BackupArn\": \"" + arn + "\"}")
+                        .statusCode(400)
+                        .body("__type", containsString("AccessDeniedException"))
+                        .body("message", equalTo("Access is denied"));
+            }
+            ddb("RestoreTableFromBackup", "{\"BackupArn\": \"" + arn + "\", \"TargetTableName\": \"a b\"}")
+                    .statusCode(400)
+                    .body("__type", containsString("AccessDeniedException"));
+        }
+        for (String arn : List.of("arn:aws:dynamodb:us-east-1:123456789012", other,
+                "arn::dynamodb:us-east-1:123456789012:table/BackupIT-none/backup/" + id,
+                "arn:aws::us-east-1:123456789012:table/BackupIT-none/backup/" + id,
+                "ARN:aws:dynamodb:us-east-1:123456789012:table/BackupIT-none/backup/" + id)) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                    .statusCode(400)
+                    .body("message", equalTo("Invalid Backup ARN"));
+        }
+    }
+
+    @Test
     void unknownBackupIsBackupNotFound() {
         String arn = TABLE_ARN_PREFIX + "BackupIT-none/backup/01700000000000-ABCDEF12";
         ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
@@ -461,6 +488,17 @@ class DynamoDbBackupIntegrationTest {
                         + "failed to satisfy constraint: Member must satisfy enum value set: "
                         + "[PROVISIONED, PAY_PER_REQUEST]; Value 'a b' at 'targetTableName' failed to satisfy "
                         + "constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"));
+    }
+
+    @Test
+    void restoreTableFromBackupChecksTheBackupIdAfterTheRequest() {
+        String arn = TABLE_ARN_PREFIX + "BackupIT-none/backup/1700000000000-abcdef12";
+        ddb("RestoreTableFromBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                .statusCode(400)
+                .body("message", equalTo("The parameter 'TableName' is required but was not present in the request"));
+        ddb("RestoreTableFromBackup", "{\"BackupArn\": \"" + arn + "\", \"TargetTableName\": \"BackupIT-never\"}")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: BackupArn is not valid"));
     }
 
     @Test
