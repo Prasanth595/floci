@@ -154,6 +154,28 @@ class DynamoDbBackupIntegrationTest {
     }
 
     @Test
+    void backupArnTableNameAndPartitionAreChecked() {
+        String backup = "/backup/01700000000000-abcdef12";
+        for (String table : List.of("tt", "t".repeat(256))) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + TABLE_ARN_PREFIX + table + backup + "\"}")
+                    .statusCode(400)
+                    .body("message", equalTo("Invalid Backup ARN"));
+        }
+        for (String arn : List.of("arn:aws-cn:dynamodb:us-east-1:000000000000:table/BackupIT-none" + backup,
+                "arn:aws:dynamodb:cn-north-1:000000000000:table/BackupIT-none" + backup)) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                    .statusCode(400)
+                    .body("message", equalTo("Invalid Request: BackupArn is not valid"));
+        }
+        for (String arn : List.of(TABLE_ARN_PREFIX + "ttt" + backup, TABLE_ARN_PREFIX + "t".repeat(255) + backup,
+                "arn:aws-cn:dynamodb:cn-north-1:000000000000:table/BackupIT-none" + backup)) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                    .statusCode(400)
+                    .body("__type", containsString("BackupNotFoundException"));
+        }
+    }
+
+    @Test
     void backupArnOfAnotherAccountIsDeniedOnceItSplitsIntoFields() {
         String id = "01700000000000-abcdef12";
         String other = "arn:aws:dynamodb:us-east-1:123456789012:";

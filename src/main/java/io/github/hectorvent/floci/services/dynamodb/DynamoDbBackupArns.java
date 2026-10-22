@@ -14,17 +14,18 @@ import java.util.regex.Pattern;
  */
 final class DynamoDbBackupArns {
 
-    private static final Pattern RESOURCE = Pattern.compile("table/([a-zA-Z0-9_.\\-]+)/backup/([^/]{3,})");
+    private static final Pattern RESOURCE = Pattern.compile("table/([a-zA-Z0-9_.\\-]{3,255})/backup/([^/]{3,})");
     private static final Pattern BACKUP_ID = Pattern.compile("\\d{14}-[0-9a-fA-F]{8}");
 
     private DynamoDbBackupArns() {}
 
-    record BackupArn(String arn, String service, String region, String accountId, String tableName,
-                     String backupId) {
+    record BackupArn(String arn, String partition, String service, String region, String accountId,
+                     String tableName, String backupId) {
 
         /** AWS answers "Invalid Request: BackupArn is not valid" when this fails. */
         boolean isValid() {
-            return "dynamodb".equals(service) && AwsRegions.isRegionId(region) && !accountId.isEmpty()
+            return "dynamodb".equals(service) && AwsRegions.isRegionId(region)
+                    && AwsRegions.partitionFor(region).equals(partition) && !accountId.isEmpty()
                     && BACKUP_ID.matcher(backupId).matches();
         }
 
@@ -57,8 +58,8 @@ final class DynamoDbBackupArns {
         if (!resource.matches()) {
             throw invalidBackupArn();
         }
-        return new BackupArn(input, arn.service(), arn.region(), arn.accountId(), resource.group(1),
-                resource.group(2));
+        return new BackupArn(input, arn.partition(), arn.service(), arn.region(), arn.accountId(),
+                resource.group(1), resource.group(2));
     }
 
     static String mint(String tableArn, Instant creationDateTime) {
