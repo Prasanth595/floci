@@ -49,7 +49,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -145,7 +144,11 @@ class DynamoDbStreamsEventSourcePollerTest {
     private DynamoDbStreamsEventSourcePoller pollerOver(DynamoDbStreamReader streamReader, EsmStore store) {
         return new DynamoDbStreamsEventSourcePoller(
                 mock(Vertx.class), streamReader, executorService, new LambdaTargetResolver(functionStore, aliasStore),
-                store, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
+                store, OBJECT_MAPPER, config, filterMatcher, batchFailures(), clock::get);
+    }
+
+    private StreamBatchFailures batchFailures() {
+        return new StreamBatchFailures(sqsService, snsService, s3Service, OBJECT_MAPPER, config);
     }
 
     /**
@@ -243,7 +246,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         Vertx vertx = mock(Vertx.class);
         DynamoDbStreamsEventSourcePoller p = new DynamoDbStreamsEventSourcePoller(
                 vertx, reader, executorService, new LambdaTargetResolver(functionStore, aliasStore),
-                esmStore, OBJECT_MAPPER, config, filterMatcher, sqsService, snsService, s3Service, clock::get);
+                esmStore, OBJECT_MAPPER, config, filterMatcher, batchFailures(), clock::get);
 
         p.startPersistedPollers();
 
@@ -989,17 +992,6 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     @Test
-    void s3OnFailureKeyUsesUtcLayout() {
-        UUID randomId = UUID.fromString("12345678-1234-1234-1234-123456789abc");
-
-        String key = DynamoDbStreamsEventSourcePoller.buildS3OnFailureKey(
-                "esm-1", "shard-1", Instant.parse("2026-09-14T23:07:08Z"), randomId);
-
-        assertEquals("aws/lambda/esm-1/shard-1/2026/09/14/"
-                + "2026-09-14T23.07.08-12345678-1234-1234-1234-123456789abc", key);
-    }
-
-    @Test
     void onFailurePayloadUsesEpochSecondsNotMillisForArrivalTimestamps() throws Exception {
         // Chosen so the seconds/millis interpretations land 46+ years apart: a millis bug cannot
         // accidentally parse back to this epoch-seconds value.
@@ -1323,7 +1315,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     void retryBackoffDoublesFromThePollIntervalAndCapsOut() {
         assertEquals(2_000, poller.retryBackoffMs(1));
         assertEquals(4_000, poller.retryBackoffMs(2));
-        assertEquals(DynamoDbStreamsEventSourcePoller.MAX_RETRY_BACKOFF_MS, poller.retryBackoffMs(20));
+        assertEquals(StreamBatchFailures.MAX_RETRY_BACKOFF_MS, poller.retryBackoffMs(20));
     }
 
     @Test
