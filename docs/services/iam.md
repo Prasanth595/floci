@@ -108,7 +108,9 @@ A role `Description` is held to the shape AWS publishes for it on every action t
 `ListRoles`, `ListPolicies`, `ListUsers` and `ListGroups` return 100 items when `MaxItems` is
 omitted and reject a value outside 1 to 1000. `PathPrefix` and `Scope` filter before paging, and
 roles, users, groups and customer managed policies are listed in name order so a `Marker` resumes
-where the previous page stopped.
+where the previous page stopped. `ListUsers`, `ListGroups` and the attached and inline policy lists
+accept only a `Marker` issued by the same action for the same principal; any other value, a bare
+number included, is `InvalidInput`.
 `ListPolicies` does not yet apply `OnlyAttached` or `PolicyUsageFilter`.
 
 ### Permission Boundaries

@@ -497,4 +497,127 @@ class IamListPaginationIntegrationTest {
             call("DeleteGroup", "GroupName", name);
         }
     }
+
+    @Test
+    void listUsersAndListGroupsDefaultToOneHundredItems() {
+        String tag = suffix();
+        String path = "/pg-principals-default-" + tag + "/";
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < 101; i++) {
+            names.add(String.format("pg-default-%s-%03d", tag, i));
+        }
+        for (String name : names) {
+            call("CreateUser", "UserName", name, "Path", path);
+            call("CreateGroup", "GroupName", name, "Path", path);
+        }
+        try {
+            for (String[] list : List.of(new String[]{"ListUsers", "Users", "UserName"},
+                    new String[]{"ListGroups", "Groups", "GroupName"})) {
+                Page first = page(list[0], list[1], list[2], iam(list[0]).formParam("PathPrefix", path));
+                assertEquals(names.subList(0, 100), first.names(), list[0]);
+                assertTrue(first.truncated(), list[0]);
+                assertNotNull(first.marker(), list[0]);
+
+                Page second = page(list[0], list[1], list[2], iam(list[0]).formParam("PathPrefix", path)
+                        .formParam("Marker", first.marker()));
+                assertEquals(List.of(names.get(100)), second.names(), list[0]);
+                assertFalse(second.truncated(), list[0]);
+                assertNull(second.marker(), list[0]);
+            }
+        } finally {
+            for (String name : names) {
+                call("DeleteUser", "UserName", name);
+                call("DeleteGroup", "GroupName", name);
+            }
+        }
+    }
+
+    /**
+     * These lists have only ever issued signed markers, so a bare number is not an offset into
+     * them: it is refused like any other marker they did not issue.
+     */
+    @Test
+    void newlyPagedListsRejectAnUnsignedNumericMarker() {
+        String name = "pg-numeric-" + suffix();
+        createRole(name, "/");
+        call("CreateUser", "UserName", name);
+        call("CreateGroup", "GroupName", name);
+        try {
+            List<String[]> requests = List.of(new String[]{"ListUsers"}, new String[]{"ListGroups"},
+                    new String[]{"ListAttachedUserPolicies", "UserName"},
+                    new String[]{"ListAttachedGroupPolicies", "GroupName"},
+                    new String[]{"ListAttachedRolePolicies", "RoleName"},
+                    new String[]{"ListUserPolicies", "UserName"},
+                    new String[]{"ListGroupPolicies", "GroupName"},
+                    new String[]{"ListRolePolicies", "RoleName"});
+            for (String[] r : requests) {
+                RequestSpecification request = iam(r[0]).formParam("Marker", "1");
+                if (r.length > 1) {
+                    request.formParam(r[1], name);
+                }
+                request.when().post("/").then()
+                    .statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+            }
+        } finally {
+            deleteRole(name);
+            call("DeleteUser", "UserName", name);
+            call("DeleteGroup", "GroupName", name);
+        }
+    }
+
+    /** A marker resumes only the listing that issued it: same action, same principal. */
+    @Test
+    void aMarkerFromAnotherListingIsRejected() {
+        String tag = suffix();
+        String roleA = "pg-scope-a-" + tag;
+        String roleB = "pg-scope-b-" + tag;
+        createRole(roleA, "/");
+        createRole(roleB, "/");
+        List<String> arns = new ArrayList<>();
+        List<String> users = List.of("pg-scope-u0-" + tag, "pg-scope-u1-" + tag);
+        for (int i = 0; i < 2; i++) {
+            arns.add(createPolicy("pg-scope-" + tag + "-" + i, "/"));
+            call("CreateUser", "UserName", users.get(i), "Path", "/pg-scope-" + tag + "/");
+            call("CreateGroup", "GroupName", users.get(i), "Path", "/pg-scope-" + tag + "/");
+            for (String role : List.of(roleA, roleB)) {
+                call("AttachRolePolicy", "RoleName", role, "PolicyArn", arns.get(i));
+                call("PutRolePolicy", "RoleName", role, "PolicyName", "pg-inline-" + i,
+                        "PolicyDocument", POLICY_DOCUMENT);
+            }
+        }
+        try {
+            String attachedA = listPage("ListAttachedRolePolicies", "AttachedPolicies", "PolicyArn",
+                    "RoleName", roleA, "1", null).marker();
+            assertNotNull(attachedA);
+            String usersMarker = page("ListUsers", "Users", "UserName", iam("ListUsers")
+                    .formParam("PathPrefix", "/pg-scope-" + tag + "/").formParam("MaxItems", "1")).marker();
+            assertNotNull(usersMarker);
+
+            List<RequestSpecification> misuses = List.of(
+                    iam("ListAttachedRolePolicies").formParam("RoleName", roleB).formParam("Marker", attachedA),
+                    iam("ListRolePolicies").formParam("RoleName", roleA).formParam("Marker", attachedA),
+                    iam("ListGroups").formParam("PathPrefix", "/pg-scope-" + tag + "/")
+                            .formParam("Marker", usersMarker));
+            for (RequestSpecification misuse : misuses) {
+                misuse.when().post("/").then()
+                    .statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+            }
+            assertEquals(List.of(arns.get(1)), listPage("ListAttachedRolePolicies", "AttachedPolicies",
+                    "PolicyArn", "RoleName", roleA, "1", attachedA).names(), "the issuing listing still resumes");
+        } finally {
+            for (int i = 0; i < 2; i++) {
+                for (String role : List.of(roleA, roleB)) {
+                    call("DetachRolePolicy", "RoleName", role, "PolicyArn", arns.get(i));
+                    call("DeleteRolePolicy", "RoleName", role, "PolicyName", "pg-inline-" + i);
+                }
+                call("DeleteUser", "UserName", users.get(i));
+                call("DeleteGroup", "GroupName", users.get(i));
+            }
+            arns.forEach(IamListPaginationIntegrationTest::deletePolicy);
+            deleteRole(roleA);
+            deleteRole(roleB);
+        }
+    }
 }
