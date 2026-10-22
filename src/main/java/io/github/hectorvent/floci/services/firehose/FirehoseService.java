@@ -1216,7 +1216,7 @@ public class FirehoseService implements ResourceProvider {
                 continue;
             }
             Optional<DeliveryStreamDescription> stream = streamGet(streamKey);
-            if (stream.isEmpty()) {
+            if (stream.isEmpty() || !isRedshiftStream(stream.get())) {
                 redshiftPending.remove(streamKey);
                 continue;
             }
@@ -1258,6 +1258,10 @@ public class FirehoseService implements ResourceProvider {
     private void drainRedshiftCopies(String streamKey, DeliveryStreamDescription stream) {
         Deque<PendingRedshiftCopy> queue = redshiftPending.get(streamKey);
         if (queue == null) {
+            return;
+        }
+        if (!isRedshiftStream(stream)) {
+            redshiftPending.remove(streamKey);
             return;
         }
         RedshiftDestination redshift = stream.getDestinations().get(0).getRedshiftDestinationDescription();

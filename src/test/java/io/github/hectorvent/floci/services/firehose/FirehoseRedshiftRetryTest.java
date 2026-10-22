@@ -300,6 +300,20 @@ class FirehoseRedshiftRetryTest {
     }
 
     @Test
+    void pendingCopiesAreDiscardedIfDestinationIsNoLongerRedshift() throws Exception {
+        createStream("");
+        copyFails();
+        service.flush(STREAM);
+
+        service.describeDeliveryStream(STREAM).getDestinations().get(0).setRedshiftDestinationDescription(null);
+
+        pastBackoff();
+        service.retryPendingRedshiftCopies();
+
+        verify(delivery, times(1)).copy(anyString(), anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
     void backupEnabledWritesTheBatchToTheBackupBucketOnlyOnce() throws Exception {
         createStream(BACKUP_ENABLED);
         copyFails();
