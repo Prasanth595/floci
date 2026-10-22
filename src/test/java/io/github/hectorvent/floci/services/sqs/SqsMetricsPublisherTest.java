@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService.Datapoint;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
@@ -227,6 +228,31 @@ class SqsMetricsPublisherTest {
                 List.of(new Dimension("QueueName", "stamped")), ended, ended, 60, List.of("Sum"), null, REGION);
         assertEquals(1, points.size());
         assertEquals(ended, points.getFirst().timestamp());
+    }
+
+    @Test
+    void theHourlyTickDropsAwsSqsDatapointsOlderThanFifteenDays() {
+        Instant tick = Instant.parse("2026-10-22T13:01:01Z");
+        Instant hour = Instant.parse("2026-10-22T13:00:00Z");
+        Instant expired = hour.minus(Duration.ofDays(16));
+        Instant kept = hour.minus(Duration.ofDays(14));
+        List<Dimension> queue = List.of(new Dimension("QueueName", "old"));
+        cloudWatch.putMetricDataForAccount(ACCOUNT, "AWS/SQS", List.of(
+                MetricDatum.of("NumberOfMessagesSent", "Count", 1, queue, expired.getEpochSecond()),
+                MetricDatum.of("NumberOfMessagesSent", "Count", 1, queue, kept.getEpochSecond())), REGION);
+        cloudWatch.putMetricDataForAccount(ACCOUNT, "Custom", List.of(
+                MetricDatum.of("NumberOfMessagesSent", "Count", 1, queue, expired.getEpochSecond())), REGION);
+
+        publisher.publish(tick);
+
+        assertTrue(points("AWS/SQS", queue, expired).isEmpty());
+        assertEquals(1, points("AWS/SQS", queue, kept).size());
+        assertEquals(1, points("Custom", queue, expired).size());
+    }
+
+    private List<Datapoint> points(String namespace, List<Dimension> dimensions, Instant at) {
+        return cloudWatch.getMetricStatistics(namespace, "NumberOfMessagesSent", dimensions, at, at, 60,
+                List.of("Sum"), null, REGION);
     }
 
     @Test

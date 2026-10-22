@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -130,6 +131,22 @@ public class CloudWatchMetricsService {
             aware.putForAccount(accountId, key, datum);
         } else {
             metricStore.put(key, datum);
+        }
+    }
+
+    /**
+     * Drops the {@code namespace} datapoints stamped before {@code cutoff}, in every account. A service
+     * that writes its own metrics each minute, such as SQS, calls it so that history stays bounded.
+     */
+    public void deleteMetricDataBefore(String namespace, Instant cutoff) {
+        long cutoffSeconds = cutoff.getEpochSecond();
+        Predicate<MetricDatum> expired = d -> namespace.equals(d.getNamespace()) && d.getTimestamp() < cutoffSeconds;
+        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+            aware.deleteAllAccountsMatching(expired);
+            return;
+        }
+        for (String key : List.copyOf(metricStore.keys())) {
+            metricStore.get(key).filter(expired).ifPresent(ignored -> metricStore.delete(key));
         }
     }
 

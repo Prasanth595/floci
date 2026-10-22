@@ -6,11 +6,13 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -24,7 +26,8 @@ import java.util.concurrent.TimeUnit;
  * them: one sample of each depth gauge, and for each counter one sample per call in the minute plus
  * the zero sample AWS adds to every minute. SentMessageSize has one sample per message and no zero
  * sample. A tick runs just after each minute boundary and stamps its samples with the minute that
- * ended, so a call lands in the minute it was made, as on AWS.
+ * ended, so a call lands in the minute it was made, as on AWS. Once an hour it drops the AWS/SQS
+ * datapoints older than the 15 days AWS keeps one-minute data, so the generated history stays bounded.
  */
 @ApplicationScoped
 public class SqsMetricsPublisher {
@@ -33,6 +36,7 @@ public class SqsMetricsPublisher {
     private static final Logger LOG = Logger.getLogger(SqsMetricsPublisher.class);
     private static final long MINUTE_MILLIS = 60_000;
     private static final long TICK_OFFSET_MILLIS = 1_000;
+    private static final Duration RETENTION = Duration.ofDays(15);
     private static final String COUNT = "Count";
 
     private final SqsService sqsService;
@@ -61,8 +65,17 @@ public class SqsMetricsPublisher {
                 MINUTE_MILLIS, TimeUnit.MILLISECONDS);
     }
 
-    void onStop(@Observes ShutdownEvent ignored) {
-        scheduler.shutdownNow();
+    /** Before EmulatorLifecycle's default-priority storage shutdown, letting a running tick finish its writes. */
+    void onStop(@Observes @Priority(1000) ShutdownEvent ignored) {
+        scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                LOG.warn("The AWS/SQS metrics publisher did not finish its tick within 5 seconds");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warnv(e, "Interrupted while stopping the AWS/SQS metrics publisher");
+        }
     }
 
     /**
@@ -85,6 +98,13 @@ public class SqsMetricsPublisher {
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Publishing AWS/SQS metrics for queue {0} of account {1} in {2} failed; its samples "
                         + "for this minute are dropped", queue.queueName(), queue.accountId(), queue.region());
+            }
+        }
+        if (minute % 3600 == 0) {
+            try {
+                metricsService.deleteMetricDataBefore(NAMESPACE, Instant.ofEpochSecond(minute).minus(RETENTION));
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Dropping AWS/SQS datapoints older than {0} failed; the next hour tries again", RETENTION);
             }
         }
     }
