@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 /**
@@ -286,12 +287,14 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         // applyOpenApiSpec is the only place that turns it into resources and methods. Resolved
         // before anything changes, so a document that cannot be read leaves the API as it was.
         JsonNode openApiDocument = OpenApiDocuments.resolve(props, engine, s3Service, objectMapper);
+        // The declared Name and Description; null clears an undeclared Description.
+        List<Map<String, String>> nameAndDescription = List.of(
+                replacePatchOp("/name", name), replacePatchOp("/description", description));
 
         RestApi api;
         if (existing != null) {
             snapshotBeforeUpdate(r, existing, region, openApiDocument != null);
-            List<Map<String, String>> operations = new ArrayList<>(List.of(
-                    replacePatchOp("/name", name), replacePatchOp("/description", description)));
+            List<Map<String, String>> operations = new ArrayList<>(nameAndDescription);
             if (endpoint != null) {
                 operations.addAll(endpointPatchOps(existing.getEndpointConfiguration(),
                         endpointTypes.isEmpty() ? null : endpointTypes.getFirst(),
@@ -312,17 +315,23 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(api.getId());
         boolean created = existing == null;
-        // putRestApi overwrites Name and Description from the document's info, so the declared Name
-        // and Description (null clearing an undeclared Description) are re-applied immediately after.
-        List<Map<String, String>> declaredNameAndDescription = List.of(
-                replacePatchOp("/name", name), replacePatchOp("/description", description));
-        // A step that fails once the API exists undoes this provision: an API it created is deleted
-        // again (or left marked for the stack's rollback when that delete fails too), and a kept API
-        // gets back what the update patched. putRestApi leaves the API as it was when it rejects the
-        // document.
+        // Set once putRestApi has accepted the document, which replaces the API's definition. The
+        // snapshot of a kept API does not hold that definition, so from then on it cannot be put back.
+        AtomicBoolean documentApplied = new AtomicBoolean();
+        // A step that fails once the API exists undoes this provision. An API it created is deleted
+        // again; if that delete fails too, a create leaves the API marked as created by the stack, and
+        // an update lists it for the stack's next cleanup. A kept API gets back what the update
+        // patched (putRestApi leaves the API as it was when it rejects the document), unless its
+        // document was already applied, which is reported as a rollback failure instead.
         CfnRollback.guarded(r, ctx, created,
                 () -> delete(REST_API, api.getId(), region),
-                () -> restore(api.getId(), readSnapshot(r)),
+                () -> {
+                    if (documentApplied.get()) {
+                        throw new IllegalStateException("its OpenAPI document was already applied, and the"
+                                + " update keeps no copy of the definition it replaced");
+                    }
+                    restore(api.getId(), readSnapshot(r));
+                },
                 () -> {
                     r.getAttributes().put("RestApiId", api.getId());
                     // Not the first of getResources, which is the root only on a freshly created API.
@@ -330,17 +339,12 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
                             apiGatewayService.findRootResourceId(region, api.getId()).orElseThrow());
                     if (openApiDocument != null) {
                         apiGatewayService.putRestApi(region, api.getId(), "overwrite", openApiDocument.toString());
-                        if (created) {
-                            apiGatewayService.updateRestApi(region, api.getId(), declaredNameAndDescription);
-                        }
+                        documentApplied.set(true);
+                        // putRestApi overwrites Name and Description from the document's info, so the
+                        // declared ones are applied again.
+                        apiGatewayService.updateRestApi(region, api.getId(), nameAndDescription);
                     }
                 });
-        // On a kept API the re-apply follows the guard: the document putRestApi accepted replaced the
-        // API's definition, which the snapshot does not hold, so putting back only the patch would
-        // not restore the API.
-        if (!created && openApiDocument != null) {
-            apiGatewayService.updateRestApi(region, api.getId(), declaredNameAndDescription);
-        }
         // An API created in place of one removed out of band is a replacement: a rollback deletes it.
         ReplacementCleanup.record(r, ctx, attributesBefore);
     }
