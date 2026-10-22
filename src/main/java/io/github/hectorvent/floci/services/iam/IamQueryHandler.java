@@ -85,6 +85,7 @@ public class IamQueryHandler {
     private final ServiceLastAccessedService serviceLastAccessedService;
     private final OrganizationsAccessReportService organizationsAccessReportService;
     private final DelegationRequestService delegationRequestService;
+    private final CentralRootAccess centralRootAccess;
     private final RegionResolver regionResolver;
     private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
     /** Signs each page's Marker, so only a marker this handler issued names an item. */
@@ -96,6 +97,7 @@ public class IamQueryHandler {
                            ServiceLastAccessedService serviceLastAccessedService,
                            OrganizationsAccessReportService organizationsAccessReportService,
                            DelegationRequestService delegationRequestService,
+                           CentralRootAccess centralRootAccess,
                            RegionResolver regionResolver,
                            Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
         this.iamService = iamService;
@@ -105,6 +107,7 @@ public class IamQueryHandler {
         this.serviceLastAccessedService = serviceLastAccessedService;
         this.organizationsAccessReportService = organizationsAccessReportService;
         this.delegationRequestService = delegationRequestService;
+        this.centralRootAccess = centralRootAccess;
         this.regionResolver = regionResolver;
         this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
     }
@@ -2024,38 +2027,42 @@ public class IamQueryHandler {
     // =========================================================================
 
     private Response handleListOrganizationsFeatures(MultivaluedMap<String, String> params) {
-        return rootFeaturesResponse("ListOrganizationsFeatures", iamService.listOrganizationsFeatures());
+        return rootFeaturesResponse("ListOrganizationsFeatures",
+                centralRootAccess.list(regionResolver.getAccountId()));
     }
 
     private Response handleEnableOrganizationsRootCredentialsManagement(MultivaluedMap<String, String> params) {
         return rootFeaturesResponse("EnableOrganizationsRootCredentialsManagement",
-                iamService.enableOrganizationsRootCredentialsManagement());
+                centralRootAccess.enableRootCredentialsManagement(regionResolver.getAccountId()));
     }
 
     private Response handleEnableOrganizationsRootSessions(MultivaluedMap<String, String> params) {
         return rootFeaturesResponse("EnableOrganizationsRootSessions",
-                iamService.enableOrganizationsRootSessions());
+                centralRootAccess.enableRootSessions(regionResolver.getAccountId()));
     }
 
     private Response handleDisableOrganizationsRootCredentialsManagement(MultivaluedMap<String, String> params) {
         return rootFeaturesResponse("DisableOrganizationsRootCredentialsManagement",
-                iamService.disableOrganizationsRootCredentialsManagement());
+                centralRootAccess.disableRootCredentialsManagement(regionResolver.getAccountId()));
     }
 
     private Response handleDisableOrganizationsRootSessions(MultivaluedMap<String, String> params) {
         return rootFeaturesResponse("DisableOrganizationsRootSessions",
-                iamService.disableOrganizationsRootSessions());
+                centralRootAccess.disableRootSessions(regionResolver.getAccountId()));
     }
 
     /**
-     * Builds the shared {@code <EnabledFeatures><member>..</member></EnabledFeatures>} result used by
-     * both {@code ListOrganizationsFeatures} and the enable/disable ops. The org-scoped
-     * {@code OrganizationId} is intentionally omitted — LZA's root-user-management module reads only
-     * the enabled-feature set, and omitting it avoids coupling the IAM endpoint to Organizations.
+     * The shared {@code OrganizationId} and {@code EnabledFeatures} result all five feature
+     * operations answer, in the order the model declares them. The organization id used to be
+     * omitted here to keep IAM off Organizations; the caller checks the reference models on these
+     * operations need the organization anyway, and {@link CentralRootAccess} asks for it through a
+     * provider interface, so the member is answered as published.
      */
-    private Response rootFeaturesResponse(String action, List<String> features) {
-        XmlBuilder xml = new XmlBuilder().start("EnabledFeatures");
-        for (String feature : features) {
+    private Response rootFeaturesResponse(String action, CentralRootAccess.Features features) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("OrganizationId", features.organizationId())
+                .start("EnabledFeatures");
+        for (String feature : features.enabledFeatures()) {
             xml.elem("member", feature);
         }
         String result = xml.end("EnabledFeatures").build();

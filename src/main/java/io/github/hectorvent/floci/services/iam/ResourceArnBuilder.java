@@ -570,10 +570,21 @@ public class ResourceArnBuilder {
         if (iamService == null) {
             return List.of("*");
         }
-        return SigV4CredentialScope.accessKeyId(ctx.getHeaderString("Authorization"))
-                .flatMap(accessKeyId -> iamService.get().findUserNameByAccessKeyId(accessKeyId))
+        Optional<String> accessKeyId = SigV4CredentialScope.accessKeyId(ctx.getHeaderString("Authorization"));
+        Optional<List<String>> user = accessKeyId
+                .flatMap(key -> iamService.get().findUserNameByAccessKeyId(key))
                 .flatMap(userName -> storedIamEntity("user", userName, accountId))
-                .map(stored -> List.of(stored.arn()))
+                .map(stored -> List.of(stored.arn()));
+        if (user.isPresent()) {
+            return user.get();
+        }
+        // A caller that is the account root names the root user, which is what these actions act
+        // on when they are called with no UserName. AWS's own task policy for auditing root
+        // credentials is written against arn:aws:iam::*:root, so a privileged session calling
+        // GetUser or ListAccessKeys has to name that resource rather than the wildcard.
+        return accessKeyId.flatMap(key -> iamService.get().resolveCallerArn(key))
+                .filter(arn -> arn.endsWith(":root"))
+                .map(List::of)
                 .orElse(List.of("*"));
     }
 

@@ -787,9 +787,27 @@ that has never set one.
 | EnableOrganizationsRootSessions | Enables the `RootSessions` feature. |
 | DisableOrganizationsRootSessions | Disables the `RootSessions` feature. |
 
-Only the set of enabled features is stored, and enabling a feature twice is idempotent. Floci does not
-model root credentials or root sessions themselves, so the flags change what `ListOrganizationsFeatures`
-returns and nothing else.
+Only the set of enabled features is stored, and enabling a feature twice is idempotent. Floci does
+not model root credentials themselves, so `RootCredentialsManagement` changes what
+`ListOrganizationsFeatures` returns and nothing else; `RootSessions` is what STS `AssumeRoot` reads
+before opening a privileged session.
+
+All five answer for one organization, so all five check the caller, each refusal being a shape the
+reference models on them and on nothing else. In the order they are asked: no organization at all
+is `OrganizationNotFoundException`, an organization without All features is
+`OrganizationNotInAllFeaturesModeException`, one without trusted access for IAM in Organizations is
+`ServiceAccessNotEnabledException`, and a caller that is neither the management account nor a
+delegated administrator for IAM is `AccountNotManagementOrDelegatedAdministratorException`. The two
+enable operations add `CallerIsNotManagementAccountException`, which is modeled on them alone, so a
+delegated administrator may read the features and turn them off but not on. Each is 400 and carries
+the shape name as its code: botocore declares no `error.code` for any of the five.
+
+The feature set belongs to the organization rather than to whoever asked for it, so it is read and
+written in the management account's scope and a delegated administrator sees what the management
+account enabled. The order is chosen rather than read, and so is the account the record lives in; a
+toggle set before this moved sat in the calling account's scope and is set again once. The
+`OrganizationId` the model declares beside `EnabledFeatures` is answered now that the organization
+is known either way.
 
 ### Server Certificates
 

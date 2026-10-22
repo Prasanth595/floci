@@ -7,8 +7,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.RootAccessOrganization;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
 import io.github.hectorvent.floci.services.organizations.model.Handshake;
@@ -30,6 +32,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -53,7 +56,7 @@ import java.util.regex.Pattern;
  * @see <a href="https://docs.aws.amazon.com/organizations/latest/APIReference/Welcome.html">AWS Organizations API Reference</a>
  */
 @ApplicationScoped
-public class OrganizationsService implements ScpProvider {
+public class OrganizationsService implements ScpProvider, RootAccessOrganization {
 
     private static final Logger LOG = Logger.getLogger(OrganizationsService.class);
 
@@ -1404,6 +1407,31 @@ public class OrganizationsService implements ScpProvider {
     }
 
     // ──────────────────────────── Collection helpers ────────────────────────────
+
+    @Override
+    public Optional<Membership> membershipOf(String accountId) {
+        return findOrganizationForAccount(accountId).map(organization -> {
+            Set<String> delegatedAdmins = new LinkedHashSet<>();
+            Set<String> members = new LinkedHashSet<>();
+            members.add(organization.getMasterAccountId());
+            for (OrganizationAccount account : accountsIn(organization)) {
+                members.add(account.getId());
+                if (namesIam(account.getDelegatedServices().keySet())) {
+                    delegatedAdmins.add(account.getId());
+                }
+            }
+            return new Membership(organization.getId(), organization.getMasterAccountId(),
+                    FEATURE_SET_ALL.equals(organization.getFeatureSet()),
+                    namesIam(organization.getEnabledServicePrincipals().keySet()),
+                    delegatedAdmins, members);
+        });
+    }
+
+    /** Whether IAM is among these principals, legacy per-partition spellings folded in. */
+    private static boolean namesIam(Set<String> principals) {
+        return principals.stream()
+                .anyMatch(principal -> IAM_SERVICE_PRINCIPAL.equals(ServicePrincipals.canonical(principal)));
+    }
 
     private List<OrganizationAccount> accountsIn(Organization organization) {
         return accounts.scanAllAccounts().stream()
