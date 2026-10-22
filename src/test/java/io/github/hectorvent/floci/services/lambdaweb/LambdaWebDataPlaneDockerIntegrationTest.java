@@ -46,6 +46,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -112,7 +113,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 res.end(JSON.stringify({method: req.method, url: req.url, headers: req.headers, bodyLength: body.length,
                   env: {endpoint: process.env.AWS_LAMBDA_HTTP_ENDPOINT, init: process.env.AWS_LAMBDA_INITIALIZATION_TYPE,
                         exec: process.env.AWS_EXECUTION_ENV, account: process.env.AWS_ACCOUNT_ID,
-                        region: process.env.AWS_REGION, custom: process.env.CUSTOM}}));
+                        region: process.env.AWS_REGION, custom: process.env.CUSTOM},
+                  execArgv: process.execArgv}));
               });
             }).listen(Number(port), host);
             """;
@@ -523,6 +525,11 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
     private String createFunction(int timeoutSeconds, int maxConcurrencyPerEnvironment, String systemLogLevel,
                                   String mode, String authType) throws IOException {
+        return createFunction(timeoutSeconds, maxConcurrencyPerEnvironment, systemLogLevel, mode, authType, null);
+    }
+
+    private String createFunction(int timeoutSeconds, int maxConcurrencyPerEnvironment, String systemLogLevel,
+                                  String mode, String authType, String nodeOptions) throws IOException {
         functionName = "dp-docker-" + Long.toString(System.nanoTime(), 36);
         s3Service.createBucket(BUCKET, "us-east-1");
         s3Service.putObject(BUCKET, functionName + ".zip", zip(APP), "application/zip", Map.of());
@@ -534,12 +541,14 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                                            "runtimeConfig": {"runtime": "nodejs24.x"}},
                            "serviceConfig": {"executionRoleArn": "%s", "timeoutSeconds": %d,
                                              "maxConcurrencyPerEnvironment": %d,
-                                             "environmentVariables": {"CUSTOM": "yes", "MODE": "%s"},
+                                             "environmentVariables": {"CUSTOM": "yes", "MODE": "%s"%s},
                                              "telemetryConfig": {"loggingConfig": {"systemLogLevel": "%s"}}}},
                          "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
                                             "authType": "%s", "autoDeploymentMode": "LatestRevision"}}
                         """.formatted(functionName, BUCKET, functionName, ROLE, timeoutSeconds,
-                        maxConcurrencyPerEnvironment, mode, systemLogLevel, authType))
+                        maxConcurrencyPerEnvironment, mode,
+                        nodeOptions == null ? "" : ", \"NODE_OPTIONS\": \"" + nodeOptions + "\"",
+                        systemLogLevel, authType))
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(202)
                 .extract().path("endpoint.domainName");
@@ -648,6 +657,17 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertEquals(List.of("ERROR Application.InitCodeError: could not load customer code: init boom", "INFO starting"),
                 output.stream().map(event -> event.getString("level") + " " + event.getString("message")).sorted()
                         .toList(), events.toString());
+    }
+
+    @Test
+    @Timeout(180)
+    void heapFlagsInNodeOptionsReplaceTheDefaultOnes() throws Exception {
+        String domain = createFunction(30, 64, "INFO", "serve", "ApplicationManaged",
+                "--expose-gc --max-old-space-size=1536");
+
+        given().header("Host", domain).when().get("/").then().statusCode(200)
+                .body("execArgv", contains("--expose-gc", "--max-http-header-size", "135168",
+                        "--no-experimental-require-module", "--max-old-space-size=1536"));
     }
 
     @Test
