@@ -91,6 +91,13 @@ class IotServiceTest {
                    "reported": {"lights": {"color": {"r": 255, "g": 0, "b": 255}, "on": true}, "arr": [1, 3], "same": {"x": 1}}}}
         """;
     private static final String NESTED_DELTA = "{\"lights\":{\"color\":{\"g\":255}},\"arr\":[1,2]}";
+    private static final String TEOS_STORED_SENSORS = """
+        {"state": {"reported": {"sensors": {"IDT_O1": 22.3, "ODT": -14.1}}},
+         "metadata": {"reported": {"sensors": {"IDT_O1": {"timestamp": 1000}, "ODT": {"timestamp": 1000}}}},
+         "version": 1, "timestamp": 1000}
+        """;
+    private static final String TEOS_SENSOR_UPDATE =
+            "{\"state\":{\"reported\":{\"sensors\":{\"IDT_O1\":26.3},\"tz\":\"Europe/Stockholm\"}}}";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final SqsService sqs = mock(SqsService.class);
@@ -956,6 +963,181 @@ class IotServiceTest {
         assertEquals(json("{\"desired\":{\"color\":{\"timestamp\":1000}}}"), current.get("metadata"));
         JsonNode stored = service.getThingShadow("sensor-2", null, REGION);
         assertEquals(json("{\"desired\":{\"color\":{\"timestamp\":1000}}}"), reparse(stored.get("metadata")));
+    }
+
+    /** The documents current and the stored shadow after TEOS_SENSOR_UPDATE onto TEOS_STORED_SENSORS. */
+    private void assertTeosSensorUpdateMerged(String thingName, long timestamp) throws Exception {
+        JsonNode current = json("""
+            {"state": {"reported": {"sensors": {"IDT_O1": 26.3, "ODT": -14.1}, "tz": "Europe/Stockholm"}},
+             "metadata": {"reported": {"sensors": {"IDT_O1": %1$s, "ODT": {"timestamp": 1000}}, "tz": %1$s}},
+             "version": 2}
+            """.formatted(leaf(timestamp)));
+        assertEquals(current, recordedPayload("$aws/things/" + thingName + "/shadow/update/documents").get("current"));
+        JsonNode shadow = service.getThingShadow(thingName, null, REGION);
+        assertEquals(current.get("state"), reparse(shadow.get("state")));
+        assertEquals(current.get("metadata"), reparse(shadow.get("metadata")));
+        assertEquals(2, shadow.get("version").asLong());
+    }
+
+    @Test
+    void aNestedUpdateMergesKeyByKeyAndKeepsTheTimestampOfEveryUntouchedLeaf() throws Exception {
+        storeShadow("teos-1", TEOS_STORED_SENSORS);
+
+        JsonNode accepted = service.updateThingShadow("teos-1", null, json(TEOS_SENSOR_UPDATE), REGION);
+
+        assertEquals(json(TEOS_SENSOR_UPDATE).get("state"), accepted.get("state"));
+        assertTeosSensorUpdateMerged("teos-1", accepted.get("timestamp").asLong());
+    }
+
+    @Test
+    void anMqttNestedUpdateMergesKeyByKeyAsTheRestUpdateDoes() throws Exception {
+        storeShadow("teos-2", TEOS_STORED_SENSORS);
+
+        mqttShadowRequest("$aws/things/teos-2/shadow/update", TEOS_SENSOR_UPDATE);
+
+        long timestamp = recordedPayload("$aws/things/teos-2/shadow/update/accepted").get("timestamp").asLong();
+        assertTeosSensorUpdateMerged("teos-2", timestamp);
+    }
+
+    @Test
+    void aNestedNullRemovesTheLeafAndItsMetadataAndAnEmptiedObjectStays() throws Exception {
+        storeShadow("teos-3", TEOS_STORED_SENSORS);
+
+        service.updateThingShadow("teos-3", null, json("{\"state\":{\"reported\":{\"sensors\":{\"ODT\":null}}}}"), REGION);
+
+        JsonNode afterOne = service.getThingShadow("teos-3", null, REGION);
+        assertEquals(json("{\"reported\":{\"sensors\":{\"IDT_O1\":22.3}}}"), reparse(afterOne.get("state")));
+        assertEquals(json("{\"reported\":{\"sensors\":{\"IDT_O1\":{\"timestamp\":1000}}}}"), reparse(afterOne.get("metadata")));
+
+        service.updateThingShadow("teos-3", null, json("{\"state\":{\"reported\":{\"sensors\":{\"IDT_O1\":null}}}}"), REGION);
+
+        JsonNode afterBoth = service.getThingShadow("teos-3", null, REGION);
+        assertEquals(json("{\"reported\":{\"sensors\":{}}}"), reparse(afterBoth.get("state")));
+        assertEquals(json("{\"reported\":{\"sensors\":{}}}"), reparse(afterBoth.get("metadata")));
+    }
+
+    @Test
+    void anArrayReplacesTheStoredArrayWholeWithFreshMetadata() throws Exception {
+        JsonNode first = service.updateThingShadow("teos-4", null, json("""
+            {"state": {"reported": {"arr": [1, 2, 3], "cfg": {"objs": [{"a": 1}, {"b": 2}], "keep": 1}}}}
+            """), REGION);
+
+        JsonNode second = service.updateThingShadow("teos-4", null,
+                json("{\"state\":{\"reported\":{\"arr\":[4],\"cfg\":{\"objs\":[{\"c\":3}]}}}}"), REGION);
+
+        long timestamp = second.get("timestamp").asLong();
+        JsonNode shadow = service.getThingShadow("teos-4", null, REGION);
+        assertEquals(json("{\"reported\":{\"arr\":[4],\"cfg\":{\"objs\":[{\"c\":3}],\"keep\":1}}}"), reparse(shadow.get("state")));
+        assertEquals(json("{\"reported\":{\"arr\":[%1$s],\"cfg\":{\"objs\":[{\"c\":%1$s}],\"keep\":%2$s}}}"
+                .formatted(leaf(timestamp), leaf(first.get("timestamp").asLong()))), reparse(shadow.get("metadata")));
+    }
+
+    @Test
+    void anObjectOntoAScalarOrAnArrayReplacesItAsSentNullsIncluded() throws Exception {
+        storeShadow("teos-5", """
+            {"state": {"reported": {"cfg": {"s": 5, "arr": [1], "keep": 1}}},
+             "metadata": {"reported": {"cfg": {"s": {"timestamp": 1000}, "arr": [{"timestamp": 1000}], "keep": {"timestamp": 1000}}}},
+             "version": 1, "timestamp": 1000}
+            """);
+
+        JsonNode accepted = service.updateThingShadow("teos-5", null,
+                json("{\"state\":{\"reported\":{\"cfg\":{\"s\":{\"a\":null},\"arr\":{\"a\":null}}}}}"), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode shadow = service.getThingShadow("teos-5", null, REGION);
+        assertEquals(json("{\"reported\":{\"cfg\":{\"s\":{\"a\":null},\"arr\":{\"a\":null},\"keep\":1}}}"),
+                reparse(shadow.get("state")));
+        assertEquals(json("{\"reported\":{\"cfg\":{\"s\":{\"a\":%1$s},\"arr\":{\"a\":%1$s},\"keep\":{\"timestamp\":1000}}}}"
+                .formatted(leaf(timestamp))), reparse(shadow.get("metadata")));
+    }
+
+    @Test
+    void anObjectOntoAMissingKeyAddsOnlyItsValuesAndNullsAloneAddNothing() throws Exception {
+        storeShadow("teos-6", """
+            {"state": {"reported": {"keep": 1}}, "metadata": {"reported": {"keep": {"timestamp": 1000}}},
+             "version": 1, "timestamp": 1000}
+            """);
+
+        JsonNode accepted = service.updateThingShadow("teos-6", null, json("""
+            {"state": {"reported": {"n": {"a": null, "b": 1}, "m": {"a": null}, "t": {"u": {"v": null}},
+                                    "t2": {"u": {}}, "w": {"a": null, "b": {}}, "e": {}, "missing": null}}}
+            """), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode shadow = service.getThingShadow("teos-6", null, REGION);
+        assertEquals(json("{\"reported\":{\"keep\":1,\"n\":{\"b\":1},\"t2\":{\"u\":{}},\"w\":{\"b\":{}},\"e\":{}}}"),
+                reparse(shadow.get("state")));
+        assertEquals(json("{\"reported\":{\"keep\":{\"timestamp\":1000},\"n\":{\"b\":%s},\"t2\":{\"u\":{}},\"w\":{\"b\":{}},\"e\":{}}}"
+                .formatted(leaf(timestamp))), reparse(shadow.get("metadata")));
+    }
+
+    @Test
+    void anEmptyObjectOntoAStoredObjectChangesNothingButTheVersion() throws Exception {
+        storeShadow("teos-7", """
+            {"state": {"reported": {"x": {"y": 2}}}, "metadata": {"reported": {"x": {"y": {"timestamp": 1000}}}},
+             "version": 1, "timestamp": 1000}
+            """);
+
+        service.updateThingShadow("teos-7", null, json("{\"state\":{\"reported\":{\"x\":{}}}}"), REGION);
+
+        JsonNode shadow = service.getThingShadow("teos-7", null, REGION);
+        assertEquals(json("{\"reported\":{\"x\":{\"y\":2}}}"), reparse(shadow.get("state")));
+        assertEquals(json("{\"reported\":{\"x\":{\"y\":{\"timestamp\":1000}}}}"), reparse(shadow.get("metadata")));
+        assertEquals(2, shadow.get("version").asLong());
+    }
+
+    @Test
+    void aSectionSentEmptyOrLeftEmptyIsNotStored() throws Exception {
+        service.updateThingShadow("teos-8", null, json("{\"state\":{\"desired\":{}}}"), REGION);
+
+        JsonNode empty = service.getThingShadow("teos-8", null, REGION);
+        assertEquals(json("{}"), reparse(empty.get("state")));
+        assertEquals(json("{}"), reparse(empty.get("metadata")));
+
+        service.updateThingShadow("teos-8", null, json("{\"state\":{\"desired\":{\"b\":1},\"reported\":{\"a\":1}}}"), REGION);
+        recorder.clear();
+        service.updateThingShadow("teos-8", null, json("{\"state\":{\"reported\":{\"a\":null}}}"), REGION);
+
+        JsonNode current = recordedPayload("$aws/things/teos-8/shadow/update/documents").get("current");
+        assertEquals(json("{\"desired\":{\"b\":1}}"), current.get("state"));
+        assertEquals(Set.of("desired"), fieldNames(current.get("metadata")));
+
+        recorder.clear();
+        service.updateThingShadow("teos-8", null, json("{\"state\":{\"desired\":{\"b\":null}}}"), REGION);
+
+        assertEquals(json("{\"state\":{},\"metadata\":{},\"version\":4}"),
+                recordedPayload("$aws/things/teos-8/shadow/update/documents").get("current"));
+    }
+
+    @Test
+    void aNestedDesiredChangeGivesTheDeltaAndDocumentsOfTheMergedShadow() throws Exception {
+        String stored = """
+            {"state": {"desired": {"lights": {"color": {"r": 1, "g": 2}}}, "reported": {"lights": {"color": {"r": 1, "g": 3}}}},
+             "metadata": {"desired": {"lights": {"color": {"r": {"timestamp": 1000}, "g": {"timestamp": 1000}}}},
+                          "reported": {"lights": {"color": {"r": {"timestamp": 1000}, "g": {"timestamp": 1000}}}}},
+             "version": 5, "timestamp": 1000}
+            """;
+        storeShadow("teos-9", stored);
+
+        JsonNode accepted = service.updateThingShadow("teos-9", null,
+                json("{\"state\":{\"desired\":{\"lights\":{\"color\":{\"b\":9}}}}}"), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode delta = recordedPayload("$aws/things/teos-9/shadow/update/delta");
+        assertEquals(json("{\"lights\":{\"color\":{\"b\":9,\"g\":2}}}"), delta.get("state"));
+        assertEquals(json("{\"lights\":{\"color\":{\"b\":%s,\"g\":{\"timestamp\":1000}}}}".formatted(leaf(timestamp))),
+                delta.get("metadata"));
+        assertEquals(6, delta.get("version").asLong());
+        JsonNode documents = recordedPayload("$aws/things/teos-9/shadow/update/documents");
+        JsonNode previous = json(stored);
+        ((ObjectNode) previous).remove("timestamp");
+        assertEquals(previous, documents.get("previous"));
+        assertEquals(json("""
+            {"state": {"desired": {"lights": {"color": {"r": 1, "g": 2, "b": 9}}}, "reported": {"lights": {"color": {"r": 1, "g": 3}}}},
+             "metadata": {"desired": {"lights": {"color": {"r": {"timestamp": 1000}, "g": {"timestamp": 1000}, "b": %s}}},
+                          "reported": {"lights": {"color": {"r": {"timestamp": 1000}, "g": {"timestamp": 1000}}}}},
+             "version": 6}
+            """.formatted(leaf(timestamp))), documents.get("current"));
     }
 
     @Test

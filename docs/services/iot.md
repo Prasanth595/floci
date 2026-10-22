@@ -324,6 +324,8 @@ A successful classic or named shadow change reaches MQTT subscribers and the top
 - `delete/accepted`: the deleted `version`, `timestamp`, and `clientToken`. `DeleteThingShadow` returns `version` and `timestamp`.
 - `rejected`, for an MQTT request only: `code` (the HTTP status as a number), `message`, and `clientToken` once the request parsed. A version conflict is `409` with `Version conflict`, a payload that is not JSON is `400` with `Invalid JSON`.
 
+An update merges into the stored shadow as on AWS. A nested object merges key by key at any depth: every leaf the update does not name keeps its value and its metadata timestamp, and `{}` sent onto a stored object or section changes nothing. A `null` deletes the key and its metadata. A nested object emptied that way stays as `{}`, but a `desired` or `reported` section that ends up empty is not kept. An object sent for a missing key adds its non-null values: `{}` adds `{}`, and an object holding only nulls adds nothing. An array or a scalar replaces the stored value whole, and so does an object sent onto a scalar or an array, which AWS stores as sent, null leaves included.
+
 An empty `name` is the classic shadow. A name that is not 1 to 64 of `$`, `a-z`, `A-Z`, `0-9`, `:`, `_` and `-` fails with `InvalidRequestException` (`Bad Request`), and an MQTT request on such a named topic, empty name included, is ignored as on AWS, with no `rejected`. A name containing `$` other than the reserved `$package` fails with `InvalidRequestException` (`Invalid shadow name : <name>`), which an MQTT request receives as a `400` `rejected`. `$package` is served as an ordinary named shadow: AWS's reserved document schema, and its omission of `metadata`, are not emulated.
 
 Shadow events are evaluated only against the rules of the shadow's region. A REST change belongs to the region of its SigV4 credential, and MQTT shadows live in the default region (`FLOCI_DEFAULT_REGION`). `clientid()` is `N/A` for every shadow event, as on AWS. The MQTT broker itself has no region or account, so its subscribers receive the shadow events of every region and account, as they receive a republish.
@@ -345,7 +347,6 @@ Current accepted limitation:
 - Persistent offline sessions are not modeled yet.
 - QoS 2 and advanced MQTT 5 property semantics remain follow-up scope.
 - At most 1,000 MQTT publishes are pending rule evaluation, running or waiting. While that many are pending, further publishes are still delivered to subscribers but their topic rules are skipped, with one warning logged until the backlog drains.
-- Shadow state is merged shallowly: a nested object in `desired` or `reported` replaces the stored value of its top-level key instead of being merged into it.
 - REST shadow errors are not published to `rejected`.
 - MQTT shadow request topics are not themselves delivered to rules or subscribers.
 - An IoT Data `Publish` to a shadow request topic does not update the shadow, and a `republish` that targets a shadow request topic is not processed as a shadow request.

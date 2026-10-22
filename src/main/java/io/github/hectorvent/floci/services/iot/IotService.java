@@ -2081,8 +2081,9 @@ public class IotService {
     }
 
     /**
-     * Applies one section of an update shallowly, to the state and its metadata alike: a value sets
-     * the top-level key, a null removes it, and a null section removes the whole section.
+     * Applies one section of an update to the state and its metadata alike. A null section removes the
+     * whole section, an object merges through {@link #mergeShadowObject}, and a section left empty is
+     * removed, since AWS never keeps an empty {@code desired} or {@code reported}.
      */
     private void mergeShadowSection(ObjectNode state, ObjectNode metadata, String section, JsonNode patch, long timestamp) {
         if (patch.isMissingNode()) {
@@ -2098,13 +2099,41 @@ public class IotService {
         }
         ObjectNode stateSection = state.withObject("/" + section);
         ObjectNode metadataSection = metadata.withObject("/" + section);
+        mergeShadowObject(stateSection, metadataSection, patch, timestamp);
+        if (stateSection.isEmpty()) {
+            state.remove(section);
+            metadata.remove(section);
+        }
+    }
+
+    /**
+     * Merges an update object into a stored object and its metadata key by key, as AWS does. A null
+     * removes the key and its metadata. An object onto a stored object merges into it at any depth, and
+     * one emptied that way stays as {@code {}}. An object onto a missing key adds its non-null values, so
+     * one holding only nulls adds nothing while {@code {}} adds {@code {}}. Anything else, an object onto a
+     * scalar or an array included, replaces the stored value as sent, null leaves and all, and stamps
+     * each of its leaves.
+     */
+    private void mergeShadowObject(ObjectNode state, ObjectNode metadata, JsonNode patch, long timestamp) {
         patch.fields().forEachRemaining(entry -> {
-            if (entry.getValue().isNull()) {
-                stateSection.remove(entry.getKey());
-                metadataSection.remove(entry.getKey());
+            String key = entry.getKey();
+            JsonNode value = entry.getValue();
+            JsonNode stored = state.get(key);
+            if (value.isNull()) {
+                state.remove(key);
+                metadata.remove(key);
+            } else if (value.isObject() && (stored == null || stored.isObject())) {
+                ObjectNode storedObject = stored instanceof ObjectNode existing ? existing : objectMapper.createObjectNode();
+                ObjectNode storedMetadata = metadata.get(key) instanceof ObjectNode existingMetadata
+                        ? existingMetadata : objectMapper.createObjectNode();
+                mergeShadowObject(storedObject, storedMetadata, value, timestamp);
+                if (stored != null || !storedObject.isEmpty() || value.isEmpty()) {
+                    state.set(key, storedObject);
+                    metadata.set(key, storedMetadata);
+                }
             } else {
-                stateSection.set(entry.getKey(), entry.getValue());
-                metadataSection.set(entry.getKey(), shadowMetadata(entry.getValue(), timestamp));
+                state.set(key, value);
+                metadata.set(key, shadowMetadata(value, timestamp));
             }
         });
     }
