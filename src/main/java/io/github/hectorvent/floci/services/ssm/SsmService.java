@@ -733,12 +733,12 @@ public class SsmService implements ResourceProvider {
         return actual != null && matchesAny(actual, filter);
     }
 
-    /** Parameters stored before Floci kept a tier are Standard, as AWS defaults them. */
     /** The account the current request acts in; parameter storage is partitioned by it. */
     String accountId() {
         return regionResolver.getAccountId();
     }
 
+    /** Parameters stored before Floci kept a tier are Standard, as AWS defaults them. */
     static String tierOf(Parameter parameter) {
         return parameter.getTier() != null ? parameter.getTier() : "Standard";
     }
