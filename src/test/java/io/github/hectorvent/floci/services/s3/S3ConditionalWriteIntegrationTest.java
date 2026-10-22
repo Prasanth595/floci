@@ -250,6 +250,54 @@ class S3ConditionalWriteIntegrationTest {
     }
 
     @Test
+    void concurrentCompleteMultipartUpload_ifNoneMatchStar_allowsOnlyOneWriter() throws Exception {
+        String bucket = createBucket("mpu-if-none-concurrent");
+        String key = "object.txt";
+        int writers = 16;
+        List<String> uploadIds = new ArrayList<>();
+        List<String> partETags = new ArrayList<>();
+        for (int writer = 0; writer < writers; writer++) {
+            String uploadId = initiateMultipartUpload(bucket, key);
+            uploadIds.add(uploadId);
+            partETags.add(uploadPart(bucket, key, uploadId, 1, "writer-" + writer));
+        }
+        CyclicBarrier barrier = new CyclicBarrier(writers);
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+
+        try {
+            List<Future<Integer>> futures = new ArrayList<>();
+            for (int writer = 0; writer < writers; writer++) {
+                String uploadId = uploadIds.get(writer);
+                String partETag = partETags.get(writer);
+                futures.add(executor.submit(() -> {
+                    barrier.await();
+                    return given()
+                        .contentType("application/xml")
+                        .header("If-None-Match", "*")
+                        .body(completeMultipartXml(1, partETag))
+                    .when()
+                        .post("/" + bucket + "/" + key + "?uploadId=" + uploadId)
+                    .then()
+                        .extract()
+                        .statusCode();
+                }));
+            }
+
+            List<Integer> statusCodes = new ArrayList<>();
+            for (Future<Integer> future : futures) {
+                statusCodes.add(future.get(30, SECONDS));
+            }
+
+            assertEquals(1, frequency(statusCodes, 200));
+            assertEquals(writers - 1, frequency(statusCodes, 412));
+            assertObjectBody(bucket, key, "writer-" + statusCodes.indexOf(200));
+        }
+        finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void completeMultipartUpload_ifMatch_succeedsOnMatch() {
         String bucket = createBucket("mpu-if-match");
         String eTag = putObject(bucket, "object.txt", "first");
