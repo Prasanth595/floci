@@ -48,7 +48,6 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.services.dynamodb.DynamoDbTimestamps.epochSeconds;
-import static io.github.hectorvent.floci.services.dynamodb.DynamoDbTimestamps.instantOf;
 
 /**
  * DynamoDB JSON protocol handler of the native engine, reached through the native backend
@@ -2215,7 +2214,8 @@ public class NativeDynamoDbJsonHandler {
 
     private static Instant timestampOrNull(JsonNode request, String member) {
         JsonNode node = request.path(member);
-        return node.isNumber() ? instantOf(node.decimalValue()) : null;
+        // AWS rounds the seconds as a double, so a value beyond the long range of milliseconds saturates.
+        return node.isNumber() ? Instant.ofEpochMilli(Math.round(node.doubleValue() * 1000)) : null;
     }
 
     private ObjectNode backupDetailsNode(TableBackup backup, String status) {

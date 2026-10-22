@@ -7,6 +7,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -184,6 +185,22 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
                 .statusCode(400)
                 .body("__type", containsString("InvalidRestoreTimeException"));
         restoreToTime(table, "PitrIT-window-checks-earliest", earliest).statusCode(200);
+    }
+
+    @Test
+    void restoreDateTimeIsRoundedToTheMillisecondAsADouble() {
+        String table = "PitrIT-rounding";
+        createTable(table);
+        updateContinuousBackups(table, "true").statusCode(200);
+        String nowPlusTwoToThe64Millis = BigDecimal.valueOf(System.currentTimeMillis(), 3)
+                .add(new BigDecimal(BigInteger.TWO.pow(64), 3)).toPlainString();
+
+        assertEquals("+292278994-08-17T07:12:55.807Z", refusedRestoreTime(table, nowPlusTwoToThe64Millis));
+        assertEquals("+292278994-08-17T07:12:55.807Z", refusedRestoreTime(table, "1e400"));
+        assertEquals("-292275055-05-16T16:47:04.192Z", refusedRestoreTime(table, "-1e20"));
+        assertEquals("1970-01-01T00:00:00.001Z", refusedRestoreTime(table, "0.0005"));
+        assertEquals("1970-01-01T00:00:00Z", refusedRestoreTime(table, "-0.0005"));
+        assertEquals("2026-10-22T00:42:24.001Z", refusedRestoreTime(table, "1792629744.0004999"));
     }
 
     @Test
@@ -423,6 +440,16 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
 
     private ValidatableResponse restore(String members) {
         return ddb("RestoreTableToPointInTime", "{" + members + "}");
+    }
+
+    private String refusedRestoreTime(String source, String restoreDateTime) {
+        String message = restore("""
+                "SourceTableName": "%s", "TargetTableName": "PitrIT-never", "RestoreDateTime": %s
+                """.formatted(source, restoreDateTime))
+                .statusCode(400)
+                .body("__type", containsString("InvalidRestoreTimeException"))
+                .extract().path("message");
+        return message.substring("RestoreDateTime '".length(), message.indexOf("' must be within"));
     }
 
     private static void expectError(ValidatableResponse response, String type, String message) {

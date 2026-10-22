@@ -12,6 +12,7 @@ import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.InputStreamReader;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -320,6 +321,22 @@ class DynamoDbExportIntegrationTest {
                 "InvalidExportTimeException", "Point in Time Recovery is not available for specified export time");
         expectError(exportAt(table, "export-checks", future), "InvalidExportTimeException", "Export Time is invalid");
         exportAt(table, "export-checks", earliest).statusCode(200);
+    }
+
+    @Test
+    void exportTimeBeyondTheMillisecondRangeIsInvalid() {
+        String table = "ExportTimeRange";
+        createHashTable(table);
+        enablePointInTimeRecovery(table);
+        BigDecimal nowPlusTwoToThe64Millis = BigDecimal.valueOf(System.currentTimeMillis(), 3)
+                .add(new BigDecimal(BigInteger.TWO.pow(64), 3));
+
+        expectError(exportAt(table, "export-range", nowPlusTwoToThe64Millis),
+                "InvalidExportTimeException", "Export Time is invalid");
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "ExportTime": 1e400}
+            """.formatted(TABLE_ARN_PREFIX + table, BUCKET_NAME)),
+                "InvalidExportTimeException", "Export Time is invalid");
     }
 
     // --- Helpers ---
