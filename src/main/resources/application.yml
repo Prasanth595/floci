@@ -954,6 +954,7 @@ floci:
       enabled: true
     emrserverless:
       enabled: true
+      job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
     ssoadmin:
       enabled: true
     ssooidc:

@@ -18,12 +18,15 @@ import io.github.hectorvent.floci.services.emrserverless.model.UpdateApplication
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -42,15 +45,17 @@ public class EmrServerlessService {
     private final EmulatorConfig config;
     private final AccountAwareStorageBackend<Application> storage;
     private final RegionResolver regionResolver;
+    private final Clock clock;
     
     @Inject
     RequestContext requestContext;
 
     @Inject
     public EmrServerlessService(EmulatorConfig config, StorageFactory storageFactory,
-                                RegionResolver regionResolver) {
+                                RegionResolver regionResolver, Clock clock) {
         this.config = config;
         this.regionResolver = regionResolver;
+        this.clock = clock;
         this.storage = storageFactory.create("emrserverless", "emr-serverless-applications.json",
                 new TypeReference<Map<String, Application>>() {});
     }
@@ -75,9 +80,9 @@ public class EmrServerlessService {
             }
         }
 
-        String id = generateId();
+        String id = newId();
         String arn = buildArn(id);
-        long now = System.currentTimeMillis();
+        Instant createdAt = now();
 
         Application app = new Application();
         app.setApplicationId(id);
@@ -88,8 +93,8 @@ public class EmrServerlessService {
         app.setType(request.getType());
         app.setState("CREATED");
         app.setStateDetails("");
-        app.setCreatedAt(now);
-        app.setUpdatedAt(now);
+        app.setCreatedAt(createdAt);
+        app.setUpdatedAt(createdAt);
         if (request.getTags() != null) {
             validateTags(request.getTags());
         }
@@ -188,7 +193,7 @@ public class EmrServerlessService {
             app.setJobLevelCostAllocationConfiguration(request.getJobLevelCostAllocationConfiguration());
         }
 
-        app.setUpdatedAt(System.currentTimeMillis());
+        app.setUpdatedAt(now());
         storage.put(applicationId, app);
         return app;
     }
@@ -200,7 +205,7 @@ public class EmrServerlessService {
             throw new AwsException("ValidationException", "Application must be in a stopped or created state in order to be deleted.", 400);
         }
         app.setState("TERMINATED");
-        app.setUpdatedAt(System.currentTimeMillis());
+        app.setUpdatedAt(now());
         storage.put(applicationId, app);
     }
 
@@ -214,7 +219,7 @@ public class EmrServerlessService {
             throw new AwsException("ValidationException", "Application is terminated.", 400);
         }
         app.setState("STARTED");
-        app.setUpdatedAt(System.currentTimeMillis());
+        app.setUpdatedAt(now());
         storage.put(applicationId, app);
     }
 
@@ -228,8 +233,38 @@ public class EmrServerlessService {
             throw new AwsException("ValidationException", "Application is terminated.", 400);
         }
         app.setState("STOPPED");
-        app.setUpdatedAt(System.currentTimeMillis());
+        app.setUpdatedAt(now());
         storage.put(applicationId, app);
+    }
+
+    /**
+     * Admits a job run to the application and returns what {@code admit} builds from it. An
+     * application "only accepts jobs when it's in" STARTED, and auto-start, on unless the
+     * application turns it off, starts a CREATED or STOPPED one "on job submission" (EMR Serverless
+     * user guide, "Application states" and "Default application behavior"). This service's lock is
+     * held throughout, so the application cannot be stopped or deleted while the run is admitted.
+     */
+    public synchronized <T> T admitJobRun(String applicationId, Function<Application, T> admit) {
+        Application app = getApplication(applicationId);
+        String state = app.getState();
+        if ("TERMINATED".equals(state)) {
+            throw new AwsException("ValidationException", "Application is terminated.", 400);
+        }
+        if (!"STARTED".equals(state)) {
+            if (!autoStartEnabled(app)) {
+                throw new AwsException("ValidationException", "Application " + applicationId
+                        + " must be started before a job run is submitted, as its auto-start is disabled.", 400);
+            }
+            startApplication(applicationId);
+            app = getApplication(applicationId);
+        }
+        return admit.apply(app);
+    }
+
+    // AutoStartConfig.enabled "Defaults to true".
+    private static boolean autoStartEnabled(Application app) {
+        return app.getAutoStartConfiguration() == null
+                || !Boolean.FALSE.equals(app.getAutoStartConfiguration().getEnabled());
     }
 
     // ---- Tags ---------------------------------------------------------------------------------
@@ -276,8 +311,8 @@ public class EmrServerlessService {
     /**
      * The application an EMR Serverless ARN names:
      * {@code arn:<partition>:emr-serverless:<region>:<account>:/applications/<id>}, the form
-     * CreateApplication returns. A job run ARN ({@code .../jobruns/<id>}) is refused, as job runs are
-     * not emulated.
+     * CreateApplication returns. A job run ARN ({@code .../jobruns/<id>}) is refused, as job run tags
+     * are not emulated yet.
      */
     private Application applicationFor(String arn) {
         AwsArnUtils.Arn parsed;
@@ -303,7 +338,7 @@ public class EmrServerlessService {
     }
 
     /** At most 50 tags, each key and value within TagKey and TagValue and free of the reserved prefix. */
-    private static void validateTags(Map<String, String> tags) {
+    static void validateTags(Map<String, String> tags) {
         if (tags.size() > MAX_TAGS) {
             throw new AwsException("ValidationException",
                     "A resource can have at most " + MAX_TAGS + " tags.", 400);
@@ -334,7 +369,8 @@ public class EmrServerlessService {
         return text.regionMatches(true, 0, RESERVED_PREFIX, 0, RESERVED_PREFIX.length());
     }
 
-    private String generateId() {
+    /** An application or job run id: 16 lowercase hexadecimal characters, within the model's [0-9a-z]+. */
+    static String newId() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
     }
 
@@ -354,6 +390,10 @@ public class EmrServerlessService {
             // A malformed stored ARN cannot establish Region ownership.
             return false;
         }
+    }
+
+    private Instant now() {
+        return clock.instant().truncatedTo(ChronoUnit.MILLIS);
     }
 
     private ApplicationSummary toSummary(Application app) {

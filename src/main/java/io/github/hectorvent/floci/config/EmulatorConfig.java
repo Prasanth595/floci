@@ -1084,6 +1084,10 @@ public interface EmulatorConfig {
     interface EmrServerlessServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** How long a BATCH job run stays RUNNING before it succeeds; 0 = a run succeeds as soon as it starts. */
+        @WithDefault("0")
+        int jobRunDurationSeconds();
     }
 
     interface Route53ResolverServiceConfig {

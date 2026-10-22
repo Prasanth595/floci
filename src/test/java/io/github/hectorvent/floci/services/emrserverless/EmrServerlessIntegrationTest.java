@@ -1,32 +1,46 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
+import io.github.hectorvent.floci.testing.EmrServerlessRequests;
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.config.JsonConfig;
+import io.restassured.config.RestAssuredConfig;
+import io.restassured.path.json.config.JsonPathConfig;
+import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import static io.restassured.RestAssured.given;
+import java.math.BigDecimal;
+import java.time.Duration;
+import java.util.UUID;
+
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class EmrServerlessIntegrationTest {
 
-    private static final String JSON_CONTENT_TYPE = "application/json";
+    private static final RestAssuredConfig DECIMAL_NUMBERS = RestAssuredConfig.config()
+            .jsonConfig(JsonConfig.jsonConfig().numberReturnType(JsonPathConfig.NumberReturnType.BIG_DECIMAL));
     private static String applicationId;
+
+    @Inject
+    MutableClock clock;
 
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    private io.restassured.specification.RequestSpecification givenReq() {
-        return given()
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=TEST/20260819/us-east-1/emr-serverless/aws4_request, SignedHeaders=host;x-amz-date, Signature=test")
-            .contentType(JSON_CONTENT_TYPE);
+    private RequestSpecification givenReq() {
+        return EmrServerlessRequests.emrServerless("us-east-1");
     }
 
     @Test
@@ -285,5 +299,43 @@ public class EmrServerlessIntegrationTest {
         .then()
             .statusCode(200)
             .body("application.state", equalTo("TERMINATED"));
+    }
+
+    @Test
+    @Order(9)
+    void applicationTimestampsAreEpochSecondsWithMilliseconds() {
+        // A Region of its own, so ListApplications holds this application and no other test's.
+        String region = "ap-southeast-4";
+        clock.advance(Duration.ofMillis(250));
+        BigDecimal before = BigDecimal.valueOf(clock.instant().toEpochMilli(), 3);
+        String id = EmrServerlessRequests.emrServerless(region)
+            .body("""
+                {"name": "stamped-app", "releaseLabel": "emr-6.6.0", "type": "SPARK", "clientToken": "%s"}
+                """.formatted(UUID.randomUUID()))
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(200)
+            .extract().path("applicationId");
+
+        BigDecimal createdAt = EmrServerlessRequests.emrServerless(region).config(DECIMAL_NUMBERS)
+        .when()
+            .get("/applications/" + id)
+        .then()
+            .statusCode(200)
+            .extract().path("application.createdAt");
+        BigDecimal updatedAt = EmrServerlessRequests.emrServerless(region).config(DECIMAL_NUMBERS)
+            .get("/applications/" + id)
+            .then().statusCode(200).extract().path("application.updatedAt");
+        BigDecimal listed = EmrServerlessRequests.emrServerless(region).config(DECIMAL_NUMBERS)
+            .get("/applications")
+            .then().statusCode(200).extract().path("applications[0].createdAt");
+
+        // The test clock moves a millisecond on every read, so the application was created a little later.
+        assertTrue(createdAt.compareTo(before) > 0 && createdAt.compareTo(before.add(BigDecimal.ONE)) < 0,
+                "createdAt " + createdAt + " is not just after " + before);
+        assertTrue(createdAt.stripTrailingZeros().scale() <= 3, "createdAt " + createdAt + " is finer than milliseconds");
+        assertEquals(0, createdAt.compareTo(updatedAt), "updatedAt " + updatedAt + " differs from createdAt " + createdAt);
+        assertEquals(0, createdAt.compareTo(listed), "ListApplications reports createdAt " + listed);
     }
 }
