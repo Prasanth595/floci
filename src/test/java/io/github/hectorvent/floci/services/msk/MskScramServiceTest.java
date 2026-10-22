@@ -54,9 +54,12 @@ class MskScramServiceTest {
         cluster.setClusterArn(CLUSTER);
         when(clusters.describeCluster(CLUSTER)).thenReturn(cluster);
         secrets = mock(SecretsManagerService.class);
-        Secret metadata = new Secret();
-        metadata.setKmsKeyId("customer-key");
-        when(secrets.describeSecret(anyString(), eq("us-east-1"))).thenReturn(metadata);
+        when(secrets.describeSecret(anyString(), eq("us-east-1"))).thenAnswer(invocation -> {
+            Secret metadata = new Secret();
+            metadata.setArn(invocation.getArgument(0));
+            metadata.setKmsKeyId("customer-key");
+            return metadata;
+        });
         kms = mock(KmsService.class);
         when(kms.describeKey("customer-key", "us-east-1")).thenReturn(new KmsKey());
         service = new MskScramSecretsService(storageFactory, clusters, secrets, kms, new ObjectMapper());
@@ -86,6 +89,7 @@ class MskScramServiceTest {
             "arn:aws:kms:us-east-1:000000000000:alias/msk-scram"})
     void rejectsKmsAliasReferencesBeforeKeyLookup(String keyReference) {
         Secret metadata = new Secret();
+        metadata.setArn(SECRET);
         metadata.setKmsKeyId(keyReference);
         when(secrets.describeSecret(SECRET, "us-east-1")).thenReturn(metadata);
 
@@ -102,6 +106,7 @@ class MskScramServiceTest {
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012"})
     void acceptsKmsKeyIdsAndKeyArns(String keyReference) {
         Secret metadata = new Secret();
+        metadata.setArn(SECRET);
         metadata.setKmsKeyId(keyReference);
         when(secrets.describeSecret(SECRET, "us-east-1")).thenReturn(metadata);
         when(kms.describeKey(keyReference, "us-east-1")).thenReturn(new KmsKey());
@@ -113,18 +118,40 @@ class MskScramServiceTest {
     }
 
     @Test
-    void acceptsReturnedSecretArnWithGeneratedSuffix() {
+    void rejectsPartialSecretArnForAssociation() {
         String fullArn = SECRET + "-Ab12Cd";
-        when(secrets.batchGetSecretValue(List.of(SECRET), "us-east-1"))
-            .thenReturn(
-                new BatchGetSecretValueResult(List.of(new BatchSecretValue(
-                        fullArn, "AmazonMSK_alice", "{\"username\":\"alice\",\"password\":\"password\"}",
-                        null, "version", List.of("AWSCURRENT"), null)), List.of())
-            );
+        Secret metadata = new Secret();
+        metadata.setArn(fullArn);
+        metadata.setKmsKeyId("customer-key");
+        when(secrets.describeSecret(SECRET, "us-east-1")).thenReturn(metadata);
 
-        assertTrue(service.batchAssociateScramSecret(CLUSTER, List.of(SECRET)).isEmpty());
-        assertEquals(List.of(SECRET), service.listScramSecrets(CLUSTER, null, null).items());
-        assertTrue(service.batchDisassociateScramSecret(CLUSTER, List.of(SECRET)).isEmpty());
+        List<Map<String, String>> failures = service.batchAssociateScramSecret(CLUSTER, List.of(SECRET));
+
+        assertEquals(List.of(Map.of("secretArn", SECRET, "errorCode", "InvalidSecretArn",
+                "errorMessage", "Amazon MSK wasn't able to access the provided secret.")), failures);
+        assertTrue(service.listScramSecrets(CLUSTER, null, null).items().isEmpty());
+        verifyNoInteractions(kms);
+        verify(secrets, never()).batchGetSecretValue(any(), anyString());
+        secretValue(fullArn, "{\"username\":\"alice\",\"password\":\"password\"}");
+        assertTrue(service.batchAssociateScramSecret(CLUSTER, List.of(fullArn)).isEmpty());
+        assertEquals(List.of(fullArn), service.listScramSecrets(CLUSTER, null, null).items());
+    }
+
+    @Test
+    void rejectsPartialSecretArnForDisassociation() {
+        String fullArn = SECRET + "-Ab12Cd";
+        secretValue(fullArn, "{\"username\":\"alice\",\"password\":\"password\"}");
+        assertTrue(service.batchAssociateScramSecret(CLUSTER, List.of(fullArn)).isEmpty());
+        Secret metadata = new Secret();
+        metadata.setArn(fullArn);
+        when(secrets.describeSecret(SECRET, "us-east-1")).thenReturn(metadata);
+
+        List<Map<String, String>> failures = service.batchDisassociateScramSecret(CLUSTER, List.of(SECRET));
+
+        assertEquals(List.of(Map.of("secretArn", SECRET, "errorCode", "InvalidSecretArn",
+                "errorMessage", "The provided secret ARN is invalid.")), failures);
+        assertEquals(List.of(fullArn), service.listScramSecrets(CLUSTER, null, null).items());
+        assertTrue(service.batchDisassociateScramSecret(CLUSTER, List.of(fullArn)).isEmpty());
     }
 
     @Test

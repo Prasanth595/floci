@@ -67,11 +67,12 @@ public class MskScramSecretsService {
             for (String secretArn : secretArns) {
                 boolean newAssociation = !state.getAssociations().containsKey(secretArn);
                 try {
-                    validateSecretArn(clusterArn, secretArn);
+                    Secret secret = validateSecretArn(clusterArn, secretArn);
+                    validateFullArn(secretArn, secret, "Amazon MSK wasn't able to access the provided secret.");
                     if (!newAssociation) {
                         throw new AwsException("InvalidSecretArn", "The provided secret ARN is invalid.", 400);
                     }
-                    validateSecretEncryption(secretArn);
+                    validateSecretEncryption(secret);
                     // Amazon MSK reads only the AWSCURRENT version of an associated secret
                     BatchSecretValue secretValue = readSecret(secretArn);
                     ScramSecretAssociation association = state.getAssociations()
@@ -106,7 +107,8 @@ public class MskScramSecretsService {
             List<Map<String, String>> unprocessedScramSecrets = new ArrayList<>();
             for (String secretArn : secretArns) {
                 try {
-                    validateSecretArn(clusterArn, secretArn);
+                    Secret secret = validateSecretArn(clusterArn, secretArn);
+                    validateFullArn(secretArn, secret, "The provided secret ARN is invalid.");
                     if (!state.getAssociations().containsKey(secretArn)) {
                         throw new AwsException("InvalidSecretArn", "The provided secret ARN is invalid.", 400);
                     }
@@ -139,7 +141,7 @@ public class MskScramSecretsService {
         }
     }
 
-    private void validateSecretArn(String clusterArn, String secretArn) {
+    private Secret validateSecretArn(String clusterArn, String secretArn) {
         if (!AwsArnUtils.isArn(secretArn)) {
             throw new AwsException("BadRequestException", "Invalid secret ARN.", 400,
                     Map.of("invalidParameter", "secretArnList"));
@@ -159,11 +161,17 @@ public class MskScramSecretsService {
                     "The name of secrets associated with an Amazon MSK cluster must have the prefix AmazonMSK_.", 400,
                     Map.of("invalidParameter", "secretArnList"));
         }
+        return secretsManagerService.describeSecret(secretArn, arn.region());
     }
 
-    private void validateSecretEncryption(String secretArn) {
-        String region = AwsArnUtils.parse(secretArn).region();
-        Secret secret = secretsManagerService.describeSecret(secretArn, region);
+    private void validateFullArn(String secretArn, Secret secret, String message) {
+        if (!secretArn.equals(secret.getArn())) {
+            throw new AwsException("InvalidSecretArn", message, 400);
+        }
+    }
+
+    private void validateSecretEncryption(Secret secret) {
+        String region = AwsArnUtils.parse(secret.getArn()).region();
         String keyId = secret.getKmsKeyId();
         boolean hasAliasPrefix = keyId != null && keyId.startsWith("alias/");
         boolean hasAliasArn = AwsArnUtils.isArnFor(keyId, "kms") && AwsArnUtils.parse(keyId).resource().startsWith("alias/");
@@ -218,18 +226,12 @@ public class MskScramSecretsService {
                 }
             } else if (result.values().size() == 1 && result.errors().isEmpty()) {
                 BatchSecretValue value = result.values().getFirst();
-                if (value != null && matchesSecretArn(secretArn, value.arn()) && value.versionId() != null) {
+                if (value != null && secretArn.equals(value.arn()) && value.versionId() != null) {
                     return value;
                 }
             }
         }
         throw new AwsException("InternalServerError", "Unexpected Secrets Manager batch response.", 500);
-    }
-
-    private boolean matchesSecretArn(String requestedArn, String returnedArn) {
-        // Secrets Manager can resolve a partial ARN and return the full ARN with its generated suffix.
-        return requestedArn.equals(returnedArn)
-                || returnedArn != null && returnedArn.startsWith(requestedArn + "-");
     }
 
     record ScramCredentials(String username, String password) {
