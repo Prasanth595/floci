@@ -120,7 +120,8 @@ public class DynamoDbPartiQLParser {
         List<Token> tokens;
         try {
             tokens = tokenize(statement.trim());
-        } catch (Exception e) {
+        } catch (Exception ignored) {
+            // Execution reports malformed statements after credential and policy checks have run.
             return null;
         }
         return switch (tokens.getFirst().type()) {

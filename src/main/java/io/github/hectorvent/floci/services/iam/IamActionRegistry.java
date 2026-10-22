@@ -347,17 +347,22 @@ public class IamActionRegistry {
         String target = ctx.getHeaderString("X-Amz-Target");
         if (target != null && target.contains(".")) {
             String operationName = target.substring(target.lastIndexOf('.') + 1);
-            if ("dynamodb".equals(credentialScope) && "ExecuteStatement".equals(operationName)) {
-                String statement = RequestBodyReader.jsonField(ctx, MAPPER, "Statement");
-                String statementAction = DynamoDbPartiQLParser.iamAction(statement);
-                if (statementAction != null) {
-                    return statementAction;
-                }
-            }
-            return IamAuthorizedActions.actionFor(credentialScope, operationName);
+            return resolveOperation(credentialScope, operationName, ctx);
         }
 
         return resolveRoute(credentialScope, ctx);
+    }
+
+    /** The action for a dispatched operation, including statement-dependent JSON and CBOR calls. */
+    public String resolveOperation(String credentialScope, String operationName, ContainerRequestContext ctx) {
+        if ("dynamodb".equals(credentialScope) && "ExecuteStatement".equals(operationName)) {
+            String statement = RequestBodyReader.documentField(ctx, MAPPER, "Statement");
+            String statementAction = DynamoDbPartiQLParser.iamAction(statement);
+            if (statementAction != null) {
+                return statementAction;
+            }
+        }
+        return IamAuthorizedActions.actionFor(credentialScope, operationName);
     }
 
     /**

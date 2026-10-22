@@ -748,7 +748,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
             String servingScope = iamServiceScope(rpcV2Route.service(), claimedScope);
             return new ResolvedAuthorization(servingScope,
-                    IamAuthorizedActions.actionFor(servingScope, rpcV2Route.operation()));
+                    actionRegistry.resolveOperation(servingScope, rpcV2Route.operation(), ctx));
         }
 
         ResolvedAuthorization routeAuthorization = restRouteAuthorization(ctx);

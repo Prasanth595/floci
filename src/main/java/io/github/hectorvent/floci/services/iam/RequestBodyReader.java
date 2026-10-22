@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import org.jboss.logging.Logger;
@@ -16,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 public final class RequestBodyReader {
 
     private static final Logger LOG = Logger.getLogger(RequestBodyReader.class);
+    private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
     private static final String BUFFERED_BODY_PROPERTY =
             "io.github.hectorvent.floci.services.iam.RequestBodyReader.bufferedBody";
 
@@ -71,10 +73,12 @@ public final class RequestBodyReader {
         return null;
     }
 
-    static String jsonField(ContainerRequestContext ctx, ObjectMapper objectMapper, String key) {
+    static String documentField(ContainerRequestContext ctx, ObjectMapper objectMapper, String key) {
         MediaType mt = ctx.getMediaType();
+        boolean cbor = mt != null && ("cbor".equalsIgnoreCase(mt.getSubtype())
+                || "x-amz-cbor-1.1".equalsIgnoreCase(mt.getSubtype()));
         if (mt == null || !"application".equalsIgnoreCase(mt.getType())
-                || mt.getSubtype() == null || !mt.getSubtype().startsWith("x-amz-json")) {
+                || mt.getSubtype() == null || (!cbor && !mt.getSubtype().startsWith("x-amz-json"))) {
             return null;
         }
         byte[] body = buffer(ctx);
@@ -82,10 +86,10 @@ public final class RequestBodyReader {
             return null;
         }
         try {
-            JsonNode value = objectMapper.readTree(body).path(key);
+            JsonNode value = (cbor ? CBOR_MAPPER : objectMapper).readTree(body).path(key);
             return value.isTextual() ? value.asText() : null;
         } catch (IOException e) {
-            LOG.debugv(e, "Failed to parse JSON request body for IAM enforcement");
+            LOG.debugv(e, "Failed to parse request document for IAM enforcement");
             return null;
         }
     }
