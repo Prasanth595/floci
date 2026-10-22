@@ -82,6 +82,17 @@ class DynamoDbPartiQLAuthorizationIntegrationTest {
                 .body(containsString("dynamodb:PartiQLSelect"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"-- only a comment", "/* only a comment */", "SELECT * FROM t /* unterminated"})
+    void statementWithNoOperationIsAuthorizedAsExecuteStatement(String statement) {
+        String table = table();
+        execute(user("dynamodb:PartiQLSelect", arn(table)), statement).statusCode(400)
+                .body(containsString("AccessDeniedException"))
+                .body(containsString("dynamodb:ExecuteStatement"));
+        execute(user("dynamodb:ExecuteStatement", "*"), statement).statusCode(400)
+                .body(containsString("ValidationException"));
+    }
+
     private String arn(String table) {
         return "arn:aws:dynamodb:us-east-1:000000000000:table/" + table;
     }

@@ -108,12 +108,22 @@ public class DynamoDbPartiQLParser {
         }
     }
 
-    /** The IAM action for a single statement, using the same keyword tokens as execution. */
+    /**
+     * The IAM action for a single statement, using the same keyword tokens as execution. A statement
+     * the tokenizer refuses has no action here, so it is authorized as ExecuteStatement and the
+     * handler reports why it is malformed, as {@link #extractTable} leaves it.
+     */
     public static String iamAction(String statement) {
         if (statement == null || statement.isBlank()) {
             return null;
         }
-        return switch (tokenize(statement.trim()).getFirst().type()) {
+        List<Token> tokens;
+        try {
+            tokens = tokenize(statement.trim());
+        } catch (Exception e) {
+            return null;
+        }
+        return switch (tokens.getFirst().type()) {
             case SELECT -> "dynamodb:PartiQLSelect";
             case INSERT -> "dynamodb:PartiQLInsert";
             case UPDATE -> "dynamodb:PartiQLUpdate";
