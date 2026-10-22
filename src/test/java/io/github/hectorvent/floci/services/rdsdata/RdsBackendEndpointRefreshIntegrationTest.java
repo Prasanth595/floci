@@ -21,8 +21,12 @@ import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import io.github.hectorvent.floci.services.rds.container.RdsBackendEndpointResolver;
 import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
+import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
+import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
+import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -34,13 +38,22 @@ import org.junit.jupiter.api.TestInstance;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -48,7 +61,7 @@ import static org.mockito.Mockito.when;
 
 @Tag("docker")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class RdsDataBackendEndpointRefreshIntegrationTest {
+class RdsBackendEndpointRefreshIntegrationTest {
 
     private static final String IMAGE = "postgres:16.3-alpine";
     private static final String USER = "admin";
@@ -63,9 +76,11 @@ class RdsDataBackendEndpointRefreshIntegrationTest {
             "arn:aws:secretsmanager:us-east-1:000000000000:secret:data-refresh";
     private static final int POSTGRES_PORT = 5432;
 
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final List<RdsAuthProxy> proxies = new ArrayList<>();
     private DockerClient dockerClient;
     private ContainerLifecycleManager lifecycleManager;
-    private RdsDataService service;
+    private RdsDataService dataService;
     private String networkId;
     private String networkName;
     private String firstContainerId;
@@ -107,11 +122,11 @@ class RdsDataBackendEndpointRefreshIntegrationTest {
 
     @BeforeEach
     void startBackends() {
-        networkName = "floci-rdsdata-endpoint-refresh-" + UUID.randomUUID();
+        networkName = "floci-rds-endpoint-refresh-" + UUID.randomUUID();
         CreateNetworkResponse network = dockerClient.createNetworkCmd()
                 .withName(networkName)
                 .withIpam(new Network.Ipam().withConfig(
-                        new Network.Ipam.Config().withSubnet("198.18.201.0/24")))
+                        new Network.Ipam.Config().withSubnet("198.18.200.0/24")))
                 .exec();
         networkId = network.getId();
         firstContainerId = startPostgres("first");
@@ -124,14 +139,19 @@ class RdsDataBackendEndpointRefreshIntegrationTest {
         assumeTrue(canConnectEventually(firstAddress, POSTGRES_PORT)
                         && canConnectEventually(secondAddress, POSTGRES_PORT),
                 "Docker bridge addresses are not reachable from this test JVM");
-        service = dataService();
+        dataService = createDataService();
     }
 
     @AfterEach
     void tearDown() {
-        if (service != null) {
-            service.shutdown();
+        if (dataService != null) {
+            dataService.shutdown();
+            dataService = null;
         }
+        for (RdsAuthProxy proxy : proxies) {
+            proxy.stop();
+        }
+        proxies.clear();
         removeContainer(firstContainerId);
         removeContainer(secondContainerId);
         if (networkId != null) {
@@ -141,17 +161,24 @@ class RdsDataBackendEndpointRefreshIntegrationTest {
                 // best effort
             }
         }
-        service = null;
         firstContainerId = null;
         secondContainerId = null;
         networkId = null;
     }
 
     @Test
-    void dataApiKeepsRuntimeIdentityAfterContainerAddressesSwap() {
-        String firstSystemIdentifier = systemIdentifier(FIRST_RESOURCE_ARN);
-        String secondSystemIdentifier = systemIdentifier(SECOND_RESOURCE_ARN);
+    void proxyAndDataApiKeepRuntimeIdentityAfterContainerAddressesSwap() throws Exception {
+        int[] proxyPorts = FreePorts.anyInterfacePorts(2);
+        RdsAuthProxy firstProxy = proxy("first", firstContainerId, firstAddress);
+        RdsAuthProxy secondProxy = proxy("second", secondContainerId, secondAddress);
+        firstProxy.start(proxyPorts[0]);
+        secondProxy.start(proxyPorts[1]);
+        String firstSystemIdentifier = proxySystemIdentifier(proxyPorts[0]);
+        String secondSystemIdentifier = proxySystemIdentifier(proxyPorts[1]);
         assertNotEquals(firstSystemIdentifier, secondSystemIdentifier);
+        assertAll("both data planes initially reach their assigned runtime",
+                () -> assertEquals(firstSystemIdentifier, dataApiSystemIdentifier(FIRST_RESOURCE_ARN)),
+                () -> assertEquals(secondSystemIdentifier, dataApiSystemIdentifier(SECOND_RESOURCE_ARN)));
 
         stopAndDisconnect(firstContainerId);
         stopAndDisconnect(secondContainerId);
@@ -164,13 +191,20 @@ class RdsDataBackendEndpointRefreshIntegrationTest {
         assertEquals(secondAddress, containerAddress(firstContainerId));
         assertEquals(firstAddress, containerAddress(secondContainerId));
 
-        assertEquals(firstSystemIdentifier, systemIdentifier(FIRST_RESOURCE_ARN));
-        assertEquals(secondSystemIdentifier, systemIdentifier(SECOND_RESOURCE_ARN));
+        assertAll("both data planes follow runtime identity after the address swap",
+                () -> assertEquals(firstSystemIdentifier, proxySystemIdentifier(proxyPorts[0])),
+                () -> assertEquals(firstSystemIdentifier, dataApiSystemIdentifier(FIRST_RESOURCE_ARN)),
+                () -> assertEquals(secondSystemIdentifier, proxySystemIdentifier(proxyPorts[1])),
+                () -> assertEquals(secondSystemIdentifier, dataApiSystemIdentifier(SECOND_RESOURCE_ARN)));
     }
 
     @Test
-    void dataApiUsesRestartedRuntimeWhenItsPreviousAddressIsUnused() {
-        String systemIdentifier = systemIdentifier(FIRST_RESOURCE_ARN);
+    void proxyAndDataApiUseRestartedRuntimeWhenItsPreviousAddressIsUnused() throws Exception {
+        int proxyPort = FreePorts.anyInterfacePort();
+        RdsAuthProxy proxy = proxy("first", firstContainerId, firstAddress);
+        proxy.start(proxyPort);
+        String systemIdentifier = proxySystemIdentifier(proxyPort);
+        assertEquals(systemIdentifier, dataApiSystemIdentifier(FIRST_RESOURCE_ARN));
 
         stopAndDisconnect(firstContainerId);
         stopAndDisconnect(secondContainerId);
@@ -181,43 +215,56 @@ class RdsDataBackendEndpointRefreshIntegrationTest {
         assertFalse(canConnect(firstAddress, POSTGRES_PORT),
                 "the stale backend address must be unused in this scenario");
 
-        assertEquals(systemIdentifier, systemIdentifier(FIRST_RESOURCE_ARN));
+        assertAll("both data planes follow the runtime when its old address is unused",
+                () -> assertEquals(systemIdentifier, proxySystemIdentifier(proxyPort)),
+                () -> assertEquals(systemIdentifier, dataApiSystemIdentifier(FIRST_RESOURCE_ARN)));
     }
 
-    private RdsDataService dataService() {
+    private RdsAuthProxy proxy(String id, String containerId, String initialAddress) {
+        RdsAuthProxy.BackendEndpointResolver resolver = () -> {
+            ContainerLifecycleManager.EndpointInfo endpoint = lifecycleManager.resolveEndpoint(
+                    containerId, POSTGRES_PORT, networkName);
+            return new RdsAuthProxy.BackendEndpoint(endpoint.host(), endpoint.port());
+        };
+        RdsAuthProxy proxy = new RdsAuthProxy(
+                id, initialAddress, POSTGRES_PORT, resolver, containerId,
+                DatabaseEngine.POSTGRES, false,
+                USER, PASSWORD, DATABASE, mock(RdsSigV4Validator.class),
+                mock(RdsProxyTlsCertificates.class), (user, password) -> true,
+                5000, 5000, 100, null, username -> false,
+                RdsBackendGate.OPEN, RdsAuthProxy.EndpointKind.DATABASE);
+        proxies.add(proxy);
+        return proxy;
+    }
+
+    private RdsDataService createDataService() {
         RdsDataResourceResolver resolver = mock(RdsDataResourceResolver.class);
-        when(resolver.resolve(FIRST_RESOURCE_ARN, REGION)).thenReturn(target(FIRST_RESOURCE_ARN));
-        when(resolver.resolve(SECOND_RESOURCE_ARN, REGION)).thenReturn(target(SECOND_RESOURCE_ARN));
+        when(resolver.resolve(FIRST_RESOURCE_ARN, REGION))
+                .thenReturn(target(FIRST_RESOURCE_ARN, firstContainerId));
+        when(resolver.resolve(SECOND_RESOURCE_ARN, REGION))
+                .thenReturn(target(SECOND_RESOURCE_ARN, secondContainerId));
         SecretsManagerService secrets = mock(SecretsManagerService.class);
         SecretVersion version = new SecretVersion();
         version.setSecretString("{\"username\":\"" + USER + "\",\"password\":\"" + PASSWORD + "\"}");
         when(secrets.getSecretValue(any(), any(), any(), any())).thenReturn(version);
         RdsBackendEndpointResolver endpointResolver = (runtimeId, engine) ->
-                lifecycleManager.resolveEndpoint(containerFor(runtimeId), POSTGRES_PORT, networkName);
-        return new RdsDataService(resolver, secrets, new ObjectMapper(), new RdsDataConnectionFactory(),
+                lifecycleManager.resolveEndpoint(runtimeId, POSTGRES_PORT, networkName);
+        return new RdsDataService(resolver, secrets, objectMapper, new RdsDataConnectionFactory(),
                 Duration.ofSeconds(60), RdsBackendGate.OPEN, endpointResolver);
     }
 
-    private static RdsDataResourceResolver.DatabaseTarget target(String resourceArn) {
+    private static RdsDataResourceResolver.DatabaseTarget target(String resourceArn, String runtimeId) {
         return new RdsDataResourceResolver.DatabaseTarget(
-                resourceArn, resourceArn, DatabaseEngine.POSTGRES, USER, PASSWORD, DATABASE);
+                resourceArn, runtimeId, DatabaseEngine.POSTGRES, USER, PASSWORD, DATABASE);
     }
 
-    private String containerFor(String runtimeId) {
-        return switch (runtimeId) {
-            case FIRST_RESOURCE_ARN -> firstContainerId;
-            case SECOND_RESOURCE_ARN -> secondContainerId;
-            default -> throw new IllegalArgumentException("Unknown RDS runtime " + runtimeId);
-        };
-    }
-
-    private String systemIdentifier(String resourceArn) {
-        ObjectNode request = new ObjectMapper().createObjectNode();
+    private String dataApiSystemIdentifier(String resourceArn) {
+        ObjectNode request = objectMapper.createObjectNode();
         request.put("resourceArn", resourceArn);
         request.put("secretArn", SECRET_ARN);
         request.put("database", DATABASE);
         request.put("sql", "SELECT system_identifier::text FROM pg_control_system()");
-        ObjectNode response = service.executeStatement(request, REGION);
+        ObjectNode response = dataService.executeStatement(request, REGION);
         String value = response.path("records").path(0).path(0).path("stringValue").asText();
         assertFalse(value.isBlank(), "PostgreSQL must return its system identifier");
         return value;
@@ -257,6 +304,22 @@ class RdsDataBackendEndpointRefreshIntegrationTest {
     private String containerAddress(String containerId) {
         return dockerClient.inspectContainerCmd(containerId).exec()
                 .getNetworkSettings().getNetworks().get(networkName).getIpAddress();
+    }
+
+    private String proxySystemIdentifier(int proxyPort) throws Exception {
+        Class.forName("org.postgresql.Driver");
+        Properties properties = new Properties();
+        properties.setProperty("user", USER);
+        properties.setProperty("password", PASSWORD);
+        properties.setProperty("sslmode", "disable");
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:postgresql://127.0.0.1:" + proxyPort + "/" + DATABASE, properties);
+             Statement statement = connection.createStatement();
+             ResultSet result = statement.executeQuery(
+                     "SELECT system_identifier::text FROM pg_control_system()")) {
+            assertTrue(result.next());
+            return result.getString(1);
+        }
     }
 
     private void waitForPostgres(String containerId) {
