@@ -186,8 +186,14 @@ public class KmsJsonHandler {
         return Response.ok(response).build();
     }
 
+    /** MarkerType has length >= 1 in the model, so a present but empty Marker is refused, not ignored. */
     private static String marker(JsonNode request) {
-        return request.path("Marker").isMissingNode() ? null : request.path("Marker").asText(null);
+        String marker = request.path("Marker").isMissingNode() ? null : request.path("Marker").asText(null);
+        if (marker != null && marker.isEmpty()) {
+            throw SmithyValidationErrors.validationException("Value '' at 'marker' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1");
+        }
+        return marker;
     }
 
     /**

@@ -1059,6 +1059,23 @@ class KmsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "ListKeys|''|ValidationException",
+            "ListAliases|''|ValidationException",
+            "ListKeys|' '|InvalidMarkerException",
+            "ListAliases|' '|InvalidMarkerException"})
+    void listKeysAndAliasesRejectBlankMarker(String action, String marker, String errorType) {
+        given()
+                .header("X-Amz-Target", "TrentService." + action)
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Marker\":\"" + marker + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo(errorType));
+    }
+
+    @ParameterizedTest
     @CsvSource({"ListKeys", "ListAliases"})
     void listKeysAndAliasesRejectBadMarker(String action) {
         given()

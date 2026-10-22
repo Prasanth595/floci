@@ -710,7 +710,8 @@ public class KmsService implements ResourceProvider {
     private <T> Page<T> page(List<T> items, Function<T, String> id, String marker, Integer limit, int max) {
         List<T> sorted = items.stream().sorted(Comparator.comparing(id)).toList();
         int startIndex = 0;
-        if (marker != null && !marker.isBlank()) {
+        if (marker != null) {
+            // A blank marker was not issued here, so it is refused rather than restarting the listing.
             String anchor = listMarkers.cursorOf(marker.trim());
             if (anchor == null) {
                 throw new AwsException("InvalidMarkerException",
