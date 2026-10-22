@@ -76,6 +76,36 @@ class MskScramServiceTest {
     }
 
     @Test
+    void acceptsReturnedSecretArnWithGeneratedSuffix() {
+        String fullArn = SECRET + "-Ab12Cd";
+        when(secrets.batchGetSecretValue(List.of(SECRET), "us-east-1"))
+            .thenReturn(
+                new BatchGetSecretValueResult(List.of(new BatchSecretValue(
+                        fullArn, "AmazonMSK_alice", "{\"username\":\"alice\",\"password\":\"password\"}",
+                        null, "version", List.of("AWSCURRENT"), null)), List.of())
+            );
+
+        assertTrue(service.batchAssociateScramSecret(CLUSTER, List.of(SECRET)).isEmpty());
+        assertEquals(List.of(SECRET), service.listScramSecrets(CLUSTER, null, null).items());
+        assertTrue(service.batchDisassociateScramSecret(CLUSTER, List.of(SECRET)).isEmpty());
+    }
+
+    @Test
+    void rejectsReturnedSecretArnForDifferentSecret() {
+        when(secrets.batchGetSecretValue(List.of(SECRET), "us-east-1"))
+            .thenReturn(
+                new BatchGetSecretValueResult(List.of(new BatchSecretValue(
+                        SECRET + "Other", "AmazonMSK_fixture", "{\"username\":\"alice\",\"password\":\"password\"}",
+                        null, "version", List.of("AWSCURRENT"), null)), List.of())
+            );
+
+        List<Map<String, String>> failures = service.batchAssociateScramSecret(CLUSTER, List.of(SECRET));
+
+        assertEquals("InternalServerError", failures.getFirst().get("errorCode"));
+        assertTrue(service.listScramSecrets(CLUSTER, null, null).items().isEmpty());
+    }
+
+    @Test
     void reportsItemFailuresWithoutBlockingValidSecrets() {
         String invalid = SECRET + "-invalid";
         secretValue(invalid, "{}");

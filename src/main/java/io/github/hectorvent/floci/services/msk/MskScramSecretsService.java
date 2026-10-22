@@ -215,12 +215,18 @@ public class MskScramSecretsService {
                 }
             } else if (result.values().size() == 1 && result.errors().isEmpty()) {
                 BatchSecretValue value = result.values().getFirst();
-                if (value != null && secretArn.equals(value.arn()) && value.versionId() != null) {
+                if (value != null && matchesSecretArn(secretArn, value.arn()) && value.versionId() != null) {
                     return value;
                 }
             }
         }
         throw new AwsException("InternalServerError", "Unexpected Secrets Manager batch response.", 500);
+    }
+
+    private boolean matchesSecretArn(String requestedArn, String returnedArn) {
+        // Secrets Manager can resolve a partial ARN and return the full ARN with its generated suffix.
+        return requestedArn.equals(returnedArn)
+                || returnedArn != null && returnedArn.startsWith(requestedArn + "-");
     }
 
     record ScramCredentials(String username, String password) {
