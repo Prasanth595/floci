@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -696,41 +697,33 @@ public class KmsService implements ResourceProvider {
         return page(listAliases(keyId, region), KmsAlias::getAliasName, marker, limit, MAX_LIST_ALIASES_LIMIT);
     }
 
+    /** Signs each ListKeys/ListAliases Marker, so only a marker this service issued is accepted. */
+    private final SignedMarkers listMarkers = new SignedMarkers();
+
     /**
-     * Pages {@code items} the way {@link #paginateGrants} does: sorted by id, Marker is the
-     * base64 id of the last item returned, Limit is clamped to [1..max]. Without a Limit the
-     * whole remainder is returned, so callers that never page see every entry as before.
+     * Pages {@code items} sorted by id. Marker is a signed cursor naming the id of the last item
+     * returned; the next page starts at the first id sorting after it, so deleting that item
+     * between pages does not break the listing (as upstream IAM pagination does). A marker this
+     * service did not issue is InvalidMarkerException. Limit is clamped to [1..max]; without a
+     * Limit the whole remainder is returned, so callers that never page see every entry.
      */
-    private static <T> Page<T> page(List<T> items, Function<T, String> id,
-                                    String marker, Integer limit, int max) {
+    private <T> Page<T> page(List<T> items, Function<T, String> id, String marker, Integer limit, int max) {
         List<T> sorted = items.stream().sorted(Comparator.comparing(id)).toList();
         int startIndex = 0;
         if (marker != null && !marker.isBlank()) {
-            String lastId;
-            try {
-                lastId = new String(Base64.getDecoder().decode(marker), StandardCharsets.UTF_8);
-            } catch (IllegalArgumentException e) {
-                throw new AwsException("InvalidMarkerException",
-                        "The request was rejected because the marker is not valid.", 400);
-            }
-            startIndex = -1;
-            for (int i = 0; i < sorted.size(); i++) {
-                if (id.apply(sorted.get(i)).equals(lastId)) {
-                    startIndex = i + 1;
-                    break;
-                }
-            }
-            if (startIndex < 0) {
+            String anchor = listMarkers.cursorOf(marker.trim());
+            if (anchor == null) {
                 throw new AwsException("InvalidMarkerException",
                         "The request was rejected because the marker that specifies where pagination should next begin is not valid.", 400);
+            }
+            while (startIndex < sorted.size() && id.apply(sorted.get(startIndex)).compareTo(anchor) <= 0) {
+                startIndex++;
             }
         }
         int endIndex = limit == null ? sorted.size()
                 : Math.min(startIndex + Math.clamp(limit, 1, max), sorted.size());
         List<T> pageItems = sorted.subList(startIndex, endIndex);
-        String nextMarker = endIndex < sorted.size()
-                ? Base64.getEncoder().encodeToString(id.apply(pageItems.getLast()).getBytes(StandardCharsets.UTF_8))
-                : null;
+        String nextMarker = endIndex < sorted.size() ? listMarkers.issue(id.apply(pageItems.getLast())) : null;
         return new Page<>(pageItems, nextMarker);
     }
 

@@ -957,6 +957,89 @@ class KmsIntegrationTest {
         assertTrue(second.getList("Aliases.TargetKeyId").stream().allMatch(keyId::equals));
     }
 
+    @Test
+    void listAliasesResumesAfterMarkedAliasIsDeleted() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        String prefix = "alias/resume-" + System.nanoTime() + "-";
+        for (int i = 0; i < 3; i++) {
+            given()
+                    .header("X-Amz-Target", "TrentService.CreateAlias")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"AliasName\":\"" + prefix + i + "\",\"TargetKeyId\":\"" + keyId + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200);
+        }
+
+        String marker = given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\",\"Limit\":1}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Aliases.AliasName", equalTo(List.of(prefix + 0)))
+                .body("Truncated", equalTo(true))
+                .extract().path("NextMarker");
+
+        // Delete-while-listing, as Terraform and cloud-nuke do: the alias the marker names is gone.
+        given()
+                .header("X-Amz-Target", "TrentService.DeleteAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"" + prefix + 0 + "\"}")
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\",\"Limit\":1,\"Marker\":\"" + marker + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Aliases.AliasName", equalTo(List.of(prefix + 1)))
+                .body("Truncated", equalTo(true));
+    }
+
+    @Test
+    void listAliasesClampsLimitToDocumentedMaximum() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        String prefix = "alias/clamp-" + System.nanoTime() + "-";
+        for (int i = 0; i < 101; i++) {
+            given()
+                    .header("X-Amz-Target", "TrentService.CreateAlias")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"AliasName\":\"" + prefix + i + "\",\"TargetKeyId\":\"" + keyId + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200);
+        }
+
+        // The ListAliases reference allows Limit 1-100, so a larger Limit returns at most 100.
+        given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\",\"Limit\":1000}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Aliases.size()", equalTo(100))
+                .body("Truncated", equalTo(true))
+                .body("NextMarker", notNullValue());
+    }
+
     @ParameterizedTest
     @CsvSource({"ListKeys", "ListAliases"})
     void listKeysAndAliasesRejectBadMarker(String action) {
