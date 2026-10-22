@@ -8,6 +8,9 @@ import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.apache.hc.client5.http.DnsResolver;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.http.message.BasicHttpResponse;
+import org.apache.hc.core5.util.TimeValue;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.Test;
 
@@ -49,7 +52,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -655,36 +657,32 @@ class CloudFrontOriginHttpClientTest {
     }
 
     @Test
-    void doesNotReuseAnOriginConnectionPastItsKeepAlive() throws Exception {
-        List<InetSocketAddress> peers = new CopyOnWriteArrayList<>();
-        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/", exchange -> {
-            peers.add(exchange.getRemoteAddress());
-            byte[] body = "origin-ok".getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, body.length);
-            exchange.getResponseBody().write(body);
-            exchange.close();
-        });
-        server.start();
+    void theKeepAliveStrategyReturnsTheOriginsKeepAlive() {
+        CloudFrontOriginHttpClient.KeepAliveStrategy strategy =
+                new CloudFrontOriginHttpClient.KeepAliveStrategy();
+        HttpClientContext context = HttpClientContext.create();
+        context.setAttribute(CloudFrontOriginHttpClient.KEEP_ALIVE_TIMEOUT_ATTRIBUTE,
+                Duration.ofSeconds(2));
 
-        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
-                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
-            String uri = "http://origin.invalid:" + server.getAddress().getPort() + "/";
-            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
-                    new CloudFrontOriginHttpClient.OriginTimeouts(
-                            Duration.ofSeconds(1), Duration.ofSeconds(5), 1,
-                            CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
-                            Duration.ofSeconds(1));
-            readAll(get(client, request(uri), timeouts));
-            Thread.sleep(1500);
-            readAll(get(client, request(uri), timeouts));
+        assertEquals(TimeValue.ofSeconds(2),
+                strategy.getKeepAliveDuration(new BasicHttpResponse(200), context));
 
-            assertEquals(2, peers.size());
-            assertNotEquals(peers.get(0), peers.get(1),
-                    "the connection expired with its keep-alive and was not reused");
-        } finally {
-            server.stop(0);
-        }
+        BasicHttpResponse originAsksForLess = new BasicHttpResponse(200);
+        originAsksForLess.addHeader("Keep-Alive", "timeout=1");
+        assertEquals(TimeValue.ofSeconds(1),
+                strategy.getKeepAliveDuration(originAsksForLess, context),
+                "the origin's own Keep-Alive header shortens the setting");
+
+        BasicHttpResponse originAsksForMore = new BasicHttpResponse(200);
+        originAsksForMore.addHeader("Keep-Alive", "timeout=30");
+        assertEquals(TimeValue.ofSeconds(2),
+                strategy.getKeepAliveDuration(originAsksForMore, context),
+                "the setting caps what the origin asks for");
+
+        assertEquals(
+                TimeValue.ofSeconds(CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS),
+                strategy.getKeepAliveDuration(new BasicHttpResponse(200), HttpClientContext.create()),
+                "a request with no keep-alive setting uses the default");
     }
 
     @Test
@@ -743,8 +741,9 @@ class CloudFrontOriginHttpClientTest {
         });
         server.start();
 
+        AtomicLong clock = new AtomicLong();
         try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
-                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"), clock::get)) {
             CloudFrontOriginHttpClient.OriginTimeouts timeouts =
                     new CloudFrontOriginHttpClient.OriginTimeouts(
                             Duration.ofSeconds(1), Duration.ofSeconds(30), 1,
@@ -753,15 +752,15 @@ class CloudFrontOriginHttpClientTest {
             CloudFrontOriginHttpClient.OpenResponse response = get(client,
                     request("http://origin.invalid:" + server.getAddress().getPort() + "/"), timeouts);
 
-            // The viewer reads the body far slower than the completion timeout allows. The origin
-            // answered in time, so the response is not expired and the body arrives complete.
+            // The viewer reads the body far slower than the completion timeout allows: a second
+            // passes between reads. The origin answered in time, so the response is not expired.
             ByteArrayOutputStream received = new ByteArrayOutputStream();
             try (InputStream origin = response.body()) {
                 byte[] chunk = new byte[4];
                 int read;
                 while ((read = origin.read(chunk)) != -1) {
                     received.write(chunk, 0, read);
-                    Thread.sleep(200);
+                    clock.addAndGet(Duration.ofSeconds(1).toNanos());
                 }
             }
             assertArrayEquals(body, received.toByteArray());

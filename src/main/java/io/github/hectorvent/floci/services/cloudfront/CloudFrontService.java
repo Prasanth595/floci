@@ -336,9 +336,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     /**
      * The completion timeout bounds the whole request to the origin, so it cannot be shorter than
-     * the read timeout it contains. The XML parser checks the same rule for a distribution created
-     * through the API; the check lives here as well, so a distribution created through the
-     * CloudFormation path, which never sees the XML, is held to it too.
+     * the read timeout it contains. Create and update both run this, whichever path the request
+     * came from, so a distribution created through the XML API and one created through
+     * CloudFormation are held to the same rule.
      */
     private static void validateResponseCompletionTimeout(Integer completionTimeout, int originReadTimeout) {
         if (completionTimeout == null) {

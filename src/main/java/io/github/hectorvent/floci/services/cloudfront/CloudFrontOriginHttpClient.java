@@ -54,6 +54,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
 /**
@@ -68,7 +69,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     private static final String ORIGIN_TIMEOUT_MESSAGE =
             "The origin didn't respond before the request expired.";
     /** The context attribute the origin's keep-alive timeout travels in, to the pool's strategy. */
-    private static final String KEEP_ALIVE_TIMEOUT_ATTRIBUTE = "floci.cloudfront.originKeepAliveTimeout";
+    static final String KEEP_ALIVE_TIMEOUT_ATTRIBUTE = "floci.cloudfront.originKeepAliveTimeout";
     private static final Duration CONNECT_TIMEOUT = CloudFrontOriginTimeouts.DEFAULT_CONNECTION_TIMEOUT;
     private static final Duration RESPONSE_TIMEOUT = CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT;
     /** CloudFront retries a response timeout only for the methods it treats as idempotent. */
@@ -83,30 +84,52 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     private static final ThreadLocal<Duration> HANDSHAKE_TIMEOUT = new ThreadLocal<>();
 
     private final CloseableHttpClient client;
+    /** The clock the completion budget reads, {@link System#nanoTime} unless a test supplies one. */
+    private final LongSupplier nanoClock;
 
     CloudFrontOriginHttpClient(Collection<String> allowedPrivateOriginHosts) {
-        this(SystemDefaultDnsResolver.INSTANCE, allowedPrivateOriginHosts, null);
+        this(SystemDefaultDnsResolver.INSTANCE, allowedPrivateOriginHosts, (SSLContext) null);
     }
 
     CloudFrontOriginHttpClient(DnsResolver delegate, Collection<String> allowedPrivateOriginHosts) {
-        this(delegate, allowedPrivateOriginHosts, null);
+        this(delegate, allowedPrivateOriginHosts, (SSLContext) null);
     }
 
     /** Reaches Floci's own listener, whose address the private address check refuses. */
     static CloudFrontOriginHttpClient toFloci() {
-        return new CloudFrontOriginHttpClient(SystemDefaultDnsResolver.INSTANCE, (SSLContext) null);
+        return new CloudFrontOriginHttpClient(SystemDefaultDnsResolver.INSTANCE, (SSLContext) null,
+                System::nanoTime);
     }
 
     CloudFrontOriginHttpClient(
             DnsResolver delegate,
             Collection<String> allowedPrivateOriginHosts,
             SSLContext sslContext) {
-        this(new ValidatingDnsResolver(delegate, allowedPrivateOriginHosts.stream()
-                .map(CloudFrontServingController::normalizeHost)
-                .collect(Collectors.toUnmodifiableSet())), sslContext);
+        this(delegate, allowedPrivateOriginHosts, sslContext, System::nanoTime);
     }
 
-    private CloudFrontOriginHttpClient(DnsResolver resolver, SSLContext sslContext) {
+    /** The same client, reading the clock from {@code nanoClock} rather than {@link System#nanoTime}. */
+    CloudFrontOriginHttpClient(
+            DnsResolver delegate,
+            Collection<String> allowedPrivateOriginHosts,
+            LongSupplier nanoClock) {
+        this(delegate, allowedPrivateOriginHosts, null, nanoClock);
+    }
+
+    private CloudFrontOriginHttpClient(
+            DnsResolver delegate,
+            Collection<String> allowedPrivateOriginHosts,
+            SSLContext sslContext,
+            LongSupplier nanoClock) {
+        this(new ValidatingDnsResolver(delegate, allowedPrivateOriginHosts.stream()
+                .map(CloudFrontServingController::normalizeHost)
+                .collect(Collectors.toUnmodifiableSet())), sslContext, nanoClock);
+    }
+
+    private CloudFrontOriginHttpClient(
+            DnsResolver resolver, SSLContext sslContext, LongSupplier nanoClock) {
+        this.nanoClock = nanoClock;
+
         ConnectionConfig connectionConfig = ConnectionConfig.custom()
                 .setConnectTimeout(Timeout.of(CONNECT_TIMEOUT))
                 .setSocketTimeout(Timeout.of(RESPONSE_TIMEOUT))
@@ -214,7 +237,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                 CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
                 CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
         int attempts = Math.max(1, effective.connectionAttempts());
-        CompletionBudget budget = new CompletionBudget(effective.responseCompletionTimeout());
+        CompletionBudget budget = new CompletionBudget(effective.responseCompletionTimeout(), nanoClock);
         IOException lastFailure = null;
         for (int attempt = 1; attempt <= attempts; attempt++) {
             if (budget.expired()) {
@@ -266,12 +289,20 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
 
         /** The time the origin may take, in nanoseconds, or 0 when it may take as long as it wants. */
         private final long limitNanos;
+        /** The clock the budget reads, so a test can move time without waiting for it. */
+        private final LongSupplier nanoClock;
         /** The time the origin has taken so far, in nanoseconds. */
         private long spentNanos;
 
-        CompletionBudget(Duration responseCompletionTimeout) {
+        CompletionBudget(Duration responseCompletionTimeout, LongSupplier nanoClock) {
+            this.nanoClock = nanoClock;
             this.limitNanos = responseCompletionTimeout == null || responseCompletionTimeout.isZero()
                     || responseCompletionTimeout.isNegative() ? 0 : responseCompletionTimeout.toNanos();
+        }
+
+        /** The clock's reading, in nanoseconds. */
+        long now() {
+            return nanoClock.getAsLong();
         }
 
         /** Whether the origin may take as long as it wants. */
@@ -305,7 +336,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                 requestBody != null ? new InputStreamEntity(requestBody, requestBodyLength, null) : null);
         ClassicHttpResponse response;
         OriginTimeouts effective = effectiveTimeouts(timeouts, budget);
-        long attemptStart = System.nanoTime();
+        long attemptStart = budget.now();
         HANDSHAKE_TIMEOUT.set(effective.connectTimeout());
         try {
             response = client.executeOpen(RoutingSupport.determineHost(originRequest), originRequest,
@@ -321,7 +352,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
             HANDSHAKE_TIMEOUT.remove();
             // The time the origin took to connect and to answer is part of the time CloudFront
             // waits for it.
-            budget.spend(System.nanoTime() - attemptStart);
+            budget.spend(budget.now() - attemptStart);
         }
         try {
             HttpEntity entity = response.getEntity();
@@ -357,7 +388,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
      * header only shortens it: the setting is the longest CloudFront holds a connection to that
      * origin, and a connection the origin is about to close fails the next request.
      */
-    private static final class KeepAliveStrategy implements ConnectionKeepAliveStrategy {
+    static final class KeepAliveStrategy implements ConnectionKeepAliveStrategy {
         @Override
         public TimeValue getKeepAliveDuration(HttpResponse response, HttpContext context) {
             TimeValue keepAlive = TimeValue.ofSeconds(keepAliveSeconds(context));
@@ -424,16 +455,16 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         @Override
         public int read() throws IOException {
             checkExpired();
-            long start = System.nanoTime();
+            long start = budget.now();
             try {
                 int value = super.read();
-                budget.spend(System.nanoTime() - start);
+                budget.spend(budget.now() - start);
                 if (value >= 0) {
                     checkExpired();
                 }
                 return value;
             } catch (SocketTimeoutException e) {
-                budget.spend(System.nanoTime() - start);
+                budget.spend(budget.now() - start);
                 if (budget.expired()) {
                     close();
                     throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE, e);
@@ -445,16 +476,16 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         @Override
         public int read(byte[] buffer, int offset, int length) throws IOException {
             checkExpired();
-            long start = System.nanoTime();
+            long start = budget.now();
             try {
                 int read = super.read(buffer, offset, length);
-                budget.spend(System.nanoTime() - start);
+                budget.spend(budget.now() - start);
                 if (read >= 0) {
                     checkExpired();
                 }
                 return read;
             } catch (SocketTimeoutException e) {
-                budget.spend(System.nanoTime() - start);
+                budget.spend(budget.now() - start);
                 if (budget.expired()) {
                     close();
                     throw new CloudFrontOriginTimeoutException(ORIGIN_TIMEOUT_MESSAGE, e);
