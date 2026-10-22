@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ssm;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -143,6 +144,32 @@ class SsmParameterPaginationIntegrationTest {
     }
 
     @Test
+    void refusesATokenMintedInAnotherAccount() {
+        String issuer = "000000000301";
+        String other = "000000000302";
+        String path = "/pagination-" + UUID.randomUUID();
+        for (String account : List.of(issuer, other)) {
+            IntStream.rangeClosed(1, 3).forEach(i -> put(account, path + "/p" + i, "v"));
+            put(account, path + "/p1", "v2");
+        }
+
+        String pathToken = ok(issuer, "GetParametersByPath", Map.of("Path", path, "MaxResults", 1))
+                .getString("NextToken");
+        String historyToken = ok(issuer, "GetParameterHistory", Map.of("Name", path + "/p1", "MaxResults", 1))
+                .getString("NextToken");
+
+        error(other, "GetParametersByPath", Map.of("Path", path, "MaxResults", 1, "NextToken", pathToken),
+                "InvalidNextToken");
+        error(other, "GetParameterHistory", Map.of("Name", path + "/p1", "MaxResults", 1, "NextToken", historyToken),
+                "InvalidNextToken");
+        assertEquals(List.of(path + "/p2"), ok(issuer, "GetParametersByPath",
+                Map.of("Path", path, "MaxResults", 1, "NextToken", pathToken)).getList("Parameters.Name", String.class));
+        assertEquals(List.of(2L), ok(issuer, "GetParameterHistory",
+                Map.of("Name", path + "/p1", "MaxResults", 1, "NextToken", historyToken))
+                .getList("Parameters.Version", Long.class));
+    }
+
+    @Test
     void rejectsWronglyTypedPaginationFields() {
         String name = "/pagination-" + UUID.randomUUID() + "/history";
         put(name, "v");
@@ -161,14 +188,19 @@ class SsmParameterPaginationIntegrationTest {
     }
 
     private void put(String name, String value) {
-        ok("PutParameter", Map.of("Name", name, "Value", value, "Type", "String", "Overwrite", true));
+        put(null, name, value);
+    }
+
+    private void put(String account, String name, String value) {
+        ok(account, "PutParameter", Map.of("Name", name, "Value", value, "Type", "String", "Overwrite", true));
     }
 
     private JsonPath ok(String action, Map<String, ?> body) {
-        return given()
-            .header("X-Amz-Target", "AmazonSSM." + action)
-            .contentType(SSM_CONTENT_TYPE)
-            .body(body)
+        return ok(null, action, body);
+    }
+
+    private JsonPath ok(String account, String action, Map<String, ?> body) {
+        return request(account, action, body)
         .when()
             .post("/")
         .then()
@@ -177,14 +209,25 @@ class SsmParameterPaginationIntegrationTest {
     }
 
     private void error(String action, Map<String, ?> body, String errorType) {
-        given()
-            .header("X-Amz-Target", "AmazonSSM." + action)
-            .contentType(SSM_CONTENT_TYPE)
-            .body(body)
+        error(null, action, body, errorType);
+    }
+
+    private void error(String account, String action, Map<String, ?> body, String errorType) {
+        request(account, action, body)
         .when()
             .post("/")
         .then()
             .statusCode(400)
             .body("__type", equalTo(errorType));
+    }
+
+    /** A null account sends no Authorization header, so the request acts in the default account. */
+    private static RequestSpecification request(String account, String action, Map<String, ?> body) {
+        RequestSpecification spec = given()
+            .header("X-Amz-Target", "AmazonSSM." + action)
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body);
+        return account == null ? spec : spec.header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account
+                + "/20260215/us-east-1/ssm/aws4_request, SignedHeaders=host, Signature=abc");
     }
 }

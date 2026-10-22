@@ -241,7 +241,7 @@ public class SsmJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
         PaginatedResult<Parameter> page = page(pageRequest, params, Parameter::getName,
-                GET_PARAMETERS_BY_PATH_TOKEN + region + ":" + recursive + ":"
+                GET_PARAMETERS_BY_PATH_TOKEN + ssmService.accountId() + ":" + region + ":" + recursive + ":"
                         + (path.endsWith("/") ? path : path + "/"));
         for (Parameter p : page.items()) {
             parametersArray.add(parameterToNode(p));
@@ -289,7 +289,8 @@ public class SsmJsonHandler {
         ArrayNode historyArray = objectMapper.createArrayNode();
         // Zero-padded so the cursor's string order is version order ("10" would sort before "9").
         PaginatedResult<ParameterHistory> page = page(pageRequest, history,
-                h -> String.format("%019d", h.getVersion()), GET_PARAMETER_HISTORY_TOKEN + region + ":" + name);
+                h -> String.format("%019d", h.getVersion()),
+                GET_PARAMETER_HISTORY_TOKEN + ssmService.accountId() + ":" + region + ":" + name);
         for (ParameterHistory h : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", h.getName());
@@ -340,7 +341,7 @@ public class SsmJsonHandler {
     /**
      * Pages a listing. An omitted {@code MaxResults} returns everything rather than AWS's single
      * page, so callers that never follow {@code NextToken} still see every item. A token carries
-     * {@code namespace}, so one minted for another operation, region, path or parameter is refused
+     * {@code namespace}, so one minted for another operation, account, region, path or parameter is refused
      * instead of read as a position here.
      */
     private static <T> PaginatedResult<T> page(PageRequest pageRequest, List<T> items,
