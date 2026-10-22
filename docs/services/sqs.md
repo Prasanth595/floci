@@ -106,6 +106,28 @@ A message older than the queue's `MessageRetentionPeriod` is no longer returned 
 
 `CreateQueue` and `SetQueueAttributes` reject a `MessageRetentionPeriod` outside 60 to 1209600 seconds with `InvalidAttributeValue`.
 
+## CloudWatch Metrics
+
+Floci publishes the `AWS/SQS` metrics of every active queue to CloudWatch once a minute, on the single `QueueName` dimension, as SQS does. Alarms, `GetMetricData`, `GetMetricStatistics` and `ListMetrics` see them with no `PutMetricData`. A queue is active while it holds a message, and for six hours after `CreateQueue`, `SendMessage`, `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility`, `PurgeQueue`, `GetQueueAttributes` or `SetQueueAttributes` on it, batch forms included. Publication stops when the CloudWatch Metrics service is disabled.
+
+| Metric | Unit | Samples each minute |
+|---|---|---|
+| `ApproximateNumberOfMessagesVisible` | `Count` | One |
+| `ApproximateNumberOfMessagesNotVisible` | `Count` | One |
+| `ApproximateNumberOfMessagesDelayed` | `Count` | One |
+| `ApproximateAgeOfOldestMessage` | `Seconds` | One, `0` for an empty queue |
+| `NumberOfMessagesSent` | `Count` | One per sent message, plus a zero |
+| `NumberOfMessagesReceived` | `Count` | One per `ReceiveMessage` call that returned messages, valued at their number, plus a zero |
+| `NumberOfEmptyReceives` | `Count` | One per `ReceiveMessage` call that returned none, plus a zero |
+| `NumberOfMessagesDeleted` | `Count` | One per delete with a valid receipt handle, repeats included, plus a zero |
+| `SentMessageSize` | `Bytes` | One per sent message, none in a minute without sends |
+| `ApproximateNumberOfGroupsWithInflightMessages` | `Count` | FIFO only: one |
+| `NumberOfDeduplicatedSentMessages` | `Count` | FIFO only: one per send, `1` when it was deduplicated, plus a zero |
+
+These match what AWS publishes. A deduplicated FIFO send still counts in `NumberOfMessagesSent`, and a message a redrive policy moves to a dead-letter queue does not. `ApproximateAgeOfOldestMessage` counts a message moved to a FIFO dead-letter queue or by `StartMessageMoveTask` from the move.
+
+Known differences: a `SendMessageBatch` or `DeleteMessageBatch` call adds one sample per entry where AWS adds one per call, so `Sum` matches while `SampleCount`, `Average`, `Minimum` and `Maximum` can differ. A message in a standard dead-letter queue keeps its original send time for its age, where AWS counts from the move, and a standard-queue message received three times or more still counts toward the age, where AWS leaves it out until it is deleted. The fair-queue metrics (`ApproximateNumberOfNoisyGroups` and the `InQuietGroups` variants) are not published, and the delay of up to 15 minutes AWS has before a newly active queue reports is not reproduced.
+
 ## Configuration
 
 | Variable | Default | Description |

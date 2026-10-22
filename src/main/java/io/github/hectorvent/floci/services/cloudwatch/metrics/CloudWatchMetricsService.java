@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
@@ -39,8 +40,10 @@ public class CloudWatchMetricsService {
     @Inject
     public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver,
                                     AlarmSnsNotifier alarmSnsNotifier) {
+        // Services publish into this store every minute, SQS for every active queue, so under
+        // persistent mode it is journaled rather than rewritten in full on every datum.
         this.metricStore = storageFactory.create("cloudwatchmetrics", "cwmetrics.json",
-                new TypeReference<Map<String, MetricDatum>>() {});
+                new TypeReference<Map<String, MetricDatum>>() {}, WriteProfile.APPEND_HEAVY);
         this.alarmStore = storageFactory.create("cloudwatchmetrics", "cwalarms.json",
                 new TypeReference<Map<String, MetricAlarm>>() {});
         this.regionResolver = regionResolver;

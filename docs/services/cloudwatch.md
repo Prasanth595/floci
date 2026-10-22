@@ -393,6 +393,9 @@ HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action p
 Metric streams are stored as definitions with their `running` or `stopped` state. Floci never
 delivers metrics to the Firehose delivery stream a metric stream names.
 
+SQS publishes its queue metrics under `AWS/SQS` once a minute; see
+[SQS CloudWatch Metrics](sqs.md#cloudwatch-metrics).
+
 ### SNS alarm actions
 
 State transitions publish to same-account standard SNS topics in `AlarmActions`, `OKActions`, or

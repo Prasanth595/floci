@@ -29,11 +29,12 @@ current after every call but makes the cost of one write grow with the size of t
 Append-heavy stores are journaled instead: a change is appended to a `.wal` file next to the
 store, and the store's JSON file is rewritten from memory on the `FLOCI_STORAGE_WAL_COMPACTION_INTERVAL_MS`
 cadence and at shutdown, and only when something changed. Today this applies to CloudWatch Logs
-events (`cwlogs-events.json` with `cwlogs-events.wal`) and the S3 object index
-(`s3-objects.json` with `s3-objects.wal`), which holds the metadata of every object in every
-bucket. After a clean shutdown the JSON file holds every entry; while Floci runs it can be up to
+events (`cwlogs-events.json` with `cwlogs-events.wal`), CloudWatch metric datapoints
+(`cwmetrics.json` with `cwmetrics.wal`), which services such as SQS publish every minute, and the
+S3 object index (`s3-objects.json` with `s3-objects.wal`), which holds the metadata of every
+object in every bucket. After a clean shutdown the JSON file holds every entry; while Floci runs it can be up to
 one compaction interval behind, and the journal is replayed on the next start. An existing
-`cwlogs-events.json` or `s3-objects.json` from an older version is picked up as the first snapshot
+`cwlogs-events.json`, `cwmetrics.json` or `s3-objects.json` from an older version is picked up as the first snapshot
 without any migration.
 
 ## Per-Service Override
