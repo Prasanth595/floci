@@ -188,7 +188,7 @@ public class DynamoDbService {
     private static StorageBackend<String, Map<String, JsonNode>> itemStore(StorageFactory storageFactory,
                                                                           EmulatorConfig config) {
         TypeReference<Map<String, Map<String, JsonNode>>> type = new TypeReference<>() {};
-        String layout = config.storage().services().dynamodb().itemLayout();
+        String layout = Objects.requireNonNullElse(config.storage().services().dynamodb().itemLayout(), "single-file");
         return switch (layout) {
             case "single-file" -> storageFactory.create("dynamodb", "dynamodb-items.json", type);
             case "per-table" -> storageFactory.createPartitioned("dynamodb", "dynamodb-items.json", type,
