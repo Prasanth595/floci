@@ -22,17 +22,24 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService.
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService.BatchGetSecretValueResult;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService.BatchSecretValue;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class MskScramSecretsService {
 
+    private static final Logger LOG = Logger.getLogger(MskScramSecretsService.class);
     private static final int MAX_PAGE = 100;
 
     private final AccountAwareStorageBackend<MskScramAssociations> storage;
@@ -40,6 +47,7 @@ public class MskScramSecretsService {
     private final SecretsManagerService secretsManagerService;
     private final KmsService kmsService;
     private final ObjectMapper objectMapper;
+    private final ScheduledExecutorService reconciler = Executors.newSingleThreadScheduledExecutor();
     private final Object lock = new Object();
 
     @Inject
@@ -52,6 +60,33 @@ public class MskScramSecretsService {
         this.secretsManagerService = secretsManagerService;
         this.kmsService = kmsService;
         this.objectMapper = objectMapper;
+    }
+
+    @PostConstruct
+    public void init() {
+        reconciler.scheduleWithFixedDelay(() -> {
+            try {
+                reconcileScramSecrets();
+            } catch (RuntimeException e) {
+                LOG.error("MSK SCRAM reconciliation failed; retrying on the next scheduled run", e);
+            }
+        }, 5, 5, TimeUnit.SECONDS);
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        reconciler.shutdown();
+    }
+
+    void reconcileScramSecrets() {
+        for (AccountAwareStorageBackend.AccountEntry<MskScramAssociations> entry
+                : storage.scanAllAccountEntries(key -> true)) {
+            synchronized (lock) {
+                if (mskService.getClusterForAccount(entry.accountId(), entry.key()).isEmpty()) {
+                    storage.deleteForAccount(entry.accountId(), entry.key());
+                }
+            }
+        }
     }
 
     public List<Map<String, String>> batchAssociateScramSecret(String clusterArn, List<String> secretArns) {

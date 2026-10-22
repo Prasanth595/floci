@@ -19,6 +19,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -41,6 +42,7 @@ class MskScramServiceTest {
     private AccountAwareStorageBackend<MskScramAssociations> associations;
     private SecretsManagerService secrets;
     private KmsService kms;
+    private MskService clusters;
     private MskScramSecretsService service;
 
     @BeforeEach
@@ -49,10 +51,11 @@ class MskScramServiceTest {
         StorageFactory storageFactory = mock(StorageFactory.class);
         when(storageFactory.<MskScramAssociations>create(
                 eq("msk"), eq("msk-scram-associations.json"), any())).thenReturn(associations);
-        MskService clusters = mock(MskService.class);
+        clusters = mock(MskService.class);
         MskCluster cluster = new MskCluster();
         cluster.setClusterArn(CLUSTER);
         when(clusters.describeCluster(CLUSTER)).thenReturn(cluster);
+        when(clusters.getClusterForAccount(ACCOUNT, CLUSTER)).thenReturn(Optional.of(cluster));
         secrets = mock(SecretsManagerService.class);
         when(secrets.describeSecret(anyString(), eq("us-east-1"))).thenAnswer(invocation -> {
             Secret metadata = new Secret();
@@ -70,6 +73,31 @@ class MskScramServiceTest {
         when(secrets.batchGetSecretValue(List.of(arn), "us-east-1")).thenReturn(
                 new BatchGetSecretValueResult(List.of(new BatchSecretValue(
                         arn, "AmazonMSK_fixture", value, null, "version", List.of("AWSCURRENT"), null)), List.of()));
+    }
+
+    @Test
+    void reconciliationRemovesOnlyDeletedClusterAssociationsAcrossAccounts() {
+        service.batchAssociateScramSecret(CLUSTER, List.of(SECRET));
+        String otherAccount = "111111111111";
+        String deletedCluster = CLUSTER.replace(ACCOUNT, otherAccount);
+        associations.putForAccount(otherAccount, deletedCluster, new MskScramAssociations());
+        when(clusters.getClusterForAccount(otherAccount, deletedCluster)).thenReturn(Optional.empty());
+
+        service.reconcileScramSecrets();
+
+        assertTrue(associations.getForAccount(ACCOUNT, CLUSTER).isPresent());
+        assertTrue(associations.getForAccount(otherAccount, deletedCluster).isEmpty());
+        verify(clusters).getClusterForAccount(otherAccount, deletedCluster);
+    }
+
+    @Test
+    void reconciliationPreservesAssociationsWhenClusterLookupFails() {
+        service.batchAssociateScramSecret(CLUSTER, List.of(SECRET));
+        AwsException failure = new AwsException("InternalServerErrorException", "Lookup failed.", 500);
+        when(clusters.getClusterForAccount(ACCOUNT, CLUSTER)).thenThrow(failure);
+
+        assertEquals(failure, assertThrows(AwsException.class, () -> service.reconcileScramSecrets()));
+        assertTrue(associations.getForAccount(ACCOUNT, CLUSTER).isPresent());
     }
 
     @Test
