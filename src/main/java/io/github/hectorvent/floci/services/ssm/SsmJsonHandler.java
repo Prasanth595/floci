@@ -28,7 +28,9 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -349,6 +351,27 @@ public class SsmJsonHandler {
                 token -> new AwsException("InvalidNextToken", "The specified token isn't valid.", 400));
     }
 
+    /**
+     * DescribeParameters' tokens are bare name cursors, so a GetParametersByPath or
+     * GetParameterHistory token would otherwise decode as a name and silently skip results. Their
+     * namespaces contain a colon, which AWS does not allow in a parameter name, so no cursor
+     * DescribeParameters mints for an AWS-valid name starts with either one.
+     */
+    private static void refuseListingToken(String nextToken) {
+        if (nextToken == null) {
+            return;
+        }
+        String decoded;
+        try {
+            decoded = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return; // not base64 at all: Pagination reports it
+        }
+        if (decoded.startsWith(GET_PARAMETERS_BY_PATH_TOKEN) || decoded.startsWith(GET_PARAMETER_HISTORY_TOKEN)) {
+            throw new AwsException("InvalidNextToken", "The specified token isn't valid.", 400);
+        }
+    }
+
     private static void putNextToken(ObjectNode response, PaginatedResult<?> page) {
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());
@@ -373,6 +396,7 @@ public class SsmJsonHandler {
                             + "satisfy constraint: Member must have value between 1 and "
                             + DESCRIBE_PARAMETERS_MAX_RESULTS);
         }
+        refuseListingToken(request.path("NextToken").asText(null));
         PaginatedResult<Parameter> page = Pagination.paginate(
                 ssmService.describeParameters(filters, region), Parameter::getName,
                 maxResults, request.path("NextToken").asText(null),

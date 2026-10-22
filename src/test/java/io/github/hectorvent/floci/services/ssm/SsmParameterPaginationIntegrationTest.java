@@ -134,6 +134,8 @@ class SsmParameterPaginationIntegrationTest {
         error("GetParametersByPath", Map.of("Path", root + "/a", "NextToken", historyToken), "InvalidNextToken");
         error("GetParameterHistory", Map.of("Name", second, "NextToken", historyToken), "InvalidNextToken");
         error("GetParameterHistory", Map.of("Name", first, "NextToken", pathToken), "InvalidNextToken");
+        error("DescribeParameters", Map.of("NextToken", pathToken), "InvalidNextToken");
+        error("DescribeParameters", Map.of("NextToken", historyToken), "InvalidNextToken");
         // The token still resumes the listing it came from, with or without a trailing slash.
         assertEquals(List.of(root + "/a/p2"), ok("GetParametersByPath",
                 Map.of("Path", root + "/a/", "MaxResults", 1, "NextToken", pathToken))
