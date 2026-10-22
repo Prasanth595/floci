@@ -1082,6 +1082,47 @@ class KmsIntegrationTest {
         }
     }
 
+    @Test
+    void listAliasesMarkerIsBoundToTheResolvedKeyId() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+        String prefix = "alias/bound-" + System.nanoTime() + "-";
+        for (int i = 0; i < 3; i++) {
+            given()
+                    .header("X-Amz-Target", "TrentService.CreateAlias")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"AliasName\":\"" + prefix + i + "\",\"TargetKeyId\":\"" + keyId + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200);
+        }
+
+        // A marker minted with the filter as an alias name pages on with the filter as the key id,
+        // and the other way round: the marker names the key the page was filtered by.
+        String[][] pairs = {{prefix + 0, keyId}, {keyId, prefix + 0}};
+        for (String[] pair : pairs) {
+            String marker = given()
+                    .header("X-Amz-Target", "TrentService.ListAliases")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"KeyId\":\"" + pair[0] + "\",\"Limit\":1}")
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .body("Aliases.AliasName", equalTo(List.of(prefix + 0)))
+                    .extract().path("NextMarker");
+            given()
+                    .header("X-Amz-Target", "TrentService.ListAliases")
+                    .contentType(KMS_CONTENT_TYPE)
+                    .body("{\"KeyId\":\"" + pair[1] + "\",\"Limit\":1,\"Marker\":\"" + marker + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .body("Aliases.AliasName", equalTo(List.of(prefix + 1)));
+        }
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
             "ListKeys|0|ValidationException",

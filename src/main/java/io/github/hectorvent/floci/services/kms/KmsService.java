@@ -694,9 +694,11 @@ public class KmsService implements ResourceProvider {
     }
 
     public Page<KmsAlias> listAliases(String keyId, String region, String marker, Integer limit) {
-        List<KmsAlias> aliases = listAliases(keyId, region);
-        String filter = keyId == null || keyId.isBlank() ? "" : resolveKey(keyId, region).getKeyId();
-        return page(aliases, KmsAlias::getAliasName, "ListAliases\n" + region + "\n" + filter,
+        // Resolve the filter once: an alias given as KeyId could be repointed between two lookups,
+        // leaving a page of one key's aliases with a marker signed for another.
+        String filter = keyId == null || keyId.isBlank() ? null : resolveKey(keyId, region).getKeyId();
+        return page(listAliases(filter, region), KmsAlias::getAliasName,
+                "ListAliases\n" + region + "\n" + (filter == null ? "" : filter),
                 marker, limit, MAX_LIST_ALIASES_LIMIT);
     }
 
