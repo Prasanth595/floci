@@ -627,7 +627,7 @@ public class NativeDynamoDbJsonHandler {
 
         validateItemSets(item);
 
-        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, expected,
+        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, item, false, expected,
                 conditionalOperator, returnValuesOnConditionCheckFailure);
         JsonNode previousItem = dynamoDbService.putItem(tableName, item, conditionExpression,
                 exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure, expectedCheck);
@@ -738,7 +738,7 @@ public class NativeDynamoDbJsonHandler {
 
         String condOpDel = request.has("ConditionalOperator")
                 ? request.get("ConditionalOperator").asText() : "AND";
-        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, expectedDel,
+        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedDel,
                 condOpDel, returnValuesOnConditionCheckFailure);
         JsonNode oldItem = dynamoDbService.deleteItem(tableName, key, conditionExpression,
                 exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure, expectedCheck);
@@ -845,7 +845,7 @@ public class NativeDynamoDbJsonHandler {
             ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
         }
 
-        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, expectedUpd,
+        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedUpd,
                 conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
         DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
                 tableName, key, updateData, updateExpression, exprAttrNames, exprAttrValues,
@@ -870,15 +870,17 @@ public class NativeDynamoDbJsonHandler {
 
     /**
      * Validates a legacy Expected map and returns its evaluation, for the service to run against
-     * the stored item under the item's lock, or null when the request has no Expected.
+     * the stored item under the item's lock, or null when the request has no Expected. The table
+     * and the key are checked first, so their errors take precedence over the map's.
      */
-    private Consumer<JsonNode> legacyExpectedCheck(String tableName, String region, JsonNode expected,
+    private Consumer<JsonNode> legacyExpectedCheck(String tableName, String region, JsonNode keyOrItem,
+                                                   boolean isKeyArg, JsonNode expected,
                                                    String conditionalOperator,
                                                    String returnValuesOnConditionCheckFailure) {
         if (expected == null) {
             return null;
         }
-        dynamoDbService.requireTableForItemCall(tableName, region);
+        dynamoDbService.requireItemCallKey(tableName, keyOrItem, isKeyArg, region);
         validateLegacyExpected(expected);
         return existing -> evaluateLegacyExpected(existing, expected, conditionalOperator,
                 returnValuesOnConditionCheckFailure);

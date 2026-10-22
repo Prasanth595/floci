@@ -4758,6 +4758,14 @@ public class DynamoDbService {
         return requireActiveTable(regionKey(region, canonicalTableName));
     }
 
+    /**
+     * Resolves the table for an item call and validates the key it names, without reading the
+     * stored item, so a caller can report table and key errors before its own validation.
+     */
+    public void requireItemCallKey(String tableName, JsonNode keyOrItem, boolean isKeyArg, String region) {
+        buildItemKey(requireTableForItemCall(tableName, region), keyOrItem, isKeyArg);
+    }
+
     public record UpdateResult(JsonNode newItem, JsonNode oldItem, List<TouchedPath> touched) {}
 
     // One path the update expression acted on, with the value there before and after.
