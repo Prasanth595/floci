@@ -17,6 +17,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 import java.util.function.IntFunction;
 
 import static io.restassured.RestAssured.given;
@@ -25,11 +26,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Concurrent writes carrying a legacy {@code Expected} condition, sent over HTTP so the condition
- * goes through the request handler: exactly one writer of a version may win, as on DynamoDB.
+ * Writes carrying a legacy {@code Expected} condition, sent over HTTP so the condition goes through
+ * the request handler. Concurrent writers of one version: exactly one may win, as on DynamoDB.
  */
 @QuarkusTest
-class DynamoDbLegacyExpectedConcurrencyIntegrationTest {
+class DynamoDbLegacyExpectedIntegrationTest {
 
     private static final int REPEATS = 3;
     private static final int WRITERS = 16;
@@ -59,44 +60,29 @@ class DynamoDbLegacyExpectedConcurrencyIntegrationTest {
 
     @RepeatedTest(REPEATS)
     void updateItem_concurrentWritersOfOneVersion_acceptsExactlyOne() throws InterruptedException {
-        for (int round = 0; round < ROUNDS; round++) {
-            String pk = "update-" + round;
-            seed(pk);
-            List<Response> responses = runConcurrently(writer -> call("UpdateItem", """
-                    {"TableName":"%s","Key":{"pk":{"S":"%s"}},
-                     "AttributeUpdates":{"version":{"Action":"PUT","Value":{"N":"1"}},
-                                         "writer":{"Action":"PUT","Value":{"S":"%d"}}},
-                     "Expected":{"version":{"Value":{"N":"0"}}}}
-                    """.formatted(table, pk, writer)));
-            assertExactlyOneAccepted(responses);
-        }
+        assertOneWriterWinsEachRound("update", (pk, writer) -> call("UpdateItem", """
+                {"TableName":"%s","Key":{"pk":{"S":"%s"}},
+                 "AttributeUpdates":{"version":{"Action":"PUT","Value":{"N":"1"}},
+                                     "writer":{"Action":"PUT","Value":{"S":"%d"}}},
+                 "Expected":{"version":{"Value":{"N":"0"}}}}
+                """.formatted(table, pk, writer)));
     }
 
     @RepeatedTest(REPEATS)
     void putItem_concurrentWritersOfOneVersion_acceptsExactlyOne() throws InterruptedException {
-        for (int round = 0; round < ROUNDS; round++) {
-            String pk = "put-" + round;
-            seed(pk);
-            List<Response> responses = runConcurrently(writer -> call("PutItem", """
-                    {"TableName":"%s",
-                     "Item":{"pk":{"S":"%s"},"version":{"N":"1"},"writer":{"S":"%d"}},
-                     "Expected":{"version":{"Value":{"N":"0"}}}}
-                    """.formatted(table, pk, writer)));
-            assertExactlyOneAccepted(responses);
-        }
+        assertOneWriterWinsEachRound("put", (pk, writer) -> call("PutItem", """
+                {"TableName":"%s",
+                 "Item":{"pk":{"S":"%s"},"version":{"N":"1"},"writer":{"S":"%d"}},
+                 "Expected":{"version":{"Value":{"N":"0"}}}}
+                """.formatted(table, pk, writer)));
     }
 
     @RepeatedTest(REPEATS)
     void deleteItem_concurrentDeletesOfOneVersion_acceptsExactlyOne() throws InterruptedException {
-        for (int round = 0; round < ROUNDS; round++) {
-            String pk = "delete-" + round;
-            seed(pk);
-            List<Response> responses = runConcurrently(writer -> call("DeleteItem", """
-                    {"TableName":"%s","Key":{"pk":{"S":"%s"}},
-                     "Expected":{"version":{"Value":{"N":"0"}}}}
-                    """.formatted(table, pk)));
-            assertExactlyOneAccepted(responses);
-        }
+        assertOneWriterWinsEachRound("delete", (pk, writer) -> call("DeleteItem", """
+                {"TableName":"%s","Key":{"pk":{"S":"%s"}},
+                 "Expected":{"version":{"Value":{"N":"0"}}}}
+                """.formatted(table, pk)));
     }
 
     @RepeatedTest(REPEATS)
@@ -144,23 +130,65 @@ class DynamoDbLegacyExpectedConcurrencyIntegrationTest {
                 .body("__type", equalTo("ConditionalCheckFailedException"));
     }
 
+    @Test
+    void updateAndDelete_malformedKeyAndInvalidExpected_reportTheKeyError() {
+        call("UpdateItem", """
+                {"TableName":"%s","Key":{"other":{"S":"a"}},
+                 "AttributeUpdates":{"version":{"Action":"PUT","Value":{"N":"1"}}},
+                 "Expected":{"version":{}}}
+                """.formatted(table)).then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("The provided key element does not match the schema"));
+        call("DeleteItem", """
+                {"TableName":"%s","Key":{"other":{"S":"a"}},"Expected":{"version":{}}}
+                """.formatted(table)).then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("The provided key element does not match the schema"));
+    }
+
+    @Test
+    void putItem_itemWithoutItsKey_reportsTheItemKeyErrorWithAnyReturnValuesOrExpected() {
+        for (String extra : List.of("", ",\"ReturnValues\":\"ALL_OLD\"", ",\"Expected\":{\"version\":{}}")) {
+            call("PutItem", """
+                    {"TableName":"%s","Item":{"other":{"S":"a"}}%s}
+                    """.formatted(table, extra)).then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", equalTo("One of the required keys was not given a value"));
+        }
+    }
+
+    @Test
+    void updateItem_invalidExpectedOnAMissingTable_reportsTheMissingTable() {
+        call("UpdateItem", """
+                {"TableName":"absent-%s","Key":{"pk":{"S":"a"}},"Expected":{"version":{}}}
+                """.formatted(UUID.randomUUID())).then().statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     private void seed(String pk) {
         call("PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},"version":{"N":"0"}}}
                 """.formatted(table, pk)).then().statusCode(200);
     }
 
-    private static void assertExactlyOneAccepted(List<Response> responses) {
-        int accepted = 0;
-        for (Response response : responses) {
-            if (response.statusCode() == 200) {
-                accepted++;
-            } else {
-                response.then().statusCode(400)
-                        .body("__type", equalTo("ConditionalCheckFailedException"));
+    /** Seeds a fresh item at version 0 each round and races every writer at it. */
+    private void assertOneWriterWinsEachRound(String keyPrefix, BiFunction<String, Integer, Response> request)
+            throws InterruptedException {
+        for (int round = 0; round < ROUNDS; round++) {
+            String pk = keyPrefix + "-" + round;
+            seed(pk);
+            List<Response> responses = runConcurrently(writer -> request.apply(pk, writer));
+            int accepted = 0;
+            for (Response response : responses) {
+                if (response.statusCode() == 200) {
+                    accepted++;
+                } else {
+                    response.then().statusCode(400)
+                            .body("__type", equalTo("ConditionalCheckFailedException"));
+                }
             }
+            assertEquals(1, accepted, "exactly one writer of a version may be accepted");
         }
-        assertEquals(1, accepted, "exactly one writer of a version may be accepted");
     }
 
     /** Sends one request per writer, all released together. */
