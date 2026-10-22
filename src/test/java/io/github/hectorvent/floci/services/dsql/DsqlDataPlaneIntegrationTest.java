@@ -19,6 +19,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.postgresql.util.PSQLException;
 import org.postgresql.util.PSQLWarning;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -28,6 +29,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -45,6 +47,7 @@ import static io.github.hectorvent.floci.services.dsql.DsqlWireClient.sync;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -222,6 +225,46 @@ class DsqlDataPlaneIntegrationTest {
             socket.getOutputStream().write(PostgresWire.int32(7));
             socket.getOutputStream().write(new byte[3]);
             assertEquals(-1, socket.getInputStream().read());
+        }
+    }
+
+    /**
+     * DSQL takes TLS started at once, with no SSLRequest, from a client offering the ALPN protocol
+     * postgresql, as libpq's and pgjdbc's direct negotiation do, and picks postgresql whenever a
+     * client offers it; a direct handshake without it completes and the connection closes without a
+     * word (measured).
+     */
+    @Test
+    void tlsWithNoSslRequestFirstIsTakenForTheAlpnProtocolPostgresql() throws Exception {
+        Properties properties = cluster.properties("admin", cluster.adminToken());
+        properties.setProperty("sslNegotiation", "direct");
+        try (Connection connection = DriverManager.getConnection(cluster.url(), properties);
+             Statement statement = connection.createStatement();
+             ResultSet row = statement.executeQuery("SELECT current_user")) {
+            assertTrue(row.next());
+            assertEquals("admin", row.getString(1));
+        }
+        try (DsqlWireClient client = DsqlWireClient.direct(endpoint.port(), cluster.host(), "http/1.1", "postgresql")) {
+            assertEquals("postgresql", client.applicationProtocol());
+            client.signIn("admin", cluster.adminToken());
+            client.send(query("SELECT 1"));
+            assertEquals(List.of("SELECT 1"), client.untilReady());
+        }
+        for (String[] alpn : new String[][] {{}, {"http/1.1"}}) {
+            try (DsqlWireClient client = DsqlWireClient.direct(endpoint.port(), cluster.host(), alpn)) {
+                assertEquals("", client.applicationProtocol(), List.of(alpn).toString());
+                // The endpoint's 10 s handshake timeout would close it too, later: only a close at once is this quick.
+                assertThrows(EOFException.class, () -> assertTimeoutPreemptively(Duration.ofSeconds(5), client::next),
+                        List.of(alpn).toString());
+            }
+        }
+        try (DsqlWireClient client = DsqlWireClient.tls(endpoint.port(), cluster.host(), "postgresql")) {
+            assertEquals("postgresql", client.applicationProtocol());
+            client.signIn("admin", cluster.adminToken());
+        }
+        try (DsqlWireClient client = DsqlWireClient.tls(endpoint.port(), cluster.host(), "http/1.1")) {
+            assertEquals("", client.applicationProtocol());
+            client.signIn("admin", cluster.adminToken());
         }
     }
 

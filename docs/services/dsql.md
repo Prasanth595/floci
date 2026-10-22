@@ -47,7 +47,10 @@ received`, as DSQL refuses it.
 
 TLS is mandatory. The certificate covers `*.dsql.<region>.localhost.floci.io` for every Region and
 is signed by Floci's local CA (`GET /_floci/ca.pem`, see [TLS](../configuration/tls.md)), which the
-containers Floci starts already trust, so `sslmode=verify-full` works.
+containers Floci starts already trust, so `sslmode=verify-full` works. A client may also start TLS
+at once, with no SSLRequest first (`sslnegotiation=direct` in libpq, `sslNegotiation=direct` in
+pgjdbc), offering the ALPN protocol `postgresql` as those clients do; a direct handshake that does
+not offer it ends the connection without a message.
 
 The limits are DSQL's: a startup packet of 10,000 bytes or more, sent over TLS, ends the connection
 with `FATAL 08P01 invalid length of startup packet`, and a client message over 10 MiB with
