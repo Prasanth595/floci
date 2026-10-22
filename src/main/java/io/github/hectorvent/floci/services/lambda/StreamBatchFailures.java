@@ -39,8 +39,8 @@ public class StreamBatchFailures {
     static final String MAXIMUM_RECORD_AGE_EXCEEDED = "MaximumRecordAgeExceeded";
     static final long MAX_RETRY_BACKOFF_MS = 60_000;
 
-    /** AWS always writes milliseconds. {@code ISO_INSTANT} writes micros, or no fraction on a whole second. */
-    private static final DateTimeFormatter RECORD_TIMESTAMP =
+    /** Always three fraction digits. {@code ISO_INSTANT} writes micros, or no fraction on a whole second. */
+    private static final DateTimeFormatter MILLISECOND_TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
     private static final DateTimeFormatter S3_KEY_DATE =
             DateTimeFormatter.ofPattern("yyyy/MM/dd").withZone(ZoneOffset.UTC);
@@ -49,12 +49,13 @@ public class StreamBatchFailures {
 
     /**
      * The source-specific part of the invocation record. {@code batchInfoName} names the source's
-     * batch info block, such as {@code DDBStreamBatchInfo}. {@code event} builds the event of the
-     * discarded records, in the shape the function gets it; only an S3 destination asks for it, as
-     * the {@code payload} string.
+     * batch info block, such as {@code DDBStreamBatchInfo}. The arrival times are written as given,
+     * because their precision depends on the source. {@code event} builds the event of the discarded
+     * records, in the shape the function gets it; only an S3 destination asks for it, as the
+     * {@code payload} string.
      */
     record DiscardedBatch(String batchInfoName, String shardId, String startSequenceNumber,
-                          String endSequenceNumber, Instant firstArrival, Instant lastArrival,
+                          String endSequenceNumber, String firstArrival, String lastArrival,
                           int batchSize, String streamArn, Supplier<String> event) {
     }
 
@@ -94,6 +95,11 @@ public class StreamBatchFailures {
     /** The retry state of a failing batch is keyed by the checkpoint it is read after. */
     static String batchStateKey(String esmUuid, String shardId, String checkpoint) {
         return esmUuid + ":" + shardId + ":" + (checkpoint == null ? "TRIM_HORIZON" : checkpoint);
+    }
+
+    /** ISO-8601 in UTC with milliseconds, as AWS writes the record's {@code timestamp}. */
+    static String millisecondTimestamp(Instant instant) {
+        return MILLISECOND_TIMESTAMP.format(instant);
     }
 
     static String s3Key(String esmUuid, String shardId, Instant now, UUID randomId) {
@@ -175,14 +181,14 @@ public class StreamBatchFailures {
         if (withPayload) {
             root.put("payload", batch.event().get());
         }
-        root.put("timestamp", RECORD_TIMESTAMP.format(Instant.now()));
+        root.put("timestamp", millisecondTimestamp(Instant.now()));
 
         ObjectNode batchInfo = root.putObject(batch.batchInfoName());
         batchInfo.put("shardId", batch.shardId());
         batchInfo.put("startSequenceNumber", batch.startSequenceNumber());
         batchInfo.put("endSequenceNumber", batch.endSequenceNumber());
-        batchInfo.put("approximateArrivalOfFirstRecord", RECORD_TIMESTAMP.format(batch.firstArrival()));
-        batchInfo.put("approximateArrivalOfLastRecord", RECORD_TIMESTAMP.format(batch.lastArrival()));
+        batchInfo.put("approximateArrivalOfFirstRecord", batch.firstArrival());
+        batchInfo.put("approximateArrivalOfLastRecord", batch.lastArrival());
         batchInfo.put("batchSize", batch.batchSize());
         batchInfo.put("streamArn", batch.streamArn());
         return objectMapper.writeValueAsString(root);

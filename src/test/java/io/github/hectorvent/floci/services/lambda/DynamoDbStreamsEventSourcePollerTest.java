@@ -1021,13 +1021,10 @@ class DynamoDbStreamsEventSourcePollerTest {
         ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
         verify(sqsService, timeout(2000)).sendMessage(anyString(), bodyCaptor.capture(), anyInt(), anyString());
 
-        JsonNode dlqPayload = OBJECT_MAPPER.readTree(bodyCaptor.getValue());
-        Instant first = Instant.parse(
-                dlqPayload.path("DDBStreamBatchInfo").path("approximateArrivalOfFirstRecord").asText());
-        Instant last = Instant.parse(
-                dlqPayload.path("DDBStreamBatchInfo").path("approximateArrivalOfLastRecord").asText());
-        assertEquals(knownEpochSeconds, first.getEpochSecond());
-        assertEquals(knownEpochSeconds, last.getEpochSecond());
+        // 1_700_000_000 epoch seconds, written in whole seconds as in the AWS DynamoDB Streams example.
+        JsonNode batchInfo = OBJECT_MAPPER.readTree(bodyCaptor.getValue()).path("DDBStreamBatchInfo");
+        assertEquals("2023-11-14T22:13:20Z", batchInfo.path("approximateArrivalOfFirstRecord").asText());
+        assertEquals("2023-11-14T22:13:20Z", batchInfo.path("approximateArrivalOfLastRecord").asText());
     }
 
     @Test

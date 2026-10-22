@@ -73,6 +73,14 @@ class StreamBatchFailuresTest {
     }
 
     @Test
+    void millisecondTimestampAlwaysHasThreeFractionDigits() {
+        assertEquals("2026-10-20T12:07:26.000Z",
+                StreamBatchFailures.millisecondTimestamp(Instant.parse("2026-10-20T12:07:26Z")));
+        assertEquals("2026-10-20T12:07:26.012Z",
+                StreamBatchFailures.millisecondTimestamp(Instant.parse("2026-10-20T12:07:26.012345Z")));
+    }
+
+    @Test
     void retryBackoffDoublesFromThePollIntervalAndCapsAtOneMinute() {
         assertEquals(1_000, StreamBatchFailures.retryBackoffMs(500, 1));
         assertEquals(2_000, StreamBatchFailures.retryBackoffMs(500, 2));
@@ -104,7 +112,7 @@ class StreamBatchFailuresTest {
     }
 
     @Test
-    void sqsRecordFillsDefaultsAndAlwaysWritesMillisecondsWithoutBuildingTheEvent() throws Exception {
+    void sqsRecordFillsDefaultsWritesTheTimestampInMillisecondsAndDoesNotBuildTheEvent() throws Exception {
         EventSourceMapping esm = esm(0, null);
         esm.setDestinationConfig(destination("arn:aws:sqs:us-east-1:000000000000:dlq"));
         StreamBatchFailures.DiscardedBatch batch = batch(() -> {
@@ -124,8 +132,9 @@ class StreamBatchFailuresTest {
                 "no functionError without a function error: " + record);
         assertEquals(200, record.at("/responseContext/statusCode").asInt());
         assertEquals("$LATEST", record.at("/responseContext/executedVersion").asText());
-        assertEquals("2023-11-14T22:13:20.000Z", record.at("/DDBStreamBatchInfo/approximateArrivalOfFirstRecord").asText());
-        assertEquals("2023-11-14T22:13:21.000Z", record.at("/DDBStreamBatchInfo/approximateArrivalOfLastRecord").asText());
+        assertEquals("2023-11-14T22:13:20Z", record.at("/DDBStreamBatchInfo/approximateArrivalOfFirstRecord").asText(),
+                "the arrival times are written as the source gives them");
+        assertEquals("2023-11-14T22:13:21Z", record.at("/DDBStreamBatchInfo/approximateArrivalOfLastRecord").asText());
         assertTrue(record.path("timestamp").asText().matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z"),
                 "timestamp must be ISO-8601 with exactly three fraction digits: " + record.path("timestamp"));
     }
@@ -205,7 +214,7 @@ class StreamBatchFailuresTest {
 
     private static StreamBatchFailures.DiscardedBatch batch(Supplier<String> event) {
         return new StreamBatchFailures.DiscardedBatch("DDBStreamBatchInfo", "shardId-000000000000", "s1", "s2",
-                Instant.parse("2023-11-14T22:13:20Z"), Instant.parse("2023-11-14T22:13:21Z"), 2, STREAM_ARN, event);
+                "2023-11-14T22:13:20Z", "2023-11-14T22:13:21Z", 2, STREAM_ARN, event);
     }
 
     private static EventSourceMapping esm(Integer maximumRetryAttempts, Integer maximumRecordAgeInSeconds) {

@@ -21,6 +21,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -574,9 +575,13 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         DynamoDbStreamReader.Record last = records.get(records.size() - 1);
         return new StreamBatchFailures.DiscardedBatch(BATCH_INFO_NAME, shardId,
                 first.sequenceNumber(), last.sequenceNumber(),
-                Instant.ofEpochSecond(approximateCreationSeconds(first)),
-                Instant.ofEpochSecond(approximateCreationSeconds(last)),
+                creationTime(first), creationTime(last),
                 records.size(), esm.getEventSourceArn(), () -> buildDynamoDbEvent(records, esm));
+    }
+
+    /** A stream record's creation time is whole seconds, and AWS writes it without a fraction. */
+    private static String creationTime(DynamoDbStreamReader.Record rec) {
+        return DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochSecond(approximateCreationSeconds(rec)));
     }
 
     private String buildDynamoDbEvent(List<DynamoDbStreamReader.Record> records, EventSourceMapping esm) {

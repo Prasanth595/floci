@@ -11,7 +11,6 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 
@@ -30,7 +29,7 @@ class StreamBatchFailuresAccountIntegrationTest {
     private static final Duration DELIVERY_TIMEOUT = Duration.ofSeconds(5);
     private static final StreamBatchFailures.DiscardedBatch BATCH = new StreamBatchFailures.DiscardedBatch(
             "DDBStreamBatchInfo", "shardId-000000000000", "s1", "s1",
-            Instant.parse("2026-10-20T12:07:26.012Z"), Instant.parse("2026-10-20T12:07:26.012Z"), 1,
+            "2026-10-20T12:07:26Z", "2026-10-20T12:07:26Z", 1,
             "arn:aws:dynamodb:us-east-1:111122223333:table/t/stream/2026-08-01T00:00:00.000", () -> "{\"Records\":[]}");
 
     @Inject
