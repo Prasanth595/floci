@@ -975,6 +975,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             public String roleArn(String roleName) {
                 return AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "role/" + roleName).toString();
             }
+
+            @Override
+            public Optional<String> heldRoleArn(String roleName) {
+                return iamService.findRole(accountId, roleName).map(IamRole::getArn);
+            }
         };
     }
 

@@ -1330,9 +1330,13 @@ public class RedshiftQueryHandler {
                 .toList();
     }
 
-    // The AWS Query protocol accepts both the generic ".member.N" form and each shape's own
-    // locationName (e.g. the real Redshift SDK sends "SubnetIds.SubnetIdentifier.N", not "SubnetIds.member.N").
-    private static String memberKeyRegex(String baseName) {
+    /**
+     * The keys of the numbered members of the list {@code baseName}. The AWS Query protocol accepts both
+     * the generic ".member.N" form and each shape's own locationName (e.g. the real Redshift SDK sends
+     * "SubnetIds.SubnetIdentifier.N", not "SubnetIds.member.N"). The {@code iam:PassRole} check reads a
+     * cluster's roles through it, so it reads the same keys.
+     */
+    public static String memberKeyRegex(String baseName) {
         String quoted = Pattern.quote(baseName);
         return switch (baseName) {
             case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";

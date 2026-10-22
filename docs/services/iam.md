@@ -1400,6 +1400,10 @@ role each passes:
   pass the roles of the instance profile they name, to `ec2.amazonaws.com`. `CreateFlowLogs` passes
   `DeliverLogsPermissionArn` to `vpc-flow-logs.amazonaws.com`. A profile that does not exist
   passes nothing, and EC2 refuses it as without enforcement.
+- **IAM:** `AddRoleToInstanceProfile` passes the role it adds to `ec2.amazonaws.com`, since every
+  instance running with the profile then gets that role's credentials. `RoleName` names the role
+  without its path, so the check uses the ARN IAM holds the role under, or, for a role IAM does not
+  hold, the ARN the name gives.
 - **ECS:** `RegisterTaskDefinition` passes its `taskRoleArn` and `executionRoleArn` to
   `ecs-tasks.amazonaws.com`. `RunTask` and `StartTask` pass the task definition's task and execution
   roles and any role in `overrides` there too, and `CreateService`, `UpdateService` and
@@ -1433,6 +1437,12 @@ role each passes:
   names) go to `autoscaling.amazonaws.com`.
 - **Application Auto Scaling:** `RegisterScalableTarget` passes `RoleARN` to
   `application-autoscaling.amazonaws.com` when the request names one.
+- **Redshift:** `CreateCluster` and `RestoreFromClusterSnapshot` pass the roles in `IamRoles`, and
+  `ModifyClusterIamRoles` those in `AddIamRoles`, to `redshift.amazonaws.com`, in any list form the
+  Redshift handler reads (`IamRoles.IamRoleArn.N`, `IamRoles.member.N` or `IamRoles.N`).
+  **Redshift Serverless:** `CreateNamespace` and `UpdateNamespace` pass the roles in `iamRoles` and
+  the one in `defaultIamRoleArn`, and `CreateScheduledAction` and `UpdateScheduledAction` pass
+  `roleArn`, to `redshift-serverless.amazonaws.com`.
 
 Launching an instance from a launch template does not check the template's role, as on AWS: the EC2
 user guide warns that a user who can create launch template versions "can potentially update a launch
@@ -1444,8 +1454,14 @@ role having been checked when the configuration was created. A
 CloudFormation operation that names no role uses the stack's own without checking it, as the
 CloudFormation API reference says the service does "even if the users don't have permission to pass
 it". The CloudFormation user guide has the default StackSet administration role checked "Even when
-you don't specify the AdministrationRoleARN parameter". The role parameters of other services are
-not checked yet.
+you don't specify the AdministrationRoleARN parameter". A Redshift request is checked on the roles
+it associates, as the Redshift management guide puts it: "To associate an IAM role with a cluster,
+a user must have iam:PassRole permission for that IAM role." A role named only as a cluster's
+default, `DefaultIamRoleArn`, is not checked on its own, since the default is one of the roles the
+cluster holds. A namespace's `defaultIamRoleArn` is, since Floci keeps it whether or not `iamRoles`
+holds it. Redshift takes a role only under the ARN IAM holds it under, path included, so the check
+on the ARN as the request names it covers the role `COPY`, `UNLOAD` and Spectrum then use. The role
+parameters of other services are not checked yet.
 
 A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
 path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that

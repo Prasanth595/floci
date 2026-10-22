@@ -192,6 +192,13 @@ class S3CopySimulatorTest {
 
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/CopyRole";
 
+    /** A role IAM holds under {@code arn}, which is the only ARN Redshift takes it under. */
+    private static IamRole heldRole(String arn) {
+        IamRole role = mock(IamRole.class);
+        when(role.getArn()).thenReturn(arn);
+        return role;
+    }
+
     @Test
     void prepareCopyWithMalformedIamRoleArnFailsBeforeTouchingS3() {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
@@ -258,7 +265,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
         IamService iamService = mock(IamService.class);
-        IamRole role = mock(IamRole.class);
+        IamRole role = heldRole(ROLE_ARN);
         when(iamService.findRole("000000000000", "CopyRole"))
                 .thenReturn(Optional.of(role));
         when(role.getAssumeRolePolicyDocument()).thenReturn(""
@@ -281,8 +288,9 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
         IamService iamService = mock(IamService.class);
+        IamRole role = heldRole(ROLE_ARN);
         when(iamService.findRole(any(), any()))
-                .thenReturn(Optional.of(mock(IamRole.class)));
+                .thenReturn(Optional.of(role));
 
         S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iamService);
 
@@ -303,8 +311,9 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "b", "k", "|", 0, false, false, null, ROLE_ARN);
         IamService iamService = mock(IamService.class);
+        IamRole role = heldRole(ROLE_ARN);
         when(iamService.findRole(any(), any()))
-                .thenReturn(Optional.of(mock(IamRole.class)));
+                .thenReturn(Optional.of(role));
 
         S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iamService);
         S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream());
@@ -1789,7 +1798,7 @@ class S3CopySimulatorTest {
     void runCopyFrom_withJsonAuto_releasesIamSessionEvenWhenCatalogDiscoveryFails() throws Exception {
         when(s3.objectExists("wh", "data.json")).thenReturn(true);
         IamService iamService = mock(IamService.class);
-        IamRole role = mock(IamRole.class);
+        IamRole role = heldRole("arn:aws:iam::000000000000:role/Role");
         when(role.getAssumeRolePolicyDocument()).thenReturn(
                 "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"redshift.amazonaws.com\"}}]}");
         when(iamService.findRole("000000000000", "Role")).thenReturn(Optional.of(role));

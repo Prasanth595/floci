@@ -411,7 +411,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 - `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster (at
   `CreateCluster` or through `ModifyClusterIamRoles`; connections opened before a change keep the
   roles they started with), exist in
-  the local IAM service, and trust Redshift to assume it. With
+  the local IAM service under that ARN, path included, and trust Redshift to assume it. With
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
@@ -511,7 +511,7 @@ the result to S3 as one or more objects under `<prefix>`.
   so they are not deleted); a `MANIFEST` request that fails this way can leave data objects without
   a manifest, and rerunning the same statement overwrites them.
 - `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster, exist in
-  the local IAM service, and trust Redshift to assume it. With
+  the local IAM service under that ARN, path included, and trust Redshift to assume it. With
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` is not supported.
