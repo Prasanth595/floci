@@ -792,9 +792,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * maps to an action: AppSync, CodeArtifact's package endpoints, Identity Store's SCIM endpoint
      * and API Gateway's authorizers take Bearer and Basic tokens of their own, and this filter
      * cannot tell the API Gateway execute path, Lambda function URLs and the other paths it sees
-     * that are unsigned by design from the rest. A SigV4a scope, which has no region segment, is
-     * recognized for S3 (where {@link AccountContextFilter} and S3 filters verify its region set);
-     * for non-S3 services, {@link SigV4HeaderSignatureFilter} refuses it when signature validation is on.
+     * that are unsigned by design from the rest. A SigV4a scope has no region segment; every
+     * service takes its region from the signed set (see {@link AccountContextFilter}), and the
+     * shared {@link SigV4HeaderSignatureFilter} turns non-S3 ones away when signature validation is on.
      */
     private void refuseUnreadableCredential(ContainerRequestContext ctx, String auth) {
         if (ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
