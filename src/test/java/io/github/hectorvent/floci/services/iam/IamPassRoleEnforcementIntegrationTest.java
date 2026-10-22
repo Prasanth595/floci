@@ -472,6 +472,83 @@ class IamPassRoleEnforcementIntegrationTest {
     }
 
     @Test
+    void anEksPodIdentityAssociationNeedsPassRoleOnItsRoleForPodIdentity() {
+        // Pod Identity hands the service account's pods the association role's credentials, so naming a role
+        // needs iam:PassRole on it, passed to Pod Identity rather than to EKS.
+        String role = role("eks-pod");
+        String other = role("eks-pod-other");
+        User user = user("passrole-eks-pod");
+        String path = "/clusters/" + eksCluster() + "/pod-identity-associations";
+        String create = "{\"namespace\":\"default\",\"serviceAccount\":\"app\",\"roleArn\":\"" + role + "\"}";
+        String pods = "pods.eks.amazonaws.com";
+
+        user.policy(allow("eks:CreatePodIdentityAssociation", "*") + "," + passRole(role, "eks.amazonaws.com"));
+        denied(user.rest("eks").body(create).post(path).then());
+        user.policy(allow("eks:CreatePodIdentityAssociation", "*") + "," + passRole(role, pods));
+        String id = user.rest("eks").body(create).post(path).then().statusCode(200)
+                .extract().path("association.associationId");
+
+        String update = "{\"roleArn\":\"" + other + "\"}";
+        user.policy(allow("eks:UpdatePodIdentityAssociation", "*") + "," + passRole(role, pods));
+        denied(user.rest("eks").body(update).post(path + "/" + id).then());
+        user.policy(allow("eks:UpdatePodIdentityAssociation", "*") + "," + passRole(other, pods));
+        user.rest("eks").body(update).post(path + "/" + id).then().statusCode(200);
+    }
+
+    @Test
+    void anEksClusterNodeGroupFargateProfileAndNodeAccessEntryNeedPassRoleOnTheirRoles() {
+        String clusterRole = role("eks-cluster");
+        String nodeRole = role("eks-node");
+        String podRole = role("eks-fargate");
+        User user = user("passrole-eks");
+        String eks = "eks.amazonaws.com";
+        String name = "passrole-eks-" + suffix();
+        String path = "/clusters/" + name;
+        String cluster = "{\"name\":\"" + name + "\",\"roleArn\":\"" + clusterRole
+                + "\",\"accessConfig\":{\"authenticationMode\":\"API\"}}";
+
+        user.policy(allow("eks:CreateCluster", "*"));
+        denied(user.rest("eks").body(cluster).post("/clusters").then());
+        user.policy(allow("eks:CreateCluster", "*") + "," + passRole(clusterRole, eks));
+        user.rest("eks").body(cluster).post("/clusters").then().statusCode(200);
+        cleanup.register(() -> admin("eks").delete(path));
+
+        String nodegroup = "{\"nodegroupName\":\"ng\",\"subnets\":[\"subnet-abc\"],\"nodeRole\":\"" + nodeRole + "\"}";
+        user.policy(allow("eks:CreateNodegroup", "*"));
+        denied(user.rest("eks").body(nodegroup).post(path + "/node-groups").then());
+        user.policy(allow("eks:CreateNodegroup", "*") + "," + passRole(nodeRole, eks));
+        user.rest("eks").body(nodegroup).post(path + "/node-groups").then().statusCode(200);
+        cleanup.register(() -> admin("eks").delete(path + "/node-groups/ng"));
+
+        String profile = "{\"fargateProfileName\":\"fp\",\"podExecutionRoleArn\":\"" + podRole + "\"}";
+        user.policy(allow("eks:CreateFargateProfile", "*"));
+        denied(user.rest("eks").body(profile).post(path + "/fargate-profiles").then());
+        user.policy(allow("eks:CreateFargateProfile", "*") + "," + passRole(podRole, eks));
+        user.rest("eks").body(profile).post(path + "/fargate-profiles").then().statusCode(200);
+        cleanup.register(() -> admin("eks").delete(path + "/fargate-profiles/fp"));
+
+        // A node access entry passes its role to EC2, whose instances join as it; a standard one passes nothing.
+        String node = "{\"principalArn\":\"" + nodeRole + "\",\"type\":\"EC2_LINUX\"}";
+        user.policy(allow("eks:CreateAccessEntry", "*") + "," + passRole(nodeRole, eks));
+        denied(user.rest("eks").body(node).post(path + "/access-entries").then());
+        user.policy(allow("eks:CreateAccessEntry", "*") + "," + passRole(nodeRole, "ec2.amazonaws.com"));
+        user.rest("eks").body(node).post(path + "/access-entries").then().statusCode(200);
+        user.policy(allow("eks:CreateAccessEntry", "*"));
+        user.rest("eks").body("{\"principalArn\":\"" + podRole + "\"}").post(path + "/access-entries").then()
+                .statusCode(200);
+    }
+
+    /** Creates an EKS cluster as the account's admin, removed afterwards, and returns its name. */
+    private String eksCluster() {
+        String name = "passrole-cluster-" + suffix();
+        admin("eks").contentType("application/json")
+                .body("{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/passrole-cluster\"}")
+                .post("/clusters").then().statusCode(200);
+        cleanup.register(() -> admin("eks").delete("/clusters/" + name));
+        return name;
+    }
+
+    @Test
     void aMicrovmImageAndANetworkConnectorNeedPassRoleOnTheRolesTheyName() {
         String build = role("microvm-build");
         String operator = role("connector-operator");

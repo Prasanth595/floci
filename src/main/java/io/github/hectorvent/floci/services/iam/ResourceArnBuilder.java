@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
+import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
@@ -67,15 +68,25 @@ public class ResourceArnBuilder {
     private final Instance<SecretsManagerService> secretsManagerService;
     /** Looked up lazily for the same reason, to read the image a MicroVM runs. */
     private final Instance<LambdaMicrovmsService> microvmsService;
+    /** Looked up lazily for the same reason, to read the ARN an EKS cluster or what it holds is stored under. */
+    private final Instance<EksService> eksService;
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
                               Instance<SecretsManagerService> secretsManagerService,
-                              Instance<LambdaMicrovmsService> microvmsService) {
+                              Instance<LambdaMicrovmsService> microvmsService,
+                              Instance<EksService> eksService) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
         this.secretsManagerService = secretsManagerService;
         this.microvmsService = microvmsService;
+        this.eksService = eksService;
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              Instance<SecretsManagerService> secretsManagerService,
+                              Instance<LambdaMicrovmsService> microvmsService) {
+        this(objectMapper, iamService, secretsManagerService, microvmsService, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -131,6 +142,7 @@ public class ResourceArnBuilder {
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
             case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
+            case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             default               -> List.of("*");
         };
     }
@@ -1016,6 +1028,88 @@ public class ResourceArnBuilder {
             return new AwsArnUtils.Arn(partition, "pipes", region, accountId, "pipe/" + pipe).toString();
         }
         return taggedResource(ctx);
+    }
+
+    /**
+     * The resource of an EKS route, as the Service Reference gives it, in the caller's account, where EKS
+     * looks everything up. A cluster is the ARN EKS holds it under, or for one it holds none of, the ARN a
+     * create mints in the request's Region; {@code CreateCluster} is checked against the cluster its body
+     * names, as the EKS user guide's example policy for creating a cluster grants it. A node group, Fargate
+     * profile, add-on, access entry or Pod Identity association is the ARN EKS holds it under, which ends
+     * in an id the request does not carry, or {@code *} when EKS holds none to act on; listing or creating
+     * them, and every other route under a cluster, act on the cluster. The path is split as the router
+     * splits it, before decoding, so an encoded {@code /} stays inside a name, and an access entry's
+     * principal is the rest of the path, as EKS takes it. {@code DescribeUpdate} acts on the add-on its
+     * {@code addonName} names, since the updates EKS keeps are its add-ons', and otherwise on the cluster. A
+     * tagging route acts on the caller's cluster named by what follows the ARN's last {@code /}, as EKS tags
+     * it, whatever the ARN names before that. Deregistering a cluster acts on that cluster, and an EKS
+     * Anywhere subscription route on the subscription its id names. Listing clusters, registering one, the
+     * account-wide reads, and an identity provider config or capability, which end in an id Floci does not
+     * keep, name no resource, so they are {@code *}.
+     */
+    private String buildEksArn(String path, ContainerRequestContext ctx, String region, String accountId) {
+        if (path.equals("/tags") || path.startsWith("/tags/")) {
+            String tagged = taggedArn(ctx);
+            int slash = tagged == null ? -1 : tagged.lastIndexOf('/');
+            return slash < 0 || slash == tagged.length() - 1 ? "*"
+                    : eksClusterArn(tagged.substring(slash + 1), region, accountId);
+        }
+        String[] segments = IamActionRegistry.routedPath(ctx.getUriInfo()).substring(1).split("/", -1);
+        if (segments.length == 1) {
+            JsonNode body = "clusters".equals(segments[0]) && "POST".equalsIgnoreCase(ctx.getMethod())
+                    ? readJsonBody(ctx) : null;
+            String cluster = body == null ? null : body.path("name").asText(null);
+            return cluster == null || cluster.isBlank() ? "*" : eksClusterArn(cluster, region, accountId);
+        }
+        String name = pathSegment(segments[1]);
+        if (name.isEmpty()) {
+            return "*";
+        }
+        return switch (segments[0]) {
+            case "clusters" -> eksClusterRouteArn(name, segments, region, accountId);
+            case "cluster-registrations" -> eksClusterArn(name, region, accountId);
+            case "eks-anywhere-subscriptions" ->
+                    AwsArnUtils.Arn.of("eks", region, accountId, "eks-anywhere-subscription/" + name).toString();
+            default -> "*";
+        };
+    }
+
+    /** The resource of a route under the cluster {@code cluster}, its path split into {@code segments}. */
+    private String eksClusterRouteArn(String cluster, String[] segments, String region, String accountId) {
+        if (segments.length < 4 || segments[3].isEmpty()) {
+            return eksClusterArn(cluster, region, accountId);
+        }
+        String collection = segments[2];
+        return switch (collection) {
+            case "node-groups", "fargate-profiles", "addons", "pod-identity-associations" ->
+                    eksHeldArn(cluster, collection, pathSegment(segments[3]));
+            case "access-entries" -> eksHeldArn(cluster, collection,
+                    pathSegment(String.join("/", List.of(segments).subList(3, segments.length))));
+            case "updates" -> {
+                // The updates Floci keeps are its add-ons', and EKS returns one whether or not the request names
+                // its add-on, so the update is checked against the add-on it was made to.
+                Optional<String> addon = segments.length == 4 && eksService != null
+                        ? eksService.get().findResourceArn(cluster, collection, pathSegment(segments[3]))
+                        : Optional.empty();
+                yield addon.orElseGet(() -> eksClusterArn(cluster, region, accountId));
+            }
+            case "identity-provider-configs" ->
+                    "associate".equals(segments[3]) ? eksClusterArn(cluster, region, accountId) : "*";
+            case "capabilities" -> "*";
+            default -> eksClusterArn(cluster, region, accountId);
+        };
+    }
+
+    /** The ARN EKS holds the cluster {@code name} under, or else the one a create mints in {@code region}. */
+    private String eksClusterArn(String name, String region, String accountId) {
+        Optional<String> held = eksService == null ? Optional.empty()
+                : eksService.get().findResourceArn(name, null, null);
+        return held.orElseGet(() -> AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString());
+    }
+
+    /** The ARN EKS holds {@code name} of {@code collection} in the cluster under, or {@code *} when it holds none. */
+    private String eksHeldArn(String cluster, String collection, String name) {
+        return eksService == null ? "*" : eksService.get().findResourceArn(cluster, collection, name).orElse("*");
     }
 
     /** The ARN a shared tagging route names, or {@code *} for any other route. */

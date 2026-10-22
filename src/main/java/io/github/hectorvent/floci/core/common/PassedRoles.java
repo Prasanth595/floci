@@ -53,6 +53,17 @@ import java.util.regex.Pattern;
  * you must grant your user permission to pass the role to Amazon ECS"), task roles to
  * {@code ecs-tasks.amazonaws.com}.
  *
+ * <p>An EKS request passes the cluster's {@code roleArn}, a node group's {@code nodeRole}, a Fargate
+ * profile's {@code podExecutionRoleArn}, and an add-on's service account role and the role of each Pod
+ * Identity association it makes, to {@code eks.amazonaws.com}. A Pod Identity association passes its
+ * {@code roleArn} to {@code pods.eks.amazonaws.com}: the EKS user guide has "The IAM principal that is
+ * creating the association must have iam:PassRole." Its target role is not passed but assumed with the
+ * association's role: "Pod Identity then automatically performs two role assumptions in sequence: first
+ * assuming the EKS Pod Identity role, then using those credentials to assume the Target IAM Role." An
+ * access entry passes its principal to {@code ec2.amazonaws.com} for the node types alone: "If you create
+ * an access entry with type EC2_LINUX or EC2_WINDOWS, the IAM principal creating the access entry must
+ * have the iam:PassRole permission."
+ *
  * <p>A CloudFormation stack's service role is checked where a request names it, and not on later
  * operations that reuse it: CloudFormation "uses this role even if the users don't have permission
  * to pass it". A self-managed StackSet that names no administration role passes the default one:
@@ -89,6 +100,8 @@ final class PassedRoles {
     private static final String EVENTS = ServicePrincipals.of("events");
     private static final String SCHEDULER = ServicePrincipals.of("scheduler");
     private static final String PIPES = ServicePrincipals.of("pipes");
+    private static final String EKS = ServicePrincipals.of("eks");
+    private static final String EKS_PODS = ServicePrincipals.of("pods.eks");
     private static final String CLOUDFORMATION = ServicePrincipals.of("cloudformation");
     private static final String AUTOSCALING = ServicePrincipals.of("autoscaling");
     private static final String APPLICATION_AUTOSCALING = ServicePrincipals.of("application-autoscaling");
@@ -169,6 +182,13 @@ final class PassedRoles {
             case "events:PutTargets" -> fromJson(ctx, EVENTS, "Targets", "[]", "RoleArn");
             case "scheduler:CreateSchedule", "scheduler:UpdateSchedule" -> fromJson(ctx, SCHEDULER, "Target", "RoleArn");
             case "pipes:CreatePipe", "pipes:UpdatePipe" -> fromJson(ctx, PIPES, "RoleArn");
+            case "eks:CreateCluster" -> fromJson(ctx, EKS, "roleArn");
+            case "eks:CreateNodegroup" -> fromJson(ctx, EKS, "nodeRole");
+            case "eks:CreateFargateProfile" -> fromJson(ctx, EKS, "podExecutionRoleArn");
+            case "eks:CreateAddon", "eks:UpdateAddon" -> eksAddonRoles(jsonBody(ctx));
+            case "eks:CreatePodIdentityAssociation", "eks:UpdatePodIdentityAssociation" ->
+                    fromJson(ctx, EKS_PODS, "roleArn");
+            case "eks:CreateAccessEntry" -> eksNodeAccessEntry(jsonBody(ctx));
             case "lambda:CreateMicrovmImage", "lambda:UpdateMicrovmImage" -> fromJson(ctx, LAMBDA, "buildRoleArn");
             case "lambda:RunMicrovm" -> fromJson(ctx, LAMBDA, "executionRoleArn");
             case "lambda:CreateNetworkConnector", "lambda:UpdateNetworkConnector" -> fromJson(ctx, LAMBDA, "OperatorRole");
@@ -254,6 +274,20 @@ final class PassedRoles {
             }
         }
         return passed(arns, service);
+    }
+
+    /** An EKS add-on's service account role and the role of each Pod Identity association it makes. */
+    private static List<PassedRole> eksAddonRoles(JsonNode body) {
+        List<String> roles = new ArrayList<>(values(body, "serviceAccountRoleArn"));
+        roles.addAll(values(body, "podIdentityAssociations", "[]", "roleArn"));
+        return passed(roles, EKS);
+    }
+
+    /** An EKS access entry's principal, when its type is one whose nodes run as that role. */
+    private static List<PassedRole> eksNodeAccessEntry(JsonNode body) {
+        List<String> type = values(body, "type");
+        return type.contains("EC2_LINUX") || type.contains("EC2_WINDOWS")
+                ? passed(values(body, "principalArn"), EC2) : List.of();
     }
 
     /**

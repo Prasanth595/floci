@@ -1348,10 +1348,17 @@ the status, not just the request's content type.
 A REST request is authorized as the operation of the route it reached. An `X-Amz-Target` header, a
 Query `Action` field or a `smithy-protocol` header on it does not change the action it is checked
 as, and its path is matched still percent-encoded, as the router matches it, so an encoded `/`
-inside a parameter cannot make the route's rule miss.
+inside a parameter cannot make the route's rule miss. A trailing `/` is dropped first, as the router
+drops it, so `POST /clusters/` is checked as `POST /clusters`. An S3 path keeps it, since an S3 key
+may end in a slash, as a folder marker's does, and S3's rules already take a bucket's one trailing
+slash.
 
 The REST routes mapped to an action are those of S3, Lambda, API Gateway, SES v2, RDS Data,
-Kinesis, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL. In Lambda that is every route of the function
+Kinesis, EKS, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL. In EKS that is every route,
+including those Floci does not serve yet, each checked as the action of its own name, except an
+access entry's access policy routes: Floci takes the entry's principal as the rest of the path, so a
+`GET` or `DELETE` there reads or deletes an entry and is checked as `eks:DescribeAccessEntry` or
+`eks:DeleteAccessEntry`. In Lambda that is every route of the function
 API, MicroVMs and network connectors, including those Floci does not serve yet, and the Web
 Functions routes, each checked as the action of its own name except `InvokeWithResponseStream`
 (checked as `lambda:InvokeFunction`) and `GetLayerVersionByArn` (`lambda:GetLayerVersion`). AWS also
@@ -1383,8 +1390,22 @@ layer version its `Arn` names, its number read the same way. A Lambda tagging re
 connector of that ARN's Region and name, whatever account the ARN names, as Lambda looks it up, and
 an event source mapping's ARN as written.
 
+An EKS request is checked in the caller's account, where EKS looks everything up. A cluster route is
+checked against the ARN EKS holds the cluster under, or `cluster/<name>` in the request's Region for
+a cluster it does not hold, and `CreateCluster` against the cluster its body names, as the EKS user
+guide's example policy for creating a cluster grants it. A node group, Fargate profile, add-on,
+access entry or Pod Identity association route is checked against the ARN EKS holds that resource
+under, which ends in an id the request does not carry, so a policy names it with a wildcard, such as
+`nodegroup/<cluster>/<name>/*`; listing or creating them, and the other routes under a cluster, are
+checked against the cluster. A name holding an encoded `/` is read as one name, as EKS reads it.
+`DescribeUpdate` is checked against the add-on the update was made to, since the updates Floci keeps
+are its add-ons' and EKS returns one whether or not the request names its add-on, and otherwise
+against the cluster. An EKS tagging request is checked against the caller's own cluster named after
+the ARN's last `/`, whatever the ARN names before it, as EKS looks it up.
+
 The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service its ARN names,
-and it is checked as that service, against that ARN, whatever scope it is signed with. The ARN is
+and it is checked as that service, against that ARN, or for EKS the cluster it tags, whatever scope
+it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
 `resourceArn` query parameter on the other bare routes.
 
@@ -1498,6 +1519,15 @@ role each passes:
   `events.amazonaws.com`. **EventBridge Scheduler:** `CreateSchedule` and `UpdateSchedule` pass the
   target's `RoleArn` to `scheduler.amazonaws.com`. **EventBridge Pipes:** `CreatePipe` and
   `UpdatePipe` pass `RoleArn` to `pipes.amazonaws.com`.
+- **EKS:** `CreateCluster` passes `roleArn`, `CreateNodegroup` `nodeRole`, `CreateFargateProfile`
+  `podExecutionRoleArn`, and `CreateAddon` and `UpdateAddon` `serviceAccountRoleArn` and each of
+  their `podIdentityAssociations`' `roleArn`, to `eks.amazonaws.com`. `CreatePodIdentityAssociation`
+  and `UpdatePodIdentityAssociation` pass `roleArn` to `pods.eks.amazonaws.com`, but not
+  `targetRoleArn`, which the association's role assumes. `CreateAccessEntry` passes `principalArn`
+  to `ec2.amazonaws.com` when its `type` is `EC2_LINUX` or `EC2_WINDOWS`: "If you create an access
+  entry with type EC2_LINUX or EC2_WINDOWS, the IAM principal creating the access entry must have
+  the iam:PassRole permission." AWS also checks it for `CreateCapability`, `UpdateCapability`,
+  `RegisterCluster` and `UpdateClusterConfig`, which Floci does not serve.
 - **CloudFormation:** `CreateStack`, `UpdateStack`, `DeleteStack`, `CreateChangeSet` and
   `ContinueUpdateRollback` pass `RoleARN` to `cloudformation.amazonaws.com` when the request names
   one. `CreateStackSet` and `UpdateStackSet` pass `AdministrationRoleARN`, or, for a self-managed

@@ -35,6 +35,7 @@ MODELS: dict[str, str] = {
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
     "dsql": "dsql",
+    "eks": "eks",
     "lambda": "lambda",
     "lambda-core": "lambda",
     "lambda-microvms": "lambda",

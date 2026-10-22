@@ -206,6 +206,40 @@ class PassedRolesTest {
     }
 
     @Test
+    void eksPassesItsClusterNodePodAndAddonRolesAndANodeAccessEntrysPrincipal() {
+        String eks = "eks.amazonaws.com";
+        assertEquals(List.of(passed("cluster", eks)), PassedRoles.of("eks:CreateCluster",
+                json("{\"name\":\"c\",\"roleArn\":\"" + ROLES + "cluster\"}"), LOOKUPS));
+        assertEquals(List.of(passed("node", eks)), PassedRoles.of("eks:CreateNodegroup",
+                json("{\"nodeRole\":\"" + ROLES + "node\"}"), LOOKUPS));
+        assertEquals(List.of(passed("fargate", eks)), PassedRoles.of("eks:CreateFargateProfile",
+                json("{\"podExecutionRoleArn\":\"" + ROLES + "fargate\"}"), LOOKUPS));
+        String addon = """
+                {"serviceAccountRoleArn":"%1$saddon","podIdentityAssociations":[
+                 {"serviceAccount":"a","roleArn":"%1$spod-a"},{"serviceAccount":"b","roleArn":"%1$spod-b"}]}"""
+                .formatted(ROLES);
+        for (String action : List.of("eks:CreateAddon", "eks:UpdateAddon")) {
+            assertEquals(List.of(passed("addon", eks), passed("pod-a", eks), passed("pod-b", eks)),
+                    PassedRoles.of(action, json(addon), LOOKUPS));
+        }
+        // The association's role goes to Pod Identity; its target role is assumed with it, not passed.
+        String association = "{\"roleArn\":\"" + ROLES + "pod\",\"targetRoleArn\":\"" + ROLES + "target\"}";
+        for (String action : List.of("eks:CreatePodIdentityAssociation", "eks:UpdatePodIdentityAssociation")) {
+            assertEquals(List.of(passed("pod", "pods.eks.amazonaws.com")), PassedRoles.of(action, json(association),
+                    LOOKUPS));
+        }
+        // Only a node access entry passes its principal, to EC2.
+        for (String type : List.of("EC2_LINUX", "EC2_WINDOWS")) {
+            assertEquals(List.of(passed("worker", EC2)), PassedRoles.of("eks:CreateAccessEntry",
+                    json("{\"principalArn\":\"" + ROLES + "worker\",\"type\":\"" + type + "\"}"), LOOKUPS));
+        }
+        assertEquals(List.of(), PassedRoles.of("eks:CreateAccessEntry",
+                json("{\"principalArn\":\"" + ROLES + "admin\",\"type\":\"STANDARD\"}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("eks:CreateAccessEntry",
+                json("{\"principalArn\":\"" + ROLES + "admin\"}"), LOOKUPS));
+    }
+
+    @Test
     void outsideEcsOnlyARoleArnIsPassed() {
         assertEquals(List.of(), PassedRoles.of("states:CreateStateMachine", json("{\"roleArn\":\"sm\"}"), LOOKUPS));
     }
