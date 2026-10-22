@@ -8,6 +8,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -18,6 +20,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 class PartitionedFileStorageTest {
 
@@ -162,6 +165,29 @@ class PartitionedFileStorageTest {
 
         assertEquals(LONG_AGO, Files.getLastModifiedTime(bigFile));
         assertEquals(Map.of("node-1", "beat-2"), open(PartitionedFileStorage.Mode.PERIODIC).get("busy").orElseThrow());
+    }
+
+    @Test
+    void aFlushThatFailsIsRetriedOnTheNextFlush() throws Exception {
+        PartitionedFileStorage<String> storage = open(PartitionedFileStorage.Mode.PERIODIC);
+        storage.putEntry("other", "a", "1");
+        storage.flush();
+        storage.putEntry("busy", "node-1", "beat-1");
+        Path directory = tempDir.resolve("items");
+        Set<PosixFilePermission> original = Files.getPosixFilePermissions(directory);
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("r-xr-xr-x"));
+        try {
+            // A root user writes through the read-only mode, so there is nothing to test there.
+            assumeFalse(Files.isWritable(directory), "the directory stays writable for this user");
+            storage.flush();
+            assertFalse(Files.exists(storage.fileFor("busy")));
+        } finally {
+            Files.setPosixFilePermissions(directory, original);
+        }
+
+        storage.flush();
+
+        assertEquals(Map.of("node-1", "beat-1"), open(PartitionedFileStorage.Mode.PERIODIC).get("busy").orElseThrow());
     }
 
     @Test

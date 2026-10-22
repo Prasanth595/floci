@@ -185,8 +185,9 @@ public class DynamoDbService {
              config.services().dynamodb().latestRestorableLagSeconds(), Clock.systemUTC());
     }
 
-    private static StorageBackend<String, Map<String, JsonNode>> itemStore(StorageFactory storageFactory,
-                                                                          EmulatorConfig config) {
+    /** The item store the configured {@code item-layout} selects; package-private for tests. */
+    static StorageBackend<String, Map<String, JsonNode>> itemStore(StorageFactory storageFactory,
+                                                                  EmulatorConfig config) {
         TypeReference<Map<String, Map<String, JsonNode>>> type = new TypeReference<>() {};
         String layout = Objects.requireNonNullElse(config.storage().services().dynamodb().itemLayout(), "single-file");
         return switch (layout) {
@@ -388,8 +389,8 @@ public class DynamoDbService {
      * entries gets only those items; any other store gets the whole table, as before.
      */
     private void persistItems(String storageKey, Collection<String> itemKeys) {
-        if (itemStore == null) return;
-        if (!(itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) || !aware.writesEntries()) {
+        AccountAwareStorageBackend<Map<String, JsonNode>> entryStore = entryWritingItemStore();
+        if (entryStore == null) {
             persistItems(storageKey);
             return;
         }
@@ -401,15 +402,30 @@ public class DynamoDbService {
         for (String itemKey : itemKeys) {
             JsonNode item = items.get(itemKey);
             if (item == null) {
-                aware.removeEntry(storageKey, itemKey);
+                entryStore.removeEntry(storageKey, itemKey);
             } else {
-                aware.putEntry(storageKey, itemKey, item);
+                entryStore.putEntry(storageKey, itemKey, item);
             }
         }
     }
 
     private void persistItem(String storageKey, String itemKey) {
         persistItems(storageKey, List.of(itemKey));
+    }
+
+    /** Persists the given items of every table a multi-item write touched. */
+    private void persistItems(Collection<String> storageKeys, Map<String, Set<String>> itemKeysByTable) {
+        for (String storageKey : storageKeys) {
+            persistItems(storageKey, itemKeysByTable.getOrDefault(storageKey, Set.of()));
+        }
+    }
+
+    /** The item store when it persists one item at a time, otherwise {@code null}. */
+    private AccountAwareStorageBackend<Map<String, JsonNode>> entryWritingItemStore() {
+        if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware && aware.writesEntries()) {
+            return aware;
+        }
+        return null;
     }
 
     public TableDefinition createTable(String tableName,
@@ -1788,9 +1804,7 @@ public class DynamoDbService {
                 }
             }
         } finally {
-            for (String storageKey : affectedStorageKeys) {
-                persistItems(storageKey, requestedItemKeys.getOrDefault(storageKey, Set.of()));
-            }
+            persistItems(affectedStorageKeys, requestedItemKeys);
         }
         return new BatchWriteResult(Map.of());
     }
@@ -1996,14 +2010,12 @@ public class DynamoDbService {
                     live.put(participant.itemKey(), value);
                 }
             }
-            Map<String, List<String>> participantKeys = new HashMap<>();
+            Map<String, Set<String>> participantKeys = new HashMap<>();
             for (TransactParticipant participant : toAcquire.keySet()) {
-                participantKeys.computeIfAbsent(participant.storageKey(), ignored -> new ArrayList<>())
+                participantKeys.computeIfAbsent(participant.storageKey(), ignored -> new HashSet<>())
                         .add(participant.itemKey());
             }
-            for (String storageKey : affectedStorageKeys) {
-                persistItems(storageKey, participantKeys.getOrDefault(storageKey, List.of()));
-            }
+            persistItems(affectedStorageKeys, participantKeys);
             for (Runnable streamEvent : pendingStreamEvents) {
                 streamEvent.run();
             }
@@ -3058,10 +3070,10 @@ public class DynamoDbService {
      */
     private void persistRemovedItemsForAccount(String accountId, String storageKey, Map<String, JsonNode> items,
                                                List<String> removedKeys) {
-        if (accountId != null && itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware
-                && aware.writesEntries()) {
+        AccountAwareStorageBackend<Map<String, JsonNode>> entryStore = entryWritingItemStore();
+        if (accountId != null && entryStore != null) {
             for (String itemKey : removedKeys) {
-                aware.removeEntryForAccount(accountId, storageKey, itemKey);
+                entryStore.removeEntryForAccount(accountId, storageKey, itemKey);
             }
             return;
         }

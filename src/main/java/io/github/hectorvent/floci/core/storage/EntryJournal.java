@@ -186,8 +186,12 @@ final class EntryJournal<E> {
     /** Drops every record; the caller holds off appends while it does. */
     void truncate() throws IOException {
         close();
-        Files.deleteIfExists(path);
-        open();
+        try {
+            Files.deleteIfExists(path);
+        } finally {
+            // Reopen even when the delete failed, so later records are still appended.
+            open();
+        }
     }
 
     void deleteFile() {

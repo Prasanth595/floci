@@ -28,9 +28,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -128,12 +126,9 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     // and compaction holds the write lock while it writes dirty shards and truncates the journal,
     // so the journal never drops a record whose change is not yet in a shard file.
     private final ReentrantReadWriteLock compactionLock = new ReentrantReadWriteLock();
-
-    /** A store with one file per key. */
-    public PartitionedFileStorage(Path directory, Path legacyFile, Class<E> entryType, Mode mode,
-                                  long flushIntervalMs) {
-        this(directory, legacyFile, entryType, 1, mode, flushIntervalMs);
-    }
+    // Runs inside compaction between the last shard write and emptying the journal: the moment a
+    // change that slipped past the lock would be lost. Tests use it to stage that change.
+    private volatile Runnable beforeJournalTruncate = () -> { };
 
     /**
      * @param directory       where the shard files live
@@ -163,17 +158,9 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
         this.journal = mode == Mode.JOURNAL
                 ? new EntryJournal<>(directory.resolve(JOURNAL_FILE), mapper.constructType(entryType), entriesType)
                 : null;
-        if (mode == Mode.SYNC) {
-            this.scheduler = null;
-        } else {
-            this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "partitioned-storage-flush");
-                t.setDaemon(true);
-                return t;
-            });
-            this.scheduler.scheduleAtFixedRate(this::flushQuietly, flushIntervalMs, flushIntervalMs,
-                    TimeUnit.MILLISECONDS);
-        }
+        this.scheduler = mode == Mode.SYNC
+                ? null
+                : StorageFiles.scheduleEvery("partitioned-storage-flush", flushIntervalMs, this::flushQuietly);
     }
 
     // --- StorageBackend ---
@@ -182,8 +169,7 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     public void put(String key, Map<String, E> value) {
         beginChange();
         try {
-            store.put(key, split(value));
-            markAll(key);
+            applyPut(key, value);
             if (journal != null) {
                 journal.put(key, value);
             }
@@ -209,8 +195,7 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     public void delete(String key) {
         beginChange();
         try {
-            store.remove(key);
-            markAll(key);
+            applyDelete(key);
             if (journal != null) {
                 journal.delete(key);
             }
@@ -292,11 +277,10 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
 
     @Override
     public void putEntry(String key, String entryKey, E entryValue) {
-        ShardId id = new ShardId(key, shardOf(entryKey));
+        ShardId id;
         beginChange();
         try {
-            store.computeIfAbsent(key, ignored -> new Shards<>(shardCount)).part(id.shard()).put(entryKey, entryValue);
-            dirty.add(id);
+            id = applyPutEntry(key, entryKey, entryValue);
             if (journal != null) {
                 journal.putEntry(key, entryKey, entryValue);
             }
@@ -308,22 +292,17 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
 
     @Override
     public void removeEntry(String key, String entryKey) {
-        ShardId id = new ShardId(key, shardOf(entryKey));
-        boolean removed;
+        ShardId id;
         beginChange();
         try {
-            Shards<E> value = store.get(key);
-            removed = value != null && value.part(id.shard()).remove(entryKey) != null;
-            if (removed) {
-                dirty.add(id);
-                if (journal != null) {
-                    journal.removeEntry(key, entryKey);
-                }
+            id = applyRemoveEntry(key, entryKey);
+            if (id != null && journal != null) {
+                journal.removeEntry(key, entryKey);
             }
         } finally {
             endChange();
         }
-        if (removed) {
+        if (id != null) {
             writeNowIfSync(id);
         }
     }
@@ -333,15 +312,7 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     /** Stops the flush schedule and writes what is still dirty; a journal is compacted and closed. */
     public void shutdown() {
         if (scheduler != null) {
-            scheduler.shutdown();
-            try {
-                if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                    scheduler.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                scheduler.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
+            StorageFiles.stop(scheduler);
         }
         flush();
         if (journal != null) {
@@ -364,6 +335,7 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
                 LOG.errorv("Could not write {0} shards of {1}; keeping the journal", dirty.size(), directory);
                 return;
             }
+            beforeJournalTruncate.run();
             journal.truncate();
         } catch (IOException e) {
             LOG.errorv(e, "Failed to truncate the journal of {0}", directory);
@@ -374,28 +346,42 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
 
     private void applyReplayed(EntryJournal.Change<E> change) {
         switch (change) {
-            case EntryJournal.PutEntry<E> put -> {
-                int shard = shardOf(put.entryKey());
-                store.computeIfAbsent(put.key(), ignored -> new Shards<>(shardCount)).part(shard)
-                        .put(put.entryKey(), put.value());
-                dirty.add(new ShardId(put.key(), shard));
-            }
-            case EntryJournal.RemoveEntry<E> remove -> {
-                Shards<E> value = store.get(remove.key());
-                if (value != null) {
-                    value.part(shardOf(remove.entryKey())).remove(remove.entryKey());
-                }
-                dirty.add(new ShardId(remove.key(), shardOf(remove.entryKey())));
-            }
-            case EntryJournal.Put<E> put -> {
-                store.put(put.key(), split(put.value()));
-                markAll(put.key());
-            }
-            case EntryJournal.Delete<E> delete -> {
-                store.remove(delete.key());
-                markAll(delete.key());
-            }
+            case EntryJournal.PutEntry<E> put -> applyPutEntry(put.key(), put.entryKey(), put.value());
+            case EntryJournal.RemoveEntry<E> remove -> applyRemoveEntry(remove.key(), remove.entryKey());
+            case EntryJournal.Put<E> put -> applyPut(put.key(), put.value());
+            case EntryJournal.Delete<E> delete -> applyDelete(delete.key());
         }
+    }
+
+    // The apply methods change memory and mark what they change dirty. Live changes call them
+    // under the change lock and then journal the change; replay calls them for journal records.
+
+    private ShardId applyPutEntry(String key, String entryKey, E entryValue) {
+        ShardId id = new ShardId(key, shardOf(entryKey));
+        store.computeIfAbsent(key, ignored -> new Shards<>(shardCount)).part(id.shard()).put(entryKey, entryValue);
+        dirty.add(id);
+        return id;
+    }
+
+    /** The shard the entry was removed from, or {@code null} when there was no such entry. */
+    private ShardId applyRemoveEntry(String key, String entryKey) {
+        ShardId id = new ShardId(key, shardOf(entryKey));
+        Shards<E> value = store.get(key);
+        if (value == null || value.part(id.shard()).remove(entryKey) == null) {
+            return null;
+        }
+        dirty.add(id);
+        return id;
+    }
+
+    private void applyPut(String key, Map<String, E> value) {
+        store.put(key, split(value));
+        markAll(key);
+    }
+
+    private void applyDelete(String key) {
+        store.remove(key);
+        markAll(key);
     }
 
     private void beginChange() {
@@ -414,6 +400,10 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
         for (ShardId id : List.copyOf(dirty)) {
             writeShard(id);
         }
+    }
+
+    void setBeforeJournalTruncate(Runnable hook) {
+        this.beforeJournalTruncate = hook;
     }
 
     /** The file that holds {@code entryKey} of {@code key}. */
@@ -511,17 +501,16 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
                     Files.deleteIfExists(file);
                     return;
                 }
-                Files.createDirectories(directory);
-                Path tempFile = file.resolveSibling(file.getFileName() + ".tmp");
-                try (OutputStream out = Files.newOutputStream(tempFile);
-                     JsonGenerator generator = mapper.getFactory().createGenerator(out)) {
-                    generator.writeStartObject();
-                    generator.writeStringField(KEY_FIELD, id.key());
-                    generator.writeFieldName(ENTRIES_FIELD);
-                    entriesWriter.writeValue(generator, part);
-                    generator.writeEndObject();
-                }
-                Files.move(tempFile, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                StorageFiles.writeAtomically(file, tempFile -> {
+                    try (OutputStream out = Files.newOutputStream(tempFile);
+                         JsonGenerator generator = mapper.getFactory().createGenerator(out)) {
+                        generator.writeStartObject();
+                        generator.writeStringField(KEY_FIELD, id.key());
+                        generator.writeFieldName(ENTRIES_FIELD);
+                        entriesWriter.writeValue(generator, part);
+                        generator.writeEndObject();
+                    }
+                });
             } catch (IOException e) {
                 dirty.add(id);
                 LOG.errorv(e, "Failed to persist shard {0} of {1} to {2}", id.shard(), id.key(), file);

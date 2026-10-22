@@ -14,10 +14,14 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 class WalStorageTest {
 
@@ -378,6 +382,41 @@ class WalStorageTest {
             assertEquals(unreadableContents, Files.readString(quarantinePath));
         } finally {
             store.shutdown();
+        }
+    }
+
+    @Test
+    void aWalThatCannotBeEmptiedStaysOpenForLaterChanges() throws IOException {
+        // The WAL lives apart from the snapshot, so only emptying the WAL can be made to fail.
+        Path snapshotPath = tempDir.resolve("stuck-snapshot.json");
+        Path walDirectory = Files.createDirectories(tempDir.resolve("stuck-wal"));
+        Path walPath = walDirectory.resolve("data.wal");
+        Set<PosixFilePermission> original = Files.getPosixFilePermissions(walDirectory);
+
+        WalStorage<String, String> store1 = new WalStorage<>(snapshotPath, walPath,
+                new TypeReference<Map<String, String>>() {}, 600000);
+        store1.load();
+        WalStorage<String, String> store2 = null;
+        try {
+            store1.put("key1", "value1");
+            Files.setPosixFilePermissions(walDirectory, PosixFilePermissions.fromString("r-xr-xr-x"));
+            // A root user writes through the read-only mode, so there is nothing to test there.
+            assumeFalse(Files.isWritable(walDirectory), "the directory stays writable for this user");
+
+            store1.flush();
+            assertTrue(Files.exists(walPath), "the WAL could not be deleted");
+            store1.put("later", "write");
+
+            store2 = new WalStorage<>(snapshotPath, walPath, new TypeReference<Map<String, String>>() {}, 600000);
+            store2.load();
+            assertEquals("value1", store2.get("key1").orElseThrow());
+            assertEquals("write", store2.get("later").orElseThrow());
+        } finally {
+            Files.setPosixFilePermissions(walDirectory, original);
+            store1.shutdown();
+            if (store2 != null) {
+                store2.shutdown();
+            }
         }
     }
 

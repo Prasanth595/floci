@@ -3,10 +3,14 @@ package io.github.hectorvent.floci.services.dynamodb;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PartitionedFileStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
@@ -27,6 +31,10 @@ import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** DynamoDB items on a store that persists one table file at a time and one item at a time. */
 class DynamoDbPartitionedItemStoreTest {
@@ -158,6 +166,100 @@ class DynamoDbPartitionedItemStoreTest {
         assertEquals(201, restarted.scan("Logs", null, null, null, null, null, null, REGION).items().size());
     }
 
+    @Test
+    void failedConditionalWritesLeaveTheTableFileUntouched() throws Exception {
+        service.putItem("Nodes", item("node-1", "beat-1"), REGION);
+        Path nodesFile = tableFile("Nodes");
+        Files.setLastModifiedTime(nodesFile, LONG_AGO);
+
+        assertThrows(AwsException.class, () -> service.putItem("Nodes", item("node-1", "beat-2"),
+                "attribute_not_exists(id)", null, null, REGION, "NONE"));
+        assertThrows(AwsException.class, () -> service.deleteItem("Nodes", key("node-1"),
+                "attribute_not_exists(id)", null, null, REGION, "NONE"));
+        assertThrows(AwsException.class, () -> service.updateItem("Nodes", key("node-1"), null,
+                "SET v = :v", null, mapper.createObjectNode().set(":v", attribute("beat-3")), "NONE",
+                "attribute_not_exists(id)", REGION, "NONE"));
+
+        assertEquals(LONG_AGO, Files.getLastModifiedTime(nodesFile));
+        assertEquals("beat-1", value(restart().getItem("Nodes", key("node-1"), REGION)));
+    }
+
+    @Test
+    void aCancelledTransactionWritesNothing() throws Exception {
+        service.putItem("Nodes", item("node-1", "beat-1"), REGION);
+        Path nodesFile = tableFile("Nodes");
+        Files.setLastModifiedTime(nodesFile, LONG_AGO);
+
+        assertThrows(TransactionCanceledException.class, () -> service.transactWriteItems(List.of(
+                transactPut("Nodes", item("node-2", "new")),
+                transactConditionCheck("Nodes", key("missing"), "attribute_exists(id)")), REGION));
+
+        assertEquals(LONG_AGO, Files.getLastModifiedTime(nodesFile));
+        assertNull(restart().getItem("Nodes", key("node-2"), REGION));
+    }
+
+    @Test
+    void aBatchToAShardedTableRewritesOnlyTheShardsItTouches() throws Exception {
+        Path directory = tempDir.resolve("sharded");
+        DynamoDbService sharded = new DynamoDbService(tableStore, openItemStore(directory, 8), resolver);
+        for (int i = 0; i < 200; i++) {
+            sharded.putItem("Logs", item("entry-" + i, "payload"), REGION);
+        }
+        List<Path> files;
+        try (Stream<Path> listed = Files.list(directory)) {
+            files = listed.toList();
+        }
+        for (Path file : files) {
+            Files.setLastModifiedTime(file, LONG_AGO);
+        }
+
+        sharded.batchWriteItem(Map.of("Logs", List.of(
+                putRequest(item("entry-200", "payload")),
+                deleteRequest(key("entry-0")))), REGION);
+
+        long rewritten = files.stream().filter(f -> !isUntouched(f)).count();
+        assertTrue(rewritten >= 1 && rewritten <= 2, "rewrote " + rewritten + " of 8 shard files");
+        DynamoDbService restarted = new DynamoDbService(tableStore, openItemStore(directory, 8), resolver);
+        assertNull(restarted.getItem("Logs", key("entry-0"), REGION));
+        assertEquals("payload", value(restarted.getItem("Logs", key("entry-200"), REGION)));
+        assertEquals(200, restarted.scan("Logs", null, null, null, null, null, null, REGION).items().size());
+    }
+
+    @Test
+    void aRestoredTableSurvivesARestart() {
+        createTable(service, "Restored");
+
+        service.finishRestore("Restored", List.of(item("a", "1"), item("b", "2")), REGION);
+
+        DynamoDbService restarted = restart();
+        assertEquals("1", value(restarted.getItem("Restored", key("a"), REGION)));
+        assertEquals("2", value(restarted.getItem("Restored", key("b"), REGION)));
+    }
+
+    @Test
+    void anUnknownItemLayoutIsRejected() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.storage().services().dynamodb().itemLayout()).thenReturn("per-item");
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> DynamoDbService.itemStore(mock(StorageFactory.class), config));
+        assertTrue(error.getMessage().contains("per-item"), error.getMessage());
+    }
+
+    @Test
+    void aShardCountBelowOneIsRejected() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.defaultAccountId()).thenReturn(ACCOUNT);
+        when(config.storage().persistentPath()).thenReturn(tempDir.toString());
+        when(config.storage().services().dynamodb().itemLayout()).thenReturn("per-table");
+        when(config.storage().services().dynamodb().itemShards()).thenReturn(0);
+        ServiceConfigAccess serviceConfigAccess = mock(ServiceConfigAccess.class);
+        when(serviceConfigAccess.storageMode(anyString())).thenReturn("persistent");
+        StorageFactory factory = new StorageFactory(config, serviceConfigAccess);
+
+        assertThrows(IllegalArgumentException.class, () -> DynamoDbService.itemStore(factory, config));
+    }
+
     private static boolean isUntouched(Path file) {
         try {
             return LONG_AGO.equals(Files.getLastModifiedTime(file));
@@ -226,6 +328,15 @@ class DynamoDbPartitionedItemStoreTest {
         ObjectNode put = request.putObject("Put");
         put.put("TableName", table);
         put.set("Item", item);
+        return request;
+    }
+
+    private ObjectNode transactConditionCheck(String table, ObjectNode key, String condition) {
+        ObjectNode request = mapper.createObjectNode();
+        ObjectNode check = request.putObject("ConditionCheck");
+        check.put("TableName", table);
+        check.set("Key", key);
+        check.put("ConditionExpression", condition);
         return request;
     }
 

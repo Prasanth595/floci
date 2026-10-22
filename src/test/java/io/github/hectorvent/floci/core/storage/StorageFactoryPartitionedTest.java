@@ -116,6 +116,26 @@ class StorageFactoryPartitionedTest {
     }
 
     @Test
+    void entriesOfTwoAccountsUnderOneKeyStaySeparate() {
+        StorageFactory factory = newFactory("persistent");
+        AccountAwareStorageBackend<Map<String, String>> store =
+                factory.createPartitioned("svc", "svc-items.json", TYPE, String.class, 4);
+
+        store.putEntryForAccount("111111111111", "table", "k", "one");
+        store.putEntryForAccount("222222222222", "table", "k", "two");
+        store.putEntryForAccount("222222222222", "table", "gone", "x");
+        store.removeEntryForAccount("111111111111", "table", "gone");
+        store.removeEntryForAccount("222222222222", "table", "gone");
+        factory.shutdownAll();
+
+        AccountAwareStorageBackend<Map<String, String>> reopened = newFactory("persistent")
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 4);
+        assertEquals(Map.of(
+                "111111111111/table", Map.of("k", "one"),
+                "222222222222/table", Map.of("k", "two")), reopened.scanAllAccountsRaw());
+    }
+
+    @Test
     void repeatCallsShareOneBackend() {
         StorageFactory factory = newFactory("persistent");
         assertSame(factory.createPartitioned("svc", "svc-items.json", TYPE, String.class, 1),
