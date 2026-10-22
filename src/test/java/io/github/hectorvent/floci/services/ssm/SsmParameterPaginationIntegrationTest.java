@@ -111,6 +111,16 @@ class SsmParameterPaginationIntegrationTest {
         error("GetParameterHistory", Map.of("Name", name, "NextToken", "%%%"), "InvalidNextToken");
     }
 
+    @Test
+    void rejectsWronglyTypedPaginationFields() {
+        String name = "/pagination-" + UUID.randomUUID() + "/history";
+        put(name, "v");
+        error("GetParametersByPath", Map.of("Path", "/pagination", "MaxResults", "2"), "SerializationException");
+        error("GetParametersByPath", Map.of("Path", "/pagination", "NextToken", 5), "SerializationException");
+        error("GetParameterHistory", Map.of("Name", name, "MaxResults", "2"), "SerializationException");
+        error("GetParameterHistory", Map.of("Name", name, "NextToken", 5), "SerializationException");
+    }
+
     private void put(String name, String value) {
         ok("PutParameter", Map.of("Name", name, "Value", value, "Type", "String", "Overwrite", true));
     }

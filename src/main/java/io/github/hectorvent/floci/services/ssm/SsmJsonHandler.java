@@ -318,13 +318,15 @@ public class SsmJsonHandler {
      */
     private static <T> PaginatedResult<T> page(JsonNode request, List<T> items,
                                                Function<T, String> cursorOf, int maxPage) {
-        Integer maxResults = request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
+        // A non-numeric MaxResults or non-string NextToken fails to deserialize, as on AWS.
+        Integer maxResults = request.hasNonNull("MaxResults")
+                ? SsmJsonDeserialization.optionalInteger(request.path("MaxResults"), 0) : null;
         if (maxResults != null && (maxResults < 1 || maxResults > maxPage)) {
             throw SmithyValidationErrors.validationException(
                     "Value '" + maxResults + "' at 'maxResults' failed to "
                             + "satisfy constraint: Member must have value between 1 and " + maxPage);
         }
-        return Pagination.paginate(items, cursorOf, maxResults, request.path("NextToken").asText(null),
+        return Pagination.paginate(items, cursorOf, maxResults, optionalString(request, "NextToken"),
                 Integer.MAX_VALUE, maxPage, "InvalidNextToken");
     }
 
