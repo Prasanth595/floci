@@ -37,6 +37,7 @@ public class StorageFactory {
     private final Map<Path, StorageBackend<?, ?>> backendsByPath = new HashMap<>();
     private final List<HybridStorage<?, ?>> hybridBackends = new ArrayList<>();
     private final List<WalStorage<?, ?>> walBackends = new ArrayList<>();
+    private final List<PartitionedFileStorage<?>> partitionedBackends = new ArrayList<>();
     // Backends whose initial load has completed. create() loads each backend exactly once and
     // loadAll() only picks up backends that were never loaded, so neither path replays a store
     // that is already live or opens a second WAL writer on top of the first.
@@ -143,6 +144,48 @@ public class StorageFactory {
         return backend;
     }
 
+    /**
+     * Create an account-aware store whose values are maps, persisted one file per key under a
+     * directory named after {@code fileName} (without {@code .json}), so a change to one key
+     * rewrites that key's file only. Writers that change one map entry at a time use
+     * {@link AccountAwareStorageBackend#putEntry} and {@link AccountAwareStorageBackend#removeEntry}
+     * when {@link AccountAwareStorageBackend#writesEntries()} is true.
+     *
+     * <p>{@code persistent} writes a key's file on every change and {@code hybrid} writes dirty
+     * keys on the flush interval. {@code memory} keeps the store in memory, and {@code wal} keeps
+     * the single-file journaled layout of {@link #create}. An existing single {@code fileName}
+     * file is migrated into the directory on first load.
+     */
+    public synchronized <E> AccountAwareStorageBackend<Map<String, E>> createPartitioned(
+            String serviceName, String fileName, TypeReference<Map<String, Map<String, E>>> typeReference,
+            Class<E> entryType) {
+        String mode = resolveMode(serviceName);
+        if (!"persistent".equals(mode) && !"hybrid".equals(mode)) {
+            return create(serviceName, fileName, typeReference);
+        }
+        Path basePath = Path.of(config.storage().persistentPath());
+        Path legacyFile = basePath.resolve(fileName);
+        Path directory = basePath.resolve(fileName.replace(".json", ""));
+        StorageBackend<?, ?> existing = backendsByPath.get(directory);
+        if (existing != null) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Map<String, E>> typed = (AccountAwareStorageBackend<Map<String, E>>) existing;
+            return typed;
+        }
+        PartitionedFileStorage.Mode writeMode = "persistent".equals(mode)
+                ? PartitionedFileStorage.Mode.SYNC : PartitionedFileStorage.Mode.PERIODIC;
+        PartitionedFileStorage<E> inner = new PartitionedFileStorage<>(directory, legacyFile, entryType,
+                writeMode, resolveFlushInterval(serviceName));
+        partitionedBackends.add(inner);
+        LOG.infov("Storing {0} for service {1} one file per key in {2}", fileName, serviceName, directory);
+        AccountAwareStorageBackend<Map<String, E>> backend = new AccountAwareStorageBackend<>(
+                inner, requestContextInstance, config.defaultAccountId());
+        loadOnce(backend);
+        allBackends.add(backend);
+        backendsByPath.put(directory, backend);
+        return backend;
+    }
+
     /** Load every managed backend that has not been loaded yet. Safe to call repeatedly. */
     public synchronized void loadAll() {
         for (StorageBackend<?, ?> backend : allBackends) {
@@ -185,6 +228,9 @@ public class StorageFactory {
         }
         for (WalStorage<?, ?> wal : walBackends) {
             wal.shutdown();
+        }
+        for (PartitionedFileStorage<?> partitioned : partitionedBackends) {
+            partitioned.shutdown();
         }
     }
 

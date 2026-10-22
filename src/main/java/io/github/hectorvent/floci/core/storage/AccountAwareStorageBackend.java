@@ -426,6 +426,38 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         delegate.delete(accountId + "/" + key);
     }
 
+    // --- Entry writes, for map-valued stores whose backend persists one entry at a time ---
+
+    /** Whether the backend persists one map entry at a time; the entry methods require it. */
+    public boolean writesEntries() {
+        return delegate instanceof MapEntryWriter<?>;
+    }
+
+    public <E> void putEntry(String key, String entryKey, E entryValue) {
+        putEntryForAccount(prefix(), key, entryKey, entryValue);
+    }
+
+    public void removeEntry(String key, String entryKey) {
+        removeEntryForAccount(prefix(), key, entryKey);
+    }
+
+    public <E> void putEntryForAccount(String accountId, String key, String entryKey, E entryValue) {
+        this.<E>entryWriter().putEntry(accountId + "/" + key, entryKey, entryValue);
+        trackOwner(accountId);
+    }
+
+    public void removeEntryForAccount(String accountId, String key, String entryKey) {
+        entryWriter().removeEntry(accountId + "/" + key, entryKey);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <E> MapEntryWriter<E> entryWriter() {
+        if (delegate instanceof MapEntryWriter<?> writer) {
+            return (MapEntryWriter<E>) writer;
+        }
+        throw new UnsupportedOperationException("This store does not persist single map entries");
+    }
+
     /** Deletes the entry stored under {@code rawKey} exactly, as {@link #scanAllAccountsWithRawKeys} reports it. */
     public void deleteRaw(String rawKey) {
         delegate.delete(rawKey);

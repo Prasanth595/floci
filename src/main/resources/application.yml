@@ -209,6 +209,10 @@ floci:
         flush-interval-ms: 5000
       dynamodb:
         flush-interval-ms: 5000
+        # single-file: every table in dynamodb-items.json, rewritten on any item change.
+        # per-table: one file per table under dynamodb-items/; an existing dynamodb-items.json
+        # is migrated on first start. Applies to persistent and hybrid modes.
+        item-layout: single-file          # FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT
       sns:
         flush-interval-ms: 5000
       lambda:

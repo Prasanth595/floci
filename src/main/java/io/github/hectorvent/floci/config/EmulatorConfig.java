@@ -435,6 +435,14 @@ public interface EmulatorConfig {
 
         @WithDefault("5000")
         long flushIntervalMs();
+
+        /**
+         * How table items are laid out on disk: {@code single-file} keeps every table in one
+         * {@code dynamodb-items.json}, rewritten on any change; {@code per-table} writes one file
+         * per table under {@code dynamodb-items/}, so a change rewrites only its own table.
+         */
+        @WithDefault("single-file")
+        String itemLayout();
     }
 
     interface SnsStorageConfig {
