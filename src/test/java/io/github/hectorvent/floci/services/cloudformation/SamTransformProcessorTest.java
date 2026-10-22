@@ -357,6 +357,51 @@ class SamTransformProcessorTest {
                 "only the first ten characters name the version");
     }
 
+    /** As in SAM, the function's Description reaches the Lambda function as written. */
+    @Test
+    void expandSamTemplate_functionDescriptionIsCopiedToTheFunction() throws Exception {
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Parameters": {"Purpose": {"Type": "String", "Default": "orders"}},
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler", "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({});"%s
+                  }
+                }
+              }
+            }
+            """;
+
+        assertEquals("\"Orders API\"", functionDescription(template.formatted(", \"Description\": \"Orders API\"")));
+        assertEquals("{\"Ref\":\"Purpose\"}", functionDescription(template.formatted(
+                ", \"Description\": {\"Ref\": \"Purpose\"}")), "an intrinsic function is left to CloudFormation");
+        assertEquals("\"Orders API\"", functionDescription(template.formatted(
+                ", \"Description\": \"Orders API\", \"AutoPublishAlias\": \"live\"")),
+                "AutoPublishAlias without AutoPublishCodeSha256 leaves it as written");
+        assertEquals("\"Orders API\"", functionDescription(template.formatted(
+                ", \"Description\": \"Orders API\", \"AutoPublishCodeSha256\": \"abc\"")),
+                "AutoPublishCodeSha256 without AutoPublishAlias leaves it as written");
+        assertTrue(processor.expandSamTemplate(objectMapper.readTree(template.formatted(""))).path("Resources")
+                .path("MyFunc").path("Properties").path("Description").isMissingNode());
+        String allProperties = ", \"AutoPublishAlias\": \"live\", \"AutoPublishAliasAllProperties\": true";
+        assertNotEquals(publishedVersionId(template.formatted(allProperties + ", \"Description\": \"first\"")),
+                publishedVersionId(template.formatted(allProperties + ", \"Description\": \"second\"")),
+                "under AutoPublishAliasAllProperties a new Description names a new version");
+    }
+
+    private String functionDescription(String template) throws Exception {
+        return functionDescription(template, Map.of());
+    }
+
+    private String functionDescription(String template, Map<String, String> parameterValues) throws Exception {
+        return processor.expandSamTemplate(objectMapper.readTree(template), parameterValues).path("Resources")
+                .path("MyFunc").path("Properties").path("Description").toString();
+    }
+
     /** SAM's types for the other version properties, and VersionDeletionPolicy needs AutoPublishAlias. */
     @Test
     void expandSamTemplate_versionPropertiesHaveSamsTypes() throws Exception {

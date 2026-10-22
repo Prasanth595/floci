@@ -630,6 +630,7 @@ class SamTransformIntegrationTest {
                   Handler: app.handler
                   Runtime: python3.12
                   InlineCode: "def handler(event, context): return {'statusCode': 200}"
+                  Description: Configured by SAM
                   Timeout: 30
                   MemorySize: 256
                   Environment:
@@ -668,6 +669,7 @@ class SamTransformIntegrationTest {
             .body("Configuration.FunctionName", equalTo("sam-configured-func"))
             .body("Configuration.Handler", equalTo("app.handler"))
             .body("Configuration.Runtime", equalTo("python3.12"))
+            .body("Configuration.Description", equalTo("Configured by SAM"))
             .body("Configuration.Timeout", equalTo(30))
             .body("Configuration.MemorySize", equalTo(256))
             .body("Configuration.Environment.Variables.TABLE_NAME", equalTo("my-table"))
