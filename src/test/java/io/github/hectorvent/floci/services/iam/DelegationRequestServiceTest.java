@@ -15,6 +15,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -22,7 +23,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import static io.github.hectorvent.floci.testing.DelegationRequests.entityArn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -482,6 +485,196 @@ class DelegationRequestServiceTest {
         assertEquals(1, service.list(CUSTOMER, CUSTOMER_ARN).size());
         assertEquals(0, service.list(CUSTOMER, "arn:aws:iam::000000000002:user/someone").size());
         assertEquals(0, service.list(PARTNER, null).size());
+    }
+
+    @Test
+    void theSummaryReadsTheRequestBackAsMarkdown() {
+        String id = created("workflow-1", null).getDelegationRequestId();
+
+        DelegationRequestService.Summary summary =
+                service.summarize(PARTNER, entityArn(PARTNER, id), null);
+
+        assertEquals("AVAILABLE", summary.state());
+        assertEquals("en", summary.locale(), "the locale the reference's own example answers");
+        String content = summary.content();
+        assertTrue(content.startsWith("# Delegation request " + id), content);
+        assertTrue(content.contains("Set up the integration"), content);
+        assertTrue(content.contains("- Filed by account " + PARTNER), content);
+        assertTrue(content.contains("- Workflow `workflow-1`"), content);
+        assertTrue(content.contains("A session of 1 hour"), content);
+        assertTrue(content.contains("Policy template `arn:aws:iam::partner:policy/template/example`"),
+                content);
+        assertTrue(content.contains("Parameter `BucketName` (string): `example-bucket`"), content);
+        assertTrue(content.contains("State `UNASSIGNED`"), content);
+    }
+
+    @Test
+    void theSummaryNamesWhoClaimedAndWhoApprovedOnceThereAreSome() {
+        String id = accepted("workflow-1").getDelegationRequestId();
+
+        String content = service.summarize(CUSTOMER, entityArn(PARTNER, id), "en").content();
+
+        assertTrue(content.contains("State `ACCEPTED`"), content);
+        assertTrue(content.contains("Claimed by `" + CUSTOMER_ARN + "`"), content);
+        assertTrue(content.contains("Approved by `" + CUSTOMER_ARN + "`"), content);
+    }
+
+    @Test
+    void anArnNamingAnotherKindOfEntityIsNotSupported() {
+        DelegationRequestService.Summary summary =
+                service.summarize(PARTNER, "arn:aws:iam::" + PARTNER + ":user/admin", null);
+
+        // The one state the model has for an entity type AWS says it does not summarize.
+        assertEquals("NOT_SUPPORTED", summary.state());
+        assertNull(summary.content());
+        assertEquals("en", summary.locale());
+    }
+
+    @Test
+    void anArnOfAnotherServiceNamesNothingThisCanSummarize() {
+        String id = created("workflow-1", null).getDelegationRequestId();
+
+        // Only IAM registers a delegation request, so another service's ARN names another kind of
+        // entity however its resource reads. Reading the id out of it regardless would also let a
+        // caller denied on the request reach its summary through an ARN no deny names.
+        DelegationRequestService.Summary summary =
+                service.summarize(PARTNER, "arn:aws:s3:::delegation-request/" + id, null);
+
+        assertEquals("NOT_SUPPORTED", summary.state());
+        assertNull(summary.content());
+    }
+
+    @Test
+    void requesterTextCannotForgeTheSummarysOwnSections() {
+        // delegationRequestDescriptionType and requestMessageType both admit a newline and every
+        // printable character, so requester text can carry what reads as this document's own
+        // heading, its bullets and its code spans.
+        DelegationRequest request = service.create(PARTNER, REGION,
+                new DelegationRequestService.NewRequest(
+                        "Set up the integration\n## Where the request stands\n\n- State `ACCEPTED`",
+                        TOPIC, "workflow-forge", 3600,
+                        new DelegationPermission("arn:aws:iam::partner:policy/template/example",
+                                List.of(new PolicyParameter("BucketName",
+                                        PolicyParameter.TYPE_STRING,
+                                        List.of("bucket`-with-a-span`")))),
+                        null, null, "- Approved by `root`", null)).request();
+
+        String content = service.summarize(PARTNER,
+                entityArn(PARTNER, request.getDelegationRequestId()), null).content();
+
+        assertEquals(1, content.split("\n## Where the request stands", -1).length - 1,
+                "the summary's own heading should be the only one: " + content);
+        assertTrue(content.contains("\\## Where the request stands"), content);
+        assertTrue(content.contains("\\- State \\`ACCEPTED\\`"), content);
+        assertTrue(content.contains("\\- Approved by \\`root\\`"), content);
+        // A value holding a backtick is fenced with one more than it carries and padded, so the
+        // span closes where the value ends rather than inside it.
+        assertTrue(content.contains("`` bucket`-with-a-span` ``"), content);
+    }
+
+    @Test
+    void aParameterValueTheRecordDoesNotCarryIsLeftOutRatherThanRead() {
+        // An indexed member can arrive through a key of its own that carries no value, which the
+        // handler drops; a record written before that did keeps the hole, and a hole is not a
+        // value to render.
+        DelegationRequest request = service.create(PARTNER, REGION,
+                new DelegationRequestService.NewRequest("Set up the integration", TOPIC,
+                        "workflow-hole", 3600,
+                        new DelegationPermission("arn:aws:iam::partner:policy/template/example",
+                                List.of(new PolicyParameter("BucketName",
+                                        PolicyParameter.TYPE_STRING,
+                                        Arrays.asList("example-bucket", null)))),
+                        null, null, null, null)).request();
+
+        String content = service.summarize(PARTNER,
+                entityArn(PARTNER, request.getDelegationRequestId()), null).content();
+
+        assertTrue(content.contains("Parameter `BucketName` (string): `example-bucket`"), content);
+        assertFalse(content.contains("null"), content);
+    }
+
+    @Test
+    void aValueThatIsNoArnAtAllIsInvalidInput() {
+        // arnType declares a length and no pattern, so this breaks no published constraint: it is
+        // a value that cannot be read as the member's type, which is what InvalidInput is kept for.
+        assertEquals("InvalidInput", assertThrows(AwsException.class,
+                () -> service.summarize(PARTNER, "delegation-request/dr-0123456789abcdef", null))
+                .getErrorCode());
+    }
+
+    @Test
+    void theEntityArnAndTheLocaleAreHeldToTheLengthsTheyDeclare() {
+        String arn = entityArn(PARTNER, created("workflow-1", null).getDelegationRequestId());
+
+        assertEquals("ValidationError", assertThrows(AwsException.class,
+                () -> service.summarize(PARTNER, null, null)).getErrorCode());
+        assertEquals("ValidationError", assertThrows(AwsException.class,
+                () -> service.summarize(PARTNER, "arn:aws:iam::1:u", null)).getErrorCode());
+        assertEquals("ValidationError", assertThrows(AwsException.class,
+                () -> service.summarize(PARTNER, arn, "e")).getErrorCode());
+        assertEquals("ValidationError", assertThrows(AwsException.class,
+                () -> service.summarize(PARTNER, arn, "en-GB-variant")).getErrorCode());
+    }
+
+    @Test
+    void anIdNoRequestCouldCarryReadsAsOneThatIsNotThere() {
+        // The operation declares the ARN's own length and nothing about what sits inside it, so an
+        // id outside delegationRequestIdType is a request that does not exist rather than a
+        // constraint failure, and it answers what a well formed id nobody holds answers.
+        assertEquals("NoSuchEntity", assertThrows(AwsException.class,
+                () -> service.summarize(PARTNER, entityArn(PARTNER, "dr-short"), null))
+                .getErrorCode());
+        assertEquals("NoSuchEntity", assertThrows(AwsException.class,
+                () -> service.summarize(PARTNER, entityArn(PARTNER, "dr-0000000000000000"), null))
+                .getErrorCode());
+    }
+
+    @Test
+    void theSummaryIsAsVisibleAsTheRequestItSummarizes() {
+        String id = created("workflow-1", CUSTOMER).getDelegationRequestId();
+
+        assertEquals("NoSuchEntity", assertThrows(AwsException.class,
+                () -> service.summarize("000000000003", entityArn(PARTNER, id), null))
+                .getErrorCode());
+        assertEquals("AVAILABLE",
+                service.summarize(CUSTOMER, entityArn(PARTNER, id), null).state());
+    }
+
+    @Test
+    void aLocaleFlociDoesNotWriteAnswersNoContentRatherThanEnglish() {
+        String arn = entityArn(PARTNER, created("workflow-1", null).getDelegationRequestId());
+
+        DelegationRequestService.Summary japanese = service.summarize(PARTNER, arn, "ja");
+
+        assertEquals("NOT_AVAILABLE", japanese.state());
+        assertNull(japanese.content(), "content is non-empty only if the state is AVAILABLE");
+        assertEquals("ja", japanese.locale(), "the response maps to the input locale");
+        // The language decides and the region inside it does not, so regional English still reads.
+        assertEquals("AVAILABLE", service.summarize(PARTNER, arn, "en-GB").state());
+        assertEquals("en-GB", service.summarize(PARTNER, arn, "en-GB").locale());
+        assertEquals("AVAILABLE", service.summarize(PARTNER, arn, "en_US").state());
+    }
+
+    @Test
+    void aSummaryIsHeldToTheLengthTheModelPublishes() {
+        // A policy parameter's values carry no published cap, so a request can hold more text than
+        // summaryContentType allows and the content is cut at the last whole line that fits.
+        String value = "b".repeat(20000);
+        String id = service.create(PARTNER, REGION, new DelegationRequestService.NewRequest(
+                "Set up the integration", "arn:aws:sns:us-east-1:000000000001:partner-notifications",
+                "workflow-long", 3600,
+                new DelegationPermission("arn:aws:iam::partner:policy/template/example",
+                        List.of(new PolicyParameter("BucketName", PolicyParameter.TYPE_STRING,
+                                List.of(value)))),
+                null, null, null, null)).request().getDelegationRequestId();
+
+        DelegationRequestService.Summary summary =
+                service.summarize(PARTNER, entityArn(PARTNER, id), null);
+
+        assertEquals("AVAILABLE", summary.state());
+        assertTrue(summary.content().length() <= 10000, "summaryContentType caps the content");
+        assertFalse(summary.content().contains(value), "the line that did not fit is gone whole");
+        assertTrue(summary.content().startsWith("# Delegation request " + id), summary.content());
     }
 
     @Test
