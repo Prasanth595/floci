@@ -39,9 +39,6 @@ public class StreamBatchFailures {
     static final String MAXIMUM_RECORD_AGE_EXCEEDED = "MaximumRecordAgeExceeded";
     static final long MAX_RETRY_BACKOFF_MS = 60_000;
 
-    /** Always three fraction digits. {@code ISO_INSTANT} writes micros, or no fraction on a whole second. */
-    private static final DateTimeFormatter MILLISECOND_TIMESTAMP =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
     private static final DateTimeFormatter S3_KEY_DATE =
             DateTimeFormatter.ofPattern("yyyy/MM/dd").withZone(ZoneOffset.UTC);
     private static final DateTimeFormatter S3_KEY_TIME =
@@ -95,11 +92,6 @@ public class StreamBatchFailures {
     /** The retry state of a failing batch is keyed by the checkpoint it is read after. */
     static String batchStateKey(String esmUuid, String shardId, String checkpoint) {
         return esmUuid + ":" + shardId + ":" + (checkpoint == null ? "TRIM_HORIZON" : checkpoint);
-    }
-
-    /** ISO-8601 in UTC with milliseconds, as AWS writes the record's {@code timestamp}. */
-    static String millisecondTimestamp(Instant instant) {
-        return MILLISECOND_TIMESTAMP.format(instant);
     }
 
     static String s3Key(String esmUuid, String shardId, Instant now, UUID randomId) {
@@ -181,7 +173,7 @@ public class StreamBatchFailures {
         if (withPayload) {
             root.put("payload", batch.event().get());
         }
-        root.put("timestamp", millisecondTimestamp(Instant.now()));
+        root.put("timestamp", AsyncInvokeDestinationRouter.formatRecordTimestamp(Instant.now()));
 
         ObjectNode batchInfo = root.putObject(batch.batchInfoName());
         batchInfo.put("shardId", batch.shardId());

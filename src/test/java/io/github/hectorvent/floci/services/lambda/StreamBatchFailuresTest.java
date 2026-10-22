@@ -73,14 +73,6 @@ class StreamBatchFailuresTest {
     }
 
     @Test
-    void millisecondTimestampAlwaysHasThreeFractionDigits() {
-        assertEquals("2026-10-20T12:07:26.000Z",
-                StreamBatchFailures.millisecondTimestamp(Instant.parse("2026-10-20T12:07:26Z")));
-        assertEquals("2026-10-20T12:07:26.012Z",
-                StreamBatchFailures.millisecondTimestamp(Instant.parse("2026-10-20T12:07:26.012345Z")));
-    }
-
-    @Test
     void retryBackoffDoublesFromThePollIntervalAndCapsAtOneMinute() {
         assertEquals(1_000, StreamBatchFailures.retryBackoffMs(500, 1));
         assertEquals(2_000, StreamBatchFailures.retryBackoffMs(500, 2));
