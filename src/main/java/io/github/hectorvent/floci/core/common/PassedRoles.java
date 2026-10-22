@@ -54,6 +54,10 @@ import java.util.regex.Pattern;
  * "Even when you don't specify the AdministrationRoleARN parameter, the IAM principal calling
  * CreateStackSet or UpdateStackSet must have iam:PassRole permission for the
  * AWSCloudFormationStackSetAdministrationRole role."
+ *
+ * <p>A Glue job, crawler or Data Catalog encryption setting passes its role to {@code glue.amazonaws.com},
+ * by name or by ARN as ECS takes one: a job's {@code Role} is "The name or Amazon Resource Name (ARN) of
+ * the IAM role associated with this job".
  */
 final class PassedRoles {
 
@@ -77,6 +81,7 @@ final class PassedRoles {
     private static final String CLOUDFORMATION = ServicePrincipals.of("cloudformation");
     private static final String AUTOSCALING = ServicePrincipals.of("autoscaling");
     private static final String APPLICATION_AUTOSCALING = ServicePrincipals.of("application-autoscaling");
+    private static final String GLUE = ServicePrincipals.of("glue");
 
     private static final String STACK_SET_ADMINISTRATION_ROLE = "AWSCloudFormationStackSetAdministrationRole";
     private static final String SERVICE_MANAGED = "SERVICE_MANAGED";
@@ -142,7 +147,7 @@ final class PassedRoles {
             case "ecs:CreateService", "ecs:UpdateService" -> ecsService(jsonBody(ctx), lookups);
             case "ecs:CreateTaskSet" -> ecsTaskDefinitionRoles(jsonBody(ctx), lookups);
             case "ecs:CreateCapacityProvider", "ecs:UpdateCapacityProvider" ->
-                    ecsRoles(values(jsonBody(ctx), "managedInstancesProvider", "infrastructureRoleArn"), ECS, lookups);
+                    namedRoles(values(jsonBody(ctx), "managedInstancesProvider", "infrastructureRoleArn"), ECS, lookups);
             case "states:CreateStateMachine", "states:UpdateStateMachine" -> fromJson(ctx, STATES, "roleArn");
             case "events:PutRule" -> fromJson(ctx, EVENTS, "RoleArn");
             case "events:PutTargets" -> fromJson(ctx, EVENTS, "Targets", "[]", "RoleArn");
@@ -162,6 +167,11 @@ final class PassedRoles {
             case "autoscaling:StartInstanceRefresh" -> instanceRefresh(ctx, lookups);
             case "autoscaling:PutLifecycleHook" -> fromForm(ctx, AUTOSCALING, "RoleARN");
             case "application-autoscaling:RegisterScalableTarget" -> fromJson(ctx, APPLICATION_AUTOSCALING, "RoleARN");
+            case "glue:CreateJob", "glue:CreateCrawler", "glue:UpdateCrawler" ->
+                    namedRoles(values(jsonBody(ctx), "Role"), GLUE, lookups);
+            case "glue:UpdateJob" -> namedRoles(values(jsonBody(ctx), "JobUpdate", "Role"), GLUE, lookups);
+            case "glue:PutDataCatalogEncryptionSettings" -> namedRoles(values(jsonBody(ctx),
+                    "DataCatalogEncryptionSettings", "EncryptionAtRest", "CatalogEncryptionServiceRole"), GLUE, lookups);
             default -> List.of();
         };
     }
@@ -169,7 +179,7 @@ final class PassedRoles {
     private static List<PassedRole> ecsTaskDefinition(JsonNode body, Lookups lookups) {
         List<String> roles = new ArrayList<>(values(body, "taskRoleArn"));
         roles.addAll(values(body, "executionRoleArn"));
-        return ecsRoles(roles, ECS_TASKS, lookups);
+        return namedRoles(roles, ECS_TASKS, lookups);
     }
 
     /** RunTask and StartTask: the task definition's roles and its overrides to the task, and the volumes' infrastructure role. */
@@ -177,8 +187,8 @@ final class PassedRoles {
         List<String> taskRoles = new ArrayList<>(taskDefinitionRoles(body, lookups));
         taskRoles.addAll(values(body, "overrides", "taskRoleArn"));
         taskRoles.addAll(values(body, "overrides", "executionRoleArn"));
-        List<PassedRole> passed = new ArrayList<>(ecsRoles(taskRoles, ECS_TASKS, lookups));
-        passed.addAll(ecsRoles(values(body, "volumeConfigurations", "[]", "managedEBSVolume", "roleArn"), ECS, lookups));
+        List<PassedRole> passed = new ArrayList<>(namedRoles(taskRoles, ECS_TASKS, lookups));
+        passed.addAll(namedRoles(values(body, "volumeConfigurations", "[]", "managedEBSVolume", "roleArn"), ECS, lookups));
         return passed;
     }
 
@@ -191,12 +201,12 @@ final class PassedRoles {
         infrastructure.addAll(values(body, "volumeConfigurations", "[]", "managedEBSVolume", "roleArn"));
         infrastructure.addAll(values(body, "vpcLatticeConfigurations", "[]", "roleArn"));
         List<PassedRole> passed = new ArrayList<>(ecsTaskDefinitionRoles(body, lookups));
-        passed.addAll(ecsRoles(infrastructure, ECS, lookups));
+        passed.addAll(namedRoles(infrastructure, ECS, lookups));
         return passed;
     }
 
     private static List<PassedRole> ecsTaskDefinitionRoles(JsonNode body, Lookups lookups) {
-        return ecsRoles(taskDefinitionRoles(body, lookups), ECS_TASKS, lookups);
+        return namedRoles(taskDefinitionRoles(body, lookups), ECS_TASKS, lookups);
     }
 
     /** The roles of the task definition the request names; none when it names none. */
@@ -207,10 +217,10 @@ final class PassedRoles {
     }
 
     /**
-     * ECS takes a role by its name as well as by its ARN ({@code taskRoleArn} is "The short name or
+     * ECS and Glue take a role by its name as well as by its ARN ({@code taskRoleArn} is "The short name or
      * full Amazon Resource Name (ARN) of the IAM role"), and a name is the role in the request's account.
      */
-    private static List<PassedRole> ecsRoles(List<String> roles, String service, Lookups lookups) {
+    private static List<PassedRole> namedRoles(List<String> roles, String service, Lookups lookups) {
         List<String> arns = new ArrayList<>();
         for (String role : roles) {
             if (!role.isBlank()) {

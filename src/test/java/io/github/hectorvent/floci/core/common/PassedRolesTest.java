@@ -328,6 +328,28 @@ class PassedRolesTest {
                 json("{\"ServiceNamespace\":\"ecs\"}"), LOOKUPS));
     }
 
+    @Test
+    void aGlueJobCrawlerAndCatalogEncryptionPassTheirRoleToGlueByNameOrArn() {
+        String glue = "glue.amazonaws.com";
+        for (String action : new String[] {"glue:CreateJob", "glue:CreateCrawler", "glue:UpdateCrawler"}) {
+            assertEquals(List.of(passed("etl", glue)), PassedRoles.of(action,
+                    json("{\"Name\":\"j\",\"Role\":\"" + ROLES + "etl\"}"), LOOKUPS), action);
+            assertEquals(List.of(passed("service-role/etl", glue)), PassedRoles.of(action,
+                    json("{\"Name\":\"j\",\"Role\":\"service-role/etl\"}"), LOOKUPS), action);
+            assertEquals(List.of(), PassedRoles.of(action, json("{\"Name\":\"j\"}"), LOOKUPS), action);
+        }
+        // UpdateJob carries the role inside JobUpdate; a top-level Role is not one it reads.
+        assertEquals(List.of(passed("etl", glue)), PassedRoles.of("glue:UpdateJob",
+                json("{\"JobName\":\"j\",\"Role\":\"" + ROLES + "other\",\"JobUpdate\":{\"Role\":\"etl\"}}"),
+                LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("glue:UpdateJob",
+                json("{\"JobName\":\"j\",\"JobUpdate\":{\"Timeout\":5}}"), LOOKUPS));
+        assertEquals(List.of(passed("catalog", glue)), PassedRoles.of("glue:PutDataCatalogEncryptionSettings",
+                json("{\"DataCatalogEncryptionSettings\":{\"EncryptionAtRest\":{\"CatalogEncryptionMode\":"
+                        + "\"SSE-KMS-WITH-SERVICE-ROLE\",\"CatalogEncryptionServiceRole\":\"" + ROLES + "catalog\"}}}"),
+                LOOKUPS));
+    }
+
     private static PassedRole passed(String roleName, String service) {
         return new PassedRole(ROLES + roleName, service);
     }

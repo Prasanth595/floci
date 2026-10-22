@@ -51,6 +51,7 @@ class IamPassRoleEnforcementIntegrationTest {
     private static final String SCHEDULER = "scheduler.amazonaws.com";
     private static final String PIPES = "pipes.amazonaws.com";
     private static final String AUTOSCALING = "autoscaling.amazonaws.com";
+    private static final String GLUE = "glue.amazonaws.com";
     private static final String SERVICE_LINKED_ROLES =
             "arn:aws:iam::" + ACCOUNT + ":role/aws-service-role/autoscaling.amazonaws.com/";
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
@@ -810,6 +811,85 @@ class IamPassRoleEnforcementIntegrationTest {
         cleanup.register(() -> admin("ecs").contentType("application/x-amz-json-1.1")
                 .header("X-Amz-Target", "AmazonEC2ContainerServiceV20141113.StopTask")
                 .body("{\"cluster\":\"" + cluster + "\",\"task\":\"" + taskArn + "\"}").post("/"));
+    }
+
+    @Test
+    void aGlueJobNeedsPassRoleOnItsRoleForGlueByNameOrArn() {
+        String role = role("glue-job");
+        User user = user("passrole-glue-job");
+        String job = "passrole-job-" + suffix();
+        String create = """
+                {"Name":"%s","Role":"%s","Command":{"Name":"glueetl","ScriptLocation":"s3://b/s.py"}}"""
+                .formatted(job, role);
+        String actions = allow("glue:CreateJob", "*") + "," + allow("glue:UpdateJob", "*");
+
+        user.policy(actions);
+        deniedJson(glue(user, "CreateJob").body(create).post("/").then());
+        // A grant to pass the role to Lambda does not cover Glue.
+        user.policy(actions + "," + passRole(role, LAMBDA));
+        deniedJson(glue(user, "CreateJob").body(create).post("/").then());
+        user.policy(actions + "," + passRole(role, GLUE));
+        glue(user, "CreateJob").body(create).post("/").then().statusCode(200);
+        cleanup.register(() -> admin("glue").header("X-Amz-Target", "AWSGlue.DeleteJob")
+                .contentType("application/x-amz-json-1.1").body("{\"JobName\":\"" + job + "\"}").post("/"));
+
+        // UpdateJob names the role inside JobUpdate, here by its name; an update without one passes nothing.
+        String update = """
+                {"JobName":"%s","JobUpdate":{"Role":"%s","Command":{"Name":"glueetl","ScriptLocation":"s3://b/s.py"}}}"""
+                .formatted(job, roleName(role));
+        user.policy(actions);
+        deniedJson(glue(user, "UpdateJob").body(update).post("/").then());
+        glue(user, "UpdateJob").body("{\"JobName\":\"" + job + "\",\"JobUpdate\":{\"Timeout\":5}}").post("/")
+                .then().statusCode(200);
+        user.policy(actions + "," + passRole(role, GLUE));
+        glue(user, "UpdateJob").body(update).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void aGlueCrawlerNeedsPassRoleOnItsRoleForGlueByNameOrArn() {
+        String role = role("glue-crawler");
+        User user = user("passrole-glue-crawler");
+        String crawler = "passrole-crawler-" + suffix();
+        String create = """
+                {"Name":"%s","Role":"%s","Targets":{"S3Targets":[{"Path":"s3://b/data/"}]}}"""
+                .formatted(crawler, roleName(role));
+        String update = "{\"Name\":\"" + crawler + "\",\"Role\":\"" + role + "\"}";
+        String actions = allow("glue:CreateCrawler", "*") + "," + allow("glue:UpdateCrawler", "*");
+
+        user.policy(actions + "," + passRole(role, LAMBDA));
+        deniedJson(glue(user, "CreateCrawler").body(create).post("/").then());
+        user.policy(actions + "," + passRole(role, GLUE));
+        glue(user, "CreateCrawler").body(create).post("/").then().statusCode(200);
+        cleanup.register(() -> admin("glue").header("X-Amz-Target", "AWSGlue.DeleteCrawler")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + crawler + "\"}").post("/"));
+
+        user.policy(actions);
+        deniedJson(glue(user, "UpdateCrawler").body(update).post("/").then());
+        glue(user, "UpdateCrawler").body("{\"Name\":\"" + crawler + "\",\"Description\":\"d\"}").post("/")
+                .then().statusCode(200);
+        user.policy(actions + "," + passRole(role, GLUE));
+        glue(user, "UpdateCrawler").body(update).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void glueCatalogEncryptionNeedsPassRoleOnItsServiceRoleForGlue() {
+        String role = role("glue-catalog");
+        User user = user("passrole-glue-catalog");
+        String settings = """
+                {"DataCatalogEncryptionSettings":{"EncryptionAtRest":{"CatalogEncryptionMode":"SSE-KMS-WITH-SERVICE-ROLE",
+                 "SseAwsKmsKeyId":"alias/aws/glue","CatalogEncryptionServiceRole":"%s"}}}""".formatted(role);
+        String action = allow("glue:PutDataCatalogEncryptionSettings", "*");
+        cleanup.register(() -> admin("glue").header("X-Amz-Target", "AWSGlue.PutDataCatalogEncryptionSettings")
+                .contentType("application/x-amz-json-1.1").body("{\"DataCatalogEncryptionSettings\":{}}").post("/"));
+
+        user.policy(action);
+        deniedJson(glue(user, "PutDataCatalogEncryptionSettings").body(settings).post("/").then());
+        user.policy(action + "," + passRole(role, GLUE));
+        glue(user, "PutDataCatalogEncryptionSettings").body(settings).post("/").then().statusCode(200);
+    }
+
+    private static RequestSpecification glue(User user, String operation) {
+        return user.json("glue", "AWSGlue." + operation);
     }
 
     private static String runTask(String cluster, String family, String taskRoleOverride) {

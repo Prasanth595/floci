@@ -1433,6 +1433,10 @@ role each passes:
   names) go to `autoscaling.amazonaws.com`.
 - **Application Auto Scaling:** `RegisterScalableTarget` passes `RoleARN` to
   `application-autoscaling.amazonaws.com` when the request names one.
+- **Glue:** `CreateJob`, `CreateCrawler` and `UpdateCrawler` pass `Role`, `UpdateJob` the
+  `JobUpdate`'s `Role`, and `PutDataCatalogEncryptionSettings` the `EncryptionAtRest`
+  `CatalogEncryptionServiceRole`, to `glue.amazonaws.com` when the request names one. A role given
+  by its name is the role of that name, with any path, in the caller's account.
 
 Launching an instance from a launch template does not check the template's role, as on AWS: the EC2
 user guide warns that a user who can create launch template versions "can potentially update a launch
