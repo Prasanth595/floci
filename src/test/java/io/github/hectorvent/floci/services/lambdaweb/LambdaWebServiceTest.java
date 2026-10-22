@@ -787,11 +787,11 @@ class LambdaWebServiceTest {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
         when(s3.openObject("code", "app.zip", null))
-                .thenReturn(object(LambdaWebZips.unzippingTo(LambdaWebCode.MAX_BYTES)));
+                .thenReturn(object(LambdaWebZips.declaring(LambdaWebCode.MAX_BYTES)));
         WebFunctionRevision full = service.createFunction(REGION, createRequest("app")).revisions.values()
                 .iterator().next();
         when(s3.openObject("code", "app.zip", null))
-                .thenReturn(object(LambdaWebZips.unzippingTo(LambdaWebCode.MAX_BYTES + 1)));
+                .thenReturn(object(LambdaWebZips.declaring(LambdaWebCode.MAX_BYTES + 1)));
         WebFunctionRevision over = service.createRevision(REGION, "app", revisionConfig(30));
 
         assertNull(full.failureReason);

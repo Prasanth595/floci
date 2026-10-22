@@ -668,7 +668,7 @@ class LambdaWebIntegrationTest {
     @Order(12)
     void codeThatUnzipsPastTheLimitFailsItsRevision() {
         String fn = FN + "-large";
-        s3Service.putObject(BUCKET, "large.zip", LambdaWebZips.unzippingTo(LambdaWebCode.MAX_BYTES + 1),
+        s3Service.putObject(BUCKET, "large.zip", LambdaWebZips.declaring(LambdaWebCode.MAX_BYTES + 1),
                 "application/zip", Map.of());
         given().contentType("application/json")
                 .body("""
