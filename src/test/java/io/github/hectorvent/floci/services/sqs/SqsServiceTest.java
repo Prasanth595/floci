@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.sqs;
 
 import io.github.hectorvent.floci.config.EmulatorConfig.SqsServiceConfig.EndpointStrategy;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -383,6 +384,120 @@ class SqsServiceTest {
 
         List<Queue> alpha = sqsService.listQueues("alpha", region);
         assertEquals(2, alpha.size());
+    }
+
+    @Test
+    void listQueuesPagesEveryQueueExactlyOnce() {
+        String region = "eu-west-1";
+        sqsService.createQueue("page-c", null, region);
+        sqsService.createQueue("page-a", null, region);
+        sqsService.createQueue("page-b", null, region);
+
+        List<String> names = new ArrayList<>();
+        String token = null;
+        int pages = 0;
+        do {
+            PaginatedResult<Queue> page = sqsService.listQueues(null, 1, token, region);
+            assertEquals(1, page.items().size());
+            names.add(page.items().getFirst().getQueueName());
+            token = page.nextToken();
+            pages++;
+        } while (token != null);
+
+        assertEquals(3, pages);
+        assertEquals(List.of("page-a", "page-b", "page-c"), names);
+    }
+
+    @Test
+    void listQueuesOmitsNextTokenOnLastPage() {
+        String region = "eu-west-1";
+        sqsService.createQueue("last-a", null, region);
+        sqsService.createQueue("last-b", null, region);
+
+        PaginatedResult<Queue> first = sqsService.listQueues(null, 1, null, region);
+        assertNotNull(first.nextToken());
+        PaginatedResult<Queue> second = sqsService.listQueues(null, 1, first.nextToken(), region);
+        assertEquals("last-b", second.items().getFirst().getQueueName());
+        assertNull(second.nextToken());
+
+        assertNull(sqsService.listQueues(null, 2, null, region).nextToken());
+    }
+
+    @Test
+    void listQueuesWithoutMaxResultsNeverReturnsNextToken() {
+        String region = "eu-west-1";
+        sqsService.createQueue("nomax-a", null, region);
+        sqsService.createQueue("nomax-b", null, region);
+
+        PaginatedResult<Queue> page = sqsService.listQueues(null, null, null, region);
+        assertEquals(2, page.items().size());
+        assertNull(page.nextToken());
+    }
+
+    @Test
+    void listQueuesResumesAfterCursorQueueIsDeleted() {
+        String region = "eu-west-1";
+        sqsService.createQueue("gone-a", null, region);
+        Queue cursorQueue = sqsService.createQueue("gone-b", null, region);
+        sqsService.createQueue("gone-c", null, region);
+        sqsService.createQueue("gone-d", null, region);
+
+        PaginatedResult<Queue> first = sqsService.listQueues(null, 2, null, region);
+        assertEquals(List.of("gone-a", "gone-b"), first.items().stream().map(Queue::getQueueName).toList());
+
+        sqsService.deleteQueue(cursorQueue.getQueueUrl(), region);
+
+        PaginatedResult<Queue> second = sqsService.listQueues(null, 2, first.nextToken(), region);
+        assertEquals(List.of("gone-c", "gone-d"), second.items().stream().map(Queue::getQueueName).toList());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void listQueuesWithoutMaxResultsCapsAtOneThousand() {
+        String region = "eu-west-1";
+        for (int i = 0; i < 1001; i++) {
+            sqsService.createQueue(String.format("cap-%04d", i), null, region);
+        }
+
+        PaginatedResult<Queue> page = sqsService.listQueues(null, null, null, region);
+
+        assertEquals(1000, page.items().size());
+        assertEquals("cap-0000", page.items().getFirst().getQueueName());
+        assertEquals("cap-0999", page.items().getLast().getQueueName());
+        assertNull(page.nextToken());
+    }
+
+    @Test
+    void listQueuesPagesWithinPrefix() {
+        String region = "eu-west-1";
+        sqsService.createQueue("pfx-one", null, region);
+        sqsService.createQueue("other-queue", null, region);
+        sqsService.createQueue("pfx-two", null, region);
+
+        PaginatedResult<Queue> first = sqsService.listQueues("pfx-", 1, null, region);
+        PaginatedResult<Queue> second = sqsService.listQueues("pfx-", 1, first.nextToken(), region);
+
+        assertEquals("pfx-one", first.items().getFirst().getQueueName());
+        assertEquals("pfx-two", second.items().getFirst().getQueueName());
+        assertNull(second.nextToken());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1, 1001})
+    void listQueuesRejectsOutOfRangeMaxResults(int maxResults) {
+        AwsException e = assertThrows(AwsException.class,
+                () -> sqsService.listQueues(null, maxResults, null, "eu-west-1"));
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"not-a-token!", "Z2FyYmFnZQ"})
+    void listQueuesRejectsInvalidNextToken(String token) {
+        sqsService.createQueue("token-queue", null, "eu-west-1");
+        AwsException e = assertThrows(AwsException.class,
+                () -> sqsService.listQueues(null, 1, token, "eu-west-1"));
+        assertEquals("InvalidParameterValue", e.getErrorCode());
     }
 
     @Test

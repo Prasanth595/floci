@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -67,6 +69,8 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final int DEDUP_LOCK_STRIPES = 256;
     private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
     private static final int MAX_BATCH_ENTRIES = 10;
+    private static final int MAX_LIST_QUEUES_RESULTS = 1000;
+    private static final String LIST_QUEUES_TOKEN_NAMESPACE = "sqs-list-queues";
     private static final int MAX_TERMINAL_MOVE_TASKS = 10;
     private static final Duration TERMINAL_MOVE_TASK_TTL = Duration.ofHours(1);
     /** AWS accepts MaximumMessageSize between 1 KiB and 1 MiB; 1 MiB is also the default.
@@ -849,6 +853,28 @@ public class SqsService implements Resettable, ResourceProvider {
         }
         queues.forEach(q -> withCurrentQueueUrl(q, region));
         return queues;
+    }
+
+    /**
+     * ListQueues with AWS paging: without {@code maxResults} the response holds at most 1,000
+     * queues and never a token; with it, a token is returned only while more queues remain.
+     * Queues are ordered by name so consecutive pages neither skip nor repeat a queue.
+     */
+    public PaginatedResult<Queue> listQueues(String namePrefix, Integer maxResults, String nextToken,
+                                             String region) {
+        if (maxResults != null && (maxResults < 1 || maxResults > MAX_LIST_QUEUES_RESULTS)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value for parameter MaxResults is invalid. Reason: MaxResults must be an integer between 1 and "
+                            + MAX_LIST_QUEUES_RESULTS + ".", 400);
+        }
+        int limit = maxResults != null ? maxResults : MAX_LIST_QUEUES_RESULTS;
+        PaginatedResult<Queue> page = Pagination.paginate(listQueues(namePrefix, region), Queue::getQueueName,
+                limit, nextToken, LIST_QUEUES_TOKEN_NAMESPACE,
+                token -> new AwsException("InvalidParameterValue", "Invalid NextToken value.", 400));
+        if (maxResults == null) {
+            return new PaginatedResult<>(page.items(), null);
+        }
+        return page;
     }
 
     public String getQueueUrl(String queueName, String region) {

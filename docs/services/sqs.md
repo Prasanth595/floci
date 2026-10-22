@@ -10,7 +10,7 @@
 | --- | --- |
 | `CreateQueue` | Create a standard or FIFO queue |
 | `DeleteQueue` | Delete a queue |
-| `ListQueues` | List all queues |
+| `ListQueues` | List queues, with `QueueNamePrefix` filtering and `MaxResults`/`NextToken` paging |
 | `GetQueueUrl` | Look up a queue URL by name |
 | `GetQueueAttributes` | Get queue configuration attributes |
 | `SendMessage` | Send a message to a queue |
