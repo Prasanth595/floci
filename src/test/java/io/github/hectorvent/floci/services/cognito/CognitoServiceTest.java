@@ -68,6 +68,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 class CognitoServiceTest {
@@ -2584,7 +2585,7 @@ class CognitoServiceTest {
         verify(messageDispatcher).dispatch(
                 eq(pool), deliveryUser.capture(),
                 eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION),
-                eq("123456"), eq(List.of("EMAIL")));
+                eq("123456"), eq(List.of("EMAIL")), isNull());
         assertEquals("new@example.com", deliveryUser.getValue().getAttributes().get("email"));
         assertEquals("old@example.com",
                 serviceWithVerification.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));

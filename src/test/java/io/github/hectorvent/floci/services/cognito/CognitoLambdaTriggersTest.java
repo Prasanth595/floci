@@ -39,6 +39,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -2229,7 +2230,28 @@ class CognitoLambdaTriggersTest {
     }
 
     private static UserPoolClient customMessageClient(CognitoService svc, UserPool pool) {
-        return svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        return svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of(),
+                null, List.of(), null, AUTH_FLOWS, null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
+    }
+
+    /** Signs in a confirmed user {@code spike} with a verified email and a name; returns the access token. */
+    @SuppressWarnings("unchecked")
+    private static String customMessageUser(CognitoService svc, UserPool pool, UserPoolClient client) {
+        svc.adminCreateUser(pool.getId(), "spike",
+                Map.of("email", "spike@example.com", "email_verified", "true", "name", "Spike"), null);
+        svc.adminSetUserPassword(pool.getId(), "spike", "Spike@Test1", true);
+        Map<String, Object> result = svc.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "spike", "PASSWORD", "Spike@Test1"));
+        return (String) ((Map<String, Object>) result.get("AuthenticationResult")).get("AccessToken");
+    }
+
+    /** The email first, so a code sent as soon as the email is read would miss the name. */
+    private static Map<String, String> newEmailAndName() {
+        Map<String, String> attributes = new LinkedHashMap<>();
+        attributes.put("email", "spike@example.org");
+        attributes.put("name", "Renamed");
+        return attributes;
     }
 
     /** Answers the CustomMessage function with {@code response} and captures the events it is sent. */
@@ -2355,6 +2377,144 @@ class CognitoLambdaTriggersTest {
         Map<String, Object> event = MAPPER.readValue(events.getValue(), new TypeReference<>() {});
         assertEquals("CustomMessage_ForgotPassword", event.get("triggerSource"));
         assertEquals(Map.of("source", "forgot"), ((Map<String, Object>) event.get("request")).get("clientMetadata"));
+    }
+
+    /** Measured (eu-west-1, 2026-10-21): the event carries the user as the whole update leaves them. */
+    @Test
+    void customMessageFiresWithUpdateUserAttributeTriggerSourceOnUpdateUserAttributes() throws Exception {
+        SesService ses = mock(SesService.class);
+        CognitoService svc = customMessageService(ses, VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, "777888");
+        UserPool pool = customMessagePool(svc, Map.of("AutoVerifiedAttributes", List.of("email")));
+        UserPoolClient client = customMessageClient(svc, pool);
+        String accessToken = customMessageUser(svc, pool, client);
+        ArgumentCaptor<byte[]> events = customMessageAnswers(Map.of(
+                "emailSubject", "Confirm your address",
+                "emailMessage", "Your code is {####}"));
+
+        svc.updateUserAttributes(accessToken, newEmailAndName(), Map.of("source", "profile"));
+
+        JsonNode event = MAPPER.readTree(events.getValue());
+        assertEquals("CustomMessage_UpdateUserAttribute", event.path("triggerSource").asText());
+        assertEquals(client.getClientId(), event.path("callerContext").path("clientId").asText());
+        JsonNode request = event.path("request");
+        assertEquals("{####}", request.path("codeParameter").asText());
+        assertEquals("profile", request.path("clientMetadata").path("source").asText());
+        assertEquals("spike@example.org", request.path("userAttributes").path("email").asText());
+        assertEquals("false", request.path("userAttributes").path("email_verified").asText());
+        assertEquals("Renamed", request.path("userAttributes").path("name").asText());
+        assertVerificationEmail(ses, "spike@example.org", "Confirm your address", "Your code is 777888");
+    }
+
+    @Test
+    void customMessageFiresWithVerifyUserAttributeTriggerSourceOnGetUserAttributeVerificationCode() throws Exception {
+        SesService ses = mock(SesService.class);
+        CognitoService svc = customMessageService(ses, VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, "777888");
+        UserPool pool = customMessagePool(svc, Map.of("AutoVerifiedAttributes", List.of("email")));
+        UserPoolClient client = customMessageClient(svc, pool);
+        String accessToken = customMessageUser(svc, pool, client);
+        ArgumentCaptor<byte[]> events = customMessageAnswers(Map.of(
+                "emailSubject", "Verify your address",
+                "emailMessage", "Your code is {####}"));
+
+        svc.getUserAttributeVerificationCode(accessToken, "email", Map.of("source", "settings"));
+
+        JsonNode event = MAPPER.readTree(events.getValue());
+        assertEquals("CustomMessage_VerifyUserAttribute", event.path("triggerSource").asText());
+        assertEquals(client.getClientId(), event.path("callerContext").path("clientId").asText());
+        JsonNode request = event.path("request");
+        assertEquals("{####}", request.path("codeParameter").asText());
+        assertEquals("settings", request.path("clientMetadata").path("source").asText());
+        assertEquals("spike@example.com", request.path("userAttributes").path("email").asText());
+        assertVerificationEmail(ses, "spike@example.com", "Verify your address", "Your code is 777888");
+    }
+
+    /**
+     * Measured (eu-west-1, 2026-10-21 and 2026-10-22): with an email that must be verified before it
+     * changes, both events carry the address still in place, and both codes go to the new one; a
+     * request without ClientMetadata leaves the key out.
+     */
+    @Test
+    void customMessageForAnEmailAwaitingVerificationCarriesTheAddressStillInPlace() throws Exception {
+        SesService ses = mock(SesService.class);
+        CognitoService svc = customMessageService(ses, VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, "777888");
+        UserPool pool = customMessagePool(svc, Map.of(
+                "AutoVerifiedAttributes", List.of("email"),
+                "UserAttributeUpdateSettings", Map.of("AttributesRequireVerificationBeforeUpdate", List.of("email"))));
+        UserPoolClient client = customMessageClient(svc, pool);
+        String accessToken = customMessageUser(svc, pool, client);
+        ArgumentCaptor<byte[]> events = customMessageAnswers(Map.of());
+
+        svc.updateUserAttributes(accessToken, newEmailAndName(), Map.of());
+        svc.getUserAttributeVerificationCode(accessToken, "email", Map.of());
+
+        List<byte[]> sent = events.getAllValues();
+        assertEquals(2, sent.size());
+        for (byte[] payload : sent) {
+            JsonNode request = MAPPER.readTree(payload).path("request");
+            assertFalse(request.has("clientMetadata"));
+            JsonNode userAttributes = request.path("userAttributes");
+            assertEquals("spike@example.com", userAttributes.path("email").asText());
+            assertEquals("true", userAttributes.path("email_verified").asText());
+            assertEquals("Renamed", userAttributes.path("name").asText());
+        }
+        ArgumentCaptor<SendEmailRequest> emails = ArgumentCaptor.forClass(SendEmailRequest.class);
+        verify(ses, times(2)).sendServiceEmail(emails.capture());
+        assertEquals(List.of(List.of("spike@example.org"), List.of("spike@example.org")),
+                emails.getAllValues().stream().map(SendEmailRequest::toAddresses).toList());
+    }
+
+    /**
+     * Measured (eu-west-1, 2026-10-22): Cognito keeps an update whose code it cannot deliver, and
+     * answers CodeDeliveryFailureException.
+     */
+    @Test
+    void anUpdateWhoseCodeCannotBeSentIsKept() {
+        SesService ses = mock(SesService.class);
+        when(ses.sendServiceEmail(any())).thenThrow(new IllegalStateException("SES unavailable"));
+        CognitoService svc = customMessageService(ses, VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, "777888");
+        UserPool pool = customMessagePool(svc, Map.of("AutoVerifiedAttributes", List.of("email")));
+        UserPoolClient client = customMessageClient(svc, pool);
+        String accessToken = customMessageUser(svc, pool, client);
+        customMessageAnswers(Map.of());
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> svc.updateUserAttributes(accessToken, newEmailAndName(), Map.of()));
+
+        assertEquals("CodeDeliveryFailureException", failure.getErrorCode());
+        Map<String, String> attributes = svc.adminGetUser(pool.getId(), "spike").getAttributes();
+        assertEquals("spike@example.org", attributes.get("email"));
+        assertEquals("false", attributes.get("email_verified"));
+        assertEquals("Renamed", attributes.get("name"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void customMessageFunctionCallingBackForTheUserOfAnAttributeCodeIsNotBlocked(boolean update) {
+        CognitoService svc = customMessageService(mock(SesService.class),
+                VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, "777888");
+        UserPool pool = customMessagePool(svc, Map.of("AutoVerifiedAttributes", List.of("email")));
+        UserPoolClient client = customMessageClient(svc, pool);
+        String accessToken = customMessageUser(svc, pool, client);
+        when(lambdaService.invoke(anyString(), eq(CUSTOM_MESSAGE), any(byte[].class),
+                eq(InvocationType.RequestResponse))).thenAnswer(invocation -> {
+                    callFromFunction(() -> {
+                        svc.adminUpdateUserAttributes(pool.getId(), "spike", Map.of("name", "Set by the function"));
+                        return null;
+                    });
+                    return ok(Map.of());
+                });
+
+        // The function's call is for the user the request sends a code to. It would wait out the
+        // invocation if the request held that user's lock stripe while the function ran.
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+            if (update) {
+                svc.updateUserAttributes(accessToken, Map.of("email", "spike@example.org"), Map.of());
+            } else {
+                svc.getUserAttributeVerificationCode(accessToken, "email", Map.of());
+            }
+        });
+
+        assertEquals("Set by the function", svc.adminGetUser(pool.getId(), "spike").getAttributes().get("name"));
     }
 
     /** Measured (eu-west-1, 2026-10-21): no ClientMetadata omits the key, including an empty map. */

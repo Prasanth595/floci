@@ -4080,14 +4080,20 @@ public class CognitoService implements ResourceProvider {
         String username = token.username();
         String poolId = token.poolId();
 
+        List<AttributeCodeMessage> messages = new ArrayList<>();
+        Map<String, Object> response;
         synchronized (userLock(poolId, username)) {
-            return getUserAttributeVerificationCodeUnderUserLock(poolId, username, token.clientId(), attributeName,
-                    clientMetadata);
+            response = getUserAttributeVerificationCodeUnderUserLock(poolId, username, token.clientId(), attributeName,
+                    clientMetadata, messages);
         }
+        sendAttributeCodeMessages(poolId, username, token.clientId(), "CustomMessage_VerifyUserAttribute",
+                clientMetadata, messages);
+        return response;
     }
 
     private Map<String, Object> getUserAttributeVerificationCodeUnderUserLock(
-            String poolId, String username, String clientId, String attributeName, Map<String, String> clientMetadata) {
+            String poolId, String username, String clientId, String attributeName, Map<String, String> clientMetadata,
+            List<AttributeCodeMessage> messages) {
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
                     "Invalid attribute name. Only phone_number and email can be verified.", 400);
@@ -4113,7 +4119,7 @@ public class CognitoService implements ResourceProvider {
             String code = verificationCodeService.issue(poolId, user.getUsername(),
                     purpose, Duration.ofHours(24));
             dispatchAttributeVerificationCode(pool, clientId, user, attributeName, destination, purpose, code,
-                    "CustomEmailSender_VerifyUserAttribute", clientMetadata);
+                    "CustomEmailSender_VerifyUserAttribute", clientMetadata, messages);
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
         }
@@ -4203,14 +4209,20 @@ public class CognitoService implements ResourceProvider {
                     400);
         }
 
+        List<AttributeCodeMessage> messages = new ArrayList<>();
+        List<Map<String, Object>> deliveryDetails;
         synchronized (userLock(poolId, username)) {
-            return updateUserAttributesUnderUserLock(poolId, username, token.clientId(), attributes, clientMetadata);
+            deliveryDetails = updateUserAttributesUnderUserLock(poolId, username, token.clientId(), attributes,
+                    clientMetadata, messages);
         }
+        sendAttributeCodeMessages(poolId, username, token.clientId(), "CustomMessage_UpdateUserAttribute",
+                clientMetadata, messages);
+        return deliveryDetails;
     }
 
     private List<Map<String, Object>> updateUserAttributesUnderUserLock(
             String poolId, String username, String clientId, Map<String, String> attributes,
-            Map<String, String> clientMetadata) {
+            Map<String, String> clientMetadata, List<AttributeCodeMessage> messages) {
         UserPool pool = describeUserPool(poolId);
         CognitoUser currentUser = adminGetUser(poolId, username);
         validateEmailAttribute(attributes, true);
@@ -4254,7 +4266,7 @@ public class CognitoService implements ResourceProvider {
                 String verificationCode = verificationCodeService.issue(
                         poolId, currentUser.getUsername(), purpose, Duration.ofHours(24));
                 dispatchAttributeVerificationCode(pool, clientId, currentUser, attributeName, value,
-                        purpose, verificationCode, "CustomEmailSender_UpdateUserAttribute", clientMetadata);
+                        purpose, verificationCode, "CustomEmailSender_UpdateUserAttribute", clientMetadata, messages);
 
                 if (requiresVerificationBeforeUpdate(pool, attributeName)) {
                     updatedUser.getPendingAttributes().put(attributeName, value);
@@ -4275,8 +4287,7 @@ public class CognitoService implements ResourceProvider {
         } catch (AwsException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new AwsException("CodeDeliveryFailureException",
-                    "Failed to deliver verification code", 400);
+            throw codeDeliveryFailure();
         }
 
         updatedUser.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -6016,18 +6027,59 @@ public class CognitoService implements ResourceProvider {
         return configured instanceof List<?> attributes && attributes.contains(attributeName);
     }
 
+    /**
+     * Hands {@code code} to the pool's CustomEmailSender when it takes the code, and otherwise adds
+     * the message that sends it to {@code messages}, for {@link #sendAttributeCodeMessages}.
+     */
     private void dispatchAttributeVerificationCode(UserPool pool, String clientId, CognitoUser user,
                                                     String attributeName, String destination,
                                                     VerificationCode.Purpose purpose, String code,
                                                     String customEmailSenderSource,
-                                                    Map<String, String> clientMetadata) {
+                                                    Map<String, String> clientMetadata,
+                                                    List<AttributeCodeMessage> messages) {
         CognitoUser deliveryUser = MAPPER.convertValue(user, CognitoUser.class);
         deliveryUser.getAttributes().put(attributeName, destination);
         if (!sendThroughCustomEmailSender(pool, clientId, deliveryUser, deliveryMedium(attributeName),
                 customEmailSenderSource, purpose, code, clientMetadata)) {
-            messageDispatcher.dispatch(pool, deliveryUser, purpose, code,
-                    List.of(deliveryMedium(attributeName)));
+            messages.add(new AttributeCodeMessage(deliveryUser, purpose, code, deliveryMedium(attributeName)));
         }
+    }
+
+    /** An attribute's code, to send as Cognito's own message to the address on {@code deliveryUser}. */
+    private record AttributeCodeMessage(CognitoUser deliveryUser, VerificationCode.Purpose purpose, String code,
+                                        String deliveryMedium) {
+    }
+
+    /**
+     * Sends each code as Cognito's message, which the CustomMessage trigger shapes. It runs once the
+     * user lock is released, since the trigger's function may call the pool back for this user, and
+     * hands the trigger the user as stored by then, which keeps an email that must be verified before
+     * it changes (measured, eu-west-1, 2026-10-21 and 2026-10-22).
+     */
+    private void sendAttributeCodeMessages(String poolId, String username, String clientId, String triggerSource,
+                                           Map<String, String> clientMetadata, List<AttributeCodeMessage> messages) {
+        if (messages.isEmpty()) {
+            return;
+        }
+        UserPool pool = describeUserPool(poolId);
+        UserPoolClient client = describeUserPoolClient(clientId);
+        CognitoUser user = adminGetUser(poolId, username);
+        try {
+            for (AttributeCodeMessage message : messages) {
+                Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
+                        pool, client, user, triggerSource, clientMetadata);
+                messageDispatcher.dispatch(pool, message.deliveryUser(), message.purpose(), message.code(),
+                        List.of(message.deliveryMedium()), customMessage);
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw codeDeliveryFailure();
+        }
+    }
+
+    private static AwsException codeDeliveryFailure() {
+        return new AwsException("CodeDeliveryFailureException", "Failed to deliver verification code", 400);
     }
 
     /**

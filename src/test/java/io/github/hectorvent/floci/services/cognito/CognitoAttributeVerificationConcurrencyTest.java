@@ -74,7 +74,7 @@ class CognitoAttributeVerificationConcurrencyTest {
             String code = invocation.getArgument(3);
             destinationByCode.put(code, deliveryUser.getAttributes().get("email"));
             return null;
-        }).when(dispatcher).dispatch(any(), any(), any(), anyString(), any());
+        }).when(dispatcher).dispatch(any(), any(), any(), anyString(), any(), any());
         acceptOnlyLatestCode(codes, latestCode);
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
