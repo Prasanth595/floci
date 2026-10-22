@@ -56,6 +56,7 @@ class LeafCfnProvisionerTest {
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(i -> i.getArgument(0));
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(i -> i.getArgument(0));
         ctx = new ProvisionContext(engine, REGION, "000000000000", "my-stack");
     }
 
@@ -347,6 +348,78 @@ class LeafCfnProvisionerTest {
                     """), ctx);
 
             assertNull(s3.getValue().getPrefix());
+        }
+
+        @Test
+        void processingLoggingRoleAndErrorPrefixReachTheStream() {
+            ArgumentCaptor<DeliveryStreamDescription.S3Destination> s3 =
+                    ArgumentCaptor.forClass(DeliveryStreamDescription.S3Destination.class);
+            when(firehose.createDeliveryStream(anyString(), s3.capture(), any())).thenReturn("arn");
+
+            provisioner.provision(resource("Stream", "AWS::KinesisFirehose::DeliveryStream"), props("""
+                    {
+                      "DeliveryStreamName": "s",
+                      "ExtendedS3DestinationConfiguration": {
+                        "BucketARN": "arn:bucket",
+                        "RoleARN": "arn:aws:iam::000000000000:role/delivery",
+                        "ErrorOutputPrefix": "errors/!{firehose:error-output-type}/",
+                        "CloudWatchLoggingOptions": {"Enabled": true, "LogGroupName": "g", "LogStreamName": "st"},
+                        "ProcessingConfiguration": {
+                          "Enabled": true,
+                          "Processors": [{"Type": "Lambda", "Parameters": [
+                            {"ParameterName": "LambdaArn", "ParameterValue": "arn:aws:lambda:us-east-1:000000000000:function:f"}
+                          ]}]
+                        }
+                      }
+                    }
+                    """), ctx);
+
+            DeliveryStreamDescription.S3Destination destination = s3.getValue();
+            assertEquals("arn:aws:iam::000000000000:role/delivery", destination.getRoleArn());
+            assertEquals("errors/!{firehose:error-output-type}/", destination.getErrorOutputPrefix());
+            assertEquals(Boolean.TRUE, destination.getCloudWatchLoggingOptions().getEnabled());
+            assertEquals("g", destination.getCloudWatchLoggingOptions().getLogGroupName());
+            assertEquals("st", destination.getCloudWatchLoggingOptions().getLogStreamName());
+            assertTrue(destination.isProcessingEnabled());
+            assertEquals("arn:aws:lambda:us-east-1:000000000000:function:f", destination.getProcessingConfiguration()
+                    .getProcessors().get(0).getParameters().get(0).getParameterValue());
+        }
+
+        @Test
+        void theLegacyDestinationCarriesLoggingButNoProcessor() {
+            ArgumentCaptor<DeliveryStreamDescription.S3Destination> s3 =
+                    ArgumentCaptor.forClass(DeliveryStreamDescription.S3Destination.class);
+            when(firehose.createDeliveryStream(anyString(), s3.capture(), any())).thenReturn("arn");
+
+            provisioner.provision(resource("Stream", "AWS::KinesisFirehose::DeliveryStream"), props("""
+                    {
+                      "DeliveryStreamName": "s",
+                      "S3DestinationConfiguration": {
+                        "BucketARN": "arn:bucket",
+                        "CloudWatchLoggingOptions": {"LogGroupName": "g"},
+                        "ProcessingConfiguration": {"Enabled": true, "Processors": []}
+                      }
+                    }
+                    """), ctx);
+
+            assertEquals("g", s3.getValue().getCloudWatchLoggingOptions().getLogGroupName());
+            assertNull(s3.getValue().getProcessingConfiguration(),
+                    "S3DestinationConfiguration models no processor, as on the API path");
+        }
+
+        @Test
+        void anUnreadableLoggingBlockFailsTheResource() {
+            AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(
+                    resource("Stream", "AWS::KinesisFirehose::DeliveryStream"), props("""
+                    {
+                      "DeliveryStreamName": "s",
+                      "ExtendedS3DestinationConfiguration": {
+                        "BucketARN": "arn:bucket",
+                        "CloudWatchLoggingOptions": {"Enabled": {"not": "a boolean"}}
+                      }
+                    }
+                    """), ctx));
+            assertEquals("ValidationError", error.getErrorCode());
         }
 
         @Test
