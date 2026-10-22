@@ -113,7 +113,7 @@ Two behaviors invert what the conversion block above does, both probed rather th
 
 ## Logging options
 
-`CloudWatchLoggingOptions` on the S3 and extended S3 destinations is stored and returned on both `S3DestinationDescription` and `ExtendedS3DestinationDescription`. A destination that never set it reads `{"Enabled": false}`, and an omitted `Enabled` reads `false`, as on AWS. `UpdateDestination` merges it a member at a time, so an update carrying only `{"Enabled": false}` keeps the stored log group and stream. Neither Floci nor AWS checks that the log group exists. Floci writes no delivery error logs to it.
+`CloudWatchLoggingOptions` on the S3 and extended S3 destinations is stored and returned on both `S3DestinationDescription` and `ExtendedS3DestinationDescription`. A destination that never set it reads `{"Enabled": false}`, and an omitted `Enabled` reads `false`, as on AWS. `UpdateDestination` merges it a member at a time, so an update carrying only `{"Enabled": false}` keeps the stored log group and stream. `LogGroupName` and `LogStreamName` are validated against AWS's length and pattern constraints. Neither Floci nor AWS checks that the log group exists. Floci writes no delivery error logs to it.
 
 ## S3 object keys
 
