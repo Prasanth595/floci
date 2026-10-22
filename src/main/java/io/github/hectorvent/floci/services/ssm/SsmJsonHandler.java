@@ -238,7 +238,8 @@ public class SsmJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
         PaginatedResult<Parameter> page = page(request, params, Parameter::getName,
-                GET_PARAMETERS_BY_PATH_MAX_RESULTS);
+                GET_PARAMETERS_BY_PATH_MAX_RESULTS,
+                "GetParametersByPath:" + region + ":" + recursive + ":" + (path.endsWith("/") ? path : path + "/"));
         for (Parameter p : page.items()) {
             parametersArray.add(parameterToNode(p));
         }
@@ -284,7 +285,8 @@ public class SsmJsonHandler {
         ArrayNode historyArray = objectMapper.createArrayNode();
         // Zero-padded so the cursor's string order is version order ("10" would sort before "9").
         PaginatedResult<ParameterHistory> page = page(request, history,
-                h -> String.format("%019d", h.getVersion()), GET_PARAMETER_HISTORY_MAX_RESULTS);
+                h -> String.format("%019d", h.getVersion()), GET_PARAMETER_HISTORY_MAX_RESULTS,
+                "GetParameterHistory:" + region + ":" + name);
         for (ParameterHistory h : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", h.getName());
@@ -314,10 +316,11 @@ public class SsmJsonHandler {
     /**
      * Pages a listing by {@code MaxResults}/{@code NextToken}. An omitted {@code MaxResults}
      * returns everything rather than AWS's single page, so callers that never follow
-     * {@code NextToken} still see every item.
+     * {@code NextToken} still see every item. A token carries {@code namespace}, so one minted for
+     * another operation, region, path or parameter is refused instead of read as a position here.
      */
     private static <T> PaginatedResult<T> page(JsonNode request, List<T> items,
-                                               Function<T, String> cursorOf, int maxPage) {
+                                               Function<T, String> cursorOf, int maxPage, String namespace) {
         // A non-numeric MaxResults or non-string NextToken fails to deserialize, as on AWS.
         Integer maxResults = request.hasNonNull("MaxResults")
                 ? SsmJsonDeserialization.optionalInteger(request.path("MaxResults"), 0) : null;
@@ -326,8 +329,9 @@ public class SsmJsonHandler {
                     "Value '" + maxResults + "' at 'maxResults' failed to "
                             + "satisfy constraint: Member must have value between 1 and " + maxPage);
         }
-        return Pagination.paginate(items, cursorOf, maxResults, optionalString(request, "NextToken"),
-                Integer.MAX_VALUE, maxPage, "InvalidNextToken");
+        return Pagination.paginate(items, cursorOf, maxResults != null ? maxResults : Integer.MAX_VALUE,
+                optionalString(request, "NextToken"), namespace,
+                token -> new AwsException("InvalidNextToken", "The specified token isn't valid.", 400));
     }
 
     private static void putNextToken(ObjectNode response, PaginatedResult<?> page) {

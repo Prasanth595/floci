@@ -112,6 +112,35 @@ class SsmParameterPaginationIntegrationTest {
     }
 
     @Test
+    void refusesATokenMintedForAnotherListing() {
+        String root = "/pagination-" + UUID.randomUUID();
+        IntStream.rangeClosed(1, 3).forEach(i -> {
+            put(root + "/a/p" + i, "v");
+            put(root + "/b/p" + i, "v");
+        });
+        String first = root + "/a/p1";
+        String second = root + "/b/p1";
+        put(first, "v2");
+        put(second, "v2");
+
+        String pathToken = ok("GetParametersByPath", Map.of("Path", root + "/a", "MaxResults", 1))
+                .getString("NextToken");
+        String historyToken = ok("GetParameterHistory", Map.of("Name", first, "MaxResults", 1))
+                .getString("NextToken");
+
+        error("GetParametersByPath", Map.of("Path", root + "/b", "NextToken", pathToken), "InvalidNextToken");
+        error("GetParametersByPath", Map.of("Path", root + "/a", "Recursive", true, "NextToken", pathToken),
+                "InvalidNextToken");
+        error("GetParametersByPath", Map.of("Path", root + "/a", "NextToken", historyToken), "InvalidNextToken");
+        error("GetParameterHistory", Map.of("Name", second, "NextToken", historyToken), "InvalidNextToken");
+        error("GetParameterHistory", Map.of("Name", first, "NextToken", pathToken), "InvalidNextToken");
+        // The token still resumes the listing it came from, with or without a trailing slash.
+        assertEquals(List.of(root + "/a/p2"), ok("GetParametersByPath",
+                Map.of("Path", root + "/a/", "MaxResults", 1, "NextToken", pathToken))
+                .getList("Parameters.Name", String.class));
+    }
+
+    @Test
     void rejectsWronglyTypedPaginationFields() {
         String name = "/pagination-" + UUID.randomUUID() + "/history";
         put(name, "v");
