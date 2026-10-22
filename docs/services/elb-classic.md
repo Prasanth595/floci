@@ -75,6 +75,8 @@ opened and no traffic is forwarded. Only the control plane and health checking a
   the same port.
 - Between registration and the first successful check an instance reports `OutOfService` with
   reason code `ELB`, as it does on AWS.
+- Health is tracked per account, so two accounts can each have a load balancer with the same name
+  without either one changing the instance health the other reports.
 - An Auto Scaling group that names Classic load balancers in `LoadBalancerNames` has its instances
   registered and deregistered automatically, so a Terraform `min_elb_capacity` wait can be
   satisfied.

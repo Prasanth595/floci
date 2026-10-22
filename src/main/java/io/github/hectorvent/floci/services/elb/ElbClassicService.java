@@ -264,8 +264,9 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         if (regionLbs == null) {
             return;
         }
-        if (regionLbs.remove(name) != null) {
-            healthChecker.stopMonitoring(region, name);
+        ClassicLoadBalancer removed = regionLbs.remove(name);
+        if (removed != null) {
+            healthChecker.stopMonitoring(removed);
             loadBalancers.put(region, regionLbs);
         }
     }
@@ -360,7 +361,7 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         ClassicLoadBalancer lb = requireLoadBalancer(region, name);
         lb.getInstanceIds().removeAll(instanceIds);
         persist(region);
-        healthChecker.deregisterInstances(region, name, instanceIds);
+        healthChecker.deregisterInstances(lb, instanceIds);
         return List.copyOf(lb.getInstanceIds());
     }
 
@@ -377,7 +378,7 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
                 throw new AwsException("InvalidInstance",
                         "Could not find EC2 instance " + id + ".", 400);
             }
-            result.put(id, healthChecker.getHealth(region, name, id));
+            result.put(id, healthChecker.getHealth(lb, id));
         }
         return result;
     }
