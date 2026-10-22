@@ -9,6 +9,8 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -151,20 +153,20 @@ public class StorageFactory {
      * {@link AccountAwareStorageBackend#putEntry} and {@link AccountAwareStorageBackend#removeEntry}
      * when {@link AccountAwareStorageBackend#writesEntries()} is true.
      *
-     * <p>{@code persistent} writes a key's file on every change and {@code hybrid} writes dirty
-     * keys on the flush interval. {@code memory} keeps the store in memory, and {@code wal} keeps
-     * the single-file journaled layout of {@link #create}. An existing single {@code fileName}
-     * file is migrated into the directory on first load.
+     * <p>{@code persistent} writes a shard's file on every change and {@code hybrid} writes dirty
+     * shards on the flush interval. {@code wal} journals one record per changed entry and writes
+     * dirty shards on the WAL compaction interval. {@code memory} keeps the store in memory. An
+     * existing single-file store (a {@code wal}-mode snapshot and log included) is migrated into
+     * the directory on first load.
      */
     public synchronized <E> AccountAwareStorageBackend<Map<String, E>> createPartitioned(
             String serviceName, String fileName, TypeReference<Map<String, Map<String, E>>> typeReference,
             Class<E> entryType, int shardCount) {
         String mode = resolveMode(serviceName);
-        if (!"persistent".equals(mode) && !"hybrid".equals(mode)) {
+        if ("memory".equals(mode)) {
             return create(serviceName, fileName, typeReference);
         }
         Path basePath = Path.of(config.storage().persistentPath());
-        Path legacyFile = basePath.resolve(fileName);
         Path directory = basePath.resolve(fileName.replace(".json", ""));
         StorageBackend<?, ?> existing = backendsByPath.get(directory);
         if (existing != null) {
@@ -172,10 +174,29 @@ public class StorageFactory {
             AccountAwareStorageBackend<Map<String, E>> typed = (AccountAwareStorageBackend<Map<String, E>>) existing;
             return typed;
         }
-        PartitionedFileStorage.Mode writeMode = "persistent".equals(mode)
-                ? PartitionedFileStorage.Mode.SYNC : PartitionedFileStorage.Mode.PERIODIC;
+        Path legacyFile = basePath.resolve(fileName);
+        PartitionedFileStorage.Mode writeMode;
+        long interval;
+        switch (mode) {
+            case "persistent" -> {
+                writeMode = PartitionedFileStorage.Mode.SYNC;
+                interval = 0;
+            }
+            case "hybrid" -> {
+                writeMode = PartitionedFileStorage.Mode.PERIODIC;
+                interval = resolveFlushInterval(serviceName);
+            }
+            case "wal" -> {
+                writeMode = PartitionedFileStorage.Mode.JOURNAL;
+                interval = config.storage().wal().compactionIntervalMs();
+                if (!Files.isDirectory(directory)) {
+                    legacyFile = foldLegacyWal(basePath, fileName, typeReference, legacyFile);
+                }
+            }
+            default -> throw new IllegalArgumentException("Unknown storage mode: " + mode);
+        }
         PartitionedFileStorage<E> inner = new PartitionedFileStorage<>(directory, legacyFile, entryType,
-                shardCount, writeMode, resolveFlushInterval(serviceName));
+                shardCount, writeMode, interval);
         partitionedBackends.add(inner);
         LOG.infov("Storing {0} for service {1} in {2}, {3} file(s) per key", fileName, serviceName, directory,
                 shardCount);
@@ -185,6 +206,30 @@ public class StorageFactory {
         allBackends.add(backend);
         backendsByPath.put(directory, backend);
         return backend;
+    }
+
+    /**
+     * The single file to migrate into a {@code wal}-mode partitioned store. A store last run as a
+     * {@link WalStorage} keeps its data in a snapshot plus a log; the log is folded into the
+     * snapshot first so no logged change is lost, and the snapshot is what gets migrated.
+     * Otherwise the plain store file, written by {@code persistent} or {@code hybrid}, is used.
+     */
+    private static <V> Path foldLegacyWal(Path basePath, String fileName, TypeReference<Map<String, V>> typeReference,
+                                          Path plainFile) {
+        Path snapshot = basePath.resolve(fileName.replace(".json", "-snapshot.json"));
+        Path log = basePath.resolve(fileName.replace(".json", ".wal"));
+        if (!Files.exists(snapshot) && !Files.exists(log)) {
+            return plainFile;
+        }
+        WalStorage<String, V> legacy = new WalStorage<>(snapshot, log, typeReference, Long.MAX_VALUE);
+        legacy.load();
+        legacy.shutdown();
+        try {
+            Files.deleteIfExists(log);
+        } catch (IOException e) {
+            LOG.warnv(e, "Folded {0} into {1} but could not remove it", log, snapshot);
+        }
+        return snapshot;
     }
 
     /** Load every managed backend that has not been loaded yet. Safe to call repeatedly. */

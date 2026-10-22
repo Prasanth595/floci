@@ -210,8 +210,10 @@ floci:
       dynamodb:
         flush-interval-ms: 5000
         # single-file: every table in dynamodb-items.json, rewritten on any item change.
-        # per-table: one file per table under dynamodb-items/; an existing dynamodb-items.json
-        # is migrated on first start. Applies to persistent and hybrid modes.
+        # per-table: files per table under dynamodb-items/, rewritten only where an item changed
+        # (persistent: on the write, hybrid: on the flush interval; wal: each write appends one
+        # record to dynamodb-items/journal.wal and changed files are rewritten on the WAL
+        # compaction interval). An existing single-file store is migrated on first start.
         item-layout: single-file          # FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT
         # per-table only: files per table. A write rewrites only its item's file; changing the
         # count rewrites the files on the next start.

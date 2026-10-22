@@ -72,6 +72,40 @@ class StorageFactoryPartitionedTest {
     }
 
     @Test
+    void walModeJournalsChangesAndCompactsOnShutdown() {
+        StorageFactory factory = newFactory("wal");
+        AccountAwareStorageBackend<Map<String, String>> store =
+                factory.createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
+
+        store.putEntry("table-a", "k", "v");
+        assertEquals(0, fileCount(tempDir.resolve("svc-items")));
+        assertTrue(Files.exists(tempDir.resolve("svc-items").resolve(PartitionedFileStorage.JOURNAL_FILE)));
+
+        factory.shutdownAll();
+        assertEquals(1, fileCount(tempDir.resolve("svc-items")));
+        assertEquals(Map.of("k", "v"), newFactory("wal")
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1).get("table-a").orElseThrow());
+    }
+
+    @Test
+    void walModeMigratesALegacyWalStoreIncludingItsUncompactedLog() {
+        WalStorage<String, Map<String, String>> legacy = new WalStorage<>(tempDir.resolve("svc-items-snapshot.json"),
+                tempDir.resolve("svc-items.wal"), TYPE, Long.MAX_VALUE);
+        legacy.load();
+        legacy.put("000000000000/table-a", Map.of("k", "v"));
+        legacy.flush();
+        legacy.put("000000000000/table-b", Map.of("k", "only-in-the-log"));
+
+        AccountAwareStorageBackend<Map<String, String>> store = newFactory("wal")
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
+
+        assertEquals(Map.of("k", "v"), store.get("table-a").orElseThrow());
+        assertEquals(Map.of("k", "only-in-the-log"), store.get("table-b").orElseThrow());
+        assertFalse(Files.exists(tempDir.resolve("svc-items.wal")));
+        assertTrue(Files.exists(tempDir.resolve("svc-items-snapshot.json.migrated")));
+    }
+
+    @Test
     void memoryModeKeepsTheSingleValueStore() {
         AccountAwareStorageBackend<Map<String, String>> store = newFactory("memory")
                 .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);

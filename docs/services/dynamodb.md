@@ -230,6 +230,8 @@ region is rejected.
 | `FLOCI_SERVICES_DYNAMODB_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_MODE` | *(global default)* | Storage mode override for DynamoDB (`memory`, `persistent`, `hybrid`, `wal`) |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_FLUSH_INTERVAL_MS` | `5000` | Flush interval for `hybrid`/`wal` storage modes (milliseconds) |
+| `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT` | `single-file` | How items are laid out on disk: `single-file` or `per-table`. See [Item layout on disk](#item-layout-on-disk) |
+| `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_SHARDS` | `1` | With the `per-table` layout, how many files each table is split into |
 | `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` | `4` | Seconds a vector index added by `UpdateTable` spends in resource allocation |
 | `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS` | `10` | Seconds that index then spends backfilling before it goes `ACTIVE` |
 | `FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS` | `300` | Seconds `LatestRestorableDateTime` of point-in-time recovery trails the current time. Set `0` to restore the latest writes with `UseLatestRestorableTime` |
@@ -245,6 +247,20 @@ Under `persistent` storage mode, single-item writes (`PutItem`, `UpdateItem`, `D
 For write-heavy workloads under persistent setups, configuring `FLOCI_STORAGE_SERVICES_DYNAMODB_MODE=wal` or `hybrid` is recommended to avoid full-file rewrites on each write operation:
 - `wal`: Uses an append-only write-ahead log with background compaction.
 - `hybrid`: Keeps data in memory with periodic asynchronous disk flushes controlled by `FLOCI_STORAGE_SERVICES_DYNAMODB_FLUSH_INTERVAL_MS`.
+
+### Item layout on disk
+
+With the default `single-file` layout, every table's items live in one `dynamodb-items.json`, and any item write saves all of them: `persistent` rewrites the file on the write, `hybrid` on the next flush, and `wal` appends the whole table to its log and rewrites the whole snapshot on compaction. A small table that changes often, such as a heartbeat table, then keeps rewriting every large table beside it.
+
+`FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT=per-table` stores items under `dynamodb-items/` instead, as `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_SHARDS` files per table (one by default). An item belongs to the file chosen by a hash of its key, and a write saves only the items it touched:
+
+| Mode | What an item write costs on disk |
+|---|---|
+| `persistent` | Rewrites the one file that holds the item |
+| `hybrid` | Marks that file dirty; dirty files are rewritten on the flush interval |
+| `wal` | Appends one record for the item to `dynamodb-items/journal.wal`; dirty files are rewritten and the journal emptied on `FLOCI_STORAGE_WAL_COMPACTION_INTERVAL_MS` |
+
+On first start with `per-table`, an existing `dynamodb-items.json` (or a `wal`-mode `dynamodb-items-snapshot.json` and `dynamodb-items.wal`) is migrated into the directory and renamed with a `.migrated` suffix. Changing the shard count rewrites the files on the next start. The other DynamoDB stores (tables, backups, point-in-time recovery history, exports, imports) keep their single files.
 
 ## Examples
 
