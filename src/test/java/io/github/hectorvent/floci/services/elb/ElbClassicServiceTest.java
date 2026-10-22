@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.elb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
@@ -14,8 +16,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -25,13 +30,17 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,6 +48,8 @@ import static org.mockito.Mockito.when;
 class ElbClassicServiceTest {
 
     private static final String REGION = "us-west-2";
+    private static final String DEFAULT_ACCOUNT = "000000000000";
+    private static final String OTHER_ACCOUNT = "222222222222";
 
     @Mock
     Ec2Service ec2Service;
@@ -378,5 +389,48 @@ class ElbClassicServiceTest {
 
         assertEquals(AwsRegionFacts.classicElbHostedZoneId(REGION).orElseThrow(),
                 service.describeLoadBalancers(REGION, List.of("stored-elb")).getFirst().getCanonicalHostedZoneNameId());
+    }
+
+    /**
+     * Startup runs outside any request, where the storage-backed map sees only the default
+     * account. Every other account's balancers have to come back too, as their own account's.
+     */
+    @Test
+    void restoreBringsBackTheBalancersOfEveryAccount() {
+        AccountAwareStorageBackend<Map<String, ClassicLoadBalancer>> storage =
+                AccountAwareStorageBackend.inMemory(DEFAULT_ACCOUNT);
+        StorageFactory factory = mock(StorageFactory.class);
+        doReturn(storage).when(factory).create(eq("elb"), eq("elb-load-balancers.json"), any());
+        ClassicLoadBalancer own = storedBalancer("web", List.of("i-own"));
+        ClassicLoadBalancer foreign = storedBalancer("web", List.of("i-foreign"));
+        // Read back from disk, a region map is whatever map the JSON reader built.
+        storage.putForAccount(DEFAULT_ACCOUNT, REGION, new LinkedHashMap<>(Map.of("web", own)));
+        storage.putForAccount(OTHER_ACCOUNT, REGION, new LinkedHashMap<>(Map.of("web", foreign)));
+
+        service = new ElbClassicService(ec2Service, healthChecker, factory, null);
+        service.initializeStorage();
+        service.restorePersistedRuntime();
+
+        verify(healthChecker).startMonitoring(own);
+        verify(healthChecker).registerInstances(own, List.of("i-own"));
+        verify(healthChecker).startMonitoring(foreign);
+        verify(healthChecker).registerInstances(foreign, List.of("i-foreign"));
+        String zone = AwsRegionFacts.classicElbHostedZoneId(REGION).orElseThrow();
+        assertEquals(zone, own.getCanonicalHostedZoneNameId());
+        assertEquals(zone, foreign.getCanonicalHostedZoneNameId());
+        // A record stored before balancers carried their account takes it from where it is stored.
+        assertEquals(DEFAULT_ACCOUNT, own.getAccountId());
+        assertEquals(OTHER_ACCOUNT, foreign.getAccountId());
+        assertInstanceOf(ConcurrentHashMap.class, storage.getForAccount(DEFAULT_ACCOUNT, REGION).orElseThrow());
+        assertInstanceOf(ConcurrentHashMap.class, storage.getForAccount(OTHER_ACCOUNT, REGION).orElseThrow());
+    }
+
+    private static ClassicLoadBalancer storedBalancer(String name, List<String> instanceIds) {
+        ClassicLoadBalancer lb = new ClassicLoadBalancer();
+        lb.setLoadBalancerName(name);
+        lb.setRegion(REGION);
+        lb.setCanonicalHostedZoneNameId("Z35SXDOTRQ7X7K");
+        lb.setInstanceIds(new ArrayList<>(instanceIds));
+        return lb;
     }
 }

@@ -64,8 +64,8 @@ opened and no traffic is forwarded. Only the control plane and health checking a
 
 ## Behavior Notes
 
-- Load balancer state is persisted through Floci storage and health checking is restarted on
-  startup.
+- Load balancer state is persisted through Floci storage, and on startup health checking is
+  restarted for the load balancers of every account.
 - A new load balancer gets AWS's default health check (`TCP:80`, interval 30, timeout 5,
   unhealthy 2, healthy 10) and AWS's default attributes (cross-zone off, access log off,
   connection draining off with a 300 second timeout, 60 second idle timeout).
