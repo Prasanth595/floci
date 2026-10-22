@@ -26,6 +26,11 @@ public final class SmithyValidationErrors {
         return count + String.join("; ", violations);
     }
 
+    /** The violation for a required member the request leaves out. */
+    public static String notNull(String path) {
+        return "Value null at '" + path + "' failed to satisfy constraint: Member must not be null";
+    }
+
     /** The 400 error carrying {@link #message} under the protocol's validation error code. */
     public static AwsException exception(String errorCode, List<String> violations) {
         return new AwsException(errorCode, message(violations), 400);

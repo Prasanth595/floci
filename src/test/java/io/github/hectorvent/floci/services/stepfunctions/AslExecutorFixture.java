@@ -37,7 +37,7 @@ import static org.mockito.Mockito.mock;
  * <p>Every other collaborator defaults to what the convenience constructors pass: a Mockito mock
  * for each integration, the system clock, a real sleeper, {@code System.nanoTime()} for deadlines,
  * no Wait cap override, AWS's 5-minute Express limit, and no RDS Data, Redshift Data, service
- * registry or Lambda task authorizer. A Lambda target resolver is built over the function store
+ * registry, Lambda task authorizer or EMR task invoker. A Lambda target resolver is built over the function store
  * unless a test supplies its own.
  */
 final class AslExecutorFixture {
@@ -82,6 +82,7 @@ final class AslExecutorFixture {
         private LambdaTaskAuthorizer lambdaTaskAuthorizer;
         private Duration expressMaxExecutionTime;
         private LongSupplier nanoTime;
+        private EmrTaskInvoker emrTaskInvoker;
 
         private Builder() {
         }
@@ -236,6 +237,11 @@ final class AslExecutorFixture {
             return this;
         }
 
+        Builder emrTaskInvoker(EmrTaskInvoker emrTaskInvoker) {
+            this.emrTaskInvoker = emrTaskInvoker;
+            return this;
+        }
+
         AslExecutor build() {
             return new AslExecutor(lambdaExecutor,
                     targetResolver != null ? targetResolver : new LambdaTargetResolver(functionStore, null),
@@ -245,7 +251,7 @@ final class AslExecutorFixture {
                     jsonataEvaluator != null ? jsonataEvaluator : new JsonataEvaluator(objectMapper),
                     sfnService, config, vertx, customResourceLiveness, clock, sleeper, maxWaitSeconds,
                     redshiftDataHandler, serviceRegistry, null, lambdaTaskAuthorizer, expressMaxExecutionTime,
-                    nanoTime, null);
+                    nanoTime, null, emrTaskInvoker);
         }
     }
 }

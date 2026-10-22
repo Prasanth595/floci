@@ -80,12 +80,13 @@ that does not match the selected task account fails with
   `HeartbeatSeconds` as a literal number.
   `resourceType` is the integrated service (`states`, `ecs`, `aws-sdk:sqs`) and `resource` the
   API with its suffix (`startExecution.sync:2`, `runTask.sync`), as AWS names them. A `.sync`
-  Task (`states:startExecution.sync` and `.sync:2`, `ecs:runTask.sync`) also records
+  Task (`states:startExecution.sync` and `.sync:2`, `ecs:runTask.sync`, the `elasticmapreduce:`
+  ones) also records
   `TaskSubmitted` after `TaskStarted`, once the call that started its job has returned and before
   it waits on the job. `taskSubmittedEventDetails` carries `resourceType`, `resource`,
   `outputDetails`, and that call's response as `output`, in PascalCase: `{"ExecutionArn",
   "StartDate"}` with `StartDate` in epoch milliseconds for a nested execution, `{"Failures",
-  "Tasks"}` for an ECS task. AWS folds the SDK's `SdkHttpMetadata` and `SdkResponseMetadata`
+  "Tasks"}` for an ECS task, `{"ClusterId"}`, `{"StepId"}` or `{}` for an EMR one. AWS folds the SDK's `SdkHttpMetadata` and `SdkResponseMetadata`
   into that response as well; Floci records the response fields alone.
 - A direct Lambda function ARN emits `LambdaFunctionScheduled`, `LambdaFunctionStarted`,
   and then `LambdaFunctionSucceeded` or `LambdaFunctionFailed`. `LambdaFunctionScheduled`
@@ -269,7 +270,7 @@ One deviation. Every pause is capped at `floci.services.stepfunctions.max-wait-s
 ASL carries two `TimeoutSeconds` fields and Floci enforces both, in the two terminal shapes
 AWS uses. The state machine's own field bounds every state; a `Task`'s own field bounds one that
 waits: for a task token (an activity, or a `.waitForTaskToken` integration) or for a job to end
-(`ecs:runTask.sync`, `states:startExecution.sync` and `.sync:2`). A Lambda or other SDK task that
+(`ecs:runTask.sync`, the `elasticmapreduce:` `.sync` ones, `states:startExecution.sync` and `.sync:2`). A Lambda or other SDK task that
 returns directly is not bound by it.
 
 The state machine's own `TimeoutSeconds` is the whole execution's budget. It is checked before
@@ -302,6 +303,8 @@ both carry the cause `The Task state in AWS Step Functions execution [<arn>] whi
 this resource was aborted`. A `StopExecution` that lands while the state waits ends the wait and
 stops the job with the same cause, and so does the execution's budget, and so does a failure in
 another branch of the `Parallel`, or in another iteration of the `Map`, that the `Task` is in.
+An `addStep.sync` step is cancelled with `CancelSteps` instead, and the cluster of a
+`createCluster.sync` is left running (see [Amazon EMR tasks](#amazon-emr-tasks)).
 
 One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the task up, the instant
 it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start
@@ -839,6 +842,59 @@ block execution. Temporary signing credentials are revoked after each request.
 Successful responses preserve their headers and status. JSON response text is parsed regardless of
 its content type, matching the live AWS integration; other text remains a string. Non-2xx responses
 raise catchable `ApiGateway.<status>` failures.
+
+## Amazon EMR tasks
+
+`arn:...:states:::elasticmapreduce:` serves the optimized EMR integrations the Step Functions guide
+lists, request-response for all seven and `.sync` for `createCluster`, `terminateCluster` and
+`addStep`. Each one calls Floci's EMR in the state machine's Region, under the guide's field names:
+
+| Resource | EMR calls | Result |
+| --- | --- | --- |
+| `createCluster` | `RunJobFlow` | `{ClusterId}` |
+| `createCluster.sync` | `RunJobFlow`, then `DescribeCluster` until `WAITING` | `Cluster`, then `ClusterId` |
+| `setClusterTerminationProtection` | `SetTerminationProtection`, `ClusterId` as `JobFlowIds` | `{}` |
+| `terminateCluster` | `TerminateJobFlows`, `ClusterId` as `JobFlowIds` | `{}` |
+| `terminateCluster.sync` | the same, then `DescribeCluster` until `TERMINATED` or `TERMINATED_WITH_ERRORS` | `Cluster` |
+| `addStep` | `AddJobFlowSteps` with the one `Step`, and `ExecutionRoleArn` when given | `{StepId}` |
+| `addStep.sync` | the same, then `DescribeStep` until `COMPLETED` | `Step`, then `StepId` |
+| `cancelStep` | `CancelSteps` with the one `StepId` | `{CancelStepsInfo}` |
+| `modifyInstanceFleetByName` | `ListInstanceFleets` for the fleet named `InstanceFleetName`, then `ModifyInstanceFleet` | `{}` |
+| `modifyInstanceGroupByName` | `ListInstanceGroups` for the group named `InstanceGroupName`, then `ModifyInstanceGroups` | `{}` |
+
+A `.sync` result is the describe call's response with the starting call's result after it. That is
+the `createCluster.sync` output recorded on AWS: `Cluster`, the SDK's `SdkHttpMetadata` and
+`SdkResponseMetadata`, then `ClusterId`. Floci leaves the SDK metadata out, as it does everywhere.
+State machines read an `addStep.sync` result's `Step` (`$.result.Step.Status.State`); its `StepId`,
+and `terminateCluster.sync`'s whole result, follow the same rule without a recording of their own.
+The timestamps inside are EMR's epoch seconds, which no recording confirms either.
+
+A `.sync` Task records `TaskSubmitted` with the starting call's result, then polls every 100 ms under
+the same two clocks as the other `.sync` integrations (see [Timeouts](#timeouts)). A step that ends
+`FAILED`, `CANCELLED` or `INTERRUPTED`, and a cluster that terminates before it reaches `WAITING`,
+fail the Task with `States.TaskFailed`, the describe response as the cause: a JSON string, which a
+`Catch` reads with `States.StringToJson` (for example its `Step.Status.State`). When
+the wait ends early, `addStep.sync` cancels its step with `CancelSteps`, as Step Functions "will make
+a best-effort attempt to cancel the task". A cluster is never terminated: "Step Functions does not
+terminate an Amazon EMR cluster automatically if execution is stopped." EMR in Floci reaches each
+state at once, so every wait ends at its first poll.
+
+An error from EMR fails the Task with the SDK exception class under the `EMR.` prefix:
+`EMR.InvalidRequestException` and `EMR.InternalServerException` for the two errors EMR models,
+`EMR.AmazonElasticMapReduceException` for any other, such as the `ValidationException`
+"Specified job flow ID does not exist." that `AddJobFlowSteps` answers for an unknown cluster. The cause is EMR's message; AWS
+also appends `(Service: AmazonElasticMapReduce; Status Code: 400; Error Code: ...; Request ID: ...)`.
+
+The integrations refuse what the guide rules out with `States.TaskFailed`, since no source gives
+AWS's error; the `createCluster` messages are the guide's own rules, the others Floci's words: a
+`createCluster` whose `Instances.KeepJobFlowAliveWhenNoSteps` is not `true` or that carries `Steps`,
+an `addStep` without a `Step`, an `InstanceGroupId` or `InstanceFleetId` in a ByName request, and a
+name that matches no group or fleet, or more than one. They also refuse a request without the
+integration's own fields, before EMR sees it: a `ClusterId` (every API but `createCluster`),
+`cancelStep`'s `StepId`, and a ByName request's name. A member EMR itself requires, such as
+`TerminationProtected`, is left to EMR, which answers its validation error.
+`.waitForTaskToken`, which AWS does not offer for EMR, and `.sync` on any other API fail as an
+unsupported resource.
 
 ## Configuration
 

@@ -183,8 +183,8 @@ public class AslExecutor {
     private static final int INLINE_MAP_MAX_CONCURRENCY = 40;
     private static final int DISTRIBUTED_MAP_MAX_CONCURRENCY = 10_000;
 
-    // How often a .sync integration (ecs:runTask, states:startExecution) re-reads the job it waits
-    // on. The wait itself is bounded by the Task's TimeoutSeconds and the execution's budget.
+    // How often a .sync integration (ecs:runTask, elasticmapreduce, states:startExecution) re-reads the job
+    // it waits on. The wait itself is bounded by the Task's TimeoutSeconds and the execution's budget.
     private static final long SYNC_POLL_INTERVAL_MS = 100;
 
     // AWS caps the string input of States.Base64Encode/Base64Decode/Hash at 10,000 characters
@@ -267,6 +267,7 @@ public class AslExecutor {
     private final Instance<StepFunctionsService> sfnService;
     private final WebClient webClient;
     private final ApiGatewayTaskInvoker apiGatewayTaskInvoker;
+    private final EmrTaskInvoker emrTaskInvoker;
     private final EmulatorConfig config;
     private final NestedTaskCredentials nestedTaskCredentials;
     private final CustomResourceLiveness customResourceLiveness;
@@ -297,14 +298,15 @@ public class AslExecutor {
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                        CustomResourceLiveness customResourceLiveness, RedshiftDataJsonHandler redshiftDataHandler,
                        ServiceRegistry serviceRegistry, NestedTaskCredentials nestedTaskCredentials,
-                       LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker) {
+                       LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker,
+                       EmrTaskInvoker emrTaskInvoker) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
-                nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker);
+                nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -322,8 +324,9 @@ public class AslExecutor {
                 RedshiftDataJsonHandler redshiftDataHandler, ServiceRegistry serviceRegistry,
                 NestedTaskCredentials nestedTaskCredentials, LambdaTaskAuthorizer lambdaTaskAuthorizer,
                 Duration expressMaxExecutionTimeOverride, LongSupplier nanoTimeOverride,
-                ApiGatewayTaskInvoker apiGatewayTaskInvoker) {
+                ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker) {
         this.apiGatewayTaskInvoker = apiGatewayTaskInvoker;
+        this.emrTaskInvoker = emrTaskInvoker;
         this.nestedTaskCredentials = nestedTaskCredentials;
         this.serviceRegistry = serviceRegistry;
         this.lambdaTaskAuthorizer = lambdaTaskAuthorizer;
@@ -386,7 +389,7 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null);
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -407,7 +410,7 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null);
+                clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -1444,6 +1447,14 @@ public class AslExecutor {
                     jobSubmitted);
         }
 
+        // EMR optimized integrations: request-response and .sync. AWS supports no .waitForTaskToken
+        // variant, so one carrying a token falls through to Unsupported resource.
+        if (integration.isOptimizedService("elasticmapreduce") && taskToken == null) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeEmr(integration, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos,
+                    jobSubmitted);
+        }
+
         // AWS SDK service integrations: Step Functions
         if (integration.isSdkService("sfn")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
@@ -2190,6 +2201,43 @@ public class AslExecutor {
                 arr.add(recaseKeys(objectMapper, ecsJsonHandler.taskNode(task), true));
             }
             return arr;
+        }
+    }
+
+    /**
+     * The {@code elasticmapreduce:} integrations. A {@code .sync} Task records its call's response as
+     * submitted and polls the cluster or step as {@code ecs:runTask.sync} polls its tasks, bounded by
+     * the same two clocks; whatever ends the wait first abandons the job.
+     */
+    private JsonNode invokeEmr(StatesIntegration integration, JsonNode input, String region, String executionArn,
+                               long executionDeadlineNanos, long taskDeadlineNanos,
+                               Consumer<JsonNode> jobSubmitted) throws Exception {
+        EmrTaskInvoker.Job job = emrTaskInvoker.start(integration, input, region);
+        if (integration.suffix().isEmpty()) {
+            return job.response();
+        }
+        try {
+            jobSubmitted.accept(job.response());
+        } catch (RuntimeException e) {
+            emrTaskInvoker.abandon(job, region);
+            throw e;
+        }
+        while (true) {
+            try {
+                sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
+                        executionDeadlineNanos, taskDeadlineNanos);
+            } catch (TaskTimedOutException | ExecutionTimedOutException | InterruptedException e) {
+                emrTaskInvoker.abandon(job, region);
+                throw e;
+            }
+            if (abortedByCaller(executionArn)) {
+                emrTaskInvoker.abandon(job, region);
+                throw new ExecutionAbortedException();
+            }
+            Optional<JsonNode> result = emrTaskInvoker.poll(job, region);
+            if (result.isPresent()) {
+                return result.get();
+            }
         }
     }
 
