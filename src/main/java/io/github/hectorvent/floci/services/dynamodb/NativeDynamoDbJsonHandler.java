@@ -44,6 +44,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -626,22 +627,14 @@ public class NativeDynamoDbJsonHandler {
 
         validateItemSets(item);
 
-        JsonNode oldItem = null;
-        if ("ALL_OLD".equals(returnValues) || expected != null) {
-            dynamoDbService.requireTableForItemCall(tableName, region);
-            oldItem = dynamoDbService.getItem(tableName, item, region);
-        }
-
-        if (expected != null) {
-            evaluateLegacyExpected(oldItem, expected, conditionalOperator, returnValuesOnConditionCheckFailure);
-        }
-
-        var previousItem = dynamoDbService.putItem(tableName, item, conditionExpression,
-                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure);
+        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, expected,
+                conditionalOperator, returnValuesOnConditionCheckFailure);
+        JsonNode previousItem = dynamoDbService.putItem(tableName, item, conditionExpression,
+                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure, expectedCheck);
 
         ObjectNode response = objectMapper.createObjectNode();
-        if ("ALL_OLD" .equals(returnValues) && oldItem != null) {
-            response.set("Attributes", oldItem);
+        if ("ALL_OLD".equals(returnValues) && previousItem != null) {
+            response.set("Attributes", previousItem);
         }
         addItemCollectionMetrics(response, request, tableName, item, region);
         addWriteConsumedCapacity(response, request, tableName, region, previousItem, item);
@@ -745,13 +738,10 @@ public class NativeDynamoDbJsonHandler {
 
         String condOpDel = request.has("ConditionalOperator")
                 ? request.get("ConditionalOperator").asText() : "AND";
-        if (expectedDel != null) {
-            JsonNode existingForDel = dynamoDbService.getItem(tableName, key, region);
-            evaluateLegacyExpected(existingForDel, expectedDel, condOpDel, returnValuesOnConditionCheckFailure);
-        }
-
+        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, expectedDel,
+                condOpDel, returnValuesOnConditionCheckFailure);
         JsonNode oldItem = dynamoDbService.deleteItem(tableName, key, conditionExpression,
-                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure);
+                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure, expectedCheck);
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_OLD" .equals(returnValues) && oldItem != null) {
@@ -855,14 +845,11 @@ public class NativeDynamoDbJsonHandler {
             ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
         }
 
-        if (expectedUpd != null) {
-            JsonNode existingForUpd = dynamoDbService.getItem(tableName, key, region);
-            evaluateLegacyExpected(existingForUpd, expectedUpd, conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
-        }
-
+        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, expectedUpd,
+                conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
         DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
                 tableName, key, updateData, updateExpression, exprAttrNames, exprAttrValues,
-                returnValues, conditionExpression, region, returnValuesOnConditionCheckFailure);
+                returnValues, conditionExpression, region, returnValuesOnConditionCheckFailure, expectedCheck);
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_NEW" .equals(returnValues) && result.newItem() != null) {
@@ -881,10 +868,24 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
+    /**
+     * Validates a legacy Expected map and returns its evaluation, for the service to run against
+     * the stored item under the item's lock, or null when the request has no Expected.
+     */
+    private Consumer<JsonNode> legacyExpectedCheck(String tableName, String region, JsonNode expected,
+                                                   String conditionalOperator,
+                                                   String returnValuesOnConditionCheckFailure) {
+        if (expected == null) {
+            return null;
+        }
+        dynamoDbService.requireTableForItemCall(tableName, region);
+        validateLegacyExpected(expected);
+        return existing -> evaluateLegacyExpected(existing, expected, conditionalOperator,
+                returnValuesOnConditionCheckFailure);
+    }
+
     private void evaluateLegacyExpected(JsonNode existing, JsonNode expected, String conditionalOperator,
                                           String returnValuesOnConditionCheckFailure) {
-        if (expected == null) return;
-        validateLegacyExpected(expected);
         boolean useOr = "OR".equals(conditionalOperator);
         boolean overall = !useOr;
         var fields = expected.fields();

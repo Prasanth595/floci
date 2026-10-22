@@ -967,10 +967,24 @@ public class DynamoDbService {
                          String conditionExpression,
                          JsonNode exprAttrNames, JsonNode exprAttrValues,
                          String region, String returnValuesOnConditionCheckFailure) {
-        var canonicalTableName = canonicalTableName(region, tableName);
+        return putItem(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
+                region, returnValuesOnConditionCheckFailure, null);
+    }
+
+    /**
+     * As above, and {@code existingItemCheck}, when present, receives the stored item (null when
+     * absent) under the item's lock and rejects the put by throwing. A check made against an item
+     * read before the lock is taken can be invalidated by a concurrent write.
+     */
+    public JsonNode putItem(String tableName, JsonNode item,
+                         String conditionExpression,
+                         JsonNode exprAttrNames, JsonNode exprAttrValues,
+                         String region, String returnValuesOnConditionCheckFailure,
+                         Consumer<JsonNode> existingItemCheck) {
+        String canonicalTableName = canonicalTableName(region, tableName);
         requireActiveTable(regionKey(region, canonicalTableName));
         return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
-                        region, returnValuesOnConditionCheckFailure, true);
+                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck);
     }
 
     private JsonNode putItemInternal(String tableName, JsonNode item,
@@ -989,7 +1003,7 @@ public class DynamoDbService {
                                   boolean shouldPersist,
                                   Consumer<Runnable> deferredStreamEvents) {
         return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null);
+                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null);
     }
 
     private JsonNode putItemInternal(String tableName, JsonNode item,
@@ -998,7 +1012,8 @@ public class DynamoDbService {
                                   String region, String returnValuesOnConditionCheckFailure,
                                   boolean shouldPersist,
                                   Consumer<Runnable> deferredStreamEvents,
-                                  Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems) {
+                                  Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
+                                  Consumer<JsonNode> existingItemCheck) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -1017,6 +1032,9 @@ public class DynamoDbService {
 
             if (conditionExpression != null) {
                 evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
+            }
+            if (existingItemCheck != null) {
+                existingItemCheck.accept(existing);
             }
             requireItemNestingWithinLimit(normalizedItem);
 
@@ -1076,8 +1094,21 @@ public class DynamoDbService {
                                 String conditionExpression,
                                 JsonNode exprAttrNames, JsonNode exprAttrValues,
                                 String region, String returnValuesOnConditionCheckFailure) {
+        return deleteItem(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
+                region, returnValuesOnConditionCheckFailure, null);
+    }
+
+    /**
+     * As above, and {@code existingItemCheck}, when present, receives the stored item (null when
+     * absent) under the item's lock and rejects the delete by throwing.
+     */
+    public JsonNode deleteItem(String tableName, JsonNode key,
+                                String conditionExpression,
+                                JsonNode exprAttrNames, JsonNode exprAttrValues,
+                                String region, String returnValuesOnConditionCheckFailure,
+                                Consumer<JsonNode> existingItemCheck) {
         return deleteItemInternal(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
-                                  region, returnValuesOnConditionCheckFailure, true);
+                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck);
     }
 
     private JsonNode deleteItemInternal(String tableName, JsonNode key,
@@ -1096,7 +1127,7 @@ public class DynamoDbService {
                                          boolean shouldPersist,
                                          Consumer<Runnable> deferredStreamEvents) {
         return deleteItemInternal(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null);
+                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null);
     }
 
     private JsonNode deleteItemInternal(String tableName, JsonNode key,
@@ -1105,7 +1136,8 @@ public class DynamoDbService {
                                          String region, String returnValuesOnConditionCheckFailure,
                                          boolean shouldPersist,
                                          Consumer<Runnable> deferredStreamEvents,
-                                         Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems) {
+                                         Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
+                                         Consumer<JsonNode> existingItemCheck) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = requireActiveTable(storageKey);
@@ -1114,6 +1146,9 @@ public class DynamoDbService {
 
         return withItemLock(storageKey, itemKey, () -> {
             var items = itemsFor(storageKey, stagedItems, false);
+            if (existingItemCheck != null) {
+                existingItemCheck.accept(items == null ? null : items.get(itemKey));
+            }
             if (items == null) return null;
 
             if (conditionExpression != null) {
@@ -1174,6 +1209,22 @@ public class DynamoDbService {
                 returnValuesOnConditionCheckFailure, UpdateSizeRule.UPDATE_ITEM);
     }
 
+    /**
+     * As above, and {@code existingItemCheck}, when present, receives the stored item (null when
+     * absent) under the item's lock and rejects the update by throwing.
+     */
+    public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
+                                    String updateExpression,
+                                    JsonNode expressionAttrNames, JsonNode expressionAttrValues,
+                                    String returnValues, String conditionExpression, String region,
+                                    String returnValuesOnConditionCheckFailure,
+                                    Consumer<JsonNode> existingItemCheck) {
+        return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
+                expressionAttrNames, expressionAttrValues, returnValues,
+                conditionExpression, region, returnValuesOnConditionCheckFailure, true, null, null,
+                UpdateSizeRule.UPDATE_ITEM, existingItemCheck);
+    }
+
     UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
                                     String updateExpression,
                                     JsonNode expressionAttrNames, JsonNode expressionAttrValues,
@@ -1209,7 +1260,7 @@ public class DynamoDbService {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
                 conditionExpression, region, returnValuesOnConditionCheckFailure, shouldPersist,
-                deferredStreamEvents, null, sizeRule);
+                deferredStreamEvents, null, sizeRule, null);
     }
 
     private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -1220,7 +1271,8 @@ public class DynamoDbService {
                                              boolean shouldPersist,
                                              Consumer<Runnable> deferredStreamEvents,
                                              Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
-                                             UpdateSizeRule sizeRule) {
+                                             UpdateSizeRule sizeRule,
+                                             Consumer<JsonNode> existingItemCheck) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = requireActiveTable(storageKey);
@@ -1235,6 +1287,9 @@ public class DynamoDbService {
 
             if (conditionExpression != null) {
                 evaluateCondition(existing, conditionExpression, expressionAttrNames, expressionAttrValues, returnValuesOnConditionCheckFailure);
+            }
+            if (existingItemCheck != null) {
+                existingItemCheck.accept(existing);
             }
 
             ObjectNode item;
@@ -1896,14 +1951,14 @@ public class DynamoDbService {
                     String tableName = put.path("TableName").asText();
                     String storageKey = regionKey(region, canonicalTableName(region, tableName));
                     putItemInternal(tableName, put.get("Item"), null, null, null, region, "NONE", false,
-                            pendingStreamEvents::add, staged);
+                            pendingStreamEvents::add, staged, null);
                     affectedStorageKeys.add(storageKey);
                 } else if (transactItem.has("Delete")) {
                     JsonNode del = transactItem.get("Delete");
                     String tableName = del.path("TableName").asText();
                     String storageKey = regionKey(region, canonicalTableName(region, tableName));
                     deleteItemInternal(tableName, del.get("Key"), null, null, null, region, "NONE", false,
-                            pendingStreamEvents::add, staged);
+                            pendingStreamEvents::add, staged, null);
                     affectedStorageKeys.add(storageKey);
                 } else if (transactItem.has("Update")) {
                     JsonNode upd = transactItem.get("Update");
@@ -1914,7 +1969,7 @@ public class DynamoDbService {
                             upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null,
                             upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null,
                             "NONE", null, region, "NONE", false, pendingStreamEvents::add, staged,
-                            UpdateSizeRule.FINISHED_ITEM);
+                            UpdateSizeRule.FINISHED_ITEM, null);
                     affectedStorageKeys.add(storageKey);
                 }
             }
