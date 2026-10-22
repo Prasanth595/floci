@@ -28,7 +28,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 /**
@@ -181,6 +180,21 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * Keeps the snapshot of a kept API whose own undo did not complete. The engine restores the
+     * previous resource and reports the rollback failure once; with the snapshot, a
+     * ContinueUpdateRollback tries the restore again, or fails again when the update's document had
+     * replaced the definition, instead of finding nothing to undo.
+     */
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        String snapshot = attempted.getAttributes().get(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR);
+        if (REST_API.equals(previous.getResourceType()) && snapshot != null
+                && attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
+            previous.getAttributes().put(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR, snapshot);
+        }
+    }
+
+    /**
      * Puts a replaced RestApi, Resource or Method back when a later resource fails the update, and a
      * RestApi patched in place back to its snapshot. Without a replacement, a Resource update
      * changed nothing, since all its properties are createOnly, so there is nothing to undo. A
@@ -199,8 +213,8 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Patches the API back from the snapshot taken before its in-place update. An update that also
-     * re-applied an OpenAPI document replaced the API's resources, methods and models, which the
+     * Patches the API back from the snapshot taken before its in-place update. An update whose
+     * OpenAPI document was applied replaced the API's resources, methods and models, which the
      * snapshot does not hold, so its rollback is not implemented. With no snapshot, nothing changed.
      */
     private boolean rollbackRestApiUpdate(StackResource resource) {
@@ -293,7 +307,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
 
         RestApi api;
         if (existing != null) {
-            snapshotBeforeUpdate(r, existing, region, openApiDocument != null);
+            snapshotBeforeUpdate(r, existing, region);
             List<Map<String, String>> operations = new ArrayList<>(nameAndDescription);
             if (endpoint != null) {
                 operations.addAll(endpointPatchOps(existing.getEndpointConfiguration(),
@@ -315,22 +329,21 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(api.getId());
         boolean created = existing == null;
-        // Set once putRestApi has accepted the document, which replaces the API's definition. The
-        // snapshot of a kept API does not hold that definition, so from then on it cannot be put back.
-        AtomicBoolean documentApplied = new AtomicBoolean();
         // A step that fails once the API exists undoes this provision. An API it created is deleted
         // again; if that delete fails too, a create leaves the API marked as created by the stack, and
         // an update lists it for the stack's next cleanup. A kept API gets back what the update
-        // patched (putRestApi leaves the API as it was when it rejects the document), unless its
-        // document was already applied, which is reported as a rollback failure instead.
+        // patched (putRestApi leaves the API as it was when it rejects the document); when its
+        // document was already applied, the definition cannot be put back, which is reported as a
+        // rollback failure.
         CfnRollback.guarded(r, ctx, created,
                 () -> delete(REST_API, api.getId(), region),
                 () -> {
-                    if (documentApplied.get()) {
+                    JsonNode snapshot = readSnapshot(r);
+                    restore(api.getId(), snapshot);
+                    if (snapshot.path("body").asBoolean(false)) {
                         throw new IllegalStateException("its OpenAPI document was already applied, and the"
                                 + " update keeps no copy of the definition it replaced");
                     }
-                    restore(api.getId(), readSnapshot(r));
                 },
                 () -> {
                     r.getAttributes().put("RestApiId", api.getId());
@@ -339,7 +352,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
                             apiGatewayService.findRootResourceId(region, api.getId()).orElseThrow());
                     if (openApiDocument != null) {
                         apiGatewayService.putRestApi(region, api.getId(), "overwrite", openApiDocument.toString());
-                        documentApplied.set(true);
+                        markDocumentApplied(r);
                         // putRestApi overwrites Name and Description from the document's info, so the
                         // declared ones are applied again.
                         apiGatewayService.updateRestApi(region, api.getId(), nameAndDescription);
@@ -385,10 +398,11 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Keeps what an in-place update is about to patch, the name, description and endpoint
-     * configuration the API has now, so {@link #rollbackUpdate} can put them back, and whether the
-     * update also re-applies an OpenAPI document.
+     * configuration the API has now, so {@link #rollbackUpdate} can put them back. Its {@code body}
+     * flag starts false and is set by {@link #markDocumentApplied} once the update's OpenAPI
+     * document has replaced the API's definition.
      */
-    private void snapshotBeforeUpdate(StackResource r, RestApi existing, String region, boolean body) {
+    private void snapshotBeforeUpdate(StackResource r, RestApi existing, String region) {
         ObjectNode snapshot = objectMapper.createObjectNode();
         snapshot.put("region", region);
         snapshot.put("name", existing.getName());
@@ -398,7 +412,21 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         if (existing.getEndpointConfiguration() != null) {
             existing.getEndpointConfiguration().getVpcEndpointIds().forEach(vpcEndpointIds::add);
         }
-        snapshot.put("body", body);
+        snapshot.put("body", false);
+        r.getAttributes().put(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    /**
+     * Records on an in-place update's snapshot that putRestApi accepted its OpenAPI document, which
+     * replaced the API's resources, methods and models: the snapshot cannot put those back. An API
+     * this provision created has no snapshot.
+     */
+    private void markDocumentApplied(StackResource r) {
+        if (!r.getAttributes().containsKey(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR)) {
+            return;
+        }
+        ObjectNode snapshot = (ObjectNode) readSnapshot(r);
+        snapshot.put("body", true);
         r.getAttributes().put(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
