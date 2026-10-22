@@ -40,6 +40,8 @@ class LambdaWebEnvironmentManagerTest {
                 LambdaWebEnvironmentManager.nodeFlags("--expose-gc   --max-semi-space-size=32"));
         assertEquals(flags(List.of("--max-old-space-size")),
                 LambdaWebEnvironmentManager.nodeFlags("--max-old-space-size 1536"));
+        assertEquals(flags(List.of("--max-old-space-size=\"1536\"")),
+                LambdaWebEnvironmentManager.nodeFlags("--max-old-space-size=\"1536\""));
     }
 
     @Test
