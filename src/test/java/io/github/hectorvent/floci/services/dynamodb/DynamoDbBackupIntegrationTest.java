@@ -311,6 +311,22 @@ class DynamoDbBackupIntegrationTest {
         ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + "x".repeat(40) + "\"}")
                 .statusCode(400)
                 .body("message", equalTo("Invalid Backup ARN"));
+        String shortArn = "x".repeat(36);
+        ddb("ListBackups", """
+                {"Limit": 0, "ExclusiveStartBackupArn": "%s", "BackupType": "BAD"}
+                """.formatted(shortArn))
+                .statusCode(400)
+                .body("message", equalTo("3 validation errors detected: Value '0' at 'limit' failed to satisfy "
+                        + "constraint: Member must have value greater than or equal to 1; Value '" + shortArn
+                        + "' at 'exclusiveStartBackupArn' failed to satisfy constraint: Member must have length "
+                        + "greater than or equal to 37; Value 'BAD' at 'backupType' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: [ALL, AWS_BACKUP, USER, SYSTEM]"));
+        String longArn = "x".repeat(1025);
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + longArn + "\"}")
+                .statusCode(400)
+                .body("message", equalTo("1 validation error detected: Value '" + longArn + "' at "
+                        + "'exclusiveStartBackupArn' failed to satisfy constraint: Member must have length "
+                        + "less than or equal to 1024"));
     }
 
     @Test

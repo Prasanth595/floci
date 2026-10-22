@@ -61,6 +61,8 @@ public class NativeDynamoDbJsonHandler {
     // The order AWS prints the enum constraint in.
     private static final List<String> BACKUP_TYPE_FILTERS = List.of("ALL", "AWS_BACKUP", "USER", "SYSTEM");
     private static final int MAX_LIST_BACKUPS_LIMIT = 100;
+    private static final int MIN_BACKUP_ARN_LENGTH = 37;
+    private static final int MAX_BACKUP_ARN_LENGTH = 1024;
     private static final Instant MAX_TIME_RANGE_BOUND = Instant.ofEpochMilli(99_999_999_999_999L);
     private static final int MAX_RECOVERY_PERIOD_DAYS = 35;
 
@@ -1963,6 +1965,15 @@ public class NativeDynamoDbJsonHandler {
             violations.add("Value '" + limit + "' at 'limit' failed to satisfy constraint: "
                     + "Member must have value less than or equal to " + MAX_LIST_BACKUPS_LIMIT);
         }
+        String exclusiveStartBackupArn = textOrNull(request, "ExclusiveStartBackupArn");
+        if (exclusiveStartBackupArn != null && exclusiveStartBackupArn.length() < MIN_BACKUP_ARN_LENGTH) {
+            violations.add("Value '" + exclusiveStartBackupArn + "' at 'exclusiveStartBackupArn' failed to satisfy "
+                    + "constraint: Member must have length greater than or equal to " + MIN_BACKUP_ARN_LENGTH);
+        }
+        if (exclusiveStartBackupArn != null && MAX_BACKUP_ARN_LENGTH < exclusiveStartBackupArn.length()) {
+            violations.add("Value '" + exclusiveStartBackupArn + "' at 'exclusiveStartBackupArn' failed to satisfy "
+                    + "constraint: Member must have length less than or equal to " + MAX_BACKUP_ARN_LENGTH);
+        }
         String backupType = request.hasNonNull("BackupType") ? request.get("BackupType").asText() : "USER";
         if (!BACKUP_TYPE_FILTERS.contains(backupType)) {
             violations.add("Value '" + backupType + "' at 'backupType' failed to satisfy constraint: "
@@ -1979,7 +1990,7 @@ public class NativeDynamoDbJsonHandler {
         checkTimeRangeBound("TimeRangeUpperBound", upperBound);
 
         DynamoDbService.ListBackupsResult result = dynamoDbService.listBackups(tableName, limit, lowerBound,
-                upperBound, textOrNull(request, "ExclusiveStartBackupArn"), backupType, region);
+                upperBound, exclusiveStartBackupArn, backupType, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaries = response.putArray("BackupSummaries");
