@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -494,6 +495,7 @@ class ElbClassicServiceTest {
             ClassicLoadBalancer lb = entry.getValue();
             assertEquals(Set.of(REGION), storage.keysForAccount(account), account);
             assertInstanceOf(ConcurrentHashMap.class, storage.getForAccount(account, REGION).orElseThrow(), account);
+            assertSame(lb, storage.getForAccount(account, REGION).orElseThrow().get("web"), account);
             verify(healthChecker, times(1)).startMonitoring(lb);
             assertEquals(zone, lb.getCanonicalHostedZoneNameId(), account);
             assertEquals(account, lb.getAccountId());
