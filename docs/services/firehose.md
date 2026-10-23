@@ -159,10 +159,10 @@ or from the secret in `SecretsManagerConfiguration` when `Enabled` is true (the 
 
 A batch is staged in S3 once, and the `COPY` runs on its own thread so that a slow or hanging query does not hold the
 buffer flusher thread or `PutRecord`. If its `COPY` fails (missing table or cluster, bad data), the staged object stays in S3
-and the `COPY` is retried against that same object every 5 minutes until `RetryOptions.DurationInSeconds` has elapsed since
-the first failure (default 3600, `0` means a single attempt). Only the first failure of a batch is logged as a warning.
-Batches are loaded in order, so a newer batch waits behind an older failing one. After the window the batch is given up
-with an error log and the staged object is kept. Pending copies are held in memory and are lost on restart. With `S3BackupMode`
+and the `COPY` is retried against that same object every 5 minutes until `RetryOptions.DurationInSeconds` has elapsed (the
+window starts with the first attempt, default 3600, `0` means a single attempt). Only the first failure of a batch is logged
+as a warning. Batches are loaded in order, so a newer batch waits behind an older failing one. After the window the batch is
+given up with an error log and the staged object is kept. Pending copies are held in memory and are lost on restart. With `S3BackupMode`
 set to `Enabled`, which needs an `S3BackupConfiguration`, each batch is also written once to that bucket under its own prefix
 and compression. The backup is written after the batch is staged and queued, and a failed backup write is logged without
 holding the load back or re-staging the batch, so that batch then has no backup copy.
