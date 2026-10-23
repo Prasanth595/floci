@@ -36,6 +36,68 @@ class S3NullVersionReviewTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
+    void rollbackThenPutListsTheReplacementNull(boolean memory) {
+        S3Service service = rolledBackService(memory);
+        S3Object replacement = service.putObject("bucket", "key", bytes("replacement"), "text/plain", Map.of());
+        assertArrayEquals(bytes("replacement"), service.getObject("bucket", "key", "null").getData());
+        List<S3Object> versions = service.listObjectVersions("bucket", "key", 100, null).versions();
+        assertEquals(1, versions.size());
+        assertEquals(replacement.getETag(), versions.getFirst().getETag(),
+                "listing must describe the retrievable null version");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void rollbackThenDeleteDoesNotResurrectNull(boolean memory) {
+        S3Service service = rolledBackService(memory);
+        service.deleteObject("bucket", "key");
+        assertAll(
+                () -> assertTrue(service.listObjectVersions("bucket", "key", 100, null).versions().isEmpty(),
+                        "plain DELETE must remove the only null version"),
+                () -> assertFalse(service.objectExists("bucket", "key")),
+                () -> assertEquals("NoSuchVersion", assertThrows(AwsException.class,
+                        () -> service.getObject("bucket", "key", "null")).getErrorCode()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void rollbackCannotEraseAnnotationsOfLockedArchivedNull(boolean memory) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir, memory);
+        service.createBucket("bucket", "us-east-1");
+        service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+        service.putObjectAnnotation("bucket", "key", "note", null, bytes("annotation"), null, null);
+        service.setBucketObjectLockEnabled("bucket");
+        service.putObjectLegalHold("bucket", "key", "null", "ON");
+        String configuration = service.snapshotBucketConfiguration("bucket");
+        service.putBucketVersioning("bucket", "Enabled");
+        service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of());
+        service.restoreBucketConfiguration("bucket", configuration);
+
+        assertAll(
+                () -> assertEquals("AccessDenied", assertThrows(AwsException.class,
+                        () -> service.putObject("bucket", "key", bytes("replacement"), "text/plain", Map.of())).getErrorCode()),
+                () -> assertEquals("AccessDenied", assertThrows(AwsException.class,
+                        () -> service.deleteObject("bucket", "key")).getErrorCode()),
+                () -> assertArrayEquals(bytes("annotation"), service.readObjectAnnotationPayload(
+                        service.getObjectAnnotation("bucket", "key", "note", "null"))),
+                () -> assertArrayEquals(bytes("numbered"), service.getObject("bucket", "key").getData()));
+    }
+
+    private S3Service rolledBackService(boolean memory) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir, memory);
+        service.createBucket("bucket", "us-east-1");
+        service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+        String configuration = service.snapshotBucketConfiguration("bucket");
+        service.putBucketVersioning("bucket", "Enabled");
+        String version = service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of()).getVersionId();
+        service.deleteObject("bucket", "key", version);
+        service.restoreBucketConfiguration("bucket", configuration);
+        return service;
+    }
+
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
     void neverVersionedBodyReadsDoNotHoldTheBucketMonitor(boolean explicitNull) throws Exception {
         InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<>();
         S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir, true);

@@ -1040,9 +1040,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 checkLockProtection(prev, false);
             }
 
-            if ("Suspended".equals(bucket.getVersioningStatus())) {
-                checkArchivedNullLock(bucketOwnerAccount, bucketName, key, false);
-            }
+            checkArchivedNullLock(bucketOwnerAccount, bucketName, key, false);
 
             // Apply lock fields from request or bucket default
             applyObjectLock(object, bucket,
@@ -1062,9 +1060,7 @@ public class S3Service implements Resettable, ResourceProvider {
             } else {
                 writeFile(bucketOwnerAccount, bucketName, key, data);
             }
-            if ("Suspended".equals(bucket.getVersioningStatus())) {
-                deleteArchivedNullVersion(bucketOwnerAccount, bucketName, key, false);
-            }
+            deleteArchivedNullVersion(bucketOwnerAccount, bucketName, key, false);
             // An overwrite replaces the object's annotations (AWS drops them on overwrite).
             // The cleanup runs only after the body write succeeds, so a failed PUT keeps the
             // old body together with its annotations; and before the new metadata is published,
@@ -2499,10 +2495,8 @@ public class S3Service implements Resettable, ResourceProvider {
                 checkLockProtection(existing, bypassGovernance);
             }
             // Non-versioned delete
-            if ("Suspended".equals(bucket.getVersioningStatus())) {
-                checkArchivedNullLock(ownerId(), bucketName, key, bypassGovernance);
-                deleteArchivedNullVersion(ownerId(), bucketName, key, true);
-            }
+            checkArchivedNullLock(ownerId(), bucketName, key, bypassGovernance);
+            deleteArchivedNullVersion(ownerId(), bucketName, key, true);
             objectStore.delete(objectKey(bucketName, key));
             deleteFile(bucketName, key);
             deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
