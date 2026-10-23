@@ -168,6 +168,30 @@ class DynamoDbPartitionedItemStoreTest {
     }
 
     @Test
+    void eachBatchItemIsSavedInsideItsOwnWrite() {
+        DynamoDbStreamService streams = mock(DynamoDbStreamService.class);
+        DynamoDbService batching = new DynamoDbService(tableStore, openItemStore(), resolver, streams, null);
+        List<JsonNode> onDiskWhenTheSecondItemWasWritten = new ArrayList<>();
+        // A save deferred until after the batch releases its item locks could read an item, lose
+        // the race to a concurrent write of the same key, then save the stale copy over it. So by
+        // the time the batch writes its second item, the first must already be on disk.
+        doAnswer(invocation -> {
+            JsonNode written = invocation.getArgument(2);
+            if ("node-b".equals(written.get("id").get("S").asText())) {
+                onDiskWhenTheSecondItemWasWritten.add(restart().getItem("Nodes", key("node-a"), REGION));
+            }
+            return null;
+        }).when(streams).captureEvent(eq("INSERT"), any(), any(), any(), any());
+
+        batching.batchWriteItem(Map.of("Nodes", List.of(
+                putRequest(item("node-a", "a")),
+                putRequest(item("node-b", "b")))), REGION);
+
+        assertEquals(1, onDiskWhenTheSecondItemWasWritten.size());
+        assertEquals("a", value(onDiskWhenTheSecondItemWasWritten.getFirst()));
+    }
+
+    @Test
     void aWriteToAShardedTableRewritesOneOfItsFiles() throws Exception {
         Path directory = tempDir.resolve("sharded");
         DynamoDbService sharded = new DynamoDbService(tableStore, openItemStore(directory, 8), resolver);

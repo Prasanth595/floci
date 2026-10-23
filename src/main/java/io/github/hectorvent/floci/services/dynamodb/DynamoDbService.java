@@ -1841,6 +1841,11 @@ public class DynamoDbService {
             }
         }
 
+        // A store that writes single items saves each one inside its item lock, as PutItem does: a
+        // pass after the locks are released could read an item, lose the race to a concurrent
+        // write of the same key, and then save the stale copy over it. A whole-table store is
+        // saved once at the end, as a copy of the live table.
+        boolean persistEachItem = entryWritingItemStore() != null;
         Set<String> affectedStorageKeys = new LinkedHashSet<>();
         try {
             for (Map.Entry<String, List<JsonNode>> entry : requestItems.entrySet()) {
@@ -1849,17 +1854,19 @@ public class DynamoDbService {
                 for (JsonNode writeRequest : entry.getValue()) {
                     if (writeRequest.has("PutRequest")) {
                         JsonNode item = writeRequest.get("PutRequest").get("Item");
-                        putItemInternal(tableName, item, null, null, null, region, "NONE", false);
+                        putItemInternal(tableName, item, null, null, null, region, "NONE", persistEachItem);
                         affectedStorageKeys.add(storageKey);
                     } else if (writeRequest.has("DeleteRequest")) {
                         JsonNode key = writeRequest.get("DeleteRequest").get("Key");
-                        deleteItemInternal(tableName, key, null, null, null, region, "NONE", false);
+                        deleteItemInternal(tableName, key, null, null, null, region, "NONE", persistEachItem);
                         affectedStorageKeys.add(storageKey);
                     }
                 }
             }
         } finally {
-            persistItems(affectedStorageKeys, requestedItemKeys);
+            if (!persistEachItem) {
+                persistItems(affectedStorageKeys, requestedItemKeys);
+            }
         }
         return new BatchWriteResult(Map.of());
     }
