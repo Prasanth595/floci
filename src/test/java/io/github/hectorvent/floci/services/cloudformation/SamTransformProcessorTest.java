@@ -395,9 +395,9 @@ class SamTransformProcessorTest {
 
     /**
      * With AutoPublishAlias, SAM appends a given AutoPublishCodeSha256 to the function's Description, so
-     * that a new value alone changes the function and a version publishes for it. The first three
-     * Descriptions, and what they become, are the ones SAM's own translator test expects:
-     * https://github.com/aws/serverless-application-model/blob/v1.115.0/tests/translator/output/function_with_alias_and_code_sha256.json
+     * that a new value alone changes the function and a version publishes for it. A function without a
+     * description gets the bare hash, a plain string gets the hash after a space, and an intrinsic
+     * function is wrapped in an Fn::Join with the hash.
      */
     @Test
     void expandSamTemplate_autoPublishCodeSha256IsAppendedToTheDescription() throws Exception {
