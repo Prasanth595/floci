@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -83,6 +84,34 @@ class LambdaWebExecutionRoleTest {
         assertFalse(starts(role("ec2", "/", statement("Allow", "{\"Service\":\"ec2.amazonaws.com\"}",
                 "sts:AssumeRole", null))));
         assertFalse(starts("arn:aws:iam::000000000000:role/missing"));
+    }
+
+    @Test
+    void lambdaAssumesTheRoleAsAServicePrincipal() {
+        String allow = statement("Allow", LAMBDA, "sts:AssumeRole", null);
+        List<String> accepted = List.of(
+                role("everyone", "/", statement("Allow", "{\"AWS\":\"*\"}", "sts:AssumeRole", null)),
+                role("service", "/", statement("Allow", LAMBDA, "sts:AssumeRole",
+                        "{\"Bool\":{\"aws:PrincipalIsAWSService\":\"true\"}}")),
+                role("service-name", "/", statement("Allow", LAMBDA, "sts:AssumeRole",
+                        "{\"StringEquals\":{\"aws:PrincipalServiceName\":\"lambda.amazonaws.com\"}}")));
+        List<String> refused = List.of(
+                role("deny-everyone", "/", allow + ","
+                        + statement("Deny", "{\"AWS\":\"*\"}", "sts:AssumeRole", null)),
+                role("not-service", "/", statement("Allow", LAMBDA, "sts:AssumeRole",
+                        "{\"Bool\":{\"aws:PrincipalIsAWSService\":\"false\"}}")),
+                role("no-service", "/", statement("Allow", LAMBDA, "sts:AssumeRole",
+                        "{\"Null\":{\"aws:PrincipalIsAWSService\":\"true\"}}")),
+                role("no-service-name", "/", statement("Allow", LAMBDA, "sts:AssumeRole",
+                        "{\"Null\":{\"aws:PrincipalServiceName\":\"true\"}}")));
+        for (String roleArn : accepted) {
+            assertTrue(creates(roleArn), roleArn);
+            assertTrue(starts(roleArn), roleArn);
+        }
+        for (String roleArn : refused) {
+            assertFalse(creates(roleArn), roleArn);
+            assertFalse(starts(roleArn), roleArn);
+        }
     }
 
     private boolean creates(String roleArn) {
