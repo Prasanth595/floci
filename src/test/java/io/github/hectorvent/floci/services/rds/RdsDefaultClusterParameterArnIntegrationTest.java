@@ -3,19 +3,14 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.RestAssured;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.DBClusterParameterGroup;
 
-import java.net.URI;
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.RdsRequests.rdsClient;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -29,7 +24,7 @@ class RdsDefaultClusterParameterArnIntegrationTest {
     @CsvSource({"us-east-1,111111111111,aws", "eu-west-2,222222222222,aws",
             "cn-north-1,333333333333,aws-cn", "us-gov-west-1,444444444444,aws-us-gov"})
     void namedManagedDefaultsCarryTheRequestScopedArn(String region, String account, String partition) {
-        try (RdsClient client = client(region, account)) {
+        try (RdsClient client = rdsClient(region, account)) {
             List<DBClusterParameterGroup> groups = client.describeDBClusterParameterGroups(request ->
                     request.dbClusterParameterGroupName(GROUP_NAME)).dbClusterParameterGroups();
             assertEquals(1, groups.size());
@@ -45,7 +40,7 @@ class RdsDefaultClusterParameterArnIntegrationTest {
     @CsvSource({"us-east-1,111111111111,aws", "eu-west-2,222222222222,aws",
             "cn-north-1,333333333333,aws-cn", "us-gov-west-1,444444444444,aws-us-gov"})
     void listedManagedDefaultsCarryTheRequestScopedArns(String region, String account, String partition) {
-        try (RdsClient client = client(region, account)) {
+        try (RdsClient client = rdsClient(region, account)) {
             List<DBClusterParameterGroup> groups = client.describeDBClusterParameterGroups()
                     .dbClusterParameterGroups().stream()
                     .filter(group -> group.dbClusterParameterGroupName().startsWith("default."))
@@ -56,15 +51,6 @@ class RdsDefaultClusterParameterArnIntegrationTest {
                         group.dbClusterParameterGroupArn());
             }
         }
-    }
-
-    private static RdsClient client(String region, String account) {
-        return RdsClient.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .region(Region.of(region))
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test")))
-                .build();
     }
 
     private static String arn(String partition, String region, String account, String name) {
