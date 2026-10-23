@@ -768,7 +768,9 @@ an `Fn::If` written around a path or an operation, skipping an `AWS::NoValue` br
 Root-level `security` stays in the document as written and is not copied into operations,
 and an `Auth` that selects no default, such as `ApiKeyRequired: false` alone, leaves the
 document unchanged. floci's REST importer still applies root-level `security` to an
-operation that has none of its own, which API Gateway does not.
+operation that has none of its own, which API Gateway does not. As in SAM, any non-empty
+`Auth` needs a literal `paths` object in the `DefinitionBody`, so a body written as an
+`Fn::If` is rejected even when no default is selected.
 
 Other `Auth` properties, custom default authorizers and external definitions are rejected.
 When a default applies, so are unresolved or malformed security requirements, method

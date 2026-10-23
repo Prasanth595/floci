@@ -257,6 +257,20 @@ class SamRestApiAuthTest {
         assertEquals(original, template);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"ApiKeyRequired\":false}", "{\"DefaultAuthorizer\":\"AWS_IAM\"}"})
+    void refusesADefinitionBodyWrittenAsFnIfAsSamDoes(String auth) throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode properties = (ObjectNode) template.at("/Resources/Api/Properties");
+        properties.set("Auth", mapper.readTree(auth));
+        JsonNode body = properties.get("DefinitionBody");
+        properties.set("DefinitionBody", conditional(body, body));
+        JsonNode original = template.deepCopy();
+        AwsException failure = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals(original, template);
+    }
+
     private ObjectNode conditional(JsonNode whenTrue, JsonNode whenFalse) {
         ObjectNode conditional = mapper.createObjectNode();
         conditional.putArray("Fn::If").add("Enabled").add(whenTrue.deepCopy()).add(whenFalse.deepCopy());

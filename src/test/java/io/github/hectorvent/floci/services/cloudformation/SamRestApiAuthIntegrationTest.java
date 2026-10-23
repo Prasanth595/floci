@@ -211,6 +211,57 @@ class SamRestApiAuthIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void falseFnIfLeavesNoRouteWhileOtherRoutesGetTheSamDefault(boolean pathLevel) throws Exception {
+        ObjectNode template = template(false);
+        template.set("Conditions", mapper.readTree("{\"Disabled\":{\"Fn::Equals\":[\"on\",\"off\"]}}"));
+        template.set("Outputs", mapper.readTree("{\"ApiId\":{\"Value\":{\"Ref\":\"Api\"}}}"));
+        ((ObjectNode) template.at("/Resources/Api/Properties/Auth")).remove("ApiKeyRequired");
+        ObjectNode paths = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody/paths");
+        ObjectNode items = (ObjectNode) paths.get("/items");
+        JsonNode post = items.get("post").deepCopy();
+        ObjectNode conditional = mapper.createObjectNode();
+        conditional.putArray("Fn::If").add("Disabled").add(pathLevel ? items.deepCopy() : post.deepCopy())
+                .add(mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        if (pathLevel) {
+            paths.set("/items", conditional);
+            paths.set("/other", mapper.createObjectNode().set("post", post));
+        } else {
+            items.set("post", conditional);
+            items.set("put", post);
+        }
+        String stack = "sam-false-condition-auth-" + UUID.randomUUID();
+        given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack").formParam("StackName", stack)
+                .formParam("TemplateBody", template.toString())
+                .formParam("Capabilities.member.1", "CAPABILITY_AUTO_EXPAND")
+                .when().post("/").then().statusCode(200);
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status(),
+                    () -> CfnStackWaits.failedResourceReason(stack));
+            String outputs = given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DescribeStacks").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200).extract().asString();
+            String apiId = XmlParser.extractPairs(outputs, "Outputs", "OutputKey", "OutputValue").get("ApiId");
+            String resources = "/restapis/" + apiId + "/resources";
+            String liveId = given().get(resources).then().statusCode(200)
+                    .extract().path("item.find { it.path == '" + (pathLevel ? "/other" : "/items") + "' }.id");
+            if (pathLevel) {
+                given().get(resources).then().body("item.find { it.path == '/items' }", equalTo(null));
+            } else {
+                given().get(resources + "/" + liveId + "/methods/POST").then().statusCode(404);
+            }
+            given().get(resources + "/" + liveId + "/methods/" + (pathLevel ? "POST" : "PUT"))
+                    .then().statusCode(200).body("authorizationType", equalTo("AWS_IAM"));
+        } finally {
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DeleteStack").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200);
+            CfnStackWaits.awaitStackDeleted(stack);
+        }
+    }
+
     private ObjectNode customAuthorizer() throws Exception {
         return (ObjectNode) mapper.readTree("""
                 {"type":"apiKey","name":"Authorization","in":"header",
