@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.core.storage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -386,6 +388,28 @@ class PartitionedFileStorageJournalTest {
 
         assertTrue(Files.size(journal()) > 0, "the unreplayed records are kept");
         assertEquals(Map.of("a", "1"), open(1).get("table").orElseThrow());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = PartitionedFileStorage.Mode.class, names = {"SYNC", "PERIODIC"})
+    void anotherModeWritesALeftoverJournalIntoItsShardsAndRemovesIt(PartitionedFileStorage.Mode mode) {
+        PartitionedFileStorage<String> crashed = open(1);
+        crashed.put("table", Map.of("a", "1", "b", "2"));
+        crashed.flush();
+        crashed.putEntry("table", "a", "journaled");
+
+        PartitionedFileStorage<String> switched = new PartitionedFileStorage<>(tempDir.resolve("items"),
+                tempDir.resolve("items.json"), String.class, 1, mode, Long.MAX_VALUE);
+        opened.add(switched);
+        switched.load();
+
+        assertEquals(Map.of("a", "journaled", "b", "2"), switched.get("table").orElseThrow());
+        assertFalse(Files.exists(journal()), "the journal is folded into the shard files and removed");
+        switched.putEntry("table", "a", "newer");
+        switched.flush();
+
+        // Back in journal mode, nothing stale is replayed over the newer shard file.
+        assertEquals(Map.of("a", "newer", "b", "2"), open(1).get("table").orElseThrow());
     }
 
     @Test

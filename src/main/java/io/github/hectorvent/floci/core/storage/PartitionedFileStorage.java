@@ -57,7 +57,9 @@ import java.util.stream.Stream;
  * dirty shard on the flush interval, like {@link HybridStorage}. A {@link Mode#JOURNAL} store
  * appends one record per changed entry to {@value #JOURNAL_FILE} in the directory, like
  * {@link WalStorage}, but its compaction rewrites only the shards changed since the last one
- * instead of a snapshot of the whole store. Load replays the journal over the shard files.
+ * instead of a snapshot of the whole store. Load replays the journal over the shard files. A
+ * store in another mode that finds a journal left by a journal-mode run writes its changes into
+ * the shard files on load and removes it.
  *
  * <p>While the directory holds no data, a legacy single-file store (the {@code Map<String,
  * Map<String, E>>} file the other backends write, or a {@code wal} snapshot and log) is migrated:
@@ -128,6 +130,8 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     private final ObjectWriter entriesWriter;
     private final ScheduledExecutorService scheduler;
     private final EntryJournal<E> journal;
+    // Outside journal mode: the journal a crashed journal-mode run may have left, read once on load.
+    private final EntryJournal<E> leftoverJournal;
     // Journal mode: changes hold the read lock while they update memory and append their record,
     // and compaction holds the write lock while it writes dirty shards and truncates the journal,
     // so the journal never drops a record whose change is not yet in a shard file. In every mode,
@@ -185,9 +189,10 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
         JavaType entriesType = mapper.getTypeFactory().constructMapType(Map.class, String.class, entryType);
         this.entriesReader = mapper.readerFor(entriesType);
         this.entriesWriter = mapper.writerFor(entriesType);
-        this.journal = mode == Mode.JOURNAL
-                ? new EntryJournal<>(directory.resolve(JOURNAL_FILE), mapper.constructType(entryType), entriesType)
-                : null;
+        EntryJournal<E> journalFile = new EntryJournal<>(directory.resolve(JOURNAL_FILE),
+                mapper.constructType(entryType), entriesType);
+        this.journal = mode == Mode.JOURNAL ? journalFile : null;
+        this.leftoverJournal = mode == Mode.JOURNAL ? null : journalFile;
         this.scheduler = mode == Mode.SYNC
                 ? null
                 : StorageFiles.scheduleEvery("partitioned-storage-flush", flushIntervalMs, this::flushQuietly);
@@ -282,21 +287,49 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
             loadDirectory();
         }
         if (journal != null) {
-            int replayed;
-            try {
-                replayed = journal.replay(this::applyReplayed);
-            } catch (IOException e) {
-                // Compaction would write the partial state and empty the journal, losing the
-                // records not yet read: refuse to start instead, as a failed migration does.
-                throw new UncheckedIOException("Failed to replay the journal of " + directory
-                        + "; it is untouched, fix the cause and restart", e);
-            }
-            if (replayed > 0) {
-                LOG.infov("Replayed {0} journal records into {1}", replayed, directory);
-            }
+            replayJournal(journal);
             journal.open();
+        } else if (!leftoverJournal.isEmpty()) {
+            foldLeftoverJournal();
         }
         loaded = true;
+    }
+
+    private void replayJournal(EntryJournal<E> source) {
+        int replayed;
+        try {
+            replayed = source.replay(this::applyReplayed);
+        } catch (IOException e) {
+            // Compaction would write the partial state and empty the journal, losing the
+            // records not yet read: refuse to start instead, as a failed migration does.
+            throw new UncheckedIOException("Failed to replay the journal of " + directory
+                    + "; it is untouched, fix the cause and restart", e);
+        }
+        if (replayed > 0) {
+            LOG.infov("Replayed {0} journal records into {1}", replayed, directory);
+        }
+    }
+
+    /**
+     * Folds the journal of a journal-mode run that ended without compacting into the shard files,
+     * then removes it. Ignored, its changes would be lost now and replayed as stale ones over newer
+     * shard files once the store is back in journal mode.
+     */
+    private void foldLeftoverJournal() {
+        Path file = directory.resolve(JOURNAL_FILE);
+        LOG.warnv("Found {0}, left by a wal-mode run; writing its changes into the shard files", file);
+        replayJournal(leftoverJournal);
+        writeDirtyShards();
+        if (!dirty.isEmpty()) {
+            throw new IllegalStateException("Could not write " + dirty.size() + " shards of " + directory
+                    + " from " + file + "; it is kept, fix the cause and restart");
+        }
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to remove " + file
+                    + "; its changes are in the shard files, remove it and restart", e);
+        }
     }
 
     @Override
