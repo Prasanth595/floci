@@ -19,12 +19,12 @@ import java.util.List;
 import java.util.Set;
 import java.util.zip.CRC32;
 
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.assertEpochMillisBetween;
 import static io.github.hectorvent.floci.testing.DynamoDbRequests.decimalAt;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -5903,8 +5903,7 @@ given()
         .then()
             .statusCode(200), "/TableDescription/CreationDateTime");
         long after = System.currentTimeMillis();
-        long createdMillis = created.movePointRight(3).longValueExact();
-        assertTrue(before <= createdMillis && createdMillis <= after, created + " is not between " + before + " and " + after);
+        assertEpochMillisBetween(before, created, after);
 
         ValidatableResponse described = given()
             .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")

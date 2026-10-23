@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.assertEpochMillisBetween;
 import static io.github.hectorvent.floci.testing.DynamoDbRequests.decimalAt;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
@@ -15,7 +16,6 @@ import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** CreateGlobalTable and its Describe, Update and List siblings, the 2017.11.29 API. */
 @QuarkusTest
@@ -85,8 +85,7 @@ class DynamoDbGlobalTableIntegrationTest {
                 + "\"ReplicationGroup\":[{\"RegionName\":\"eu-west-1\"}]}")
             .then().statusCode(200), "/GlobalTableDescription/CreationDateTime");
         long after = System.currentTimeMillis();
-        long createdMillis = created.movePointRight(3).longValueExact();
-        assertTrue(before <= createdMillis && createdMillis <= after, created + " is not between " + before + " and " + after);
+        assertEpochMillisBetween(before, created, after);
     }
 
     @Test
