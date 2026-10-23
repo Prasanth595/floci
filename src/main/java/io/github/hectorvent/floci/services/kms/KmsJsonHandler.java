@@ -39,7 +39,7 @@ public class KmsJsonHandler {
 
     private static final Set<String> KEY_ID_OPERATIONS = Set.of(
             "GetPublicKey", "DescribeKey", "ReplicateKey", "CreateGrant", "ListGrants", "RevokeGrant", "Encrypt", "GenerateDataKey",
-            "GenerateDataKeyWithoutPlaintext", "Sign", "Verify", "GenerateMac", "VerifyMac", "ScheduleKeyDeletion",
+            "GenerateDataKeyWithoutPlaintext", "GenerateDataKeyPair", "GenerateDataKeyPairWithoutPlaintext", "Sign", "Verify", "GenerateMac", "VerifyMac", "ScheduleKeyDeletion",
             "CancelKeyDeletion", "TagResource", "UntagResource", "ListResourceTags", "GetKeyPolicy", "PutKeyPolicy",
             "ListKeyPolicies", "UpdateKeyDescription", "GetKeyRotationStatus", "EnableKeyRotation",
             "DisableKeyRotation", "EnableKey", "DisableKey", "RotateKeyOnDemand", "GetParametersForImport",
@@ -81,6 +81,8 @@ public class KmsJsonHandler {
             case "ReEncrypt" -> handleReEncrypt(request, region);
             case "GenerateDataKey" -> handleGenerateDataKey(request, region);
             case "GenerateDataKeyWithoutPlaintext" -> handleGenerateDataKeyWithoutPlaintext(request, region);
+            case "GenerateDataKeyPair" -> handleGenerateDataKeyPair(request, region);
+            case "GenerateDataKeyPairWithoutPlaintext" -> handleGenerateDataKeyPairWithoutPlaintext(request, region);
             case "Sign" -> handleSign(request, region);
             case "Verify" -> handleVerify(request, region);
             case "GenerateMac" -> handleGenerateMac(request, region);
@@ -400,6 +402,37 @@ public class KmsJsonHandler {
         response.put("CiphertextBlob", Base64.getEncoder().encodeToString((byte[]) result.get("CiphertextBlob")));
         response.put("KeyId", (String) result.get("KeyId"));
         return Response.ok(response).build();
+    }
+
+    private Response handleGenerateDataKeyPair(JsonNode request, String region) {
+        String keyId = request.path("KeyId").asText();
+        String spec = readDataKeyPairSpec(request);
+        Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
+
+        KmsService.DataKeyPair result = service.generateDataKeyPair(keyId, spec, context, region);
+
+        ObjectNode response = dataKeyPairResponse(result);
+        response.put("PrivateKeyPlaintext", Base64.getEncoder().encodeToString(result.privateKeyPlaintext()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleGenerateDataKeyPairWithoutPlaintext(JsonNode request, String region) {
+        String keyId = request.path("KeyId").asText();
+        String spec = readDataKeyPairSpec(request);
+        Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
+
+        KmsService.DataKeyPair result = service.generateDataKeyPairWithoutPlaintext(keyId, spec, context, region);
+
+        return Response.ok(dataKeyPairResponse(result)).build();
+    }
+
+    private ObjectNode dataKeyPairResponse(KmsService.DataKeyPair result) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("PrivateKeyCiphertextBlob", Base64.getEncoder().encodeToString(result.privateKeyCiphertextBlob()));
+        response.put("PublicKey", Base64.getEncoder().encodeToString(result.publicKey()));
+        response.put("KeyId", result.keyArn());
+        response.put("KeyPairSpec", result.keyPairSpec());
+        return response;
     }
 
     private Response handleReEncrypt(JsonNode request, String region) {
@@ -724,6 +757,22 @@ public class KmsJsonHandler {
                     + "RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, "
                     + "ECC_NIST_EDWARDS25519, SYMMETRIC_DEFAULT, HMAC_224, HMAC_256, HMAC_384, HMAC_512, SM2, "
                     + "ML_DSA_44, ML_DSA_65, ML_DSA_87]");
+        }
+        return spec;
+    }
+
+    private static final List<String> DATA_KEY_PAIR_SPECS = List.of("RSA_2048", "RSA_3072", "RSA_4096",
+            "ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521", "ECC_SECG_P256K1", "SM2", "ECC_NIST_EDWARDS25519");
+
+    private static String readDataKeyPairSpec(JsonNode request) {
+        String spec = request.path("KeyPairSpec").asText(null);
+        if (spec == null) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("keyPairSpec"));
+        }
+        if (!DATA_KEY_PAIR_SPECS.contains(spec)) {
+            throw SmithyValidationErrors.validationException("Value '" + spec
+                    + "' at 'keyPairSpec' failed to satisfy constraint: Member must satisfy enum value set: "
+                    + DATA_KEY_PAIR_SPECS.toString());
         }
         return spec;
     }

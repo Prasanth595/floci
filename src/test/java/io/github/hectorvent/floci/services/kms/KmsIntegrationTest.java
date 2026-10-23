@@ -18,15 +18,19 @@ import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.PrivateKey;
 import java.security.PublicKey;
+import java.security.Signature;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.emptyString;
@@ -2501,6 +2505,113 @@ class KmsIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"))
                 .body("message", equalTo("Please specify either number of bytes or key spec."));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"RSA_2048", "RSA_4096", "ECC_NIST_P256", "ECC_NIST_P521", "ECC_SECG_P256K1", "ECC_NIST_EDWARDS25519"})
+    void generateDataKeyPairEncryptsItsPrivateKeyUnderTheKmsKey(String keyPairSpec) {
+        String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+
+        JsonPath pair = callKms("GenerateDataKeyPair",
+                "{\"KeyId\":\"%s\",\"KeyPairSpec\":\"%s\",\"EncryptionContext\":{\"purpose\":\"test\"}}"
+                        .formatted(keyArn, keyPairSpec))
+                .then()
+                .statusCode(200)
+                .body("KeyId", equalTo(keyArn))
+                .body("KeyPairSpec", equalTo(keyPairSpec))
+                .body("PublicKey", notNullValue())
+                .extract().jsonPath();
+
+        String plaintext = callKms("Decrypt",
+                "{\"CiphertextBlob\":\"%s\",\"EncryptionContext\":{\"purpose\":\"test\"}}"
+                        .formatted(pair.getString("PrivateKeyCiphertextBlob")))
+                .then().statusCode(200).extract().path("Plaintext");
+        assertEquals(pair.getString("PrivateKeyPlaintext"), plaintext);
+    }
+
+    @Test
+    void generateDataKeyPairWithoutPlaintextReturnsAPublicKeyThatMatchesTheEncryptedPrivateKey() throws Exception {
+        String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String alias = "alias/data-key-pair-" + UUID.randomUUID();
+        callKms("CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(alias, keyArn))
+                .then().statusCode(200);
+
+        JsonPath pair = callKms("GenerateDataKeyPairWithoutPlaintext",
+                "{\"KeyId\":\"%s\",\"KeyPairSpec\":\"ECC_NIST_P256\",\"EncryptionContext\":{\"kid\":\"1\"}}".formatted(alias))
+                .then()
+                .statusCode(200)
+                .body("KeyId", equalTo(keyArn))
+                .body("KeyPairSpec", equalTo("ECC_NIST_P256"))
+                .body("$", not(hasKey("PrivateKeyPlaintext")))
+                .extract().jsonPath();
+        String privateKey = callKms("Decrypt",
+                "{\"CiphertextBlob\":\"%s\",\"EncryptionContext\":{\"kid\":\"1\"}}"
+                        .formatted(pair.getString("PrivateKeyCiphertextBlob")))
+                .then().statusCode(200).extract().path("Plaintext");
+
+        KeyFactory keyFactory = KeyFactory.getInstance("EC");
+        PrivateKey signingKey = keyFactory.generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(privateKey)));
+        PublicKey verifyingKey = keyFactory.generatePublic(
+                new X509EncodedKeySpec(Base64.getDecoder().decode(pair.getString("PublicKey"))));
+        Signature signer = Signature.getInstance("SHA256withECDSA");
+        signer.initSign(signingKey);
+        signer.update("message".getBytes(StandardCharsets.UTF_8));
+        byte[] signature = signer.sign();
+        Signature verifier = Signature.getInstance("SHA256withECDSA");
+        verifier.initVerify(verifyingKey);
+        verifier.update("message".getBytes(StandardCharsets.UTF_8));
+        assertTrue(verifier.verify(signature));
+    }
+
+    @Test
+    void generateDataKeyPairBindsItsCiphertextToTheEncryptionContext() {
+        String ciphertext = callKms("GenerateDataKeyPairWithoutPlaintext",
+                "{\"KeyId\":\"%s\",\"KeyPairSpec\":\"ECC_NIST_P256\",\"EncryptionContext\":{\"kid\":\"1\"}}"
+                        .formatted(createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT")))
+                .then().statusCode(200).extract().path("PrivateKeyCiphertextBlob");
+
+        callKms("Decrypt", "{\"CiphertextBlob\":\"%s\",\"EncryptionContext\":{\"kid\":\"2\"}}".formatted(ciphertext))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidCiphertextException"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "GenerateDataKeyPair||Value null at 'keyPairSpec' failed to satisfy constraint: Member must not be null",
+            "GenerateDataKeyPairWithoutPlaintext||Value null at 'keyPairSpec' failed to satisfy constraint: Member must not be null",
+            "GenerateDataKeyPair|,\"KeyPairSpec\":\"AES_256\"|Value 'AES_256' at 'keyPairSpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, SM2, ECC_NIST_EDWARDS25519]",
+            "GenerateDataKeyPairWithoutPlaintext|,\"KeyPairSpec\":\"HMAC_256\"|Value 'HMAC_256' at 'keyPairSpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, SM2, ECC_NIST_EDWARDS25519]",
+    })
+    void generateDataKeyPairValidatesItsKeyPairSpecBeforeLookingUpTheKey(String operation, String member, String error) {
+        callKms(operation, "{\"KeyId\":\"00000000-0000-0000-0000-000000000000\"%s}".formatted(member == null ? "" : member))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: " + error));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"GenerateDataKeyPair", "GenerateDataKeyPairWithoutPlaintext"})
+    void generateDataKeyPairRejectsAnAsymmetricKey(String operation) {
+        callKms(operation, "{\"KeyId\":\"%s\",\"KeyPairSpec\":\"ECC_NIST_P256\"}"
+                .formatted(createKeyArn("RSA_2048", "ENCRYPT_DECRYPT")))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo("You cannot generate a data key pair with an asymmetric CMK"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"GenerateDataKeyPair", "GenerateDataKeyPairWithoutPlaintext"})
+    void generateDataKeyPairNamesItsOperationInTheKeyUsageError(String operation) {
+        String keyArn = createKeyArn("ECC_NIST_P256", "SIGN_VERIFY");
+
+        callKms(operation, "{\"KeyId\":\"%s\",\"KeyPairSpec\":\"ECC_NIST_P256\"}".formatted(keyArn))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidKeyUsageException"))
+                .body("message", equalTo(keyArn + " key usage is SIGN_VERIFY which is not valid for " + operation + "."));
     }
 
     @ParameterizedTest
