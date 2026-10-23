@@ -32,6 +32,8 @@ class PassedRolesTest {
     private static final String DEFAULT_ADMINISTRATION = ROLES + "AWSCloudFormationStackSetAdministrationRole";
     private static final String EC2 = "ec2.amazonaws.com";
     private static final String AUTOSCALING = "autoscaling.amazonaws.com";
+    private static final String RDS = "rds.amazonaws.com";
+    private static final String DMS = "dms.amazonaws.com";
     private static final String PROFILE_ARN = "arn:aws:iam::111122223333:instance-profile/arn-profile";
 
     /**
@@ -381,6 +383,81 @@ class PassedRolesTest {
                 "redshift-serverless:UpdateScheduledAction"}) {
             assertEquals(List.of(passed("snapshots", serverless)), PassedRoles.of(action,
                     json("{\"scheduledActionName\":\"a\",\"roleArn\":\"" + ROLES + "snapshots\"}"), LOOKUPS), action);
+        }
+    }
+
+    @Test
+    void rdsPassesEachRoleARequestNamesForAnInstanceOrClusterToRds() {
+        for (String action : new String[] {"rds:AddRoleToDBCluster", "rds:AddRoleToDBInstance",
+                "rds:RemoveRoleFromDBCluster", "rds:RemoveRoleFromDBInstance", "rds:CreateDBProxy", "rds:ModifyDBProxy"}) {
+            assertEquals(List.of(passed("feature", RDS)), PassedRoles.of(action,
+                    form("DBInstanceIdentifier=d&RoleArn=" + ROLES + "feature&FeatureName=s3Import"), LOOKUPS), action);
+        }
+        assertEquals(List.of(passed("export", RDS)), PassedRoles.of("rds:StartExportTask",
+                form("ExportTaskIdentifier=e&IamRoleArn=" + ROLES + "export"), LOOKUPS));
+        // The directory role is named without its path, so it is checked on the ARN IAM holds it under.
+        assertEquals(List.of(new PassedRole(ROLES + "app/app-role", RDS), passed("monitoring", RDS)),
+                PassedRoles.of("rds:CreateDBInstance", form("DBInstanceIdentifier=d&DomainIAMRoleName=app-role"
+                        + "&MonitoringRoleArn=" + ROLES + "monitoring"), LOOKUPS));
+        assertEquals(List.of(passed("gone", RDS)), PassedRoles.of("rds:ModifyDBCluster",
+                form("DBClusterIdentifier=c&DomainIAMRoleName=gone"), LOOKUPS));
+        // A cluster's associated roles at any index, in either list form; a restore of an instance takes no
+        // monitoring role, and a modify of a cluster no associated roles.
+        assertEquals(List.of(passed("monitoring", RDS), passed("s3", RDS), passed("lambda", RDS)),
+                PassedRoles.of("rds:RestoreDBClusterToPointInTime", form("DBClusterIdentifier=c&MonitoringRoleArn="
+                        + ROLES + "monitoring&AssociatedRoles.DBClusterAssociatedRole.1.RoleArn=" + ROLES
+                        + "s3&AssociatedRoles.member.3.RoleArn=" + ROLES + "lambda"), LOOKUPS));
+        assertEquals(List.of(passed("gone", RDS)), PassedRoles.of("rds:RestoreDBInstanceFromDBSnapshot",
+                form("DBInstanceIdentifier=d&DomainIAMRoleName=gone&MonitoringRoleArn=" + ROLES + "monitoring"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("rds:ModifyDBCluster",
+                form("DBClusterIdentifier=c&AssociatedRoles.member.1.RoleArn=" + ROLES + "s3"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("rds:CreateDBCluster", form("DBClusterIdentifier=c"), LOOKUPS));
+    }
+
+    @Test
+    void anOptionGroupPassesTheRoleEachOptionTakesInItsIamRoleSettingToRds() {
+        String backup = "OptionsToInclude.OptionConfiguration.1.";
+        String audit = "OptionsToInclude.OptionConfiguration.2.";
+        String legacy = "OptionsToInclude.member.1.";
+        // Read as the handler reads it: both list forms, up to the first gap, and a setting named twice
+        // as its last value.
+        assertEquals(List.of(passed("audit", RDS), passed("legacy", RDS)), PassedRoles.of("rds:ModifyOptionGroup",
+                form("OptionGroupName=g&" + backup + "OptionName=SQLSERVER_BACKUP_RESTORE&" + backup
+                        + "OptionSettings.OptionSetting.2.Name=IAM_ROLE_ARN&" + backup
+                        + "OptionSettings.OptionSetting.2.Value=" + ROLES + "after-gap&" + audit
+                        + "OptionName=SQLSERVER_AUDIT&" + audit + "OptionSettings.OptionSetting.1.Name=S3_BUCKET_ARN&"
+                        + audit + "OptionSettings.OptionSetting.1.Value=" + ROLES + "bucket&" + audit
+                        + "OptionSettings.OptionSetting.2.Name=IAM_ROLE_ARN&" + audit
+                        + "OptionSettings.OptionSetting.2.Value=" + ROLES + "first&" + audit
+                        + "OptionSettings.member.1.Name=IAM_ROLE_ARN&" + audit + "OptionSettings.member.1.Value="
+                        + ROLES + "audit&" + legacy + "OptionName=SQLSERVER_BACKUP_RESTORE&" + legacy
+                        + "OptionSettings.member.1.Name=IAM_ROLE_ARN&" + legacy + "OptionSettings.member.1.Value="
+                        + ROLES + "legacy&OptionsToInclude.OptionConfiguration.4.OptionName=SQLSERVER_AUDIT&"
+                        + "OptionsToInclude.OptionConfiguration.4.OptionSettings.OptionSetting.1.Name=IAM_ROLE_ARN&"
+                        + "OptionsToInclude.OptionConfiguration.4.OptionSettings.OptionSetting.1.Value=" + ROLES
+                        + "option-after-gap"), LOOKUPS));
+    }
+
+    @Test
+    void dmsPassesItsEndpointsAndReplicationInstancesRolesToDms() {
+        String endpoint = """
+                {"EndpointIdentifier":"e","ServiceAccessRoleArn":"%1$saccess",
+                 "S3Settings":{"ServiceAccessRoleArn":"%1$ss3","BucketName":"b"},
+                 "PostgreSQLSettings":{"SecretsManagerAccessRoleArn":"%1$ssecrets"},
+                 "OracleSettings":{"SecretsManagerOracleAsmAccessRoleArn":"%1$sasm"},
+                 "Tags":[{"Key":"ServiceAccessRoleArn","Value":"%1$stag"}],
+                 "FooSettings":{"ServiceAccessRoleArn":"%1$sunknown-structure"},
+                 "KafkaSettings":{"ServiceAccessRoleArn":"%1$sno-role-member"},
+                 "DynamoDbSettings":{"SecretsManagerAccessRoleArn":"%1$snot-its-member"}}""".formatted(ROLES);
+        // Only the role members the DMS model gives each settings structure the handler stores.
+        for (String action : new String[] {"dms:CreateEndpoint", "dms:ModifyEndpoint"}) {
+            assertEquals(List.of(passed("access", DMS), passed("s3", DMS), passed("secrets", DMS), passed("asm", DMS)),
+                    PassedRoles.of(action, json(endpoint), LOOKUPS), action);
+        }
+        for (String action : new String[] {"dms:CreateReplicationInstance", "dms:ModifyReplicationInstance"}) {
+            assertEquals(List.of(passed("key-cache", DMS)), PassedRoles.of(action, json(
+                    "{\"KerberosAuthenticationSettings\":{\"KeyCacheSecretIamArn\":\"" + ROLES + "key-cache\"}}"),
+                    LOOKUPS), action);
         }
     }
 

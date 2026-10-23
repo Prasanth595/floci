@@ -21,6 +21,8 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.zip.GZIPOutputStream;
 
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
@@ -53,6 +55,8 @@ class IamPassRoleEnforcementIntegrationTest {
     private static final String AUTOSCALING = "autoscaling.amazonaws.com";
     private static final String REDSHIFT = "redshift.amazonaws.com";
     private static final String REDSHIFT_SERVERLESS = "redshift-serverless.amazonaws.com";
+    private static final String RDS = "rds.amazonaws.com";
+    private static final String DMS = "dms.amazonaws.com";
     private static final String SERVICE_LINKED_ROLES =
             "arn:aws:iam::" + ACCOUNT + ":role/aws-service-role/autoscaling.amazonaws.com/";
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
@@ -811,6 +815,90 @@ class IamPassRoleEnforcementIntegrationTest {
         serverless(user, "UpdateNamespace").body(defaultOnly).post("/").then().statusCode(200);
     }
 
+    @Test
+    void anRdsRequestNeedsPassRoleOnEachRoleItNamesForRds() {
+        String role = role("rds-feature");
+        User user = user("passrole-rds");
+        String missing = "passrole-missing-" + suffix();
+        String option = "OptionsToInclude.OptionConfiguration.1.";
+        Map<String, Map<String, String>> requests = new LinkedHashMap<>();
+        requests.put("AddRoleToDBInstance", Map.of("DBInstanceIdentifier", missing, "RoleArn", role,
+                "FeatureName", "s3Import"));
+        requests.put("RemoveRoleFromDBCluster", Map.of("DBClusterIdentifier", missing, "RoleArn", role,
+                "FeatureName", "s3Import"));
+        requests.put("ModifyDBProxy", Map.of("DBProxyName", missing, "RoleArn", role));
+        requests.put("ModifyDBInstance", Map.of("DBInstanceIdentifier", missing, "MonitoringInterval", "60",
+                "MonitoringRoleArn", role));
+        requests.put("RestoreDBClusterFromSnapshot", Map.of("DBClusterIdentifier", missing, "SnapshotIdentifier",
+                missing, "Engine", "aurora-postgresql", "AssociatedRoles.DBClusterAssociatedRole.1.RoleArn", role));
+        requests.put("ModifyOptionGroup", Map.of("OptionGroupName", missing, option + "OptionName",
+                "SQLSERVER_BACKUP_RESTORE", option + "OptionSettings.OptionSetting.1.Name", "IAM_ROLE_ARN",
+                option + "OptionSettings.OptionSetting.1.Value", role));
+        requests.put("StartExportTask", Map.of("ExportTaskIdentifier", missing, "SourceArn",
+                "arn:aws:rds:us-east-1:" + ACCOUNT + ":snapshot:" + missing, "S3BucketName", missing,
+                "IamRoleArn", role, "KmsKeyId", "alias/" + missing));
+
+        // A grant to pass the role to Redshift does not cover RDS; with one for RDS, each reaches RDS, which
+        // has no such resource.
+        user.policy(allow("rds:*", "*") + "," + passRole(role, REDSHIFT));
+        requests.forEach((action, params) -> denied(user.rds(action).formParams(params).post("/").then()));
+        user.policy(allow("rds:*", "*") + "," + passRole(role, RDS));
+        requests.forEach((action, params) -> user.rds(action).formParams(params).post("/").then()
+                .statusCode(not(403)).body(not(containsString("iam:PassRole"))));
+    }
+
+    @Test
+    void anRdsDirectoryRoleNamedByNameNeedsPassRoleOnTheArnIamHoldsItUnder() {
+        String role = role("/directory/", "rds-directory");
+        User user = user("passrole-rds-directory");
+        String pathless = "arn:aws:iam::" + ACCOUNT + ":role/" + roleName(role);
+        String cluster = "passrole-missing-" + suffix();
+
+        user.policy(allow("rds:ModifyDBCluster", "*") + "," + passRole(pathless, RDS));
+        denied(modifyClusterDirectoryRole(user, cluster, roleName(role)).then());
+        user.policy(allow("rds:ModifyDBCluster", "*") + "," + passRole(role, RDS));
+        modifyClusterDirectoryRole(user, cluster, roleName(role)).then()
+                .statusCode(404).body(containsString("DBClusterNotFound"));
+    }
+
+    private static Response modifyClusterDirectoryRole(User user, String cluster, String roleName) {
+        return user.rds("ModifyDBCluster").formParam("DBClusterIdentifier", cluster)
+                .formParam("DomainIAMRoleName", roleName).post("/");
+    }
+
+    @Test
+    void aDmsEndpointAndReplicationInstanceNeedPassRoleOnTheirRolesForDms() {
+        String role = role("dms-access");
+        User user = user("passrole-dms");
+        String endpoint = ("{\"EndpointIdentifier\":\"passrole-%s\",\"EndpointType\":\"target\",\"EngineName\":\"s3\","
+                + "\"S3Settings\":{\"ServiceAccessRoleArn\":\"%s\",\"BucketName\":\"passrole-bucket\"}}")
+                .formatted(suffix(), role);
+        String modifyEndpoint = ("{\"EndpointArn\":\"arn:aws:dms:us-east-1:%s:endpoint:PASSROLEMISSING\","
+                + "\"PostgreSQLSettings\":{\"SecretsManagerAccessRoleArn\":\"%s\"}}").formatted(ACCOUNT, role);
+        String modifyInstance = ("{\"ReplicationInstanceArn\":\"arn:aws:dms:us-east-1:%s:rep:PASSROLEMISSING\","
+                + "\"KerberosAuthenticationSettings\":{\"KeyCacheSecretIamArn\":\"%s\"}}").formatted(ACCOUNT, role);
+
+        // A grant to pass the role to RDS does not cover DMS.
+        user.policy(allow("dms:*", "*") + "," + passRole(role, RDS));
+        deniedJson(dms(user, "CreateEndpoint").body(endpoint).post("/").then());
+        deniedJson(dms(user, "ModifyEndpoint").body(modifyEndpoint).post("/").then());
+        deniedJson(dms(user, "ModifyReplicationInstance").body(modifyInstance).post("/").then());
+
+        user.policy(allow("dms:*", "*") + "," + passRole(role, DMS));
+        String endpointArn = dms(user, "CreateEndpoint").body(endpoint).post("/").then().statusCode(200)
+                .extract().path("Endpoint.EndpointArn");
+        cleanup.register(() -> admin("dms").header("X-Amz-Target", "AmazonDMSv20160101.DeleteEndpoint")
+                .contentType("application/x-amz-json-1.1").body("{\"EndpointArn\":\"" + endpointArn + "\"}").post("/"));
+        dms(user, "ModifyEndpoint").body(modifyEndpoint).post("/").then()
+                .statusCode(400).body(containsString("ResourceNotFoundFault"));
+        dms(user, "ModifyReplicationInstance").body(modifyInstance).post("/").then()
+                .statusCode(400).body(containsString("ResourceNotFoundFault"));
+    }
+
+    private static RequestSpecification dms(User user, String operation) {
+        return user.json("dms", "AmazonDMSv20160101." + operation);
+    }
+
     private static Response restore(User user, String cluster, String role) {
         return user.redshift("RestoreFromClusterSnapshot").formParam("ClusterIdentifier", cluster)
                 .formParam("SnapshotIdentifier", "passrole-no-snapshot").formParam("IamRoles.IamRoleArn.1", role)
@@ -1077,6 +1165,10 @@ class IamPassRoleEnforcementIntegrationTest {
 
         RequestSpecification redshift(String action) {
             return given().header("Authorization", auth(accessKeyId, "redshift")).formParam("Action", action);
+        }
+
+        RequestSpecification rds(String action) {
+            return given().header("Authorization", auth(accessKeyId, "rds")).formParam("Action", action);
         }
 
         RequestSpecification ecs(String action) {

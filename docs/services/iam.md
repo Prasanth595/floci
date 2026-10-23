@@ -1521,6 +1521,21 @@ role each passes:
   **Redshift Serverless:** `CreateNamespace` and `UpdateNamespace` pass the roles in `iamRoles` and
   the one in `defaultIamRoleArn`, and `CreateScheduledAction` and `UpdateScheduledAction` pass
   `roleArn`, to `redshift-serverless.amazonaws.com`.
+- **RDS:** `AddRoleToDBCluster`, `AddRoleToDBInstance`, `RemoveRoleFromDBCluster`,
+  `RemoveRoleFromDBInstance`, `CreateDBProxy` and `ModifyDBProxy` pass `RoleArn`, and
+  `StartExportTask` passes `IamRoleArn`, to `rds.amazonaws.com`. `CreateDBInstance`,
+  `CreateDBInstanceReadReplica`, `ModifyDBInstance`, `CreateDBCluster`, `ModifyDBCluster`,
+  `RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` pass the Enhanced Monitoring
+  role, `MonitoringRoleArn`, there too. They, `RestoreDBInstanceFromDBSnapshot` and
+  `RestoreDBInstanceToPointInTime` pass the directory role `DomainIAMRoleName` names, checked on the
+  ARN IAM holds it under, since the name carries no path. `CreateDBCluster` and the two cluster
+  restores pass each role in `AssociatedRoles`, and `ModifyOptionGroup` passes the role each option
+  it includes takes in its `IAM_ROLE_ARN` setting, as SQL Server's native backup and audit options
+  do. **DMS:** `CreateEndpoint` and `ModifyEndpoint` pass `ServiceAccessRoleArn` and the role
+  members the DMS model gives each engine's settings structure (`ServiceAccessRoleArn`,
+  `SecretsManagerAccessRoleArn`, `SecretsManagerOracleAsmAccessRoleArn`), and
+  `CreateReplicationInstance` and `ModifyReplicationInstance` pass
+  `KerberosAuthenticationSettings.KeyCacheSecretIamArn`, to `dms.amazonaws.com`.
 
 Launching an instance from a launch template does not check the template's role, as on AWS: the EC2
 user guide warns that a user who can create launch template versions "can potentially update a launch
@@ -1538,8 +1553,11 @@ a user must have iam:PassRole permission for that IAM role." A role named only a
 default, `DefaultIamRoleArn`, is not checked on its own, since the default is one of the roles the
 cluster holds. A namespace's `defaultIamRoleArn` is, since Floci keeps it whether or not `iamRoles`
 holds it. Redshift takes a role only under the ARN IAM holds it under, path included, so the check
-on the ARN as the request names it covers the role `COPY`, `UNLOAD` and Spectrum then use. The role
-parameters of other services are not checked yet.
+on the ARN as the request names it covers the role `COPY`, `UNLOAD` and Spectrum then use. The RDS
+user guide has the Enhanced Monitoring role checked: "The user that enables Enhanced Monitoring must
+be granted the PassRole permission." Removing a role from an RDS instance or cluster is checked as
+adding one is, since the Service Reference lists `iam:PassRole` for both. The role parameters of
+other services are not checked yet.
 
 A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
 path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that

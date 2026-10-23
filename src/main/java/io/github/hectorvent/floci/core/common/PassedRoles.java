@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -69,6 +70,14 @@ import java.util.regex.Pattern;
  * default, which Floci keeps whether or not the namespace's roles hold it. Redshift takes a role only
  * under the ARN IAM holds it under, path included, so the ARN as the request names it is the role it
  * passes.
+ *
+ * <p>An RDS request passes to {@code rds.amazonaws.com} every role it names for the instance or cluster:
+ * the role it adds or removes, a proxy's role, an export task's role, the Enhanced Monitoring role (the
+ * RDS user guide: "The user that enables Enhanced Monitoring must be granted the PassRole permission."),
+ * the directory role it names by name, a cluster's associated roles, and the role an option takes in its
+ * {@code IAM_ROLE_ARN} setting, as SQL Server's backup and audit options do. A DMS endpoint passes to
+ * {@code dms.amazonaws.com} its service access role and the roles its settings name for each engine, and
+ * a replication instance the role its Kerberos settings name.
  */
 final class PassedRoles {
 
@@ -94,6 +103,45 @@ final class PassedRoles {
     private static final String APPLICATION_AUTOSCALING = ServicePrincipals.of("application-autoscaling");
     private static final String REDSHIFT = ServicePrincipals.of("redshift");
     private static final String REDSHIFT_SERVERLESS = ServicePrincipals.of("redshift-serverless");
+    private static final String RDS = ServicePrincipals.of("rds");
+    private static final String DMS = ServicePrincipals.of("dms");
+
+    /** The RDS operations whose request takes a {@code MonitoringRoleArn}. */
+    private static final Set<String> RDS_MONITORING_ROLE = Set.of("rds:CreateDBCluster", "rds:CreateDBInstance",
+            "rds:CreateDBInstanceReadReplica", "rds:ModifyDBCluster", "rds:ModifyDBInstance",
+            "rds:RestoreDBClusterFromSnapshot", "rds:RestoreDBClusterToPointInTime");
+    /** The RDS operations whose request takes a cluster's {@code AssociatedRoles}. */
+    private static final Set<String> RDS_ASSOCIATED_ROLES = Set.of("rds:CreateDBCluster",
+            "rds:RestoreDBClusterFromSnapshot", "rds:RestoreDBClusterToPointInTime");
+    /** An associated role's ARN, in either list form the RDS handler reads, at any index. */
+    private static final Pattern ASSOCIATED_ROLE =
+            Pattern.compile("AssociatedRoles\\.(DBClusterAssociatedRole|member)\\.\\d+\\.RoleArn");
+    /** The option setting SQL Server's backup and audit options take their role in. */
+    private static final String OPTION_ROLE_SETTING = "IAM_ROLE_ARN";
+    private static final String DMS_SERVICE_ACCESS_ROLE = "ServiceAccessRoleArn";
+    private static final String DMS_SECRETS_ROLE = "SecretsManagerAccessRoleArn";
+    /**
+     * The role members of each DMS endpoint settings structure, as the DMS model gives them. Every structure
+     * here is one the DMS handler stores; the others ({@code KafkaSettings}, {@code RedisSettings},
+     * {@code TimestreamSettings}) name no role.
+     */
+    private static final Map<String, List<String>> DMS_SETTINGS_ROLES = Map.ofEntries(
+            Map.entry("DynamoDbSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("S3Settings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("DmsTransferSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("KinesisSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("ElasticsearchSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("NeptuneSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("RedshiftSettings", List.of(DMS_SERVICE_ACCESS_ROLE, DMS_SECRETS_ROLE)),
+            Map.entry("PostgreSQLSettings", List.of(DMS_SERVICE_ACCESS_ROLE, DMS_SECRETS_ROLE)),
+            Map.entry("MySQLSettings", List.of(DMS_SERVICE_ACCESS_ROLE, DMS_SECRETS_ROLE)),
+            Map.entry("MongoDbSettings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("OracleSettings", List.of(DMS_SECRETS_ROLE, "SecretsManagerOracleAsmAccessRoleArn")),
+            Map.entry("SybaseSettings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("MicrosoftSQLServerSettings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("IBMDb2Settings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("DocDbSettings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("GcpMySQLSettings", List.of(DMS_SECRETS_ROLE)));
 
     private static final String STACK_SET_ADMINISTRATION_ROLE = "AWSCloudFormationStackSetAdministrationRole";
     private static final String SERVICE_MANAGED = "SERVICE_MANAGED";
@@ -188,6 +236,18 @@ final class PassedRoles {
             case "redshift-serverless:CreateNamespace", "redshift-serverless:UpdateNamespace" -> namespaceRoles(ctx);
             case "redshift-serverless:CreateScheduledAction", "redshift-serverless:UpdateScheduledAction" ->
                     fromJson(ctx, REDSHIFT_SERVERLESS, "roleArn");
+            case "rds:AddRoleToDBCluster", "rds:AddRoleToDBInstance", "rds:RemoveRoleFromDBCluster",
+                 "rds:RemoveRoleFromDBInstance", "rds:CreateDBProxy", "rds:ModifyDBProxy" ->
+                    fromForm(ctx, RDS, "RoleArn");
+            case "rds:StartExportTask" -> fromForm(ctx, RDS, "IamRoleArn");
+            case "rds:CreateDBInstance", "rds:CreateDBInstanceReadReplica", "rds:ModifyDBInstance",
+                 "rds:RestoreDBInstanceFromDBSnapshot", "rds:RestoreDBInstanceToPointInTime", "rds:CreateDBCluster",
+                 "rds:ModifyDBCluster", "rds:RestoreDBClusterFromSnapshot", "rds:RestoreDBClusterToPointInTime" ->
+                    rdsDatabaseRoles(action, ctx, lookups);
+            case "rds:ModifyOptionGroup" -> optionGroupRoles(ctx);
+            case "dms:CreateEndpoint", "dms:ModifyEndpoint" -> dmsEndpointRoles(jsonBody(ctx));
+            case "dms:CreateReplicationInstance", "dms:ModifyReplicationInstance" ->
+                    fromJson(ctx, DMS, "KerberosAuthenticationSettings", "KeyCacheSecretIamArn");
             default -> List.of();
         };
     }
@@ -396,6 +456,72 @@ final class PassedRoles {
             }
         }
         return passed(roles, REDSHIFT_SERVERLESS);
+    }
+
+    /**
+     * The roles an RDS instance or cluster request names: the directory role {@code DomainIAMRoleName}
+     * names without its path, which is checked on the ARN IAM holds it under as
+     * {@link #instanceProfileRole} checks a role name; and the {@code MonitoringRoleArn} and the
+     * {@code AssociatedRoles} where the operation takes them, every associated role at any index, as the RDS
+     * handler reads them.
+     */
+    private static List<PassedRole> rdsDatabaseRoles(String action, ContainerRequestContext ctx, Lookups lookups) {
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        List<String> roles = new ArrayList<>();
+        String directoryRole = blankToNull(form.get("DomainIAMRoleName"));
+        if (directoryRole != null) {
+            roles.add(lookups.heldRoleArn(directoryRole).orElseGet(() -> lookups.roleArn(directoryRole)));
+        }
+        if (RDS_MONITORING_ROLE.contains(action)) {
+            roles.add(form.get("MonitoringRoleArn"));
+        }
+        if (RDS_ASSOCIATED_ROLES.contains(action)) {
+            form.forEach((key, value) -> {
+                if (ASSOCIATED_ROLE.matcher(key).matches()) {
+                    roles.add(value);
+                }
+            });
+        }
+        return passed(roles, RDS);
+    }
+
+    /**
+     * The role each option of a ModifyOptionGroup request takes in its {@code IAM_ROLE_ARN} setting, read
+     * as the RDS handler reads {@code OptionsToInclude}: in either list form, each option from 1 up to the
+     * first with no {@code OptionName}, each setting up to the first with no {@code Name}, and of an option
+     * naming the setting twice the last.
+     */
+    private static List<PassedRole> optionGroupRoles(ContainerRequestContext ctx) {
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        List<String> roles = new ArrayList<>();
+        for (String options : List.of("OptionsToInclude.OptionConfiguration.", "OptionsToInclude.member.")) {
+            for (int option = 1; form.get(options + option + ".OptionName") != null; option++) {
+                String role = null;
+                for (String settings : List.of(".OptionSettings.OptionSetting.", ".OptionSettings.member.")) {
+                    String setting = options + option + settings;
+                    for (int index = 1; form.get(setting + index + ".Name") != null; index++) {
+                        if (OPTION_ROLE_SETTING.equals(form.get(setting + index + ".Name"))) {
+                            role = form.get(setting + index + ".Value");
+                        }
+                    }
+                }
+                roles.add(role);
+            }
+        }
+        return passed(roles, RDS);
+    }
+
+    /** A DMS endpoint's service access role, and the role members of each engine's settings structure it sets. */
+    private static List<PassedRole> dmsEndpointRoles(JsonNode body) {
+        List<String> roles = new ArrayList<>(values(body, DMS_SERVICE_ACCESS_ROLE));
+        if (body != null) {
+            for (Map.Entry<String, JsonNode> member : body.properties()) {
+                for (String role : DMS_SETTINGS_ROLES.getOrDefault(member.getKey(), List.of())) {
+                    roles.addAll(values(member.getValue(), role));
+                }
+            }
+        }
+        return passed(roles, DMS);
     }
 
     private static List<PassedRole> fromJson(ContainerRequestContext ctx, String service, String... path) {
