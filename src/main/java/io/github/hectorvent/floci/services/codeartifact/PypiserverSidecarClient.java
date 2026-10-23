@@ -206,6 +206,24 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
         }
     }
 
+    /**
+     * Delegates to {@link SidecarConcurrency#beginUse}: {@code CodeArtifactService} calls this
+     * right after it resolves {@code repositoryContainerId}, closing the window between that
+     * resolution and this client's own {@link #listPackageVersions} call, which brackets the
+     * same key again internally. Nesting is safe: {@link SidecarConcurrency}'s bookkeeping is a
+     * reference count, not a flag.
+     */
+    @Override
+    public void beginUse(String repositoryContainerId) {
+        SidecarConcurrency.beginUse(repositoryContainerId);
+    }
+
+    /** Delegates to {@link SidecarConcurrency#endUse}, pairing {@link #beginUse} above. */
+    @Override
+    public void endUse(String repositoryContainerId) {
+        SidecarConcurrency.endUse(repositoryContainerId);
+    }
+
     private Instant lastModified(String fileUrl) {
         HttpRequest request = HttpRequest.newBuilder(URI.create(fileUrl)).timeout(Duration.ofSeconds(10))
                 .method("HEAD", BodyPublishers.noBody()).build();
