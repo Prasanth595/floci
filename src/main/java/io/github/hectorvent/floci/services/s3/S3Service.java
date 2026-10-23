@@ -1060,16 +1060,15 @@ public class S3Service implements Resettable, ResourceProvider {
             } else {
                 writeFile(bucketOwnerAccount, bucketName, key, data);
             }
-            deleteArchivedNullVersion(bucketOwnerAccount, bucketName, key, false);
-            // An overwrite replaces the object's annotations (AWS drops them on overwrite).
-            // The cleanup runs only after the body write succeeds, so a failed PUT keeps the
-            // old body together with its annotations; and before the new metadata is published,
-            // so the replacement never appears annotated.
-            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
             // Release the cached payload before publishing - see the comment in the versioned
             // branch above; the same race applies here.
             object.setData(null);
             putObjectForAccount(bucketOwnerAccount, objectKey(bucketName, key), object);
+            // Retain archived null history and annotations until publication succeeds.
+            // Annotation readers share this bucket monitor, so they cannot observe the
+            // replacement with the old annotations while cleanup is pending.
+            deleteArchivedNullVersion(bucketOwnerAccount, bucketName, key, false);
+            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
             LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, body.size());
         }
         return object;

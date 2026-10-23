@@ -212,6 +212,48 @@ class S3NullVersionReviewTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
+    void failedNonEnabledPublicationRetainsArchivedNullHistory(boolean memory) {
+        for (boolean rollback : List.of(true, false)) {
+            for (boolean afterPut : List.of(false, true)) {
+                PublicationFailureStore objects = new PublicationFailureStore();
+                S3Service service = service(memory, objects);
+                S3Object original = service.putObject("bucket", "key", bytes("original"),
+                        "text/plain", Map.of("original", "metadata"));
+                service.putObjectAnnotation("bucket", "key", "note", null, bytes("annotation"), null, null);
+                service.putObjectTagging("bucket", "key", Map.of("original", "tag"));
+                String snapshot = service.snapshotBucketConfiguration("bucket");
+                service.putBucketVersioning("bucket", "Enabled");
+                service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of());
+                if (rollback) {
+                    service.restoreBucketConfiguration("bucket", snapshot);
+                } else {
+                    service.putBucketVersioning("bucket", "Suspended");
+                }
+                objects.remaining = 1;
+                objects.afterPut = afterPut;
+
+                assertThrows(IllegalStateException.class, () -> service.putObject(
+                        "bucket", "key", bytes("replacement"), "text/plain", Map.of()));
+
+                S3Object retained = service.getObject("bucket", "key", "null");
+                assertArrayEquals(bytes("original"), retained.getData());
+                assertEquals(original.getETag(), retained.getETag());
+                assertEquals(Map.of("original", "metadata"), retained.getMetadata());
+                assertEquals(Map.of("original", "tag"), service.getObjectTagging("bucket", "key", "null"));
+                assertArrayEquals(bytes("annotation"), service.readObjectAnnotationPayload(
+                        service.getObjectAnnotation("bucket", "key", "note", "null")));
+
+                service.putObject("bucket", "key", bytes("retry"), "text/plain", Map.of());
+                assertArrayEquals(bytes("retry"), service.getObject("bucket", "key", "null").getData());
+                assertFalse(objects.get("bucket/\0null-version/key").isPresent());
+                assertEquals("NoSuchAnnotation", assertThrows(AwsException.class,
+                        () -> service.getObjectAnnotation("bucket", "key", "note", "null")).getErrorCode());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
     void failedNullReplacementRestoresBodyMetadataAndLockAtEachPublication(boolean memory) throws Exception {
         for (boolean marker : List.of(false, true)) {
             for (boolean afterPut : List.of(false, true)) {
