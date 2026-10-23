@@ -769,8 +769,9 @@ Root-level `security` stays in the document as written and is not copied into op
 and an `Auth` that selects no default, such as `ApiKeyRequired: false` alone, leaves the
 document unchanged. floci's REST importer still applies root-level `security` to an
 operation that has none of its own, which API Gateway does not. As in SAM, any non-empty
-`Auth` needs a `DefinitionBody` with a `paths` object, so a body written as an `Fn::If` is
-rejected even when no default is selected.
+`Auth`, even one that selects no default, needs a Swagger or OpenAPI 3 `DefinitionBody`
+whose `paths` entries, and the branches of an `Fn::If` around one, are objects, so a body or
+a `paths` map written as an `Fn::If` is rejected.
 
 Other `Auth` properties, custom default authorizers and external definitions are rejected.
 When a default applies, so are unresolved or malformed security requirements, method

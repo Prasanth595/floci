@@ -212,8 +212,30 @@ class SamRestApiAuthTest {
         paths.set("/nested", mapper.createObjectNode().set("get",
                 conditional(conditional(get, mapper.readTree("{\"Ref\":\"AWS::NoValue\"}")), get)));
         ((ObjectNode) paths.at("/~1items/get")).set("security", mapper.readTree("[{\"undefined\":[]}]"));
+        paths.set("/nestedPath", conditional(conditional(mapper.createObjectNode().set("get", get),
+                mapper.readTree("{\"Ref\":\"AWS::NoValue\"}")), mapper.readTree("{\"Ref\":\"AWS::NoValue\"}")));
+        paths.set("/referenced", mapper.readTree("{\"$ref\":\"#/components/pathItems/shared\"}"));
         JsonNode expanded = processor.expandSamTemplate(template).at("/Resources/Api/Properties/Body");
         assertEquals(properties.get("DefinitionBody"), expanded);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"noVersion", "pathsIf", "textPath", "textFnIf"})
+    void refusesWithoutADefaultWhatSamRefusesForAnyAuth(String shape) throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode properties = (ObjectNode) template.at("/Resources/Api/Properties");
+        properties.set("Auth", mapper.readTree("{\"ApiKeyRequired\":false}"));
+        ObjectNode body = (ObjectNode) properties.get("DefinitionBody");
+        switch (shape) {
+            case "noVersion" -> body.remove("openapi");
+            case "pathsIf" -> body.set("paths", conditional(body.get("paths"), body.get("paths")));
+            case "textPath" -> ((ObjectNode) body.get("paths")).put("/text", "not a path item");
+            default -> ((ObjectNode) body.get("paths")).set("/text", mapper.readTree("{\"Fn::If\":\"Enabled\"}"));
+        }
+        JsonNode original = template.deepCopy();
+        AwsException failure = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals(original, template);
     }
 
     @ParameterizedTest

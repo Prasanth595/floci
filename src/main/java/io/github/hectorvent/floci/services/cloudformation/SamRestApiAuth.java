@@ -11,6 +11,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /** Translates the supported explicit REST API authentication controls into inline OpenAPI. */
 final class SamRestApiAuth {
@@ -19,6 +20,7 @@ final class SamRestApiAuth {
             "get", "put", "post", "delete", "options", "head", "patch", "trace",
             "x-amazon-apigateway-any-method");
     private static final Set<String> SUPPORTED = Set.of("DefaultAuthorizer", "ApiKeyRequired");
+    private static final Pattern OPENAPI_3 = Pattern.compile("3(\\.\\d)(\\.\\d)?");
 
     private final ObjectMapper mapper;
 
@@ -55,7 +57,8 @@ final class SamRestApiAuth {
         }
         if (!iam && !keyRequired) {
             // Like SAM, an Auth that selects no default, such as ApiKeyRequired: false alone,
-            // leaves the document as written.
+            // leaves the document as written once it has checked what SAM checks for any Auth.
+            requireSamDocument(document);
             return;
         }
         // The template engine keeps only an intrinsic function's result, and the importer reads a
@@ -114,12 +117,47 @@ final class SamRestApiAuth {
     }
 
     /**
-     * The values a path item or an operation may take, as SAM reads them: both branches of an
-     * {@code Fn::If} other than {@code AWS::NoValue}, or the node itself. The template engine keeps
-     * only the chosen branch, so a default must be written inside each branch, not beside the
+     * The checks SAM makes for any non-empty Auth before it applies a default: SwaggerEditor.is_valid
+     * wants a truthy swagger or an openapi of 3.x, and the SwaggerEditor constructor wants every
+     * paths entry, and each branch of an {@code Fn::If} around one, to be an object.
+     */
+    private void requireSamDocument(ObjectNode document) {
+        JsonNode openapi = document.path("openapi");
+        if (!SamTransformProcessor.isTruthy(document.path("swagger"))
+                && !(SamTransformProcessor.isTruthy(openapi) && OPENAPI_3.matcher(openapi.asText()).matches())) {
+            throw invalid("Auth requires a Swagger or OpenAPI 3 DefinitionBody.");
+        }
+        Iterator<JsonNode> paths = document.path("paths").elements();
+        while (paths.hasNext()) {
+            for (JsonNode path : conditionalContents(paths.next())) {
+                if (!path.isObject()) {
+                    throw invalid("Auth requires inline path objects.");
+                }
+            }
+        }
+    }
+
+    /**
+     * The values a path item or an operation may take, when a default is added to them: as
+     * {@link #conditionalContents}, refusing a nested {@code Fn::If}. The template engine keeps only
+     * the chosen branch, so a default must be written inside each branch, not beside the
      * {@code Fn::If}.
      */
     private List<JsonNode> branches(JsonNode node) {
+        List<JsonNode> branches = conditionalContents(node);
+        for (JsonNode branch : branches) {
+            if (branch.has("Fn::If")) {
+                throw invalid("Auth does not support a nested Fn::If in paths.");
+            }
+        }
+        return branches;
+    }
+
+    /**
+     * SAM's get_conditional_contents: both branches of an {@code Fn::If} other than
+     * {@code AWS::NoValue}, or the node itself.
+     */
+    private List<JsonNode> conditionalContents(JsonNode node) {
         if (!node.has("Fn::If")) {
             return List.of(node);
         }
@@ -130,9 +168,6 @@ final class SamRestApiAuth {
         List<JsonNode> branches = new ArrayList<>();
         for (int i = 1; i < arguments.size(); i++) {
             JsonNode branch = arguments.get(i);
-            if (branch.has("Fn::If")) {
-                throw invalid("Auth does not support a nested Fn::If in paths.");
-            }
             if (!isNoValue(branch)) {
                 branches.add(branch);
             }
