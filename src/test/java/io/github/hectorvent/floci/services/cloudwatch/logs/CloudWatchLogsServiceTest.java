@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -444,15 +445,7 @@ class CloudWatchLogsServiceTest {
     /** Runs the thread until it ends or waits on a lock the caller may hold. */
     private static void startAndWaitUntilFinishedOrStuck(Thread thread) {
         thread.start();
-        long deadline = System.nanoTime() + 5_000_000_000L;
-        while (thread.isAlive() && System.nanoTime() < deadline) {
-            Thread.State state = thread.getState();
-            if (state == Thread.State.BLOCKED || state == Thread.State.WAITING
-                    || state == Thread.State.TIMED_WAITING) {
-                return;
-            }
-            Thread.onSpinWait();
-        }
+        ThreadStates.awaitParkedOrDone(thread);
     }
 
     @Test

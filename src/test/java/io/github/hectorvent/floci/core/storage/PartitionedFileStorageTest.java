@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.core.storage;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.FileSystemAssumptions;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -177,7 +179,7 @@ class PartitionedFileStorageTest {
         storage.flush();
         storage.putEntry("busy", "node-1", "beat-1");
         Path directory = tempDir.resolve("items");
-        StorageTestFiles.assumePosixPermissions(directory);
+        FileSystemAssumptions.assumePosixPermissions(directory);
         Set<PosixFilePermission> original = Files.getPosixFilePermissions(directory);
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("r-xr-xr-x"));
         try {
@@ -300,7 +302,7 @@ class PartitionedFileStorageTest {
     void aMigrationThatCannotWriteFailsAndKeepsTheLegacyFile() throws Exception {
         Path legacy = tempDir.resolve("items.json");
         new ObjectMapper().writeValue(legacy.toFile(), Map.of("a", Map.of("k", "1")));
-        StorageTestFiles.assumePosixPermissions(tempDir);
+        FileSystemAssumptions.assumePosixPermissions(tempDir);
         Set<PosixFilePermission> original = Files.getPosixFilePermissions(tempDir);
         Files.setPosixFilePermissions(tempDir, PosixFilePermissions.fromString("r-xr-xr-x"));
         try {
@@ -367,7 +369,7 @@ class PartitionedFileStorageTest {
         Path old = current.resolveSibling("old-name.json");
         Files.move(current, old);
         Path directory = tempDir.resolve("items");
-        StorageTestFiles.assumePosixPermissions(directory);
+        FileSystemAssumptions.assumePosixPermissions(directory);
         Set<PosixFilePermission> original = Files.getPosixFilePermissions(directory);
 
         PartitionedFileStorage<String> blocked = new PartitionedFileStorage<>(directory,
@@ -408,7 +410,7 @@ class PartitionedFileStorageTest {
             // the write, or the write puts the cleared file back.
             storage.setBeforeShardWrite(() -> { });
             clearer[0] = Thread.ofPlatform().start(storage::clear);
-            StorageTestThreads.awaitParkedOrDone(clearer[0]);
+            ThreadStates.awaitParkedOrDone(clearer[0]);
         });
 
         storage.flush();

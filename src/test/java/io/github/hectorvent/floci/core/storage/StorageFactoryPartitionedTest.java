@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
+import io.github.hectorvent.floci.testing.FileSystemAssumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -164,7 +165,7 @@ class StorageFactoryPartitionedTest {
 
     @Test
     void aMigrationThatCannotWriteLeavesTheLegacyLogInPlace() throws Exception {
-        StorageTestFiles.assumePosixPermissions(tempDir);
+        FileSystemAssumptions.assumePosixPermissions(tempDir);
         WalStorage<String, Map<String, String>> legacy = new WalStorage<>(tempDir.resolve("svc-items-snapshot.json"),
                 tempDir.resolve("svc-items.wal"), TYPE, Long.MAX_VALUE);
         legacy.load();

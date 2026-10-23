@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.storage;
 
+import io.github.hectorvent.floci.testing.FileSystemAssumptions;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -274,7 +276,7 @@ class PartitionedFileStorageJournalTest {
             // The shards are written and the journal is about to be emptied. A write now must
             // wait for the compaction to finish, or its journal record is dropped unwritten.
             writer[0] = Thread.ofPlatform().start(() -> live.putEntry("table", "late", "2"));
-            StorageTestThreads.awaitParkedOrDone(writer[0]);
+            ThreadStates.awaitParkedOrDone(writer[0]);
         });
 
         live.flush();
@@ -294,7 +296,7 @@ class PartitionedFileStorageJournalTest {
             // entry must wait, or its record lands first and a replay ends on the older value.
             live.setBeforeJournalAppend(() -> { });
             second[0] = Thread.ofPlatform().start(() -> live.putEntry("table", "a", "second"));
-            StorageTestThreads.awaitParkedOrDone(second[0]);
+            ThreadStates.awaitParkedOrDone(second[0]);
         });
 
         live.putEntry("table", "a", "first");
@@ -370,7 +372,7 @@ class PartitionedFileStorageJournalTest {
     void aJournalThatCannotBeReadFailsLoadAndIsNeverCompactedAway() throws Exception {
         PartitionedFileStorage<String> crashed = open(1);
         crashed.putEntry("table", "a", "1");
-        StorageTestFiles.assumePosixPermissions(journal());
+        FileSystemAssumptions.assumePosixPermissions(journal());
         Set<PosixFilePermission> original = Files.getPosixFilePermissions(journal());
         PartitionedFileStorage<String> restarting = new PartitionedFileStorage<>(tempDir.resolve("items"),
                 tempDir.resolve("items.json"), String.class, 1, PartitionedFileStorage.Mode.JOURNAL, Long.MAX_VALUE);
@@ -434,7 +436,7 @@ class PartitionedFileStorageJournalTest {
         PartitionedFileStorage<String> crashed = open(1);
         crashed.putEntry("table", "a", "1");
         Path directory = tempDir.resolve("items");
-        StorageTestFiles.assumePosixPermissions(directory);
+        FileSystemAssumptions.assumePosixPermissions(directory);
         Set<PosixFilePermission> original = Files.getPosixFilePermissions(directory);
         crashed.setBeforeJournalTruncate(() -> {
             // The shards are written; now make emptying the journal fail.
