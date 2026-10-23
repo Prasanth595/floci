@@ -290,6 +290,7 @@ class PartitionedFileStorageTest {
         Path legacy = tempDir.resolve("items.json");
         new ObjectMapper().writeValue(legacy.toFile(), Map.of("a", Map.of("k", "1")));
         Files.createDirectories(tempDir.resolve("items"));
+        Files.createFile(tempDir.resolve("items").resolve(PartitionedFileStorage.JOURNAL_FILE));
 
         assertEquals(Map.of("k", "1"), open(PartitionedFileStorage.Mode.SYNC).get("a").orElseThrow());
         assertTrue(Files.exists(tempDir.resolve("items.json.migrated")));

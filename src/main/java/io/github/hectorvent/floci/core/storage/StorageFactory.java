@@ -156,20 +156,16 @@ public class StorageFactory {
      * when {@link AccountAwareStorageBackend#writesEntries()} is true.
      *
      * <p>{@code persistent} writes a shard's file on every change and {@code hybrid} writes dirty
-     * shards on the flush interval. {@code memory} keeps the store in memory, and {@code wal}
-     * keeps its single-file {@link WalStorage} for now. An existing single-file store (a
-     * {@code wal}-mode snapshot and log included) is migrated into the directory on first load.
+     * shards on the flush interval. {@code wal} journals one record per changed entry and writes
+     * dirty shards on the WAL compaction interval. {@code memory} keeps the store in memory. An
+     * existing single-file store (a {@code wal}-mode snapshot and log included) is migrated into
+     * the directory on first load.
      */
     public synchronized <E> AccountAwareStorageBackend<Map<String, E>> createPartitioned(
             String serviceName, String fileName, TypeReference<Map<String, Map<String, E>>> typeReference,
             Class<E> entryType, int shardCount) {
         String mode = resolveMode(serviceName);
         if ("memory".equals(mode)) {
-            return create(serviceName, fileName, typeReference);
-        }
-        if ("wal".equals(mode)) {
-            LOG.warnv("The per-table layout does not support wal mode yet; storing {0} for service {1} "
-                    + "in the single-file layout", fileName, serviceName);
             return create(serviceName, fileName, typeReference);
         }
         Path basePath = Path.of(config.storage().persistentPath());
@@ -190,6 +186,10 @@ public class StorageFactory {
             case "hybrid" -> {
                 writeMode = PartitionedFileStorage.Mode.PERIODIC;
                 interval = resolveFlushInterval(serviceName);
+            }
+            case "wal" -> {
+                writeMode = PartitionedFileStorage.Mode.JOURNAL;
+                interval = config.storage().wal().compactionIntervalMs();
             }
             default -> throw new IllegalArgumentException("Unknown storage mode: " + mode);
         }

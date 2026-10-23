@@ -76,13 +76,37 @@ class StorageFactoryPartitionedTest {
     }
 
     @Test
-    void walModeKeepsTheSingleFileStoreForNow() {
-        AccountAwareStorageBackend<Map<String, String>> store = newFactory("wal")
-                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 4);
+    void walModeJournalsChangesAndCompactsOnShutdown() {
+        StorageFactory factory = newFactory("wal");
+        AccountAwareStorageBackend<Map<String, String>> store =
+                factory.createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
 
-        assertFalse(store.writesEntries());
-        store.put("table-a", Map.of("k", "v"));
-        assertFalse(Files.exists(tempDir.resolve("svc-items")));
+        store.putEntry("table-a", "k", "v");
+        assertEquals(0, fileCount(tempDir.resolve("svc-items")));
+        assertTrue(Files.exists(tempDir.resolve("svc-items").resolve(PartitionedFileStorage.JOURNAL_FILE)));
+
+        factory.shutdownAll();
+        assertEquals(1, fileCount(tempDir.resolve("svc-items")));
+        assertEquals(Map.of("k", "v"), newFactory("wal")
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1).get("table-a").orElseThrow());
+    }
+
+    @Test
+    void walModeMigratesALegacyWalStoreIncludingItsUncompactedLog() {
+        WalStorage<String, Map<String, String>> legacy = new WalStorage<>(tempDir.resolve("svc-items-snapshot.json"),
+                tempDir.resolve("svc-items.wal"), TYPE, Long.MAX_VALUE);
+        legacy.load();
+        legacy.put("000000000000/table-a", Map.of("k", "v"));
+        legacy.flush();
+        legacy.put("000000000000/table-b", Map.of("k", "only-in-the-log"));
+
+        AccountAwareStorageBackend<Map<String, String>> store = newFactory("wal")
+                .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
+
+        assertEquals(Map.of("k", "v"), store.get("table-a").orElseThrow());
+        assertEquals(Map.of("k", "only-in-the-log"), store.get("table-b").orElseThrow());
+        assertFalse(Files.exists(tempDir.resolve("svc-items.wal")));
+        assertTrue(Files.exists(tempDir.resolve("svc-items-snapshot.json.migrated")));
     }
 
     @Test
@@ -112,7 +136,7 @@ class StorageFactoryPartitionedTest {
         // What a crash right after the directory was created leaves behind.
         Files.createDirectories(tempDir.resolve("svc-items"));
 
-        AccountAwareStorageBackend<Map<String, String>> store = newFactory("hybrid")
+        AccountAwareStorageBackend<Map<String, String>> store = newFactory("wal")
                 .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
 
         assertEquals(Map.of("k", "v"), store.get("table-a").orElseThrow());
@@ -131,7 +155,7 @@ class StorageFactoryPartitionedTest {
         Files.setLastModifiedTime(tempDir.resolve("svc-items-snapshot.json"), older);
         Files.setLastModifiedTime(tempDir.resolve("svc-items.wal"), older);
 
-        AccountAwareStorageBackend<Map<String, String>> store = newFactory("hybrid")
+        AccountAwareStorageBackend<Map<String, String>> store = newFactory("wal")
                 .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1);
 
         assertEquals(Map.of("k", "from-plain"), store.get("table-a").orElseThrow());
@@ -153,14 +177,14 @@ class StorageFactoryPartitionedTest {
         Files.setPosixFilePermissions(staging, PosixFilePermissions.fromString("r-xr-xr-x"));
         try {
             assumeFalse(Files.isWritable(staging), "the directory stays writable for this user");
-            assertThrows(UncheckedIOException.class, () -> newFactory("hybrid")
+            assertThrows(UncheckedIOException.class, () -> newFactory("wal")
                     .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1));
         } finally {
             Files.setPosixFilePermissions(staging, PosixFilePermissions.fromString("rwxr-xr-x"));
         }
 
         assertArrayEquals(logged, Files.readAllBytes(log));
-        assertEquals(Map.of("k", "only-in-the-log"), newFactory("hybrid")
+        assertEquals(Map.of("k", "only-in-the-log"), newFactory("wal")
                 .createPartitioned("svc", "svc-items.json", TYPE, String.class, 1).get("table-a").orElseThrow());
         legacy.shutdown();
     }
