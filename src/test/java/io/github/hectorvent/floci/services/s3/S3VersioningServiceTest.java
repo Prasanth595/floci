@@ -56,11 +56,14 @@ class S3VersioningServiceTest {
                 "versioned".getBytes(StandardCharsets.UTF_8), "text/plain", null);
         s3Service.putBucketVersioning("versioned-bucket", "Suspended");
 
-        s3Service.putObject("versioned-bucket", "key",
+        S3Object replacement = s3Service.putObject("versioned-bucket", "key",
                 "replacement null".getBytes(StandardCharsets.UTF_8), "text/plain", null);
 
         List<S3Object> versions = s3Service.listObjectVersions("versioned-bucket", "key", 100, null).versions();
         assertEquals(1, versions.stream().filter(version -> version.getVersionId() == null).count());
+        S3Object listedNull = versions.stream().filter(version -> version.getVersionId() == null).findFirst().orElseThrow();
+        assertTrue(listedNull.isLatest());
+        assertEquals(replacement.getETag(), listedNull.getETag());
         assertEquals("replacement null", new String(
                 s3Service.getObject("versioned-bucket", "key", "null").getData(), StandardCharsets.UTF_8));
     }
