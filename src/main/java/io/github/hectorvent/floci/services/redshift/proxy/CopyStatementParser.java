@@ -15,6 +15,9 @@ import java.util.regex.Pattern;
 public final class CopyStatementParser {
 
     public sealed interface S3Statement permits S3CopyFrom, S3Unload {
+        String iamRoleArn();
+
+        boolean defaultIamRoleRequested();
     }
 
     /** COPY options that change field content; {@link #NONE} keeps the plain byte-copy path. */
@@ -50,12 +53,32 @@ public final class CopyStatementParser {
             boolean jsonAuto,
             boolean jsonAutoIgnoreCase,
             boolean manifest,
-            CopyTransforms transforms) implements S3Statement {
+            CopyTransforms transforms,
+            boolean defaultIamRoleRequested) implements S3Statement {
 
         public S3CopyFrom {
             if (transforms == null) {
                 transforms = CopyTransforms.NONE;
             }
+        }
+
+        public S3CopyFrom(
+                String targetTable,
+                List<String> columns,
+                String bucket,
+                String keyOrPrefix,
+                String delimiter,
+                int headerLines,
+                boolean gzip,
+                boolean csv,
+                String nullAs,
+                String iamRoleArn,
+                boolean jsonAuto,
+                boolean jsonAutoIgnoreCase,
+                boolean manifest,
+                CopyTransforms transforms) {
+            this(targetTable, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
+                    nullAs, iamRoleArn, jsonAuto, jsonAutoIgnoreCase, manifest, transforms, false);
         }
 
         public S3CopyFrom(
@@ -128,7 +151,33 @@ public final class CopyStatementParser {
             boolean escape,
             boolean cleanPath,
             boolean encrypted,
-            String sseKmsKeyId) implements S3Statement {
+            String sseKmsKeyId,
+            boolean defaultIamRoleRequested) implements S3Statement {
+
+        public S3Unload(
+                String selectQuery,
+                String bucket,
+                String prefix,
+                String delimiter,
+                boolean header,
+                boolean gzip,
+                boolean csv,
+                boolean addQuotes,
+                String nullAs,
+                boolean manifest,
+                boolean allowOverwrite,
+                boolean parallel,
+                long maxFileSizeBytes,
+                String iamRoleArn,
+                String extension,
+                boolean escape,
+                boolean cleanPath,
+                boolean encrypted,
+                String sseKmsKeyId) {
+            this(selectQuery, bucket, prefix, delimiter, header, gzip, csv, addQuotes, nullAs, manifest,
+                    allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
+                    escape, cleanPath, encrypted, sseKmsKeyId, false);
+        }
 
         public S3Unload(
                 String selectQuery,
@@ -513,7 +562,7 @@ public final class CopyStatementParser {
         }
         return new S3Unload(select, bucket, prefix, delimiter, header, gzip, csv,
                 addQuotes, nullAs, manifest, allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
-                escape, cleanPath, encrypted, kmsKeyId);
+                escape, cleanPath, encrypted, kmsKeyId, auth.defaultIamRoleRequested);
     }
 
     private static S3CopyFrom parseCopy(String cleaned, String defaultIamRoleArn) {
@@ -739,7 +788,7 @@ public final class CopyStatementParser {
         }
 
         return new S3CopyFrom(table, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
-                nullAs, iamRoleArn, jsonAuto, jsonAutoIgnoreCase, manifest, transforms);
+                nullAs, iamRoleArn, jsonAuto, jsonAutoIgnoreCase, manifest, transforms, auth.defaultIamRoleRequested);
     }
 
     /**
@@ -762,6 +811,7 @@ public final class CopyStatementParser {
         private String iamRoleArn;
         private String credentialsRoleArn;
         private boolean seenIamRole;
+        private boolean defaultIamRoleRequested;
         private boolean seenCredentials;
         private boolean seenAccessKeyId;
         private boolean seenSecretAccessKey;
@@ -786,9 +836,9 @@ public final class CopyStatementParser {
                     return REJECT;
                 }
                 seenIamRole = true;
-                iamRoleArn = iamRole.group(3) == null ? extractNullValue(iamRole)
-                        : defaultIamRoleArn == null ? "default" : defaultIamRoleArn;
-                return isBlank(iamRoleArn) ? REJECT : iamRole.end();
+                defaultIamRoleRequested = iamRole.group(3) != null;
+                iamRoleArn = defaultIamRoleRequested ? defaultIamRoleArn : extractNullValue(iamRole);
+                return !defaultIamRoleRequested && isBlank(iamRoleArn) ? REJECT : iamRole.end();
             }
             if (matchClause(credentials, offset, end)) {
                 if (seenCredentials) {

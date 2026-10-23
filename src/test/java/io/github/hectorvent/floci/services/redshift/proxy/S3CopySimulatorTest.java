@@ -54,6 +54,29 @@ import static org.mockito.Mockito.when;
 class S3CopySimulatorTest {
 
     @Test
+    void quotedDefaultIsValidatedAsAnArnForCopyAndUnload() {
+        IamService iamService = mock(IamService.class);
+        for (String defaultRole : new String[]{null, ROLE_ARN}) {
+            for (String authorization : List.of("IAM_ROLE 'default'", "IAM_ROLE \"default\"",
+                    "CREDENTIALS 'aws_iam_role=default'")) {
+                CopyStatementParser.S3CopyFrom copy = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                        "COPY people FROM 's3://bucket/data' " + authorization, defaultRole);
+                CopyStatementParser.S3Unload unload = (CopyStatementParser.S3Unload) CopyStatementParser.parse(
+                        "UNLOAD ('SELECT 1') TO 's3://bucket/out/' " + authorization, defaultRole);
+                S3CopySimulator.S3TransferException copyError = assertThrows(S3CopySimulator.S3TransferException.class,
+                        () -> S3CopySimulator.prepareCopy(copy, s3, iamService, "000000000000", List.of(ROLE_ARN)));
+                S3CopySimulator.S3TransferException unloadError = assertThrows(S3CopySimulator.S3TransferException.class,
+                        () -> S3CopySimulator.prepareUnload(unload, s3, iamService, "000000000000", List.of(ROLE_ARN)));
+                assertEquals("42501", copyError.sqlState());
+                assertEquals("42501", unloadError.sqlState());
+                assertTrue(copyError.getMessage().contains("malformed ARN"), copyError.getMessage());
+                assertTrue(unloadError.getMessage().contains("malformed ARN"), unloadError.getMessage());
+            }
+        }
+        verifyNoInteractions(s3, iamService);
+    }
+
+    @Test
     void missingDefaultRoleFailsCopyAndUnloadBeforeTouchingS3() {
         CopyStatementParser.S3CopyFrom copy = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
                 "COPY people FROM 's3://bucket/data' IAM_ROLE default");
@@ -66,6 +89,7 @@ class S3CopySimulatorTest {
         assertEquals("42501", copyError.sqlState());
         assertEquals("42501", unloadError.sqlState());
         assertTrue(copyError.getMessage().contains("No default IAM role"));
+        assertTrue(unloadError.getMessage().contains("No default IAM role"));
         verifyNoInteractions(s3);
     }
 

@@ -66,10 +66,6 @@ public final class RedshiftRoleAccess {
     public static RoleSession resolveRoleSession(String iamRoleArn, IamService iamService,
                                           String clusterAccountId, List<String> associatedRoleArns,
                                           Duration sessionTtl) {
-        if ("default".equals(iamRoleArn)) {
-            throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                    "No default IAM role is associated with the Redshift cluster", null);
-        }
         AwsArnUtils.Arn parsed;
         try {
             parsed = AwsArnUtils.parse(iamRoleArn);
