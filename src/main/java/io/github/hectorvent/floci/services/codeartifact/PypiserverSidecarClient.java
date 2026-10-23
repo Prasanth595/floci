@@ -64,6 +64,7 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
     @Override
     public void release(String repositoryContainerId) {
         manager.release(repositoryContainerId);
+        SidecarConcurrency.release(repositoryContainerId);
     }
 
     /**
@@ -155,42 +156,54 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
      * requests one at a time before returning even a single-result page. Keyed by {@code
      * repositoryContainerId} so the concurrency cap holds across simultaneous calls against the
      * same pypiserver container, not just within one of them.
+     *
+     * <p>The whole method runs between {@link SidecarConcurrency#beginUse} and {@link
+     * SidecarConcurrency#endUse}, not only the {@code mapBounded} call: a repository delete racing
+     * this call's own HTTP fetch of the version listing, before {@code mapBounded} is even reached,
+     * must not be able to run {@link SidecarConcurrency#release} to completion in between, or {@code
+     * mapBounded} would cache a fresh permit for a container that is already gone.
      */
     @Override
     public List<PackageVersionTimestamp> listPackageVersions(String repositoryContainerId, String domain,
             String repository, String namespace, String packageName) {
-        String baseUrl = ensureReady(repositoryContainerId, null);
-        String normalized = normalizePackageName(packageName);
-        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + SidecarUriUtils.encodeSegment(normalized)
-                + "/json");
-        HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
-        HttpResponse<String> response;
+        SidecarConcurrency.beginUse(repositoryContainerId);
         try {
-            response = httpClient.send(request, BodyHandlers.ofString());
-        } catch (Exception e) {
-            throw new IllegalStateException("Could not reach the pypiserver sidecar to list versions of "
-                    + packageName, e);
+            String baseUrl = ensureReady(repositoryContainerId, null);
+            String normalized = normalizePackageName(packageName);
+            URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + SidecarUriUtils.encodeSegment(normalized)
+                    + "/json");
+            HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
+            HttpResponse<String> response;
+            try {
+                response = httpClient.send(request, BodyHandlers.ofString());
+            } catch (Exception e) {
+                throw new IllegalStateException("Could not reach the pypiserver sidecar to list versions of "
+                        + packageName, e);
+            }
+            if (response.statusCode() == 404) {
+                return List.of();
+            }
+            if (response.statusCode() != 200) {
+                throw new IllegalStateException("Could not list versions of " + packageName + " on the pypiserver "
+                        + "sidecar: upstream returned " + response.statusCode());
+            }
+            JsonNode releases;
+            try {
+                releases = mapper.readTree(response.body()).path("releases");
+            } catch (Exception e) {
+                throw new IllegalStateException("Could not parse pypiserver's version listing for " + packageName,
+                        e);
+            }
+            List<String> versions = new ArrayList<>();
+            releases.fieldNames().forEachRemaining(versions::add);
+            return SidecarConcurrency.mapBounded(repositoryContainerId, versions, version -> {
+                JsonNode files = releases.path(version);
+                String fileUrl = files.isEmpty() ? "" : files.get(0).path("url").asText("");
+                return new PackageVersionTimestamp(version, fileUrl.isEmpty() ? null : lastModified(fileUrl));
+            });
+        } finally {
+            SidecarConcurrency.endUse(repositoryContainerId);
         }
-        if (response.statusCode() == 404) {
-            return List.of();
-        }
-        if (response.statusCode() != 200) {
-            throw new IllegalStateException("Could not list versions of " + packageName + " on the pypiserver "
-                    + "sidecar: upstream returned " + response.statusCode());
-        }
-        JsonNode releases;
-        try {
-            releases = mapper.readTree(response.body()).path("releases");
-        } catch (Exception e) {
-            throw new IllegalStateException("Could not parse pypiserver's version listing for " + packageName, e);
-        }
-        List<String> versions = new ArrayList<>();
-        releases.fieldNames().forEachRemaining(versions::add);
-        return SidecarConcurrency.mapBounded(repositoryContainerId, versions, version -> {
-            JsonNode files = releases.path(version);
-            String fileUrl = files.isEmpty() ? "" : files.get(0).path("url").asText("");
-            return new PackageVersionTimestamp(version, fileUrl.isEmpty() ? null : lastModified(fileUrl));
-        });
     }
 
     private Instant lastModified(String fileUrl) {

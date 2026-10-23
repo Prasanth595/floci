@@ -8,12 +8,15 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -74,6 +77,60 @@ class CloudWatchLogsServiceTest {
             service.untagLogGroup(historical, List.of("team"), REGION);
             assertEquals(Map.of(), service.listTagsLogGroup(historical, REGION));
         }
+    }
+
+    // ──────────────────────────── Missing resources ────────────────────────────
+
+    @Test
+    void missingLogGroupIsReportedWithTheAwsText() {
+        String group = "/missing";
+        Map<String, Executable> calls = new LinkedHashMap<>();
+        calls.put("DeleteLogGroup", () -> service.deleteLogGroup(group, REGION));
+        calls.put("PutLogGroupDeletionProtection", () -> service.putLogGroupDeletionProtection(group, true, REGION));
+        calls.put("PutRetentionPolicy", () -> service.putRetentionPolicy(group, 1, REGION));
+        calls.put("DeleteRetentionPolicy", () -> service.deleteRetentionPolicy(group, REGION));
+        calls.put("TagLogGroup", () -> service.tagLogGroup(group, Map.of("a", "b"), REGION));
+        calls.put("UntagLogGroup", () -> service.untagLogGroup(group, List.of("a"), REGION));
+        calls.put("ListTagsLogGroup", () -> service.listTagsLogGroup(group, REGION));
+        calls.put("AssociateKmsKey", () -> service.associateKmsKey(group, KEY_ARN, REGION));
+        calls.put("DisassociateKmsKey", () -> service.disassociateKmsKey(group, REGION));
+        calls.put("CreateLogStream", () -> service.createLogStream(group, "s", REGION));
+        calls.put("DescribeLogStreams", () -> service.describeLogStreams(group, null, REGION));
+        calls.put("PutLogEvents", () -> service.putLogEvents(group, "s", List.of(Map.of("timestamp", 1L, "message", "x")), REGION));
+        calls.put("StartQuery", () -> service.startQuery(List.of(group), 0, 1, "fields @message", null, REGION));
+        calls.put("PutSubscriptionFilter", () -> service.putSubscriptionFilter(
+                group, "f", "", "arn:aws:lambda:us-east-1:000000000000:function:f", null, REGION));
+        calls.put("DescribeSubscriptionFilters", () -> service.describeSubscriptionFilters(group, null, null, 0, REGION));
+        calls.put("DeleteSubscriptionFilter", () -> service.deleteSubscriptionFilter(group, "f", REGION));
+
+        assertAll(calls.entrySet().stream().map(call -> () ->
+                assertResourceNotFound(call.getKey(), "The specified log group does not exist.", call.getValue())));
+    }
+
+    @Test
+    void missingLogStreamIsReportedWithTheAwsText() {
+        service.createLogGroup("/app", null, null, REGION);
+
+        assertAll(
+                () -> assertResourceNotFound("PutLogEvents", "The specified log stream does not exist.",
+                        () -> service.putLogEvents("/app", "s", List.of(Map.of("timestamp", 1L, "message", "x")), REGION)),
+                () -> assertResourceNotFound("DeleteLogStream", "The specified log stream does not exist.",
+                        () -> service.deleteLogStream("/app", "s", REGION)));
+    }
+
+    @Test
+    void missingSubscriptionFilterIsReportedWithTheAwsText() {
+        service.createLogGroup("/app", null, null, REGION);
+
+        assertResourceNotFound("DeleteSubscriptionFilter", "The specified subscription filter does not exist.",
+                () -> service.deleteSubscriptionFilter("/app", "f", REGION));
+    }
+
+    private static void assertResourceNotFound(String action, String message, Executable call) {
+        AwsException error = assertThrows(AwsException.class, call, action);
+        assertEquals("ResourceNotFoundException", error.getErrorCode(), action);
+        assertEquals(message, error.getMessage(), action);
+        assertEquals(400, error.getHttpStatus(), action);
     }
 
     // ──────────────────────────── Log Groups ────────────────────────────
@@ -441,18 +498,14 @@ class CloudWatchLogsServiceTest {
         assertEquals(List.of(), logs.describeLogStreams("/app", null, REGION));
     }
 
-    /** Runs the thread until it ends or waits on a lock the caller may hold. */
+    /**
+     * Runs the thread until it ends or waits on a lock the caller may hold. Gives up after five
+     * seconds, well inside the callers' ten-second timeout, so a stuck thread is reported by its
+     * state and the test still has time to finish.
+     */
     private static void startAndWaitUntilFinishedOrStuck(Thread thread) {
         thread.start();
-        long deadline = System.nanoTime() + 5_000_000_000L;
-        while (thread.isAlive() && System.nanoTime() < deadline) {
-            Thread.State state = thread.getState();
-            if (state == Thread.State.BLOCKED || state == Thread.State.WAITING
-                    || state == Thread.State.TIMED_WAITING) {
-                return;
-            }
-            Thread.onSpinWait();
-        }
+        ThreadStates.awaitState(thread, ThreadStates.PARKED_OR_DONE, Duration.ofSeconds(5), "the worker");
     }
 
     @Test

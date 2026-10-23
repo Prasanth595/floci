@@ -56,6 +56,87 @@ import static org.mockito.Mockito.*;
 
 class RedshiftServiceTest {
 
+    @Test
+    void blankDefaultRoleCreatesWithoutDefaultAndClearsExistingDefault() {
+        String role = "arn:aws:iam::111111111111:role/copy";
+        when(cm.start(anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "cluster", "localhost", 5432));
+        for (String blank : List.of("", " \t")) {
+            String identifier = blank.isEmpty() ? "empty-default" : "whitespace-default";
+            Cluster cluster = service.createCluster(identifier, "dc2.large", "admin", "pw",
+                    null, List.of(), List.of(role), blank);
+            assertNull(cluster.getDefaultIamRoleArn());
+            when(clusterBackend.get(identifier)).thenReturn(Optional.of(cluster));
+
+            service.modifyClusterIamRoles(identifier, List.of(), List.of(), role);
+            service.modifyClusterIamRoles(identifier, List.of(), List.of());
+            assertEquals(role, cluster.getDefaultIamRoleArn());
+
+            service.modifyClusterIamRoles(identifier, List.of(), List.of(), blank);
+            assertNull(cluster.getDefaultIamRoleArn());
+            assertEquals(List.of(role), cluster.getIamRoleArns());
+            verify(proxyManager).updateIamRoles("111111111111:" + identifier, List.of(role), null);
+        }
+    }
+
+    @Test
+    void modifyDefaultIamRoleValidatesBeforeMutatingAndClearsWhenRemoved() throws Exception {
+        String first = "arn:aws:iam::111111111111:role/first";
+        String second = "arn:aws:iam::111111111111:role/second";
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setIamRoleArns(List.of(first));
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+
+        service.modifyClusterIamRoles("c1", List.of(), List.of(), first);
+        assertEquals(first, cluster.getDefaultIamRoleArn());
+        verify(proxyManager).updateIamRoles("111111111111:c1", List.of(first), first);
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.modifyClusterIamRoles("c1", List.of(), List.of(first), second));
+        assertEquals("InvalidParameterValue", missing.getErrorCode());
+        assertEquals(List.of(first), cluster.getIamRoleArns());
+        assertEquals(first, cluster.getDefaultIamRoleArn());
+
+        service.modifyClusterIamRoles("c1", List.of(second), List.of(), second);
+        assertEquals(second, cluster.getDefaultIamRoleArn());
+        service.modifyClusterIamRoles("c1", List.of(), List.of(first));
+        assertEquals(second, cluster.getDefaultIamRoleArn());
+
+        ObjectMapper mapper = new ObjectMapper();
+        Cluster restored = mapper.readValue(mapper.writeValueAsBytes(cluster), Cluster.class);
+        assertEquals(second, restored.getDefaultIamRoleArn());
+        assertEquals(List.of(second), restored.getIamRoleArns());
+
+        service.modifyClusterIamRoles("c1", List.of(), List.of(second));
+        assertNull(cluster.getDefaultIamRoleArn());
+        verify(proxyManager).updateIamRoles("111111111111:c1", List.of(), null);
+    }
+
+    @Test
+    void createClusterRejectsUnassociatedOrMalformedDefaultRoleBeforeStartingContainer() {
+        String role = "arn:aws:iam::111111111111:role/copy";
+        assertThrows(AwsException.class, () -> service.createCluster("c1", "dc2.large", "admin", "pw",
+                null, List.of(), List.of(), role));
+        assertThrows(AwsException.class, () -> service.createCluster("c1", "dc2.large", "admin", "pw",
+                null, List.of(), List.of("invalid"), "invalid"));
+        verifyNoInteractions(cm);
+        verify(clusterBackend, never()).put(any(), any());
+    }
+
+    @Test
+    void createClusterStoresDefaultRoleAndConfiguresProxy() {
+        String role = "arn:aws:iam::111111111111:role/copy";
+        when(cm.start("111111111111", "c1", "admin", "pw"))
+                .thenReturn(new RedshiftContainerHandle("container", "c1", "localhost", 5432));
+        Cluster cluster = service.createCluster("c1", "dc2.large", "admin", "pw",
+                null, List.of(), List.of(role), role);
+        assertEquals(role, cluster.getDefaultIamRoleArn());
+        verify(proxyManager).startProxy(eq("111111111111:c1"), anyInt(), eq("localhost"), eq(5432),
+                anyString(), eq("admin"), eq("pw"), eq("dev"), any(), eq(List.of(role)), eq(role));
+        verify(clusterBackend, atLeastOnce()).flush();
+    }
+
     private StorageFactory sf;
     private AccountAwareStorageBackend<Cluster> clusterBackend;
     private AccountAwareStorageBackend<Snapshot> snapshotBackend;
@@ -292,12 +373,16 @@ class RedshiftServiceTest {
         clusterA.setMasterUsername("admin");
         clusterA.setMasterPassword("pw-a");
         clusterA.setClusterStatus("available");
+        clusterA.setDefaultIamRoleArn("arn:aws:iam::111111111111:role/default-a");
+        clusterA.setIamRoleArns(List.of(clusterA.getDefaultIamRoleArn()));
 
         Cluster clusterB = new Cluster();
         clusterB.setClusterIdentifier("cluster-b");
         clusterB.setMasterUsername("admin");
         clusterB.setMasterPassword("pw-b");
         clusterB.setClusterStatus("available");
+        clusterB.setDefaultIamRoleArn("arn:aws:iam::222222222222:role/default-b");
+        clusterB.setIamRoleArns(List.of(clusterB.getDefaultIamRoleArn()));
 
         when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "cluster-a", clusterA),
@@ -313,6 +398,10 @@ class RedshiftServiceTest {
         // Cluster owned by a second, non-default account must also be recovered
         verify(cm).adoptOrStart("111111111111", "cluster-a", "admin", "pw-a");
         verify(cm).adoptOrStart("222222222222", "cluster-b", "admin", "pw-b");
+        verify(proxyManager).startProxy(eq("111111111111:cluster-a"), anyInt(), anyString(), anyInt(), anyString(),
+                eq("admin"), eq("pw-a"), eq("dev"), any(), eq(clusterA.getIamRoleArns()), eq(clusterA.getDefaultIamRoleArn()));
+        verify(proxyManager).startProxy(eq("222222222222:cluster-b"), anyInt(), anyString(), anyInt(), anyString(),
+                eq("admin"), eq("pw-b"), eq("dev"), any(), eq(clusterB.getIamRoleArns()), eq(clusterB.getDefaultIamRoleArn()));
         verify(clusterBackend).putForAccount(eq("111111111111"), eq("cluster-a"), any(Cluster.class));
         verify(clusterBackend).putForAccount(eq("222222222222"), eq("cluster-b"), any(Cluster.class));
         verify(clusterBackend).flush();
@@ -378,7 +467,7 @@ class RedshiftServiceTest {
 
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7108),
                 eq("172.17.0.12"), eq(32830), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any(), isNull());
     }
 
     @Test
@@ -426,7 +515,7 @@ class RedshiftServiceTest {
 
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(cluster.getProxyPort()),
                 eq("172.17.0.9"), eq(32800), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any(), isNull());
     }
 
     @Test
@@ -636,6 +725,8 @@ class RedshiftServiceTest {
     void rebootClusterRestartsTheProxyOnTheSamePort() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("c1");
+        cluster.setDefaultIamRoleArn("arn:aws:iam::111111111111:role/default");
+        cluster.setIamRoleArns(List.of(cluster.getDefaultIamRoleArn()));
         cluster.setMasterUsername("admin");
         cluster.setMasterPassword("Secret123");
         cluster.setProxyPort(7107);
@@ -655,7 +746,7 @@ class RedshiftServiceTest {
         verify(proxyManager).stopProxy("111111111111:c1");
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107),
                 eq("172.17.0.11"), eq(32820), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), eq(cluster.getIamRoleArns()), eq(cluster.getDefaultIamRoleArn()));
     }
 
     @Test
@@ -686,7 +777,7 @@ class RedshiftServiceTest {
         // replacement container must be stopped too, once before the restart, once in
         // rollback, so it is not left running behind a "failed" cluster.
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107), any(), anyInt(),
-                any(), any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any(), isNull());
         verify(proxyManager, times(2)).stopProxy("111111111111:c1");
         verify(cm, times(2)).stop("111111111111", "c1");
     }
@@ -880,7 +971,7 @@ class RedshiftServiceTest {
 
         assertEquals(List.of("arn:aws:iam::111111111111:role/keep", "arn:aws:iam::111111111111:role/new"),
                 updated.getIamRoleArns());
-        verify(proxyManager).updateIamRoles("111111111111:c1", updated.getIamRoleArns());
+        verify(proxyManager).updateIamRoles("111111111111:c1", updated.getIamRoleArns(), null);
         verify(clusterBackend).put(eq("c1"), any(Cluster.class));
         verify(clusterBackend).flush();
     }
@@ -931,7 +1022,7 @@ class RedshiftServiceTest {
 
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals(List.of("arn:aws:iam::111111111111:role/keep"), cluster.getIamRoleArns());
-        verify(proxyManager, never()).updateIamRoles(any(), any());
+        verify(proxyManager, never()).updateIamRoles(any(), any(), any());
     }
 
     @Test
@@ -1289,7 +1380,7 @@ class RedshiftServiceTest {
         assertEquals(restored.getEndpoint().getPort(), restored.getProxyPort());
         verify(proxyManager).startProxy(eq("111111111111:restored"), anyInt(),
                 eq("172.17.0.10"), eq(32810), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any(), isNull());
     }
 
     @Test

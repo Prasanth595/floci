@@ -91,15 +91,13 @@ public class RedshiftQueryHandler {
             List<String> iamRoleArns = memberList(params, "IamRoles");
 
             String region = regionResolver.resolveRegionFromAuth(authorizationHeader);
+            String defaultIamRoleArn = params.getFirst("DefaultIamRoleArn");
             Cluster cluster = manageMasterPassword
                     ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
                             clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
-                            params.getFirst("MasterPasswordSecretKmsKeyId"), region)
-                    : iamRoleArns.isEmpty()
-                    ? service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                            clusterSubnetGroupName, vpcSecurityGroupIds)
+                            params.getFirst("MasterPasswordSecretKmsKeyId"), region, defaultIamRoleArn)
                     : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
+                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
             String parameterGroupName = params.getFirst("ClusterParameterGroupName");
             String multiAz = params.getFirst("MultiAZ");
             boolean hasParameterGroup = parameterGroupName != null && !parameterGroupName.isBlank();
@@ -748,7 +746,8 @@ public class RedshiftQueryHandler {
                 throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
             }
             Cluster cluster = service.modifyClusterIamRoles(clusterIdentifier,
-                    memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"));
+                    memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"),
+                    params.getFirst("DefaultIamRoleArn"));
             String xml = new XmlBuilder()
                     .start("ModifyClusterIamRolesResponse")
                       .start("ModifyClusterIamRolesResult")
@@ -941,6 +940,9 @@ public class RedshiftQueryHandler {
             builder.end("VpcSecurityGroups");
         }
 
+        if (cluster.getDefaultIamRoleArn() != null) {
+            builder.elem("DefaultIamRoleArn", cluster.getDefaultIamRoleArn());
+        }
         if (cluster.getIamRoleArns() != null && !cluster.getIamRoleArns().isEmpty()) {
             builder.start("IamRoles");
             for (String iamRoleArn : cluster.getIamRoleArns()) {

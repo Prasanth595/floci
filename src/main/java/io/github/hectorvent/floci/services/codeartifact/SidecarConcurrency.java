@@ -34,15 +34,35 @@ final class SidecarConcurrency {
     private static final int MAX_CONCURRENT_REQUESTS = 8;
 
     /**
-     * One {@link Semaphore} per sidecar container, shared across every {@code mapBounded} call for
-     * that container so {@link #MAX_CONCURRENT_REQUESTS} holds in aggregate: a per-call-only limit
+     * One entry per sidecar container, shared across every {@code mapBounded} call for that
+     * container so {@link #MAX_CONCURRENT_REQUESTS} holds in aggregate: a per-call-only limit
      * would let two simultaneous {@code listPackageVersions} calls against the same container each
      * open that many connections, doubling the real cap. The key is whatever identity a caller
      * already has for "which container": pypiserver's own {@code repositoryContainerId} (one
      * container per CodeArtifact repository), or a single shared constant for Reposilite (one
-     * container for every Maven repository).
+     * container for every Maven repository). Callers whose key dies with the container (pypiserver's
+     * {@code repositoryContainerId}, not Reposilite's shared constant) must bracket every call with
+     * {@link #beginUse} and {@link #endUse}, and call {@link #release} once that container is torn
+     * down, or this map grows by one entry for every repository ever deleted, for as long as the
+     * process runs.
      */
-    private static final Map<Object, Semaphore> SIDECAR_PERMITS = new ConcurrentHashMap<>();
+    private static final Map<Object, ContainerUse> SIDECAR_PERMITS = new ConcurrentHashMap<>();
+
+    /**
+     * One sidecar container's {@link Semaphore} plus the bookkeeping {@link #beginUse}/{@link
+     * #endUse}/{@link #release} need to agree on when it is actually safe to drop this entry:
+     * {@code activeCalls} is the number of calls currently between {@link #beginUse} and {@link
+     * #endUse} for this key, and {@code releasing} records that {@link #release} ran while at least
+     * one of them was still in flight. Every field is only ever touched from inside a {@link
+     * Map#compute}/{@link Map#computeIfAbsent}/{@link Map#computeIfPresent} remapping function for
+     * this exact key, which {@link ConcurrentHashMap} runs under a lock scoped to that key, so plain
+     * (non-atomic) fields are safe here.
+     */
+    private static final class ContainerUse {
+        private final Semaphore semaphore = new Semaphore(MAX_CONCURRENT_REQUESTS);
+        private int activeCalls;
+        private boolean releasing;
+    }
 
     /**
      * Virtual threads, not a platform-thread pool: {@code mapBounded} submits every item up front and
@@ -82,7 +102,7 @@ final class SidecarConcurrency {
             }
             return result;
         }
-        Semaphore permits = SIDECAR_PERMITS.computeIfAbsent(sidecarKey, key -> new Semaphore(MAX_CONCURRENT_REQUESTS));
+        Semaphore permits = SIDECAR_PERMITS.computeIfAbsent(sidecarKey, key -> new ContainerUse()).semaphore;
         List<Future<R>> futures = new ArrayList<>(items.size());
         for (T item : items) {
             futures.add(EXECUTOR.submit(() -> runWithPermit(permits, perItem, item)));
@@ -102,6 +122,49 @@ final class SidecarConcurrency {
                 }
             }
         }
+    }
+
+    /**
+     * Marks the start of one call against {@code sidecarKey}'s container, before that call does
+     * anything else against it (a {@code listPackageVersions} HTTP fetch happens before the
+     * {@link #mapBounded} that actually consumes the permit). Pairs with {@link #endUse} in a
+     * {@code try}/{@code finally} around the whole call: without this, a {@link #release} racing a
+     * call that has only fetched its version listing so far, and has not reached {@link #mapBounded}
+     * yet, would remove the entry before that call ever registers using it, and {@link #mapBounded}
+     * would then cache a brand new one for a container that is already gone, orphaned forever since
+     * nothing will call {@link #release} for that key a second time.
+     */
+    static void beginUse(Object sidecarKey) {
+        SIDECAR_PERMITS.compute(sidecarKey, (key, existing) -> {
+            ContainerUse use = existing != null ? existing : new ContainerUse();
+            use.activeCalls++;
+            return use;
+        });
+    }
+
+    /** Marks the end of one call {@link #beginUse} started, dropping the entry if {@link #release}
+     * ran while this was the last call still using it. */
+    static void endUse(Object sidecarKey) {
+        SIDECAR_PERMITS.computeIfPresent(sidecarKey, (key, use) -> {
+            use.activeCalls--;
+            return use.activeCalls == 0 && use.releasing ? null : use;
+        });
+    }
+
+    /**
+     * Drops the cached permit for {@code sidecarKey} once its container has actually been torn
+     * down, unless a call already between {@link #beginUse} and {@link #endUse} is still using it,
+     * in which case the last matching {@link #endUse} drops it instead. A no-op (leaves nothing
+     * behind) if the key was never used. Only meaningful for a key tied to one container's lifetime
+     * (pypiserver's {@code repositoryContainerId}); never call this for Reposilite's shared constant,
+     * since its one container keeps serving every other Maven repository.
+     */
+    static void release(Object sidecarKey) {
+        SIDECAR_PERMITS.compute(sidecarKey, (key, existing) -> {
+            ContainerUse use = existing != null ? existing : new ContainerUse();
+            use.releasing = true;
+            return use.activeCalls == 0 ? null : use;
+        });
     }
 
     private static <T, R> R runWithPermit(Semaphore permits, Function<T, R> perItem, T item)

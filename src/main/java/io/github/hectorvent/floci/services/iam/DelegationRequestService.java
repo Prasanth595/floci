@@ -91,6 +91,15 @@ public class DelegationRequestService {
     private static final int SESSION_DURATION_MAX = 43200;
 
     /**
+     * The longest delegation the account root may approve. Not a declared constraint but a
+     * documented one, and it belongs to the approval rather than to the request: the user guide's
+     * own note reads "The maximum duration for delegated access is 12 hours. However, root users
+     * can only approve delegation requests with a duration of 4 hours or less. If a request
+     * specifies more than 4 hours, you must use a non-root identity to approve the request."
+     */
+    private static final int ROOT_APPROVAL_DURATION_MAX = 14400;
+
+    /**
      * {@code summaryStateType}, of which {@code FAILED} is unreachable here: it reports a
      * generation that ran and did not finish, and nothing is generated asynchronously.
      */
@@ -277,6 +286,7 @@ public class DelegationRequestService {
                 DelegationRequest request = visible(callerAccountId, id, now, notices);
                 requireState(request, DelegationRequestState.ASSIGNED,
                         DelegationRequestState.PENDING_APPROVAL);
+                requireApproverMayHoldItThatLong(request, callerArn);
                 request.setApproverId(callerArn);
                 return moveTo(request, DelegationRequestState.ACCEPTED, now, notices);
             }
@@ -646,6 +656,35 @@ public class DelegationRequestService {
         throw new AwsException("ConcurrentModification", "Delegation request "
                 + request.getDelegationRequestId() + " is " + request.getState()
                 + " and cannot be changed from that state.", 409);
+    }
+
+    /**
+     * The four-hour cap on what the account root may approve, which {@code create} cannot apply:
+     * the twelve hours it enforces belong to the request, and this one belongs to whoever
+     * approves it, so it is read here where the approver is known.
+     *
+     * <p>Root is the caller whose ARN ends in {@code :root}, which is what this family already
+     * names an approver by, and covers a root credential itself as well as a key resolving to no
+     * IAM user, which this service answers with the account-root stand-in.
+     *
+     * <p>{@code AcceptDelegationRequest} models {@code NoSuchEntity}, {@code ServiceFailure} and
+     * {@code ConcurrentModification} and nothing for this, and no source gives the code AWS
+     * answers, so the code is chosen: the guide states the rule as which identity may approve,
+     * which is what {@code SendDelegationToken}'s own owner rule answers {@code AccessDenied}
+     * for. A duration the record does not carry is nothing to hold to a cap.
+     */
+    private static void requireApproverMayHoldItThatLong(DelegationRequest request,
+                                                         String callerArn) {
+        if (callerArn == null || !callerArn.endsWith(":root")
+                || request.getSessionDuration() == null
+                || request.getSessionDuration() <= ROOT_APPROVAL_DURATION_MAX) {
+            return;
+        }
+        throw new AwsException("AccessDenied", "User is not authorized to perform: "
+                + "iam:AcceptDelegationRequest on " + request.getDelegationRequestId()
+                + ", which asks for " + request.getSessionDuration() + " seconds: the root user may"
+                + " only approve a delegation of " + ROOT_APPROVAL_DURATION_MAX / 3600
+                + " hours or less. Approve it as an IAM user or role instead.", 403);
     }
 
     private void put(DelegationRequest request) {
