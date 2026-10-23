@@ -262,6 +262,102 @@ class Ec2LaunchVolumeDevicesIntegrationTest {
     }
 
     @Test
+    void modifyInstanceAttributeRefusesADeviceTerminationTakesWhileItWaits() throws Exception {
+        Instance instance = launchWithDataVolume(true);
+        instance.setState(InstanceState.running());
+        String volumeId = volumeAt(instance, "/dev/sdf");
+        // The container manager marks the instance shutting-down as termination begins.
+        doAnswer(invocation -> {
+            invocation.<Instance>getArgument(0).setState(InstanceState.shuttingDown());
+            return null;
+        }).when(containerManager).terminate(eq(instance), any());
+        CountDownLatch detaching = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            detaching.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return null;
+        }).when(volumeBlockDeviceManager).detachVolume(any(), any(), anyString());
+        LaunchTemplateData.Ebs keep = new LaunchTemplateData.Ebs();
+        keep.setDeleteOnTermination(false);
+        LaunchTemplateData.BlockDeviceMapping entry = new LaunchTemplateData.BlockDeviceMapping();
+        entry.setDeviceName("/dev/sdf");
+        entry.setEbs(keep);
+
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        try {
+            // Termination holds /dev/sdf's volume inside its block device detach.
+            Future<?> termination = threads.submit(() ->
+                    service.terminateInstances(REGION, List.of(instance.getInstanceId())));
+            assertTrue(detaching.await(10, TimeUnit.SECONDS), "termination never reached the device");
+            Future<?> modify = threads.submit(() ->
+                    service.modifyInstanceBlockDeviceMappings(REGION, instance.getInstanceId(), List.of(entry)));
+            assertThrows(TimeoutException.class, () -> modify.get(500, TimeUnit.MILLISECONDS));
+            release.countDown();
+            termination.get(10, TimeUnit.SECONDS);
+
+            // The volume went with the instance, so the change it waited to make is refused.
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> modify.get(10, TimeUnit.SECONDS));
+            assertEquals("InvalidInstanceAttributeValue", ((AwsException) refused.getCause()).getErrorCode());
+            verify(volumeBlockDeviceManager).deleteVolume(volumeId);
+        } finally {
+            release.countDown();
+            threads.shutdownNow();
+            instance.setState(InstanceState.terminated());
+        }
+    }
+
+    @Test
+    void modifyInstanceAttributeChangesNoDeviceWhenOneItNamesGoesWhileItWaits() throws Exception {
+        Instance instance = launchWithDataVolumes(true, "/dev/sdf", "/dev/sdg");
+        instance.setState(InstanceState.running());
+        doAnswer(invocation -> {
+            invocation.<Instance>getArgument(0).setState(InstanceState.shuttingDown());
+            return null;
+        }).when(containerManager).terminate(eq(instance), any());
+        // Termination holds the first data volume it reaches inside its block device detach,
+        // before it has touched the other one.
+        CountDownLatch detaching = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<String> held = new AtomicReference<>();
+        doAnswer(invocation -> {
+            if (held.compareAndSet(null, invocation.<Volume>getArgument(0).getVolumeId())) {
+                detaching.countDown();
+                release.await(10, TimeUnit.SECONDS);
+            }
+            return null;
+        }).when(volumeBlockDeviceManager).detachVolume(any(), any(), anyString());
+
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> termination = threads.submit(() ->
+                    service.terminateInstances(REGION, List.of(instance.getInstanceId())));
+            assertTrue(detaching.await(10, TimeUnit.SECONDS), "termination never reached a device");
+            String heldDevice = volumeAt(instance, "/dev/sdf").equals(held.get()) ? "/dev/sdf" : "/dev/sdg";
+            String otherDevice = "/dev/sdf".equals(heldDevice) ? "/dev/sdg" : "/dev/sdf";
+            String otherVolume = volumeAt(instance, otherDevice);
+            // The device termination has not reached comes first, so a change made device by
+            // device would keep it before the held one is found gone.
+            Future<?> modify = threads.submit(() -> service.modifyInstanceBlockDeviceMappings(REGION,
+                    instance.getInstanceId(), List.of(keptOnTermination(otherDevice), keptOnTermination(heldDevice))));
+            assertThrows(TimeoutException.class, () -> modify.get(500, TimeUnit.MILLISECONDS));
+            release.countDown();
+            termination.get(10, TimeUnit.SECONDS);
+
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> modify.get(10, TimeUnit.SECONDS));
+            assertEquals("InvalidInstanceAttributeValue", ((AwsException) refused.getCause()).getErrorCode());
+            // Unchanged, the other volume went with the instance as its launch asked.
+            verify(volumeBlockDeviceManager).deleteVolume(otherVolume);
+        } finally {
+            release.countDown();
+            threads.shutdownNow();
+            instance.setState(InstanceState.terminated());
+        }
+    }
+
+    @Test
     void theVolumesOfALaunchWhoseContainerNeverStartedAreSettledAsTerminationWouldSettleThem() {
         Instance instance = launchWithDataVolume(false);
         String dataVolume = volumeAt(instance, "/dev/sdf");
@@ -300,6 +396,15 @@ class Ec2LaunchVolumeDevicesIntegrationTest {
                 .map(Volume::getVolumeId).toList().contains(dataVolume));
         verify(volumeBlockDeviceManager).deleteVolume(dataVolume);
         service.deleteVolume(REGION, other);
+    }
+
+    private static LaunchTemplateData.BlockDeviceMapping keptOnTermination(String device) {
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setDeleteOnTermination(false);
+        LaunchTemplateData.BlockDeviceMapping entry = new LaunchTemplateData.BlockDeviceMapping();
+        entry.setDeviceName(device);
+        entry.setEbs(ebs);
+        return entry;
     }
 
     private Instance launchWithDataVolume(boolean deleteOnTermination) {

@@ -5355,6 +5355,60 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * ModifyInstanceAttribute with {@code BlockDeviceMapping}: sets DeleteOnTermination on the
+     * volumes attached at the devices it names, true where an entry leaves it unset, as AWS
+     * documents. A device the instance has no volume at is refused before anything changes. The
+     * volumes are read again under all their locks before any is changed, so a device whose
+     * volume a TerminateInstances or DetachVolume took in the meantime is refused and no device
+     * is changed.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ModifyInstanceAttribute.html">ModifyInstanceAttribute</a>
+     */
+    public void modifyInstanceBlockDeviceMappings(String region, String instanceId,
+                                                  List<LaunchTemplateData.BlockDeviceMapping> mappings) {
+        ensureDefaultResources(region);
+        List<VolumeAttachment> attached = instanceVolumeAttachments(getRequiredInstance(region, instanceId));
+        List<String> volumeIds = new ArrayList<>();
+        for (LaunchTemplateData.BlockDeviceMapping mapping : mappings) {
+            if (mapping.getDeviceName() == null || mapping.getDeviceName().isBlank()) {
+                throw new AwsException("MissingParameter", "The request must contain the parameter DeviceName", 400);
+            }
+            attachmentsAt(attached, instanceId, mapping).forEach(attachment -> volumeIds.add(attachment.getVolumeId()));
+        }
+        withVolumeLocks(volumeIds, () -> {
+            List<Volume> current = volumeIds.stream()
+                    .distinct()
+                    .map(volumeId -> volumes.get(key(region, volumeId)))
+                    .flatMap(Optional::stream)
+                    .toList();
+            List<VolumeAttachment> held = current.stream()
+                    .flatMap(volume -> volume.getAttachments().stream())
+                    .toList();
+            Map<LaunchTemplateData.BlockDeviceMapping, List<VolumeAttachment>> changes = new LinkedHashMap<>();
+            for (LaunchTemplateData.BlockDeviceMapping mapping : mappings) {
+                changes.put(mapping, attachmentsAt(held, instanceId, mapping));
+            }
+            changes.forEach((mapping, at) -> at.forEach(attachment -> attachment.setDeleteOnTermination(
+                    mapping.getEbs() == null || !Boolean.FALSE.equals(mapping.getEbs().getDeleteOnTermination()))));
+            current.forEach(volume -> volumes.put(key(region, volume.getVolumeId()), volume));
+        });
+    }
+
+    /** The instance's attachments at an entry's device, refusing a device it has no volume at. */
+    private static List<VolumeAttachment> attachmentsAt(List<VolumeAttachment> attachments, String instanceId,
+                                                        LaunchTemplateData.BlockDeviceMapping mapping) {
+        List<VolumeAttachment> at = attachments.stream()
+                .filter(attachment -> instanceId.equals(attachment.getInstanceId())
+                        && isSameDevice(attachment.getDevice(), mapping.getDeviceName()))
+                .toList();
+        if (at.isEmpty()) {
+            throw new AwsException("InvalidInstanceAttributeValue",
+                    "No device is currently mapped at " + mapping.getDeviceName(), 400);
+        }
+        return at;
+    }
+
+    /**
      * Deterministic association id derived from the instance id so repeated describes are stable.
      */
     public static String iamInstanceProfileAssociationId(String instanceId) {
@@ -12985,6 +13039,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             action.run();
             return null;
         });
+    }
+
+    /**
+     * Runs an action under several volumes' locks, taken in volume id order. Every other caller
+     * holds one volume lock at a time, so callers taking several in one order cannot deadlock.
+     */
+    private void withVolumeLocks(List<String> volumeIds, Runnable action) {
+        List<String> ordered = volumeIds.stream().distinct().sorted().toList();
+        lockInOrder(ordered, 0, action);
+    }
+
+    private void lockInOrder(List<String> volumeIds, int next, Runnable action) {
+        if (next == volumeIds.size()) {
+            action.run();
+            return;
+        }
+        withVolumeLock(volumeIds.get(next), () -> lockInOrder(volumeIds, next + 1, action));
     }
 
     private static boolean isSameDevice(String d1, String d2) {

@@ -189,6 +189,116 @@ class Ec2LaunchBlockDeviceMappingsIntegrationTest {
     }
 
     @Test
+    void modifyInstanceAttributeSetsDeleteOnTerminationForTheDevicesItNames() {
+        String account = account();
+        String instance = launch(account, "ami-0abcdef1234567890",
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdg",
+                "BlockDeviceMapping.1.Ebs.VolumeSize", "5");
+        String zone = ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".placement.availabilityZone");
+        String attached = ec2(account, "CreateVolume", "Size", "4", "AvailabilityZone", zone)
+                .getString("CreateVolumeResponse.volumeId");
+        ec2(account, "AttachVolume", "VolumeId", attached, "InstanceId", instance, "Device", "/dev/sdj");
+        String launched = deviceVolume(account, instance, "/dev/sdg");
+
+        // An entry that leaves DeleteOnTermination unset sets it to true, as AWS documents.
+        ec2(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdg",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false",
+                "BlockDeviceMapping.2.DeviceName", "/dev/sdj");
+
+        assertEquals(List.of("true", "false", "true"), ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getList(INSTANCE + ".blockDeviceMapping.item.ebs.deleteOnTermination", String.class));
+        ec2(account, "TerminateInstances", "InstanceId.1", instance);
+        assertEquals(List.of(launched), volumeIds(account));
+    }
+
+    @Test
+    void modifyInstanceAttributeRefusesADeviceTheInstanceHasNoVolumeAt() {
+        String account = account();
+        String instance = launch(account, "ami-0abcdef1234567890");
+
+        request(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false",
+                "BlockDeviceMapping.2.DeviceName", "/dev/sda1",
+                "BlockDeviceMapping.2.Ebs.DeleteOnTermination", "false")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidInstanceAttributeValue"))
+                .body("Response.Errors.Error.Message", equalTo("No device is currently mapped at /dev/sda1"));
+
+        // Nothing was changed, the device the instance does have included.
+        assertEquals("true", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".blockDeviceMapping.item[0].ebs.deleteOnTermination"));
+        request(account, "ModifyInstanceAttribute", "InstanceId", "i-0123456789abcdef0",
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidInstanceID.NotFound"));
+    }
+
+    @Test
+    void modifyInstanceAttributeRefusesDevicesNamedWithAnotherAttribute() {
+        String account = account();
+        String instance = launch(account, "ami-0abcdef1234567890");
+        XmlPath described = ec2(account, "DescribeInstances", "InstanceId.1", instance);
+        List<String> groups = described.getList(INSTANCE + ".groupSet.item.groupId", String.class);
+        String other = ec2(account, "CreateSecurityGroup", "GroupName", "other-" + account,
+                "GroupDescription", "other", "VpcId", described.getString(INSTANCE + ".vpcId"))
+                .getString("CreateSecurityGroupResponse.groupId");
+
+        // AWS takes one attribute per call, so neither half is applied, whichever would fail.
+        for (String device : List.of("/dev/xvda", "/dev/sdz")) {
+            request(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                    "GroupId.1", other,
+                    "BlockDeviceMapping.1.DeviceName", device,
+                    "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false")
+                    .post("/").then().statusCode(400)
+                    .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"))
+                    .body("Response.Errors.Error.Message",
+                            equalTo("Fields for multiple attribute types specified: blockDeviceMapping,groupSet"));
+        }
+
+        // Attributes Floci does not change count as well, the generic Attribute form included.
+        request(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "DisableApiTermination.Value", "true",
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Message",
+                        equalTo("Fields for multiple attribute types specified: disableApiTermination,blockDeviceMapping"));
+        request(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "Attribute", "kernel", "Value", "aki-0123456789abcdef0",
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Message",
+                        equalTo("Fields for multiple attribute types specified: kernel,blockDeviceMapping"));
+
+        XmlPath after = ec2(account, "DescribeInstances", "InstanceId.1", instance);
+        assertEquals(groups, after.getList(INSTANCE + ".groupSet.item.groupId", String.class));
+        assertEquals("true", after.getString(INSTANCE + ".blockDeviceMapping.item[0].ebs.deleteOnTermination"));
+    }
+
+    @Test
+    void describeInstanceAttributeListsTheBlockDeviceMapping() {
+        String account = account();
+        String instance = launch(account, "ami-0abcdef1234567890",
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdg",
+                "BlockDeviceMapping.1.Ebs.VolumeSize", "5",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false");
+
+        XmlPath attribute = ec2(account, "DescribeInstanceAttribute", "InstanceId", instance,
+                "Attribute", "blockDeviceMapping");
+
+        String item = "DescribeInstanceAttributeResponse.blockDeviceMapping.item";
+        assertEquals(List.of("/dev/xvda", "/dev/sdg"), attribute.getList(item + ".deviceName", String.class));
+        assertEquals(List.of("true", "false"), attribute.getList(item + ".ebs.deleteOnTermination", String.class));
+        assertEquals(List.of("attached", "attached"), attribute.getList(item + ".ebs.status", String.class));
+        assertEquals(deviceVolume(account, instance, "/dev/sdg"), attribute.getString(item + "[1].ebs.volumeId"));
+    }
+
+    @Test
     void anAmiEntryWithoutAnEbsBlockCreatesNoVolume() {
         String account = account();
         String image = ec2(account, "RegisterImage", "Name", "instance-store-" + account,

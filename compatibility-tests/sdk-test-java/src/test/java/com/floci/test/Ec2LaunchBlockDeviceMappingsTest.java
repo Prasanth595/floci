@@ -9,6 +9,7 @@ import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.Filter;
 import software.amazon.awssdk.services.ec2.model.Instance;
 import software.amazon.awssdk.services.ec2.model.InstanceBlockDeviceMapping;
+import software.amazon.awssdk.services.ec2.model.InstanceBlockDeviceMappingSpecification;
 import software.amazon.awssdk.services.ec2.model.InstanceType;
 import software.amazon.awssdk.services.ec2.model.Volume;
 import software.amazon.awssdk.services.ec2.model.VolumeType;
@@ -106,6 +107,52 @@ class Ec2LaunchBlockDeviceMappingsTest {
                 assertThat(ec2.describeInstances(r -> r.filters(Filter.builder().name("image-id").values(imageId)
                         .build())).reservations()).isEmpty();
             } finally {
+                ec2.deregisterImage(r -> r.imageId(imageId));
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("ModifyInstanceAttribute keeps a launch volume that termination would delete")
+    void modifyInstanceAttributeKeepsALaunchVolume() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client(ACCOUNT)) {
+            String imageId = registerImage(ec2);
+            String instanceId = null;
+            try {
+                Instance launched = ec2.runInstances(r -> r.imageId(imageId).instanceType(InstanceType.T3_MICRO)
+                        .minCount(1).maxCount(1)
+                        .blockDeviceMappings(BlockDeviceMapping.builder().deviceName("/dev/sdg")
+                                .ebs(e -> e.volumeSize(5)).build()))
+                        .instances().get(0);
+                instanceId = launched.instanceId();
+                Map<String, Volume> volumes = volumesByDevice(ec2, launched.instanceId());
+
+                ec2.modifyInstanceAttribute(r -> r.instanceId(launched.instanceId())
+                        .blockDeviceMappings(InstanceBlockDeviceMappingSpecification.builder().deviceName("/dev/sdg")
+                                .ebs(e -> e.deleteOnTermination(false)).build()));
+                Instance described = ec2.describeInstances(r -> r.instanceIds(launched.instanceId()))
+                        .reservations().get(0).instances().get(0);
+                assertThat(described.blockDeviceMappings()).extracting(m -> m.ebs().deleteOnTermination())
+                        .containsExactly(true, false, false);
+                Ec2Exception refused = assertThrows(Ec2Exception.class, () -> ec2.modifyInstanceAttribute(r -> r
+                        .instanceId(launched.instanceId())
+                        .blockDeviceMappings(InstanceBlockDeviceMappingSpecification.builder().deviceName("/dev/sdz")
+                                .ebs(e -> e.deleteOnTermination(false)).build())));
+                assertThat(refused.awsErrorDetails().errorCode()).isEqualTo("InvalidInstanceAttributeValue");
+
+                ec2.terminateInstances(r -> r.instanceIds(launched.instanceId()));
+                instanceId = null;
+                Volume kept = ec2.describeVolumes(r -> r.volumeIds(volumes.get("/dev/sdg").volumeId()))
+                        .volumes().get(0);
+                assertThat(kept.stateAsString()).isEqualTo("available");
+                for (String device : List.of("/dev/sdf", "/dev/sdg")) {
+                    ec2.deleteVolume(r -> r.volumeId(volumes.get(device).volumeId()));
+                }
+            } finally {
+                if (instanceId != null) {
+                    String cleanup = instanceId;
+                    ec2.terminateInstances(r -> r.instanceIds(cleanup));
+                }
                 ec2.deregisterImage(r -> r.imageId(imageId));
             }
         }

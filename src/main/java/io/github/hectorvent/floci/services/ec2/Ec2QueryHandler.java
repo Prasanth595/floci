@@ -1565,6 +1565,8 @@ public class Ec2QueryHandler {
             xml.start("disableApiStop").elem("value", String.valueOf(inst.isDisableApiStop())).end("disableApiStop");
         } else if ("disableApiTermination".equals(attribute)) {
             xml.start("disableApiTermination").elem("value", String.valueOf(inst.isDisableApiTermination())).end("disableApiTermination");
+        } else if ("blockDeviceMapping".equals(attribute)) {
+            instanceBlockDeviceMappingXml(xml, inst);
         } else if ("groupSet".equals(attribute)) {
             xml.start("groupSet");
             for (GroupIdentifier gi : inst.getSecurityGroups()) {
@@ -1579,8 +1581,52 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    /**
+     * The ModifyInstanceAttribute members that each name an attribute, as a parameter or a
+     * parameter prefix, with the attribute name AWS reports each under, in the order of the API's
+     * Attribute values.
+     */
+    private static final List<Map.Entry<String, String>> INSTANCE_ATTRIBUTE_MEMBERS = List.of(
+            Map.entry("DisableApiTermination.Value", "disableApiTermination"),
+            Map.entry("InstanceType.Value", "instanceType"),
+            Map.entry("Kernel.Value", "kernel"),
+            Map.entry("Ramdisk.Value", "ramdisk"),
+            Map.entry("InstanceInitiatedShutdownBehavior.Value", "instanceInitiatedShutdownBehavior"),
+            Map.entry("BlockDeviceMapping.", "blockDeviceMapping"),
+            Map.entry("UserData.Value", "userData"),
+            Map.entry("SourceDestCheck.Value", "sourceDestCheck"),
+            Map.entry("GroupId.", "groupSet"),
+            Map.entry("EbsOptimized.Value", "ebsOptimized"),
+            Map.entry("SriovNetSupport.Value", "sriovNetSupport"),
+            Map.entry("EnaSupport.Value", "enaSupport"),
+            Map.entry("DisableApiStop.Value", "disableApiStop"),
+            Map.entry("EnclaveOptions.", "enclaveOptions"));
+
     private Response handleModifyInstanceAttribute(MultivaluedMap<String, String> p, String region) {
         String instanceId = p.getFirst("InstanceId");
+        List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings = parseLaunchTemplateBlockDeviceMappings(p, "");
+        if (!blockDeviceMappings.isEmpty()) {
+            // AWS takes one attribute per call. Refusing the others named with the devices keeps a
+            // call from changing some of what it names and then failing on the rest.
+            // The generic form names its attribute in Attribute and sets it through Value.
+            String generic = p.getFirst("Attribute");
+            List<String> named = new ArrayList<>();
+            for (Map.Entry<String, String> attribute : INSTANCE_ATTRIBUTE_MEMBERS) {
+                if (attribute.getValue().equals(generic) || (attribute.getKey().endsWith(".")
+                        ? anyParamStartsWith(p, attribute.getKey()) : p.getFirst(attribute.getKey()) != null)) {
+                    named.add(attribute.getValue());
+                }
+            }
+            if (generic != null && !generic.isBlank() && !named.contains(generic)) {
+                named.add(generic);
+            }
+            if (named.size() > 1) {
+                throw new AwsException("InvalidParameterCombination",
+                        "Fields for multiple attribute types specified: " + String.join(",", named), 400);
+            }
+            service.modifyInstanceBlockDeviceMappings(region, instanceId, blockDeviceMappings);
+            return booleanResponse("ModifyInstanceAttribute");
+        }
         // UserData arrives base64-encoded, as on RunInstances; both forms are kept so the attribute
         // describes back exactly as sent.
         String userDataEncoded = p.getFirst("UserData.Value");
