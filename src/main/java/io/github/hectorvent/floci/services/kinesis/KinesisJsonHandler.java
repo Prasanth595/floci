@@ -244,17 +244,26 @@ public class KinesisJsonHandler {
             throw invalidNextToken();
         }
         String after = token.isTextual() ? streamCursorFromToken(decodeNextToken(token.textValue()), region) : startName;
-        List<String> streamNames = service.listStreams(region).stream()
-                .filter(name -> after == null || name.compareTo(after) > 0)
+        List<KinesisStream> streams = service.listStreamDetails(region).stream()
+                .filter(stream -> after == null || stream.getStreamName().compareTo(after) > 0)
                 .toList();
-        List<String> page = streamNames.stream().limit(limit).toList();
+        List<KinesisStream> page = streams.stream().limit(limit).toList();
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode names = response.putArray("StreamNames");
-        page.forEach(names::add);
-        response.put("HasMoreStreams", streamNames.size() > limit);
-        if (streamNames.size() > limit) {
+        ArrayNode summaries = response.putArray("StreamSummaries");
+        for (KinesisStream stream : page) {
+            names.add(stream.getStreamName());
+            ObjectNode summary = summaries.addObject();
+            summary.put("StreamName", stream.getStreamName());
+            summary.put("StreamARN", stream.getStreamArn());
+            summary.put("StreamStatus", stream.getStreamStatus());
+            addStreamModeDetailsNode(summary, stream);
+            summary.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
+        }
+        response.put("HasMoreStreams", streams.size() > limit);
+        if (streams.size() > limit) {
             response.put("NextToken", encodeNextToken("ListStreams|" + region,
-                    Base64Url.encode(page.getLast()), System.currentTimeMillis()));
+                    Base64Url.encode(page.getLast().getStreamName()), System.currentTimeMillis()));
         }
         return Response.ok(response).build();
     }
