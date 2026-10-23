@@ -9,6 +9,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * REST requests signed for a service Floci does not implement must be rejected with the
@@ -105,6 +106,73 @@ class UnknownServiceScopeGuardIntegrationTest {
         .then()
             .statusCode(200)
             .contentType(containsString("application/json"));
+    }
+
+    // AppSync's ListApis and API Gateway v2's GetApis share GET /v2/apis. Floci serves only the
+    // latter, which must not answer an AppSync request with its own response shape.
+    @Test
+    void appSyncScopeCannotReachApiGatewayV2Routes() {
+        given()
+            .header("Authorization", authorization("appsync"))
+        .when()
+            .get("/v2/apis")
+        .then()
+            .statusCode(404)
+            .header("X-Amzn-Errortype", "UnknownOperationException")
+            .body("__type", equalTo("UnknownOperationException"))
+            .body("message", equalTo("Unknown operation: GET /v2/apis"));
+    }
+
+    @Test
+    void apiGatewayScopeStillReachesApiGatewayV2Routes() {
+        given()
+            .header("Authorization", authorization("apigateway"))
+        .when()
+            .get("/v2/apis")
+        .then()
+            .statusCode(200)
+            .body("items", notNullValue());
+    }
+
+    // AppIntegrations' and AppRegistry's ListApplications share AppConfig's GET /applications.
+    @Test
+    void otherServiceScopesCannotReachAppConfigRoutes() {
+        for (String scope : new String[] {"app-integrations", "servicecatalog"}) {
+            given()
+                .header("Authorization", authorization(scope))
+            .when()
+                .get("/applications")
+            .then()
+                .statusCode(404)
+                .body("__type", equalTo("UnknownOperationException"))
+                .body("message", equalTo("Unknown operation: GET /applications"));
+        }
+    }
+
+    @Test
+    void appConfigScopeStillReachesAppConfigRoutes() {
+        given()
+            .header("Authorization", authorization("appconfig"))
+        .when()
+            .get("/applications")
+        .then()
+            .statusCode(200)
+            .body("Items", notNullValue());
+    }
+
+    // The AppConfigData SDK signs as appconfig, a scope AppConfig declares, so its routes must not
+    // read that as another service's request.
+    @Test
+    void appConfigScopeStillReachesAppConfigDataRoutes() {
+        given()
+            .header("Authorization", authorization("appconfig"))
+            .contentType("application/json")
+            .body("{\"ApplicationIdentifier\":\"a\",\"EnvironmentIdentifier\":\"e\","
+                    + "\"ConfigurationProfileIdentifier\":\"c\"}")
+        .when()
+            .post("/configurationsessions")
+        .then()
+            .header("X-Amzn-Errortype", not(equalTo("UnknownOperationException")));
     }
 
     @Test

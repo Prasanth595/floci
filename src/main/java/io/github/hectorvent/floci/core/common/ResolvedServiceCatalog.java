@@ -93,6 +93,7 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -112,6 +113,14 @@ public class ResolvedServiceCatalog {
                     "iot-jobs-data", "iot",
                     "monitoring", "cloudwatch",
                     "awsssoportal", "sso");
+
+    /**
+     * Scopes a service is signed as but cannot declare, because credential-scope registration is
+     * last-write-wins and another descriptor holds the scope. AppConfigData's SDK signs as
+     * {@code appconfig}, which AppConfig declares.
+     */
+    private static final Map<String, Set<String>> UNDECLARED_SIGNING_SCOPES =
+            Map.of("appconfigdata", Set.of("appconfig"));
 
     private final ServiceCatalog catalog;
 
@@ -832,6 +841,16 @@ public class ResolvedServiceCatalog {
      */
     public String canonicalCredentialScope(String credentialScope) {
         return CREDENTIAL_SCOPE_ALIASES.getOrDefault(credentialScope, credentialScope);
+    }
+
+    /**
+     * Whether a request signed for {@code credentialScope} is one {@code descriptor} serves: a scope
+     * it declares, or one it is signed as but cannot declare. False for a descriptor that declares
+     * no scope at all, which says nothing about how it is signed; callers decide what that means.
+     */
+    public boolean isSignedAs(ServiceDescriptor descriptor, String credentialScope) {
+        return descriptor.credentialScopes().contains(credentialScope)
+                || UNDECLARED_SIGNING_SCOPES.getOrDefault(descriptor.externalKey(), Set.of()).contains(credentialScope);
     }
 
     public Optional<ServiceDescriptor> byResourceClass(Class<?> resourceClass) {
