@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -208,6 +209,41 @@ class S3NullVersionReviewTest {
         }
         assertArrayEquals(bytes("original"), service.getObject("bucket", "key", "null").getData());
         assertEquals(2, service.listObjectVersions("bucket", null, 1000, null).versions().size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void readsSpanningFailedPublicationRetryTheRestoredCurrentVersion(boolean explicitNull) throws Exception {
+        PublicationFailureStore objects = new PublicationFailureStore();
+        S3Service service = service(true, objects);
+        service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
+        String snapshot = service.snapshotBucketConfiguration("bucket");
+        service.putBucketVersioning("bucket", "Enabled");
+        String numbered = service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of())
+                .getVersionId();
+        service.deleteObject("bucket", "key", numbered);
+        service.restoreBucketConfiguration("bucket", snapshot);
+        AtomicInteger reads = new AtomicInteger();
+        AtomicReference<String> observed = new AtomicReference<>();
+        objects.remaining = 1;
+        objects.afterPut = true;
+        objects.beforeFailure = () -> observed.set(
+                new String(service.getObject("bucket", "key").getData(), StandardCharsets.UTF_8));
+
+        Object result = readSnapshot(service, explicitNull, ignored -> {
+            if (reads.getAndIncrement() == 0) {
+                assertThrows(IllegalStateException.class, () -> service.putObject(
+                        "bucket", "key", bytes("replacement"), "text/plain", Map.of()));
+                return observed.get();
+            }
+            return new String(service.getObject("bucket", "key").getData(), StandardCharsets.UTF_8);
+        });
+
+        Method body = result.getClass().getDeclaredMethod("body");
+        body.setAccessible(true);
+        assertEquals("replacement", observed.get());
+        assertEquals("original", body.invoke(result));
+        assertEquals(2, reads.get());
     }
 
     @ParameterizedTest
@@ -469,6 +505,7 @@ class S3NullVersionReviewTest {
     private static final class PublicationFailureStore extends InMemoryStorage<String, S3Object> {
         private int remaining;
         private boolean afterPut;
+        private Runnable beforeFailure;
 
         @Override
         public void put(String key, S3Object value) {
@@ -478,6 +515,9 @@ class S3NullVersionReviewTest {
             }
             super.put(key, value);
             if (fail) {
+                if (beforeFailure != null) {
+                    beforeFailure.run();
+                }
                 throw new IllegalStateException("injected failure after metadata publication");
             }
         }
