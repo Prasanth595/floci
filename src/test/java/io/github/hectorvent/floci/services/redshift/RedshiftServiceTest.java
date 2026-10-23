@@ -26,11 +26,14 @@ import io.github.hectorvent.floci.services.redshift.model.SnapshotSchedule;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,6 +58,151 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 class RedshiftServiceTest {
+
+    @Test
+    void deleteWithFinalSnapshotCommitsBackupBeforeStoppingCluster() {
+        Cluster cluster = finalSnapshotCluster();
+        finalSnapshotDelete("FinalClusterSnapshotIdentifier", "final-backup",
+                "FinalClusterSnapshotRetentionPeriod", "7");
+
+        ArgumentCaptor<Map<String, Snapshot>> committed = ArgumentCaptor.captor();
+        InOrder order = inOrder(cm, snapshotBackend, proxyManager, clusterBackend);
+        order.verify(cm).takeSnapshot(eq("111111111111"), eq("final-cluster"), eq("admin"), any(Path.class));
+        order.verify(snapshotBackend).putAllAtomically(committed.capture());
+        order.verify(snapshotBackend).flush();
+        order.verify(proxyManager).stopProxy("111111111111:final-cluster");
+        order.verify(cm).stop("111111111111", "final-cluster");
+        order.verify(clusterBackend).delete("final-cluster");
+        Snapshot snapshot = committed.getValue().get("final-backup");
+        assertEquals("final-cluster", snapshot.getClusterIdentifier());
+        assertEquals("secret-pw", snapshot.getMasterPassword());
+        assertEquals(7, snapshot.getManualSnapshotRetentionPeriod());
+        assertEquals("deleting", cluster.getClusterStatus());
+    }
+
+    @Test
+    void deleteDefaultsToRequiringFinalSnapshotName() {
+        finalSnapshotCluster();
+        AwsException failure = assertThrows(AwsException.class, () -> finalSnapshotDelete());
+        assertEquals("InvalidParameterCombination", failure.getErrorCode());
+        verifyNoInteractions(cm, proxyManager);
+        verify(clusterBackend, never()).delete(anyString());
+    }
+
+    @Test
+    void finalSnapshotDefaultsToIndefiniteRetentionAndSurvivesTeardownFailure() {
+        Cluster cluster = finalSnapshotCluster();
+        doThrow(new IllegalStateException("proxy busy")).when(proxyManager).stopProxy(anyString());
+        assertThrows(AwsException.class,
+                () -> finalSnapshotDelete("FinalClusterSnapshotIdentifier", "final-backup"));
+        ArgumentCaptor<Map<String, Snapshot>> committed = ArgumentCaptor.captor();
+        verify(snapshotBackend).putAllAtomically(committed.capture());
+        assertEquals(-1, committed.getValue().get("final-backup").getManualSnapshotRetentionPeriod());
+        verify(snapshotBackend, never()).delete(anyString());
+        verify(cm, never()).stop(anyString(), anyString());
+        assertEquals("available", cluster.getClusterStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"../escape", "bad--name", "bad-", "1bad", " "})
+    void deleteRejectsMalformedFinalSnapshotName(String name) {
+        finalSnapshotCluster();
+        assertThrows(AwsException.class, () -> finalSnapshotDelete("FinalClusterSnapshotIdentifier", name));
+        verifyNoInteractions(cm, proxyManager);
+        verify(clusterBackend, never()).delete(anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "-2", "3654"})
+    void deleteRejectsInvalidRetentionBeforeDumpOrTeardown(String retention) {
+        finalSnapshotCluster();
+        AwsException failure = assertThrows(AwsException.class, () -> finalSnapshotDelete(
+                "FinalClusterSnapshotIdentifier", "final-backup", "FinalClusterSnapshotRetentionPeriod", retention));
+        assertEquals("InvalidRetentionPeriodFault", failure.getErrorCode());
+        verifyNoInteractions(cm, proxyManager);
+        verify(clusterBackend, never()).delete(anyString());
+    }
+
+    @Test
+    void deleteRejectsSkipWithFinalSnapshotName() {
+        finalSnapshotCluster();
+        AwsException failure = assertThrows(AwsException.class, () -> finalSnapshotDelete(
+                "SkipFinalClusterSnapshot", "true", "FinalClusterSnapshotIdentifier", "final-backup"));
+        assertEquals("InvalidParameterCombination", failure.getErrorCode());
+        verifyNoInteractions(cm, proxyManager);
+    }
+
+    @Test
+    void deleteRejectsMalformedSkipAndRetention() {
+        finalSnapshotCluster();
+        for (String[] option : List.of(new String[]{"SkipFinalClusterSnapshot", "yes"},
+                new String[]{"FinalClusterSnapshotRetentionPeriod", "abc"},
+                new String[]{"FinalClusterSnapshotRetentionPeriod", "2147483648"})) {
+            AwsException failure = assertThrows(AwsException.class, () -> finalSnapshotDelete(option));
+            assertEquals("InvalidParameterValue", failure.getErrorCode());
+        }
+        verifyNoInteractions(cm, proxyManager);
+    }
+
+    @Test
+    void deleteKeepsClusterWhenDumpFails() {
+        Cluster cluster = finalSnapshotCluster();
+        doThrow(new AwsException("InternalFailure", "dump failed", 500)).when(cm)
+                .takeSnapshot(eq("111111111111"), eq("final-cluster"), eq("admin"), any(Path.class));
+        assertThrows(AwsException.class,
+                () -> finalSnapshotDelete("FinalClusterSnapshotIdentifier", "final-backup"));
+        verifyNoInteractions(proxyManager);
+        verify(cm, never()).stop(anyString(), anyString());
+        verify(clusterBackend, never()).delete(anyString());
+        assertEquals("available", cluster.getClusterStatus());
+    }
+
+    @Test
+    void deleteKeepsClusterWhenSnapshotCommitFails() {
+        Cluster cluster = finalSnapshotCluster();
+        doThrow(new IllegalStateException("storage failed")).when(snapshotBackend).putAllAtomically(anyMap());
+        assertThrows(RuntimeException.class,
+                () -> finalSnapshotDelete("FinalClusterSnapshotIdentifier", "final-backup"));
+        verifyNoInteractions(proxyManager);
+        verify(cm, never()).stop(anyString(), anyString());
+        verify(clusterBackend, never()).delete(anyString());
+        assertEquals("available", cluster.getClusterStatus());
+    }
+
+    @Test
+    void deleteRejectsDuplicateBackupAndUnavailableCluster() {
+        Cluster cluster = finalSnapshotCluster();
+        when(snapshotBackend.get("existing-backup")).thenReturn(Optional.of(new Snapshot()));
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> finalSnapshotDelete("FinalClusterSnapshotIdentifier", "existing-backup"));
+        assertEquals("ClusterSnapshotAlreadyExists", duplicate.getErrorCode());
+        cluster.setClusterStatus("unavailable");
+        AwsException unavailable = assertThrows(AwsException.class,
+                () -> finalSnapshotDelete("FinalClusterSnapshotIdentifier", "final-backup"));
+        assertEquals("InvalidClusterState", unavailable.getErrorCode());
+        verifyNoInteractions(cm, proxyManager);
+    }
+
+    private Cluster finalSnapshotCluster() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("final-cluster");
+        cluster.setClusterStatus("available");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("secret-pw");
+        when(clusterBackend.get("final-cluster")).thenReturn(Optional.of(cluster));
+        return cluster;
+    }
+
+    private void finalSnapshotDelete(String... options) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "final-cluster");
+        for (int index = 0; index < options.length; index += 2) {
+            params.putSingle(options[index], options[index + 1]);
+        }
+        RedshiftQueryHandler query = new RedshiftQueryHandler(service, credentialBroker,
+                mock(EmulatorConfig.class), mock(RedshiftIamDbUserResolver.class), regionResolver);
+        query.handle("DeleteCluster", params);
+    }
 
     @Test
     void blankDefaultRoleCreatesWithoutDefaultAndClearsExistingDefault() {
@@ -871,7 +1019,7 @@ class RedshiftServiceTest {
         // sqlDump is now an absolute path scoped by account to avoid collisions across accounts
         assertTrue(snapshot.getSqlDump().contains("111111111111"));
         assertTrue(snapshot.getSqlDump().endsWith("my-snapshot.sql"));
-        verify(snapshotBackend).put(eq("my-snapshot"), any(Snapshot.class));
+        verify(snapshotBackend).putAllAtomically(Map.of("my-snapshot", snapshot));
         verify(snapshotBackend).flush();
         verify(cm).takeSnapshot(eq("111111111111"), eq("my-cluster"), eq("admin"), any(Path.class));
     }

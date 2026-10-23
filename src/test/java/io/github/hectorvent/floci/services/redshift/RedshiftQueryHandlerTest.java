@@ -462,7 +462,7 @@ class RedshiftQueryHandlerTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("test-cluster");
         cluster.setClusterStatus("deleting");
-        when(service.deleteCluster(any())).thenReturn(cluster);
+        when(service.deleteCluster("test-cluster", null, null, null)).thenReturn(cluster);
 
         Response response = handler.handle("DeleteCluster", params);
         assertEquals(200, response.getStatus());

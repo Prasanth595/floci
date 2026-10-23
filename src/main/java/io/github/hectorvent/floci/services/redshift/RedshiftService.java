@@ -612,12 +612,39 @@ public class RedshiftService {
         return clusters.scanForAccount(accountId, k -> true);
     }
 
-    public synchronized Cluster deleteCluster(String identifier) {
+    /** Internal deletion used by provisioner cleanup, which explicitly skips the final snapshot. */
+    public Cluster deleteCluster(String identifier) {
+        return deleteCluster(identifier, true, null, null);
+    }
+
+    public synchronized Cluster deleteCluster(String identifier, Boolean skipFinalClusterSnapshot,
+                                               String finalSnapshotIdentifier, Integer finalSnapshotRetentionPeriod) {
+        boolean skipSnapshot = Boolean.TRUE.equals(skipFinalClusterSnapshot);
+        if (skipSnapshot && finalSnapshotIdentifier != null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "FinalClusterSnapshotIdentifier cannot be supplied when SkipFinalClusterSnapshot is true", 400);
+        }
+        if (!skipSnapshot && (finalSnapshotIdentifier == null || finalSnapshotIdentifier.isBlank())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "FinalClusterSnapshotIdentifier is required unless SkipFinalClusterSnapshot is true", 400);
+        }
+        int retentionPeriod = finalSnapshotRetentionPeriod == null ? -1 : finalSnapshotRetentionPeriod;
+        if (retentionPeriod != -1 && (retentionPeriod < 1 || retentionPeriod > 3653)) {
+            throw new AwsException("InvalidRetentionPeriodFault",
+                    "FinalClusterSnapshotRetentionPeriod must be -1 or between 1 and 3653", 400);
+        }
         Optional<Cluster> clusterOpt = clusters.get(identifier);
         if (clusterOpt.isEmpty()) {
             throw new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404);
         }
         Cluster cluster = clusterOpt.get();
+
+        if (!skipSnapshot) {
+            if (!"available".equals(cluster.getClusterStatus())) {
+                throw new AwsException("InvalidClusterState", "Cluster must be available to create a final snapshot", 400);
+            }
+            createSnapshot(finalSnapshotIdentifier, identifier, retentionPeriod);
+        }
 
         // Tear down the auth proxy and return its port before stopping the container.
         // If it fails, abort deletion so the metadata remains and the user can retry.
@@ -957,7 +984,11 @@ public class RedshiftService {
         return Paths.get(storedPath).toAbsolutePath().normalize().startsWith(dir);
     }
 
-    public Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier) {
+    public synchronized Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier) {
+        return createSnapshot(snapshotIdentifier, clusterIdentifier, null);
+    }
+
+    private Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier, Integer retentionPeriod) {
         validateSnapshotIdentifier(snapshotIdentifier);
         Optional<Cluster> clusterOpt = clusters.get(clusterIdentifier);
         if (clusterOpt.isEmpty()) {
@@ -976,6 +1007,7 @@ public class RedshiftService {
         snapshot.setMasterPassword(cluster.getMasterPassword());
         snapshot.setSnapshotArn(snapshotArn(clusterIdentifier, snapshotIdentifier));
         snapshot.setSnapshotCreateTime(Instant.now());
+        snapshot.setManualSnapshotRetentionPeriod(retentionPeriod);
         if (cluster.getEndpoint() != null) {
             snapshot.setPort(cluster.getEndpoint().getPort());
         } else {
@@ -993,14 +1025,14 @@ public class RedshiftService {
             Files.createDirectories(dumpDir);
             containerManager.takeSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), dumpFile);
             snapshot.setSqlDump(dumpFile.toString());
+            snapshots.putAllAtomically(Map.of(snapshotIdentifier, snapshot));
+            snapshots.flush();
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
             throw new AwsException("InternalFailure", "Failed to take snapshot for cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
         }
 
-        snapshots.put(snapshotIdentifier, snapshot);
-        snapshots.flush();
         return snapshot;
     }
 
@@ -1028,7 +1060,7 @@ public class RedshiftService {
         return snapshots.get(snapshotIdentifier);
     }
 
-    public Snapshot deleteSnapshot(String snapshotIdentifier) {
+    public synchronized Snapshot deleteSnapshot(String snapshotIdentifier) {
         Optional<Snapshot> snapshotOpt = snapshots.get(snapshotIdentifier);
         if (snapshotOpt.isEmpty()) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);

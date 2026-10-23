@@ -60,7 +60,8 @@ class RedshiftDataOperationsTest {
     static void cleanup() {
         if (redshift != null && clusterId != null) {
             try {
-                redshift.deleteCluster(DeleteClusterRequest.builder().clusterIdentifier(clusterId).build());
+                redshift.deleteCluster(DeleteClusterRequest.builder().clusterIdentifier(clusterId)
+                        .skipFinalClusterSnapshot(true).build());
             } catch (Exception e) {
                 LOG.warnf(e, "Failed to clean up Redshift cluster %s", clusterId);
             }
