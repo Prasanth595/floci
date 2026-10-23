@@ -15,14 +15,13 @@ import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
 import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
+import io.github.hectorvent.floci.services.msk.model.ClusterState;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import io.github.hectorvent.floci.services.msk.model.MskScramAssociations;
 import io.github.hectorvent.floci.services.msk.model.ScramSecretAssociation;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
-import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService.BatchGetSecretValueError;
-import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService.BatchGetSecretValueResult;
-import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService.BatchSecretValue;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -33,6 +32,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -72,7 +73,7 @@ public class MskScramSecretsService {
     public void init() {
         reconciler.scheduleWithFixedDelay(() -> {
             try {
-                reconcileScramSecrets();
+                reconcileAllScramSecrets();
             } catch (RuntimeException e) {
                 LOG.error("MSK SCRAM reconciliation failed; retrying on the next scheduled run", e);
             }
@@ -88,17 +89,73 @@ public class MskScramSecretsService {
         return clusterLocks.computeIfAbsent(String.valueOf(clusterArn), ignored -> new Object());
     }
 
-    void reconcileScramSecrets() {
-        for (AccountAwareStorageBackend.AccountEntry<MskScramAssociations> entry
-                : storage.scanAllAccountEntries(key -> true)) {
-            synchronized (clusterLock(entry.key())) {
-                if (mskService.getClusterForAccount(entry.accountId(), entry.key()).isEmpty()) {
-                    storage.deleteForAccount(entry.accountId(), entry.key());
+    void reconcileAllScramSecrets() {
+        for (AccountAwareStorageBackend.AccountEntry<MskScramAssociations> entry : storage.scanAllAccountEntries(key -> true)) {
+            String clusterArn = entry.key();
+            synchronized (clusterLock(clusterArn)) {
+                Optional<MskCluster> clusterGet = mskService.getClusterForAccount(entry.accountId(), clusterArn);
+                if (clusterGet.isEmpty()) {
+                    storage.deleteForAccount(entry.accountId(), clusterArn);
+                } else {
+                    reconcileScramSecretsForCluster(clusterGet.get(), clusterArn);
                 }
             }
         }
     }
 
+    private void reconcileScramSecretsForCluster(MskCluster cluster, String clusterArn) {
+        if (mskService.isServerless(cluster) || cluster.getState() != ClusterState.ACTIVE) {
+            return;
+        }
+        MskScramAssociations clusterAssociations = associationsFor(clusterArn);
+        for (String secretArn : new ArrayList<>(clusterAssociations.getAssociations().keySet())) {
+            try {
+                reconcileScramSecret(secretArn, clusterAssociations, cluster);
+            } catch (AwsException e) {
+                LOG.warnv("Could not reconcile MSK SCRAM secret {0} for cluster {1}: {2}",
+                    secretArn, clusterArn, e.getErrorCode());
+            }
+        }
+    }
+
+    private void reconcileScramSecret(String secretArn, MskScramAssociations clusterAssociations, MskCluster cluster) {
+        ScramSecretAssociation association = clusterAssociations.getAssociations().get(secretArn);
+        if (association == null) {
+            // Should never happen
+            throw new AwsException("InternalServerErrorException", "SCRAM association is missing during reconciliation.", 500);
+        }
+        if (association.isDisassociating()) {
+            // Recover if disassociation was interrupted
+            removeScramAssociation(cluster, clusterAssociations, secretArn);
+            return;
+        }
+        Optional<Secret> secret = describeSecret(secretArn);
+        if (secret.isEmpty() || secret.get().getDeletedDate() != null) {
+            // Revoke credentials for secret that are deleted or scheduled for deletion, but keep the association
+            revokeScramCredentials(cluster, clusterAssociations, association);
+            return;
+        }
+        
+        SecretVersion secretVersion = getCurrentSecretVersion(secret.get());
+        boolean versionIdChanged = !Objects.equals(secretVersion.getVersionId(), association.getAppliedVersionId());
+        boolean containerIdChanged = !Objects.equals(cluster.getContainerId(), association.getAppliedContainerId());
+        // Reapply if the secret or cluster container has changed
+        // Reapply if credentials where revoked, which can happen if the secret was deleted and then restored
+        if (association.isCredentialsRevoked() || versionIdChanged || containerIdChanged) {
+            applyScramCredentials(cluster, clusterAssociations, association, secretVersion);
+        }
+    }
+
+    private void revokeScramCredentials(MskCluster cluster, MskScramAssociations state, ScramSecretAssociation association) {
+        if (association.isCredentialsRevoked()) {
+            // Skip repeated delete calls to the cluster
+            return;
+        }
+        deleteScramUser(cluster, state, association);
+        association.setCredentialsRevoked(true);
+        putAssociations(cluster.getClusterArn(), state);
+    }
+    
     public List<Map<String, String>> batchAssociateScramSecret(String clusterArn, List<String> secretArns) {
         synchronized (clusterLock(clusterArn)) {
             MskCluster cluster = scramCluster(clusterArn);
@@ -118,8 +175,10 @@ public class MskScramSecretsService {
                     }
                     validateSecretEncryption(secret);
                     // Amazon MSK reads only the AWSCURRENT version of an associated secret
-                    BatchSecretValue secretValue = readSecret(secretArn);
-                    applyScramCredentials(cluster, state, secretArn, secretValue);
+                    SecretVersion secretVersion = getCurrentSecretVersion(secret);
+                    ScramSecretAssociation association = state.getAssociations()
+                            .computeIfAbsent(secretArn, ignored -> new ScramSecretAssociation());
+                    applyScramCredentials(cluster, state, association, secretVersion);
                 } catch (AwsException e) {
                     if (newAssociation && state.getAssociations().remove(secretArn) != null) {
                         putAssociations(clusterArn, state);
@@ -248,14 +307,21 @@ public class MskScramSecretsService {
     }
 
     private void applyScramCredentials(MskCluster cluster, MskScramAssociations state,
-                                       String secretArn, BatchSecretValue secretValue) {
-        ScramCredentials credentials = readScramCredentials(secretValue.secretString());
+                                       ScramSecretAssociation association, SecretVersion secretValue) {
+        ScramCredentials credentials = readScramCredentials(secretValue.getSecretString());
+        boolean ownershipChanged = !Objects.equals(association.getUsername(), credentials.username());
+        if (ownershipChanged) {
+            deleteScramUser(cluster, state, association);
+            association.setUsername(credentials.username());
+            // Persist ownership changes before updating the broker; mark the version as applied only after success.
+            putAssociations(cluster.getClusterArn(), state);
+        }
         if (!config.services().msk().mock()) {
             redpandaManager.createUser(cluster, credentials.username(), credentials.password());
         }
-        ScramSecretAssociation association = new ScramSecretAssociation();
-        association.setUsername(credentials.username());
-        state.getAssociations().put(secretArn, association);
+        association.setAppliedVersionId(secretValue.getVersionId());
+        association.setAppliedContainerId(cluster.getContainerId());
+        association.setCredentialsRevoked(false);
         putAssociations(cluster.getClusterArn(), state);
     }
 
@@ -264,33 +330,62 @@ public class MskScramSecretsService {
         if (association == null) {
             return;
         }
-        if (association.getUsername() != null && !config.services().msk().mock()) {
-            redpandaManager.deleteUser(cluster, association.getUsername());
+        if (!association.isDisassociating()) {
+            association.setDisassociating(true);
+            // Persist the removal intent before deleting broker credentials so a failure does not lose it.
+            putAssociations(cluster.getClusterArn(), state);
         }
+        deleteScramUser(cluster, state, association);
         state.getAssociations().remove(secretArn);
         putAssociations(cluster.getClusterArn(), state);
     }
 
-    private BatchSecretValue readSecret(String secretArn) {
-        // Exact-ARN batch reads select AWSCURRENT without updating access timestamps.
-        BatchGetSecretValueResult result = secretsManagerService.batchGetSecretValue(
-                List.of(secretArn), AwsArnUtils.parse(secretArn).region());
-        if (result != null && result.values() != null && result.errors() != null) {
-            if (result.values().isEmpty() && result.errors().size() == 1) {
-                BatchGetSecretValueError error = result.errors().getFirst();
-                if (error != null && secretArn.equals(error.secretId())
-                        && error.errorCode() != null && error.message() != null) {
-                    int status = "AccessDeniedException".equals(error.errorCode()) ? 403 : 400;
-                    throw new AwsException(error.errorCode(), error.message(), status);
-                }
-            } else if (result.values().size() == 1 && result.errors().isEmpty()) {
-                BatchSecretValue value = result.values().getFirst();
-                if (value != null && secretArn.equals(value.arn()) && value.versionId() != null) {
-                    return value;
+    private void deleteScramUser(MskCluster cluster, MskScramAssociations state, ScramSecretAssociation association) {
+        String username = association.getUsername();
+        // Revoked credentials have already been deleted
+        if (username != null && !association.isCredentialsRevoked()) {
+            if (!config.services().msk().mock()) {
+                redpandaManager.deleteUser(cluster, username);
+            }
+            // Allow a user existing in multiple secrets to be reconciled again
+            invalidateUserAssociations(state, username);
+        }
+    }
+
+    private void invalidateUserAssociations(MskScramAssociations state, String username) {
+        for (ScramSecretAssociation association : state.getAssociations().values()) {
+            if (username.equals(association.getUsername())) {
+                association.setAppliedVersionId(null);
+                association.setAppliedContainerId(null);
+            }
+        }
+    }
+
+    private Optional<Secret> describeSecret(String secretArn) {
+        try {
+            Secret secret = secretsManagerService.describeSecret(secretArn, AwsArnUtils.parse(secretArn).region());
+            return Optional.of(secret);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return Optional.empty();
+            }
+            throw e;
+        }
+    }
+
+    private SecretVersion getCurrentSecretVersion(Secret secret) {
+        if (secret.getDeletedDate() != null) {
+            throw new AwsException("InvalidRequestException", "Secret is scheduled for deletion.", 400);
+        }
+        if (secret.getVersions() != null) {
+            for (SecretVersion version : secret.getVersions().values()) {
+                if (version.getVersionStages() != null && version.getVersionStages().contains("AWSCURRENT")) {
+                    return version;
                 }
             }
         }
-        throw new AwsException("InternalServerError", "Unexpected Secrets Manager batch response.", 500);
+        throw new AwsException("ResourceNotFoundException",
+            "Secrets Manager can't find the specified secret value for staging label: AWSCURRENT", 400);
     }
 
     record ScramCredentials(String username, String password) {
