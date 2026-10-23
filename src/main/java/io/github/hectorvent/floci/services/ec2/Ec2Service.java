@@ -8658,26 +8658,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         ensureDefaultResources(region);
         validateLaunchTemplateData(region, data);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
-        ensureLaunchTemplateVersions(launchTemplate);
-        int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
-        LaunchTemplateData source;
-        if (sourceVersion == null || sourceVersion.isBlank()) {
-            source = new LaunchTemplateData();
-        } else {
-            source = versionData(launchTemplate,
-                    resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber()));
+        synchronized (launchTemplate) {
+            ensureLaunchTemplateVersions(launchTemplate);
+            int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
+            LaunchTemplateData source;
+            if (sourceVersion == null || sourceVersion.isBlank()) {
+                source = new LaunchTemplateData();
+            } else {
+                source = versionData(launchTemplate,
+                        resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber()));
+            }
+            LaunchTemplateData merged = source.mergedWith(data != null ? data : new LaunchTemplateData());
+            validateLaunchTemplateData(region, merged);
+            launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
+            launchTemplate.getVersions().put(String.valueOf(latestVersion), merged);
+            launchTemplate.setData(new LaunchTemplateData(merged));
+            if (versionDescription != null && !versionDescription.isBlank()) {
+                launchTemplate.getVersionDescriptions().put(String.valueOf(latestVersion), versionDescription);
+            }
+            launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(String.valueOf(latestVersion)));
+            launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
+            return launchTemplate;
         }
-        LaunchTemplateData merged = source.mergedWith(data != null ? data : new LaunchTemplateData());
-        validateLaunchTemplateData(region, merged);
-        launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
-        launchTemplate.getVersions().put(String.valueOf(latestVersion), merged);
-        launchTemplate.setData(new LaunchTemplateData(merged));
-        if (versionDescription != null && !versionDescription.isBlank()) {
-            launchTemplate.getVersionDescriptions().put(String.valueOf(latestVersion), versionDescription);
-        }
-        launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(String.valueOf(latestVersion)));
-        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
-        return launchTemplate;
     }
 
     /**
@@ -8694,13 +8696,41 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 List.of());
         List<LaunchTemplate> versions = new ArrayList<>();
         for (LaunchTemplate launchTemplate : templates) {
-            List<String> effectiveVersions = requestedVersions == null || requestedVersions.isEmpty()
-                    ? List.of(launchTemplate.getLatestVersionNumber())
-                    : requestedVersions;
-            for (String requestedVersion : effectiveVersions) {
-                String resolvedVersion = resolveLaunchTemplateVersion(
-                        launchTemplate, requestedVersion, launchTemplate.getLatestVersionNumber());
-                versions.add(copyForVersion(launchTemplate, resolvedVersion));
+            synchronized (launchTemplate) {
+                List<String> effectiveVersions = requestedVersions == null || requestedVersions.isEmpty()
+                        ? List.of(launchTemplate.getLatestVersionNumber())
+                        : requestedVersions;
+                for (String requestedVersion : effectiveVersions) {
+                    String resolvedVersion = resolveLaunchTemplateVersion(
+                            launchTemplate, requestedVersion, launchTemplate.getLatestVersionNumber());
+                    versions.add(copyForVersion(launchTemplate, resolvedVersion));
+                }
+            }
+        }
+        return versions;
+    }
+
+    /** API listing semantics; the four-argument internal lookup keeps its latest-version default. */
+    List<LaunchTemplate> describeLaunchTemplateVersions(String region, String id, String name,
+                                                       List<String> requestedVersions, String minVersion, String maxVersion) {
+        if ((requestedVersions != null && !requestedVersions.isEmpty())
+                || ((id == null || id.isBlank()) && (name == null || name.isBlank()))) {
+            return describeLaunchTemplateVersions(region, id, name, requestedVersions);
+        }
+        int min = minVersion == null ? 0 : parseLaunchTemplateVersion(minVersion);
+        int max = maxVersion == null ? Integer.MAX_VALUE : parseLaunchTemplateVersion(maxVersion);
+        List<LaunchTemplate> templates = matchingLaunchTemplates(region,
+                id != null && !id.isBlank() ? List.of(id) : List.of(),
+                name != null && !name.isBlank() ? List.of(name) : List.of(), List.of());
+        List<LaunchTemplate> versions = new ArrayList<>();
+        for (LaunchTemplate template : templates) {
+            // Version mutation uses the same template monitor, so key iteration and data copies agree.
+            synchronized (template) {
+                ensureLaunchTemplateVersions(template);
+                template.getVersions().keySet().stream().mapToInt(this::parseLaunchTemplateVersion)
+                        .filter(version -> version > min && version <= max).sorted()
+                        .mapToObj(Integer::toString).map(version -> copyForVersion(template, version))
+                        .forEach(versions::add);
             }
         }
         return versions;
@@ -8854,21 +8884,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public void deleteLaunchTemplateVersion(String region, String id, String version) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, null);
-        ensureLaunchTemplateVersions(launchTemplate);
-        launchTemplate.getVersions().remove(version);
-        launchTemplate.getVersionDescriptions().remove(version);
-        int max = launchTemplate.getVersions().keySet().stream()
-                .mapToInt(this::parseLaunchTemplateVersion)
-                .max()
-                .orElse(1);
-        String maxStr = String.valueOf(max);
-        launchTemplate.setLatestVersionNumber(maxStr);
-        LaunchTemplateData latestData = launchTemplate.getVersions().get(maxStr);
-        if (latestData != null) {
-            launchTemplate.setData(new LaunchTemplateData(latestData));
+        synchronized (launchTemplate) {
+            ensureLaunchTemplateVersions(launchTemplate);
+            launchTemplate.getVersions().remove(version);
+            launchTemplate.getVersionDescriptions().remove(version);
+            int max = launchTemplate.getVersions().keySet().stream()
+                    .mapToInt(this::parseLaunchTemplateVersion)
+                    .max()
+                    .orElse(1);
+            String maxStr = String.valueOf(max);
+            launchTemplate.setLatestVersionNumber(maxStr);
+            LaunchTemplateData latestData = launchTemplate.getVersions().get(maxStr);
+            if (latestData != null) {
+                launchTemplate.setData(new LaunchTemplateData(latestData));
+            }
+            launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(maxStr));
+            launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         }
-        launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(maxStr));
-        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
     }
 
     /**
@@ -8904,12 +8936,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private void ensureLaunchTemplateVersions(LaunchTemplate launchTemplate) {
-        if (!launchTemplate.getVersions().isEmpty()) {
-            return;
+        synchronized (launchTemplate) {
+            if (!launchTemplate.getVersions().isEmpty()) {
+                return;
+            }
+            launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(),
+                    new LaunchTemplateData(launchTemplate.getData()));
+            launchTemplates.put(key(launchTemplate.getRegion(), launchTemplate.getLaunchTemplateId()), launchTemplate);
         }
-        launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(),
-                new LaunchTemplateData(launchTemplate.getData()));
-        launchTemplates.put(key(launchTemplate.getRegion(), launchTemplate.getLaunchTemplateId()), launchTemplate);
     }
 
     private String resolveLaunchTemplateVersion(LaunchTemplate launchTemplate, String requestedVersion,

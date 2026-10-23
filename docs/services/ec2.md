@@ -913,6 +913,12 @@ Two behaviours worth calling out, because they are what Terraform reads back:
 
 #### Launch template versions
 
+For a specified template, `DescribeLaunchTemplateVersions` returns all stored versions in
+ascending numeric order by default. `LaunchTemplateVersion.N` selects explicit version numbers,
+`$Latest`, or `$Default`; the legacy `Versions.N` spelling is also accepted. Without an explicit
+version list, `MinVersion` is exclusive and `MaxVersion` inclusive. Explicit versions take
+precedence over the range. Filtering, pagination, and listing across all templates are unchanged.
+
 `CreateLaunchTemplateVersion` accepts two members outside `LaunchTemplateData` itself:
 
 - **`SourceVersion` controls inheritance, and omitting it means no inheritance.** A request that

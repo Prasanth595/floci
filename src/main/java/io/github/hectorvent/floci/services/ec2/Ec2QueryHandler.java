@@ -4728,11 +4728,15 @@ public class Ec2QueryHandler {
     private Response handleDescribeLaunchTemplateVersions(MultivaluedMap<String, String> p, String region) {
         String id = p.getFirst("LaunchTemplateId");
         String name = p.getFirst("LaunchTemplateName");
+        List<String> versions = getList(p, "LaunchTemplateVersion");
+        if (versions.isEmpty()) {
+            versions = getList(p, "Versions");
+        }
         List<LaunchTemplate> launchTemplates = service.describeLaunchTemplateVersions(
                 region,
                 id,
                 name,
-                getList(p, "Versions"));
+                versions, p.getFirst("MinVersion"), p.getFirst("MaxVersion"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeLaunchTemplateVersionsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
