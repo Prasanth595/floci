@@ -33,6 +33,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -51,7 +52,7 @@ public class MskScramSecretsService {
     private final KmsService kmsService;
     private final ObjectMapper objectMapper;
     private final ScheduledExecutorService reconciler = Executors.newSingleThreadScheduledExecutor();
-    private final Object lock = new Object();
+    private final Map<String, Object> clusterLocks = new ConcurrentHashMap<>();
 
     @Inject
     public MskScramSecretsService(StorageFactory storageFactory, EmulatorConfig config, MskService mskService,
@@ -83,10 +84,14 @@ public class MskScramSecretsService {
         reconciler.shutdown();
     }
 
+    private Object clusterLock(String clusterArn) {
+        return clusterLocks.computeIfAbsent(String.valueOf(clusterArn), ignored -> new Object());
+    }
+
     void reconcileScramSecrets() {
         for (AccountAwareStorageBackend.AccountEntry<MskScramAssociations> entry
                 : storage.scanAllAccountEntries(key -> true)) {
-            synchronized (lock) {
+            synchronized (clusterLock(entry.key())) {
                 if (mskService.getClusterForAccount(entry.accountId(), entry.key()).isEmpty()) {
                     storage.deleteForAccount(entry.accountId(), entry.key());
                 }
@@ -95,7 +100,7 @@ public class MskScramSecretsService {
     }
 
     public List<Map<String, String>> batchAssociateScramSecret(String clusterArn, List<String> secretArns) {
-        synchronized (lock) {
+        synchronized (clusterLock(clusterArn)) {
             MskCluster cluster = scramCluster(clusterArn);
             validateSecretArns(secretArns);
             if (new HashSet<>(secretArns).size() != secretArns.size()) {
@@ -127,7 +132,7 @@ public class MskScramSecretsService {
     }
 
     public PaginatedResult<String> listScramSecrets(String clusterArn, Integer maxResults, String nextToken) {
-        synchronized (lock) {
+        synchronized (clusterLock(clusterArn)) {
             scramCluster(clusterArn);
             return Pagination.paginate(new ArrayList<>(associationsFor(clusterArn).getAssociations().keySet()),
                     arn -> arn, maxResults, nextToken, MAX_PAGE, "BadRequestException");
@@ -135,7 +140,7 @@ public class MskScramSecretsService {
     }
 
     public List<Map<String, String>> batchDisassociateScramSecret(String clusterArn, List<String> secretArns) {
-        synchronized (lock) {
+        synchronized (clusterLock(clusterArn)) {
             MskCluster cluster = scramCluster(clusterArn);
             validateSecretArns(secretArns);
             MskScramAssociations state = associationsFor(clusterArn);

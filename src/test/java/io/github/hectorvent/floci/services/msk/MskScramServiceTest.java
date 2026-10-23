@@ -35,6 +35,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -120,6 +125,36 @@ class MskScramServiceTest {
         version.setSecretString(
             "{\"username\":\"" + username + "\",\"password\":\"" + password + "\"}");
         return version;
+    }
+
+    @Test
+    void brokerOperationDoesNotBlockAnotherCluster() throws Exception {
+        when(config.services().msk().mock())
+            .thenReturn(true);
+        MskCluster otherCluster = clusterService.createCluster("other-scram");
+        when(config.services().msk().mock())
+            .thenReturn(false);
+        CountDownLatch operationInFirstClusterStarted = new CountDownLatch(1);
+        CountDownLatch operationInSecondClusterDone = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            operationInFirstClusterStarted.countDown();
+            assertTrue(operationInSecondClusterDone.await(10, TimeUnit.SECONDS));
+            return null;
+        }).when(redpanda).createUser(cluster, "alice", "password");
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<?> associationInFirstCluster = executor.submit(
+                () -> associate(SECRET, version("alice", "password")));
+            try {
+                assertTrue(operationInFirstClusterStarted.await(5, TimeUnit.SECONDS));
+                Future<List<String>> listInSecondCluster = executor.submit(
+                    () -> service.listScramSecrets(otherCluster.getClusterArn(), null, null).items());
+                assertTrue(listInSecondCluster.get(5, TimeUnit.SECONDS).isEmpty());
+            } finally {
+                operationInSecondClusterDone.countDown();
+            }
+            associationInFirstCluster.get(5, TimeUnit.SECONDS);
+        }
     }
 
     private void associate(String arn, SecretVersion version) {
