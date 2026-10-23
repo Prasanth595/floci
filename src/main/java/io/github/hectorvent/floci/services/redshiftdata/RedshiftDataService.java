@@ -34,6 +34,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
@@ -57,7 +59,7 @@ public class RedshiftDataService implements Resettable {
     private final RequestContext requestContext;
     private final IamService iamService;
     private final RedshiftDataIdempotencyStore idempotency;
-    private final Object admissionLock = new Object();
+    private final ConcurrentHashMap<RedshiftDataIdempotencyStore.Scope, AdmissionLock> admissionLocks = new ConcurrentHashMap<>();
 
     RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
                         RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
@@ -93,12 +95,26 @@ public class RedshiftDataService implements Resettable {
 
     @Override
     public void clear() {
-        synchronized (admissionLock) {
-            executor.clear(() -> {
+        executor.clear(() -> {
+            RuntimeException failure = null;
+            try {
                 store.clear();
+            } catch (RuntimeException storageFailure) {
+                failure = storageFailure;
+            }
+            try {
                 idempotency.clear();
-            });
-        }
+            } catch (RuntimeException receiptFailure) {
+                if (failure == null) {
+                    failure = receiptFailure;
+                } else {
+                    failure.addSuppressed(receiptFailure);
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        });
     }
 
     // ── ExecuteStatement ────────────────────────────────────────────────────
@@ -114,22 +130,12 @@ public class RedshiftDataService implements Resettable {
     private ObjectNode execute(JsonNode request, String region, String principal, boolean batch) {
         String token = RedshiftDataIdempotencyStore.clientToken(request);
         int waitSeconds = waitSeconds(request);
-        Admission admission;
-        synchronized (admissionLock) {
-            PendingStatement pending = batch ? prepareBatch(request, region) : prepareStatement(request, region);
-            RedshiftDataStatementStore.StoredStatement stored = pending.statement();
-            RedshiftDataIdempotencyStore.Scope scope = token == null ? null : new RedshiftDataIdempotencyStore.Scope(
-                    stored.accountId, region, batch ? "BatchExecuteStatement" : "ExecuteStatement", token);
-            RedshiftDataIdempotencyStore.Receipt receipt = scope == null ? null : idempotency.find(scope);
-            if (receipt == null) {
-                admission = submit(pending, principal, scope);
-            } else {
-                String id = receipt.response.path("Id").asText();
-                RedshiftDataStatementStore.StoredStatement current = store.getForAccount(stored.accountId, id);
-                admission = new Admission(stored.accountId, id,
-                        current == null ? receipt.response : executeResponse(current), executor.execution(stored.accountId, id));
-            }
-        }
+        PendingStatement pending = batch ? prepareBatch(request, region) : prepareStatement(request, region);
+        RedshiftDataStatementStore.StoredStatement stored = pending.statement();
+        RedshiftDataIdempotencyStore.Scope scope = token == null ? null : new RedshiftDataIdempotencyStore.Scope(
+                stored.accountId, region, batch ? "BatchExecuteStatement" : "ExecuteStatement", token);
+        Admission admission = executor.admitting(() -> scope == null ? submit(pending, principal, null)
+                : admitScoped(pending, principal, scope));
         if (waitSeconds > 0 && admission.execution() != null) {
             admission.execution().await(Duration.ofSeconds(waitSeconds));
             RedshiftDataStatementStore.StoredStatement current = store.getForAccount(admission.accountId(), admission.id());
@@ -141,6 +147,33 @@ public class RedshiftDataService implements Resettable {
     }
 
     private record Admission(String accountId, String id, ObjectNode response, RedshiftDataExecution execution) { }
+
+    private static final class AdmissionLock {
+        private final ReentrantLock lock = new ReentrantLock();
+        private int users;
+    }
+
+    private Admission admitScoped(PendingStatement pending, String principal, RedshiftDataIdempotencyStore.Scope scope) {
+        AdmissionLock scoped = admissionLocks.compute(scope, (key, existing) -> {
+            AdmissionLock selected = existing == null ? new AdmissionLock() : existing;
+            selected.users++;
+            return selected;
+        });
+        scoped.lock.lock();
+        try {
+            RedshiftDataIdempotencyStore.Receipt receipt = idempotency.find(scope);
+            if (receipt == null) {
+                return submit(pending, principal, scope);
+            }
+            String id = receipt.response.path("Id").asText();
+            RedshiftDataStatementStore.StoredStatement current = store.getForAccount(scope.accountId(), id);
+            return new Admission(scope.accountId(), id, current == null ? receipt.response : executeResponse(current),
+                    executor.execution(scope.accountId(), id));
+        } finally {
+            scoped.lock.unlock();
+            admissionLocks.compute(scope, (key, existing) -> --scoped.users == 0 ? null : scoped);
+        }
+    }
 
     private Admission submit(PendingStatement pending, String principal, RedshiftDataIdempotencyStore.Scope scope) {
         RedshiftDataStatementStore.StoredStatement stored = pending.statement();

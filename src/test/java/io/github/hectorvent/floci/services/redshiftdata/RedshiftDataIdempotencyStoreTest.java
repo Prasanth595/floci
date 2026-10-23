@@ -19,13 +19,68 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
 
 class RedshiftDataIdempotencyStoreTest {
 
     private static final Instant START = Instant.parse("2026-10-23T00:00:00Z");
     private final ObjectMapper mapper = new ObjectMapper();
+
+    @Test
+    void expirySweepDoesNotRewriteTheFileForEveryReceipt(@TempDir Path directory) {
+        PersistentStorage<String, RedshiftDataIdempotencyStore.Receipt> delegate = spy(new PersistentStorage<>(
+                directory.resolve("idempotency.json"), new TypeReference<Map<String, RedshiftDataIdempotencyStore.Receipt>>() { }));
+        AccountAwareStorageBackend<RedshiftDataIdempotencyStore.Receipt> backend =
+                new AccountAwareStorageBackend<>(delegate, null, "000000000000");
+        RedshiftDataIdempotencyStore initial = store(backend, START);
+        for (int i = 0; i < 25; i++) {
+            initial.put(scope(i % 2 == 0 ? "000000000000" : "111111111111", "us-east-1", "ExecuteStatement", "token-" + i),
+                    mapper.createObjectNode().put("Id", "statement-" + i));
+        }
+        clearInvocations(delegate);
+        store(backend, START.plus(Duration.ofHours(8))).sweep();
+        assertTrue(backend.scanAllAccountEntries(key -> true).isEmpty());
+        verify(delegate, never()).delete(any());
+        verify(delegate, never()).flush();
+        verify(delegate, times(1)).deleteAllAtomically(any());
+    }
+
+    @Test
+    void sweepSnapshotDoesNotBlockNewReceiptsOrDeleteAReplacement() throws Exception {
+        AccountAwareStorageBackend<RedshiftDataIdempotencyStore.Receipt> backend =
+                spy(AccountAwareStorageBackend.<RedshiftDataIdempotencyStore.Receipt>inMemory("000000000000"));
+        RedshiftDataIdempotencyStore.Scope scope = scope("000000000000", "us-east-1", "ExecuteStatement", "token");
+        store(backend, START).put(scope, mapper.createObjectNode().put("Id", "expired"));
+        RedshiftDataIdempotencyStore later = store(backend, START.plus(Duration.ofHours(8)));
+        CountDownLatch scanned = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            Object entries = invocation.callRealMethod();
+            scanned.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return entries;
+        }).when(backend).scanAllAccountEntries(any());
+        try (ExecutorService workers = Executors.newFixedThreadPool(2)) {
+            Future<?> sweep = workers.submit(later::sweep);
+            try {
+                assertTrue(scanned.await(5, TimeUnit.SECONDS));
+                Future<?> replacement = workers.submit(() -> later.put(scope, mapper.createObjectNode().put("Id", "replacement")));
+                replacement.get(2, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+            }
+            sweep.get(5, TimeUnit.SECONDS);
+            assertEquals("replacement", later.find(scope).response.path("Id").asText());
+        }
+    }
 
     @Test
     void deadlineDoesNotSlideAndExpiresAtEightHours() {

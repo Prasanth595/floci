@@ -44,6 +44,76 @@ import static org.mockito.Mockito.*;
 class RedshiftDataIdempotencyServiceTest {
 
     @Test
+    void slowReceiptWriteDoesNotBlockOtherTokensOrTokenlessRequests() throws Exception {
+        try (Fixture fixture = new Fixture(); ExecutorService callers = Executors.newFixedThreadPool(3)) {
+            CountDownLatch writing = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            doAnswer(invocation -> {
+                RedshiftDataIdempotencyStore.Scope scope = invocation.getArgument(0);
+                if (scope.token().equals("slow")) {
+                    writing.countDown();
+                    assertTrue(release.await(5, TimeUnit.SECONDS));
+                }
+                return invocation.callRealMethod();
+            }).when(fixture.receipts).put(any(), any());
+            Future<ObjectNode> slow = callers.submit(() -> fixture.service.executeStatement(
+                    fixture.single("slow", "SELECT 1"), "us-east-1"));
+            try {
+                assertTrue(writing.await(5, TimeUnit.SECONDS));
+                Future<ObjectNode> independent = callers.submit(() -> fixture.service.executeStatement(
+                        fixture.single("independent", "SELECT 1"), "us-east-1"));
+                Future<ObjectNode> tokenless = callers.submit(() -> {
+                    ObjectNode request = fixture.single("unused", "SELECT 1");
+                    request.remove("ClientToken");
+                    return fixture.service.executeStatement(request, "us-east-1");
+                });
+                assertFalse(independent.get(2, TimeUnit.SECONDS).path("Id").asText().isEmpty());
+                assertFalse(tokenless.get(2, TimeUnit.SECONDS).path("Id").asText().isEmpty());
+            } finally {
+                release.countDown();
+            }
+            slow.get(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void rejectedQueueCannotLeaveAReceiptAfterCleanupFailureAndRestart(@TempDir Path directory) throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            Path receiptFile = directory.resolve("idempotency.json");
+            RedshiftDataIdempotencyStore receipts = spy(persistentReceipts(receiptFile, fixture.clock));
+            RedshiftDataService service = fixture.service(fixture.statements, receipts);
+            doThrow(new IllegalStateException("receipt deletion unavailable")).when(receipts).removeIfStatement(any(), any());
+            CountDownLatch started = new CountDownLatch(2);
+            CountDownLatch release = new CountDownLatch(1);
+            try {
+                for (int i = 0; i < 2; i++) {
+                    fixture.executor.submit("000000000000", "us-east-1", "running-" + i, execution -> {
+                        started.countDown();
+                        try {
+                            assertTrue(release.await(5, TimeUnit.SECONDS));
+                        } catch (InterruptedException failure) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(failure);
+                        }
+                    });
+                }
+                assertTrue(started.await(5, TimeUnit.SECONDS));
+                for (int i = 0; i < 16; i++) {
+                    fixture.executor.submit("000000000000", "us-east-1", "queued-" + i, execution -> { });
+                }
+                assertThrows(AwsException.class, () -> service.executeStatement(
+                        fixture.single("rejected-persistent", "INSERT INTO mutations VALUES (1)"), "us-east-1"));
+                RedshiftDataIdempotencyStore reopened = persistentReceipts(receiptFile, fixture.clock);
+                assertNull(reopened.find(new RedshiftDataIdempotencyStore.Scope("000000000000", "us-east-1",
+                        "ExecuteStatement", "rejected-persistent")));
+                verifyNoInteractions(fixture.factory);
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
     void executeRetryReturnsOriginalIdentityAndMutatesOnce() throws Exception {
         try (Fixture fixture = new Fixture()) {
             ObjectNode request = fixture.single("insert-token", "INSERT INTO mutations VALUES (1)");

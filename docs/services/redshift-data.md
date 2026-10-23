@@ -72,6 +72,14 @@ reported storage errors and queue-admission failures do not consume the token. A
 admission does consume it. `WaitTimeSeconds` on a retry can wait for the original execution without
 submitting another one.
 
+Request validation and database-target resolution run before admission coordination. Only requests
+sharing an account, region, execute operation and token share an admission lock; tokenless requests
+use no token lock. The executor reserves queue capacity before writing admission state, so a full
+queue cannot create a receipt that reappears after restart. Workers run SQL only after admission
+writes succeed. Reset still signals cancellation if clearing either storage backend reports an
+error. Expired receipts are removed in one atomic batch per sweep, with concurrently replaced
+receipts retained.
+
 Receipts use the configured storage mode. Persistent, hybrid and WAL modes retain them across a
 normal restart; memory mode loses them. Interrupted statements keep the existing recovery behavior:
 they become `FAILED`, and SQL is never replayed automatically. This does not provide a distributed
