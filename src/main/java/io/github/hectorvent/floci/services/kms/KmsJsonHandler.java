@@ -196,10 +196,7 @@ public class KmsJsonHandler {
         }
         if (!node.isTextual()) {
             // MarkerType is a string; any other JSON value is refused rather than coerced.
-            String token = node.isNumber() ? "NUMBER_VALUE"
-                    : node.isBoolean() ? (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
-                    : node.isArray() ? "START_ARRAY" : "START_OBJECT";
-            throw new AwsException("SerializationException", token + " can not be converted to a String", 400);
+            throw new AwsException("SerializationException", jsonToken(node) + " can not be converted to a String", 400);
         }
         String marker = node.textValue();
         if (marker.isEmpty()) {

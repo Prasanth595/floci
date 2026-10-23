@@ -1164,9 +1164,17 @@ class KmsIntegrationTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
-            "ListKeys|{}", "ListKeys|[]", "ListKeys|1", "ListKeys|true",
-            "ListAliases|{}", "ListAliases|[]", "ListAliases|1", "ListAliases|true"})
-    void listKeysAndAliasesRejectNonStringMarker(String action, String marker) {
+            "ListKeys|{}|START_OBJECT",
+            "ListKeys|[]|START_ARRAY",
+            "ListKeys|1|NUMBER_VALUE",
+            "ListKeys|true|TRUE_VALUE",
+            "ListKeys|false|FALSE_VALUE",
+            "ListAliases|{}|START_OBJECT",
+            "ListAliases|[]|START_ARRAY",
+            "ListAliases|1|NUMBER_VALUE",
+            "ListAliases|true|TRUE_VALUE",
+            "ListAliases|false|FALSE_VALUE"})
+    void listKeysAndAliasesRejectNonStringMarker(String action, String marker, String token) {
         given()
                 .header("X-Amz-Target", "TrentService." + action)
                 .contentType(KMS_CONTENT_TYPE)
@@ -1174,7 +1182,8 @@ class KmsIntegrationTest {
                 .when().post("/")
                 .then()
                 .statusCode(400)
-                .body("__type", equalTo("SerializationException"));
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo(token + " can not be converted to a String"));
     }
 
     @ParameterizedTest
