@@ -66,13 +66,8 @@ public class DeliveryStreamDescription {
         this.deliveryStreamARN = arn;
         this.deliveryStreamStatus = DeliveryStreamStatus.ACTIVE;
         this.createTimestamp = Instant.now();
-        if (s3 != null) {
-            s3.applyDefaults();
-        }
-        if (redshift != null && redshift.getS3() != null) {
-            redshift.getS3().applyDefaults();
-        }
         this.destinations = List.of(redshift != null ? new Destination(redshift) : new Destination(s3));
+        applyDefaults();
         this.deliveryStreamEncryptionConfiguration = DeliveryStreamEncryptionConfiguration.disabled();
         if (kinesisStreamSource != null) {
             this.source = new Source(kinesisStreamSource);
@@ -168,6 +163,24 @@ public class DeliveryStreamDescription {
             return first.getRedshiftDestinationDescription().getS3();
         }
         return first.getExtendedS3DestinationDescription();
+    }
+
+    /**
+     * Fills the AWS defaults on every S3 configuration the stream describes: its S3 destination, or
+     * a Redshift destination's intermediate and backup configurations.
+     */
+    public final void applyDefaults() {
+        S3Destination s3 = s3Destination();
+        if (s3 != null) {
+            s3.applyDefaults();
+        }
+        if (destinations == null || destinations.isEmpty()) {
+            return;
+        }
+        RedshiftDestination redshift = destinations.get(0).getRedshiftDestinationDescription();
+        if (redshift != null && redshift.getS3Backup() != null) {
+            redshift.getS3Backup().applyDefaults();
+        }
     }
 
     @RegisterForReflection

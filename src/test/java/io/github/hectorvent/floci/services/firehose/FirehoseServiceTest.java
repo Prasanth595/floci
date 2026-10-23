@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
@@ -233,6 +234,34 @@ class FirehoseServiceTest {
         assertThrows(AwsException.class,
                 () -> firehoseService.describeDeliveryStream("111111111111", "us-east-1", "wrong-region"),
                 "legacy entries from another region must not be adopted");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aPersistedRedshiftBackupGetsTheDefaultsOnDescribe() {
+        S3Destination intermediate = new S3Destination();
+        intermediate.setBucketArn("arn:aws:s3:::stage");
+        S3Destination backup = new S3Destination();
+        backup.setBucketArn("arn:aws:s3:::bk");
+        RedshiftDestination redshift = new RedshiftDestination();
+        redshift.setS3BackupMode("Enabled");
+        redshift.setS3(intermediate);
+        redshift.setS3Backup(backup);
+        // Built the way Jackson reads a stored stream: the no-arg constructor fills no defaults.
+        DeliveryStreamDescription persisted = new DeliveryStreamDescription();
+        persisted.setDeliveryStreamName("persisted");
+        persisted.setDeliveryStreamARN("arn:aws:firehose:us-east-1:000000000000:deliverystream/persisted");
+        persisted.setAccountId("000000000000");
+        persisted.setDestinations(List.of(new DeliveryStreamDescription.Destination(redshift)));
+        AccountAwareStorageBackend<DeliveryStreamDescription> streams =
+                (AccountAwareStorageBackend<DeliveryStreamDescription>) backends.get("firehose/streams.json");
+        streams.putForAccount("000000000000", "us-east-1/persisted", persisted);
+
+        S3Destination described = firehoseService.describeDeliveryStream("persisted").getDestinations().get(0)
+                .getRedshiftDestinationDescription().getS3Backup();
+
+        assertEquals(false, described.getCloudWatchLoggingOptions().getEnabled());
+        assertEquals("UNCOMPRESSED", described.getCompressionFormat());
     }
 
     @Test
