@@ -569,6 +569,34 @@ class DelegationRequestIntegrationTest {
     }
 
     @Test
+    void theReleaseRefusesAnIdThatBreaksItsPatternAndNotOnlyAnAbsentOne() {
+        // The other half of the check above, and the one a regression could lose quietly: an id
+        // that arrived and cannot be a request id at all, rather than one that never arrived.
+        iam(CUSTOMER_AUTH)
+                .formParam("Action", "SendDelegationToken")
+                .formParam("Version", "2010-05-08")
+                .formParam("DelegationRequestId", "dr-0123456789abcdef!")
+            .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", containsString("delegationRequestId"));
+    }
+
+    @Test
+    void theRootApprovalCapHoldsOverTheWireToo() {
+        // The customer signs with its account id here, which names no IAM user, so this suite's
+        // approver is the account root: a request longer than four hours cannot be approved with
+        // it, which is the guide's rule rather than a local one.
+        String id = create(workflowId(), null, "18000").statusCode(200)
+                .extract().path("CreateDelegationRequestResponse"
+                        + ".CreateDelegationRequestResult.DelegationRequestId");
+        byId(CUSTOMER_AUTH, "AssociateDelegationRequest", id).statusCode(200);
+
+        byId(CUSTOMER_AUTH, "AcceptDelegationRequest", id).statusCode(403)
+                .body("ErrorResponse.Error.Code", equalTo("AccessDenied"))
+                .body("ErrorResponse.Error.Message", containsString("4 hours or less"));
+    }
+
+    @Test
     void theReleaseNeedsARequestIdLikeEveryOtherCallOnOne() {
         // delegationRequestIdType declares a length and a pattern, so an omitted id breaks a
         // constraint the model publishes and answers as the by-id operations already do.

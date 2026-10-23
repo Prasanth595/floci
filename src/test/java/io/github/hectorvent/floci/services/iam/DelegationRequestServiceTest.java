@@ -49,6 +49,8 @@ class DelegationRequestServiceTest {
     private static final String CUSTOMER_ARN = "arn:aws:iam::000000000002:user/admin";
     /** A second identity in the customer's account, the privileged approver the reference names. */
     private static final String APPROVER_ARN = "arn:aws:iam::000000000002:user/security-admin";
+    /** The customer's account root, which is also what a key naming no IAM user resolves to. */
+    private static final String ROOT_ARN = "arn:aws:iam::000000000002:root";
     private static final String REGION = "us-east-1";
     private static final String TOPIC = "arn:aws:sns:us-east-1:000000000001:partner-notifications";
 
@@ -100,6 +102,15 @@ class DelegationRequestServiceTest {
                         List.of(new PolicyParameter("BucketName", PolicyParameter.TYPE_STRING,
                                 List.of("example-bucket")))),
                 ownerAccountId, null, null, onlySendByOwner));
+    }
+
+    /** A request of this length, every other member being the one the helpers above file. */
+    private DelegationRequest createdFor(String workflowId, int sessionDuration) {
+        return service.create(PARTNER, REGION, new DelegationRequestService.NewRequest(
+                "Set up the integration", TOPIC, workflowId, sessionDuration,
+                new DelegationPermission("arn:aws:iam::partner:policy/template/example",
+                        List.of()),
+                null, null, null, null)).request();
     }
 
     private DelegationRequest created(String workflowId, String ownerAccountId) {
@@ -895,5 +906,47 @@ class DelegationRequestServiceTest {
         assertThrows(AwsException.class, () -> service.associate(CUSTOMER, CUSTOMER_ARN, id));
 
         assertEquals(List.of("StateChange:EXPIRED"), announced());
+    }
+
+    /**
+     * The user guide's own note: "The maximum duration for delegated access is 12 hours. However,
+     * root users can only approve delegation requests with a duration of 4 hours or less. If a
+     * request specifies more than 4 hours, you must use a non-root identity to approve the
+     * request." The twelve hours are {@code create}'s; the four are the approver's.
+     */
+    @Test
+    void theAccountRootMayOnlyApproveADelegationOfFourHoursOrLess() {
+        String id = createdFor("workflow-root-long", 18000).getDelegationRequestId();
+        service.associate(CUSTOMER, ROOT_ARN, id);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.accept(CUSTOMER, ROOT_ARN, id));
+
+        assertEquals("AccessDenied", refused.getErrorCode());
+        assertEquals(403, refused.getHttpStatus());
+        // Refused, not spent: the guide's own remedy is to approve it as a non-root identity, and
+        // the request is still sitting in ASSIGNED waiting for one.
+        assertEquals(DelegationRequestState.ACCEPTED,
+                service.accept(CUSTOMER, APPROVER_ARN, id).getState());
+    }
+
+    @Test
+    void rootMayApproveADelegationRightOnTheFourHourCap() {
+        String id = createdFor("workflow-root-capped", 14400).getDelegationRequestId();
+        service.associate(CUSTOMER, ROOT_ARN, id);
+
+        // Four hours or less is what the note allows, so the cap itself is approvable.
+        assertEquals(DelegationRequestState.ACCEPTED,
+                service.accept(CUSTOMER, ROOT_ARN, id).getState());
+    }
+
+    @Test
+    void theCapIsTheApproversRatherThanTheRequests() {
+        String id = createdFor("workflow-user-long", 43200).getDelegationRequestId();
+        service.associate(CUSTOMER, CUSTOMER_ARN, id);
+
+        // Twelve hours is the ceiling create enforces, and an IAM user may approve all of it.
+        assertEquals(DelegationRequestState.ACCEPTED,
+                service.accept(CUSTOMER, APPROVER_ARN, id).getState());
     }
 }

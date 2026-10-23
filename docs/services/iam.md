@@ -1145,6 +1145,18 @@ and `AcceptDelegationRequest` models only `NoSuchEntity`, `ServiceFailure` and
 `ConcurrentModification`, so the conflict is the closest of the three. The same lock serializes
 those transitions, so two callers claiming one request leave a single owner.
 
+Two ceilings apply to a request's length, and only one of them belongs to the request. The first is
+the twelve hours `sessionDurationType` declares, which the create holds a `SessionDuration` to. The
+second is the approver's: "root users can only approve delegation requests with a duration of 4
+hours or less. If a request specifies more than 4 hours, you must use a non-root identity to approve
+the request", so a longer request is refused at the approval rather than at the filing, and the same
+request is approvable by an IAM user or role of that account. Floci reads root as a caller whose ARN
+ends in `:root`, which is also what a key naming no IAM user resolves to, so approving a long request
+locally means signing as a user rather than with a bare account id. `AcceptDelegationRequest` models
+nothing for this and no source gives the code AWS answers, so `AccessDenied` is chosen, the guide
+stating the rule as which identity may approve and the release's own owner rule answering the same
+way.
+
 The exchange token is the other half. `SendDelegationToken` releases it, and STS
 `GetDelegatedAccessToken` exchanges it for credentials in the customer's account, acting as the
 identity that approved the request rather than the one that claimed it: accepting a request records
