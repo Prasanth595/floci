@@ -274,6 +274,7 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     }
 
     private void loadLocked() {
+        loaded = false;
         store.clear();
         dirty.clear();
         migrateLegacyFileIfNeeded();
@@ -281,7 +282,15 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
             loadDirectory();
         }
         if (journal != null) {
-            int replayed = journal.replay(this::applyReplayed);
+            int replayed;
+            try {
+                replayed = journal.replay(this::applyReplayed);
+            } catch (IOException e) {
+                // Compaction would write the partial state and empty the journal, losing the
+                // records not yet read: refuse to start instead, as a failed migration does.
+                throw new UncheckedIOException("Failed to replay the journal of " + directory
+                        + "; it is untouched, fix the cause and restart", e);
+            }
             if (replayed > 0) {
                 LOG.infov("Replayed {0} journal records into {1}", replayed, directory);
             }

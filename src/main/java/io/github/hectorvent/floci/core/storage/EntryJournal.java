@@ -114,21 +114,25 @@ final class EntryJournal<E> {
         }
     }
 
-    /** Applies every readable record in order and returns how many were applied. */
-    int replay(Consumer<Change<E>> apply) {
+    /**
+     * Applies every readable record in order and returns how many were applied. A torn or
+     * undecodable tail ends replay and is cut off.
+     *
+     * @throws IOException when the file could not be read to its end: records past the failure
+     *                     were not applied and are kept, so the caller must not empty the journal
+     */
+    int replay(Consumer<Change<E>> apply) throws IOException {
         if (!Files.exists(path)) {
             return 0;
         }
-        long fileSize;
-        try {
-            fileSize = Files.size(path);
-        } catch (IOException e) {
-            LOG.errorv(e, "Failed to read the size of {0}", path);
+        if (Files.isDirectory(path)) {
+            // Holds no records; the first append fails and compaction replaces it with a file.
+            LOG.warnv("{0} is a directory, not a journal", path);
             return 0;
         }
+        long fileSize = Files.size(path);
         int replayed = 0;
         long consumed = 0;
-        boolean cutTail = true;
         try (DataInputStream in = new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) {
             while (consumed < fileSize) {
                 long[] position = {consumed + 1};
@@ -166,11 +170,8 @@ final class EntryJournal<E> {
             }
         } catch (EOFException | JsonProcessingException e) {
             LOG.warnv("{0} is unreadable from offset {1}: {2}", path, consumed, e.getMessage());
-        } catch (IOException e) {
-            cutTail = false;
-            LOG.errorv(e, "Failed to replay {0} (replayed {1} records before the error)", path, replayed);
         }
-        if (cutTail && consumed < fileSize) {
+        if (consumed < fileSize) {
             cutTail(consumed, fileSize);
         }
         return replayed;

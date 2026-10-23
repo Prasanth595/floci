@@ -365,6 +365,30 @@ class PartitionedFileStorageJournalTest {
     }
 
     @Test
+    void aJournalThatCannotBeReadFailsLoadAndIsNeverCompactedAway() throws Exception {
+        PartitionedFileStorage<String> crashed = open(1);
+        crashed.putEntry("table", "a", "1");
+        StorageTestFiles.assumePosixPermissions(journal());
+        Set<PosixFilePermission> original = Files.getPosixFilePermissions(journal());
+        PartitionedFileStorage<String> restarting = new PartitionedFileStorage<>(tempDir.resolve("items"),
+                tempDir.resolve("items.json"), String.class, 1, PartitionedFileStorage.Mode.JOURNAL, Long.MAX_VALUE);
+        opened.add(restarting);
+        Files.setPosixFilePermissions(journal(), PosixFilePermissions.fromString("---------"));
+        try {
+            // A root user reads through the mode, so there is nothing to test there.
+            assumeFalse(Files.isReadable(journal()), "the journal stays readable for this user");
+
+            assertThrows(UncheckedIOException.class, restarting::load);
+            restarting.flush();
+        } finally {
+            Files.setPosixFilePermissions(journal(), original);
+        }
+
+        assertTrue(Files.size(journal()) > 0, "the unreplayed records are kept");
+        assertEquals(Map.of("a", "1"), open(1).get("table").orElseThrow());
+    }
+
+    @Test
     void aShardThatCannotBeWrittenKeepsTheJournal() throws Exception {
         PartitionedFileStorage<String> crashed = open(1);
         crashed.putEntry("table", "a", "1");
