@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -170,9 +171,7 @@ class MskScramServiceTest {
         String fullArn = SECRET + "-Ab12Cd";
         secretValue(fullArn, "{\"username\":\"alice\",\"password\":\"password\"}");
         assertTrue(service.batchAssociateScramSecret(CLUSTER, List.of(fullArn)).isEmpty());
-        Secret metadata = new Secret();
-        metadata.setArn(fullArn);
-        when(secrets.describeSecret(SECRET, "us-east-1")).thenReturn(metadata);
+        clearInvocations(secrets);
 
         List<Map<String, String>> failures = service.batchDisassociateScramSecret(CLUSTER, List.of(SECRET));
 
@@ -180,6 +179,21 @@ class MskScramServiceTest {
                 "errorMessage", "The provided secret ARN is invalid.")), failures);
         assertEquals(List.of(fullArn), service.listScramSecrets(CLUSTER, null, null).items());
         assertTrue(service.batchDisassociateScramSecret(CLUSTER, List.of(fullArn)).isEmpty());
+        verifyNoInteractions(secrets);
+    }
+
+    @Test
+    void disassociatesDeletedSecretWithoutLookingItUp() {
+        assertTrue(service.batchAssociateScramSecret(CLUSTER, List.of(SECRET)).isEmpty());
+        when(secrets.describeSecret(SECRET, "us-east-1"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Secret not found.", 400));
+        clearInvocations(secrets);
+
+        assertTrue(service.batchDisassociateScramSecret(CLUSTER, List.of(SECRET)).isEmpty());
+
+        assertTrue(service.listScramSecrets(CLUSTER, null, null).items().isEmpty());
+        assertTrue(associations.getForAccount(ACCOUNT, CLUSTER).isEmpty());
+        verifyNoInteractions(secrets);
     }
 
     @Test

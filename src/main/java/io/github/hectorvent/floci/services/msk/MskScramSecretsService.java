@@ -103,7 +103,6 @@ public class MskScramSecretsService {
                 boolean newAssociation = !state.getAssociations().containsKey(secretArn);
                 try {
                     Secret secret = validateSecretArn(clusterArn, secretArn);
-                    validateFullArn(secretArn, secret, "Amazon MSK wasn't able to access the provided secret.");
                     if (!newAssociation) {
                         throw new AwsException("InvalidSecretArn", "The provided secret ARN is invalid.", 400);
                     }
@@ -136,18 +135,15 @@ public class MskScramSecretsService {
 
     public List<Map<String, String>> batchDisassociateScramSecret(String clusterArn, List<String> secretArns) {
         synchronized (lock) {
-            MskCluster cluster = scramCluster(clusterArn);
+            scramCluster(clusterArn);
             validateSecretArns(secretArns);
             MskScramAssociations state = associationsFor(clusterArn);
             List<Map<String, String>> unprocessedScramSecrets = new ArrayList<>();
             for (String secretArn : secretArns) {
                 try {
-                    Secret secret = validateSecretArn(clusterArn, secretArn);
-                    validateFullArn(secretArn, secret, "The provided secret ARN is invalid.");
-                    if (!state.getAssociations().containsKey(secretArn)) {
+                    if (state.getAssociations().remove(secretArn) == null) {
                         throw new AwsException("InvalidSecretArn", "The provided secret ARN is invalid.", 400);
                     }
-                    state.getAssociations().remove(secretArn);
                     putAssociations(clusterArn, state);
                 } catch (AwsException e) {
                     unprocessedScramSecrets.add(scramFailure(secretArn, e));
@@ -196,13 +192,11 @@ public class MskScramSecretsService {
                     "The name of secrets associated with an Amazon MSK cluster must have the prefix AmazonMSK_.", 400,
                     Map.of("invalidParameter", "secretArnList"));
         }
-        return secretsManagerService.describeSecret(secretArn, arn.region());
-    }
-
-    private void validateFullArn(String secretArn, Secret secret, String message) {
+        Secret secret = secretsManagerService.describeSecret(secretArn, arn.region());
         if (!secretArn.equals(secret.getArn())) {
-            throw new AwsException("InvalidSecretArn", message, 400);
+            throw new AwsException("InvalidSecretArn", "Amazon MSK wasn't able to access the provided secret.", 400);
         }
+        return secret;
     }
 
     private void validateSecretEncryption(Secret secret) {
