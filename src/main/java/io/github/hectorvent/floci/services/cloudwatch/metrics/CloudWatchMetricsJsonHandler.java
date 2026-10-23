@@ -38,17 +38,16 @@ public class CloudWatchMetricsJsonHandler {
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsJsonHandler.class);
 
     /**
-     * The operations the console's {@code CloudWatchVersion20130116.} target shares with the
-     * current API, each with the request members the current API defines for it, as botocore's
-     * cloudwatch 2010-08-01 model lists them.
+     * The operations served through the console's {@code CloudWatchVersion20130116.} target, each
+     * with the request members accepted there: the ones this handler honours, plus
+     * {@code NextToken} and {@code MaxRecords}, which change nothing because every result comes
+     * back at once.
      */
     private static final Map<String, Set<String>> CONSOLE_TARGET_OPERATIONS = Map.of(
-            "ListMetrics", Set.of("Namespace", "MetricName", "Dimensions", "NextToken", "RecentlyActive",
-                    "IncludeLinkedAccounts", "OwningAccount"),
-            "DescribeAlarms", Set.of("AlarmNames", "AlarmNamePrefix", "AlarmTypes", "ChildrenOfAlarmName",
-                    "ParentsOfAlarmName", "StateValue", "ActionPrefix", "MaxRecords", "NextToken"),
+            "ListMetrics", Set.of("Namespace", "MetricName", "Dimensions", "NextToken"),
+            "DescribeAlarms", Set.of("AlarmNames", "AlarmNamePrefix", "MaxRecords", "NextToken"),
             "GetMetricStatistics", Set.of("Namespace", "MetricName", "Dimensions", "StartTime", "EndTime",
-                    "Period", "Statistics", "ExtendedStatistics", "Unit"),
+                    "Period", "Statistics", "Unit"),
             "DeleteAlarms", Set.of("AlarmNames"));
 
     private final CloudWatchMetricsService metricsService;
@@ -99,34 +98,40 @@ public class CloudWatchMetricsJsonHandler {
 
     /**
      * Handles an operation named with the {@code CloudWatchVersion20130116.} target of the
-     * CloudWatch console's API. Only the operations whose shapes that API shares with the current
-     * one are served: the others take members this handler would silently ignore, such as the
-     * console's {@code GetMetricData} with {@code Defaults} and {@code Metrics}, or its
-     * {@code PutMetricAlarm} metric items with {@code Alias} and {@code MetricName}. A request that
-     * sets a member the current API does not define, such as the console's
-     * {@code CountOnlyRequest}, is refused rather than answered as if the member were unset; a
-     * {@code null} or {@code false} value counts as unset. A {@code DescribeAlarms} answer that
-     * would list a metric math alarm is refused too, since the console's API gives alarm metric
-     * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}.
+     * CloudWatch console's API. The console's model gives many operations and members shapes of
+     * their own, which this handler would silently misread or ignore, such as {@code GetMetricData}
+     * with {@code Defaults} and {@code Metrics}, or {@code PutMetricAlarm} metric items with
+     * {@code Alias} and {@code MetricName}. So only the operations and top-level members in
+     * {@code CONSOLE_TARGET_OPERATIONS} are served: any other operation, and any other member set
+     * to a value other than {@code null} or {@code false}, is refused rather than answered as if it
+     * were unset. Members nested inside the served ones are not checked. A {@code DescribeAlarms}
+     * answer that would list an alarm defined with {@code Metrics} is refused too, since the
+     * console's API gives those items its own shape, with {@code Alias} instead of {@code Id} and
+     * {@code MetricStat}.
      */
     public Response handleLegacy(String action, JsonNode request, String region) {
-        Set<String> currentMembers = CONSOLE_TARGET_OPERATIONS.get(action);
-        if (currentMembers == null) {
+        Set<String> servedMembers = CONSOLE_TARGET_OPERATIONS.get(action);
+        if (servedMembers == null) {
             return unsupportedWithConsoleTarget("Operation " + action);
         }
+        ObjectNode served = objectMapper.createObjectNode();
         for (Map.Entry<String, JsonNode> member : request.properties()) {
             JsonNode value = member.getValue();
-            if (!currentMembers.contains(member.getKey()) && !value.isNull()
-                    && !(value.isBoolean() && !value.booleanValue())) {
+            if (value.isNull()) {
+                continue;
+            }
+            if (servedMembers.contains(member.getKey())) {
+                served.set(member.getKey(), value);
+            } else if (!value.isBoolean() || value.booleanValue()) {
                 return unsupportedWithConsoleTarget("Parameter " + member.getKey() + " of " + action);
             }
         }
-        Response response = handle(action, request, region);
+        Response response = handle(action, served, region);
         if ("DescribeAlarms".equals(action) && response.getEntity() instanceof JsonNode body) {
             for (JsonNode alarm : body.path("MetricAlarms")) {
                 if (alarm.has("Metrics")) {
-                    return unsupportedWithConsoleTarget("DescribeAlarms of metric math alarm "
-                            + alarm.path("AlarmName").asText());
+                    return unsupportedWithConsoleTarget("DescribeAlarms of alarm "
+                            + alarm.path("AlarmName").asText() + ", which is defined with Metrics,");
                 }
             }
         }

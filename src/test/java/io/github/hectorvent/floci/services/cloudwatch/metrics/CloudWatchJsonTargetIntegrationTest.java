@@ -20,17 +20,19 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * CloudWatch JSON 1.0 requests name their operation with either target prefix: the
  * {@code GraniteServiceVersion20100801.} prefix of the AWS SDKs, or the
  * {@code CloudWatchVersion20130116.} prefix of the CloudWatch console's API. The console prefix
- * reaches the same metrics and alarms for the operations whose shapes the two APIs share. It
- * refuses the other operations, request members the current API does not define, and a
- * {@code DescribeAlarms} answer listing a metric math alarm, which the handler would otherwise
- * ignore or answer in a shape the console's API does not have. It is JSON only, so CBOR and
- * Smithy RPC v2 requests that name it stay unknown.
+ * reaches the same metrics and alarms for four operations and the request members the handler
+ * honours for them. It refuses the other operations, other members that are set, and a
+ * {@code DescribeAlarms} answer listing an alarm defined with {@code Metrics}, which the handler
+ * would otherwise ignore or answer in a shape the console's API does not have; {@code null}
+ * members count as unset. It is JSON only, so CBOR and Smithy RPC v2 requests that name it stay
+ * unknown.
  */
 @QuarkusTest
 class CloudWatchJsonTargetIntegrationTest {
@@ -140,22 +142,29 @@ class CloudWatchJsonTargetIntegrationTest {
                 .body("__type", equalTo("UnsupportedOperation"));
     }
 
-    @Test
-    void consoleDescribeAlarmsRefusesAMetricMathAlarm() {
+    @ParameterizedTest
+    @ValueSource(strings = {
+            """
+            [{"Id":"m1","ReturnData":false,"MetricStat":{"Metric":{"Namespace":"Example/JsonTarget",
+              "MetricName":"Requests"},"Period":60,"Stat":"Sum"}},
+             {"Id":"e1","Expression":"m1*2","Label":"doubled","ReturnData":true}]
+            """,
+            """
+            [{"Id":"m1","ReturnData":true,"MetricStat":{"Metric":{"Namespace":"Example/JsonTarget",
+              "MetricName":"Requests"},"Period":60,"Stat":"Sum"}}]
+            """})
+    void consoleDescribeAlarmsRefusesAnAlarmDefinedWithMetrics(String metrics) {
         String alarm = "json-target-" + UUID.randomUUID();
         json(CURRENT_TARGET, "PutMetricAlarm", """
                 {"AlarmName":"%s","EvaluationPeriods":1,"Threshold":1,
-                 "ComparisonOperator":"GreaterThanThreshold",
-                 "Metrics":[{"Id":"m1","ReturnData":false,"MetricStat":{"Metric":{
-                     "Namespace":"Example/JsonTarget","MetricName":"Requests"},"Period":60,"Stat":"Sum"}},
-                   {"Id":"e1","Expression":"m1*2","Label":"doubled","ReturnData":true}]}
-                """.formatted(alarm)).then().statusCode(200);
+                 "ComparisonOperator":"GreaterThanThreshold","Metrics":%s}
+                """.formatted(alarm, metrics)).then().statusCode(200);
         try {
             json(LEGACY_TARGET, "DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
                     .then().statusCode(400).body("__type", equalTo("UnsupportedOperation"))
                     .body("message", containsString(alarm));
             json(CURRENT_TARGET, "DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
-                    .then().statusCode(200).body("MetricAlarms[0].Metrics.Id", contains("m1", "e1"));
+                    .then().statusCode(200).body("MetricAlarms[0].Metrics.Id", hasItem("m1"));
         } finally {
             json(CURRENT_TARGET, "DeleteAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}");
         }
@@ -166,23 +175,55 @@ class CloudWatchJsonTargetIntegrationTest {
             ListMetrics         | {"CountOnlyRequest":true}
             ListMetrics         | {"SegmentId":1}
             ListMetrics         | {"TotalSegments":2}
+            ListMetrics         | {"Namespace":"json-target-none","RecentlyActive":"PT3H"}
+            ListMetrics         | {"Namespace":"json-target-none","OwningAccount":"000000000000"}
+            ListMetrics         | {"Namespace":"json-target-none","IncludeLinkedAccounts":true}
             DescribeAlarms      | {"AlarmNames":["json-target-none"],"ExcludeAutoscalingAlarms":true}
             DescribeAlarms      | {"AlarmNames":["json-target-none"],"ExcludeManagedAlarms":true}
+            DescribeAlarms      | {"AlarmNames":["json-target-none"],"StateValue":"ALARM"}
+            DescribeAlarms      | {"AlarmNames":["json-target-none"],"AlarmTypes":["MetricAlarm"]}
+            DescribeAlarms      | {"AlarmNames":["json-target-none"],"ActionPrefix":"arn:"}
+            DescribeAlarms      | {"ChildrenOfAlarmName":"json-target-none"}
+            DescribeAlarms      | {"ParentsOfAlarmName":"json-target-none"}
+            GetMetricStatistics | {"Namespace":"Example/JsonTarget","MetricName":"Requests","Period":60,"ExtendedStatistics":["p99"]}
             GetMetricStatistics | {"Namespace":"Example/JsonTarget","MetricName":"Requests","Period":60,"Unexpected":"x"}
             DeleteAlarms        | {"AlarmNames":["json-target-none"],"Unexpected":"x"}
             """)
-    void membersTheCurrentApiDoesNotDefineAreRefused(String operation, String body) {
+    void membersTheConsoleTargetDoesNotServeAreRefused(String operation, String body) {
         json(LEGACY_TARGET, operation, body).then().statusCode(400)
                 .body("__type", equalTo("UnsupportedOperation"));
     }
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
-            ListMetrics    | {"Namespace":"json-target-none","CountOnlyRequest":false}
-            DescribeAlarms | {"AlarmNames":["json-target-none"],"ExcludeAutoscalingAlarms":false,"ExcludeManagedAlarms":null}
+            ListMetrics         | {"Namespace":"json-target-none","MetricName":"Requests","Dimensions":[{"Name":"Host","Value":"a"}],"NextToken":"t"}
+            DescribeAlarms      | {"AlarmNames":["json-target-none"],"AlarmNamePrefix":"json-target-none","MaxRecords":10,"NextToken":"t"}
+            GetMetricStatistics | {"Namespace":"json-target-none","MetricName":"Requests","Dimensions":[{"Name":"Host","Value":"a"}],"StartTime":1761091200,"EndTime":1761094800,"Period":60,"Statistics":["Sum"],"Unit":"Count"}
+            DeleteAlarms        | {"AlarmNames":["json-target-none"]}
             """)
-    void otherMembersLeftUnsetAreServed(String operation, String body) {
+    void everyServedMemberIsAccepted(String operation, String body) {
         json(LEGACY_TARGET, operation, body).then().statusCode(200);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            ListMetrics    | {"Namespace":"json-target-none","CountOnlyRequest":false,"IncludeLinkedAccounts":false}
+            DescribeAlarms | {"AlarmNames":["json-target-none"],"ExcludeAutoscalingAlarms":false,"ExcludeManagedAlarms":null,"StateValue":null}
+            """)
+    void membersLeftUnsetAreServed(String operation, String body) {
+        json(LEGACY_TARGET, operation, body).then().statusCode(200);
+    }
+
+    @Test
+    void nullServedMembersCountAsUnset() {
+        String namespace = "json-target-" + UUID.randomUUID();
+        String metric = "Requests-" + UUID.randomUUID();
+        json(CURRENT_TARGET, "PutMetricData", """
+                {"Namespace":"%s","MetricData":[{"MetricName":"%s","Value":1}]}
+                """.formatted(namespace, metric)).then().statusCode(200);
+
+        json(LEGACY_TARGET, "ListMetrics", "{\"Namespace\":null,\"MetricName\":\"" + metric + "\"}")
+                .then().statusCode(200).body("Metrics.Namespace", contains(namespace));
     }
 
     @ParameterizedTest
