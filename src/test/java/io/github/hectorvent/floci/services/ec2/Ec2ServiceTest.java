@@ -5129,11 +5129,11 @@ class Ec2ServiceTest {
         String instanceId = runOne(service, "ami-src");
 
         service.createImage("us-east-1", instanceId, "with-reboot", null, false);
-        verify(containerManager).reboot(argThat(i -> instanceId.equals(i.getInstanceId())));
+        verify(containerManager).reboot(argThat(i -> instanceId.equals(i.getInstanceId())), any());
 
         service.createImage("us-east-1", instanceId, "without-reboot", null, true);
         // Still one: NoReboot=true opted the second call out.
-        verify(containerManager, times(1)).reboot(argThat(i -> instanceId.equals(i.getInstanceId())));
+        verify(containerManager, times(1)).reboot(argThat(i -> instanceId.equals(i.getInstanceId())), any());
     }
 
     @Test

@@ -953,6 +953,41 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /**
+     * Gives an instance's container the block devices of the data volumes attached to it: those
+     * its launch created once it first runs, and all of them again after a start or a reboot, as
+     * a container that starts again has a fresh /dev. Each volume is read again under its lock
+     * just before it is attached, and nothing is attached once the instance has left running or
+     * the volume no longer holds it: termination and DetachVolume end attachments under the same
+     * lock, so one landing while this runs does not get a deleted volume's backing file recreated
+     * or a detached volume bound again.
+     */
+    private void attachVolumeDevices(String region, Instance inst) {
+        if (volumeBlockDeviceManager == null) {
+            return;
+        }
+        List<String> attached = volumes.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(volume -> volume.getAttachments().stream()
+                        .anyMatch(attachment -> inst.getInstanceId().equals(attachment.getInstanceId())))
+                .map(Volume::getVolumeId)
+                .toList();
+        for (String volumeId : attached) {
+            withVolumeLock(volumeId, () -> {
+                Volume volume = volumes.get(key(region, volumeId)).orElse(null);
+                if (volume == null || inst.getState() == null || !"running".equals(inst.getState().getName())
+                        || volumeId.equals(inst.getRootVolumeId())) {
+                    return;
+                }
+                for (VolumeAttachment attachment : volume.getAttachments()) {
+                    if (inst.getInstanceId().equals(attachment.getInstanceId())
+                            && !isSameDevice(attachment.getDevice(), inst.getRootDeviceName())) {
+                        volumeBlockDeviceManager.attachVolume(volume, inst, attachment.getDevice());
+                    }
+                }
+            });
+        }
+    }
+
     public void restoreAttachedVolumesForInstance(String region, Instance inst) {
         if (volumeBlockDeviceManager == null || inst == null) {
             return;
@@ -4033,13 +4068,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     publicKey = kp.getPublicKey();
                 }
             }
+            // The hook runs on the launch executor, where no request context is active.
+            String owner = callerAccountId();
             for (Instance inst : launched) {
                 List<SecurityGroup> policyGroups = inst.getSecurityGroups().stream()
                         .map(group -> securityGroups.get(key(region, group.getGroupId()))
                                 .orElseThrow(() -> new IllegalStateException("Missing security group " + group.getGroupId())))
                         .toList();
+                // The data volumes the launch created are attached before UserData runs, so a
+                // script that formats or mounts one finds its device.
                 containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst),
-                        policyGroups, policyPrefixLists(region, policyGroups));
+                        policyGroups, policyPrefixLists(region, policyGroups),
+                        () -> RequestScopes.runAs(owner, () -> attachVolumeDevices(region, inst)));
             }
         }
 
@@ -5023,7 +5063,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 restoreInstanceFirewall(inst);
                 String accountId = callerAccountId();
                 containerManager.start(inst, () ->
-                        RequestScopes.runAs(accountId, () -> restoreAttachedVolumesForInstance(region, inst)));
+                        RequestScopes.runAs(accountId, () -> attachVolumeDevices(region, inst)));
             }
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
@@ -5112,7 +5152,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
 
             if (!config.services().ec2().mock()) {
-                containerManager.reboot(inst);
+                String accountId = callerAccountId();
+                containerManager.reboot(inst, () ->
+                        RequestScopes.runAs(accountId, () -> attachVolumeDevices(region, inst)));
             }
         }
     }
@@ -13171,6 +13213,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterValue",
                     "Value '" + device + "' for parameter device is invalid.", 400);
         }
+        // Under the volume's lock, as every change to a volume's attachments is made.
+        return withVolumeLock(volumeId, () -> attachVolumeLocked(region, volumeId, instanceId, device));
+    }
+
+    private VolumeAttachment attachVolumeLocked(String region, String volumeId, String instanceId, String device) {
         Volume volume = getRequiredVolume(region, volumeId);
         Instance inst = getRequiredInstance(region, instanceId);
         if (!List.of("running", "stopped").contains(inst.getState().getName())) {
@@ -13231,6 +13278,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
         }
         ensureDefaultResources(region);
+        return withVolumeLock(volumeId, () -> detachVolumeLocked(region, volumeId, instanceId, device, force));
+    }
+
+    private VolumeAttachment detachVolumeLocked(String region, String volumeId, String instanceId, String device,
+                                                boolean force) {
         Volume volume = getRequiredVolume(region, volumeId);
 
         if ("available".equals(volume.getState()) || volume.getAttachments().isEmpty()) {
