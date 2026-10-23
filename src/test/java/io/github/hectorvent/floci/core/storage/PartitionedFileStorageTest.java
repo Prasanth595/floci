@@ -177,6 +177,7 @@ class PartitionedFileStorageTest {
         storage.flush();
         storage.putEntry("busy", "node-1", "beat-1");
         Path directory = tempDir.resolve("items");
+        StorageTestFiles.assumePosixPermissions(directory);
         Set<PosixFilePermission> original = Files.getPosixFilePermissions(directory);
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("r-xr-xr-x"));
         try {
@@ -298,6 +299,7 @@ class PartitionedFileStorageTest {
     void aMigrationThatCannotWriteFailsAndKeepsTheLegacyFile() throws Exception {
         Path legacy = tempDir.resolve("items.json");
         new ObjectMapper().writeValue(legacy.toFile(), Map.of("a", Map.of("k", "1")));
+        StorageTestFiles.assumePosixPermissions(tempDir);
         Set<PosixFilePermission> original = Files.getPosixFilePermissions(tempDir);
         Files.setPosixFilePermissions(tempDir, PosixFilePermissions.fromString("r-xr-xr-x"));
         try {
@@ -364,6 +366,7 @@ class PartitionedFileStorageTest {
         Path old = current.resolveSibling("old-name.json");
         Files.move(current, old);
         Path directory = tempDir.resolve("items");
+        StorageTestFiles.assumePosixPermissions(directory);
         Set<PosixFilePermission> original = Files.getPosixFilePermissions(directory);
 
         PartitionedFileStorage<String> blocked = new PartitionedFileStorage<>(directory,

@@ -140,6 +140,7 @@ class StorageFactoryPartitionedTest {
 
     @Test
     void aMigrationThatCannotWriteLeavesTheLegacyLogInPlace() throws Exception {
+        StorageTestFiles.assumePosixPermissions(tempDir);
         WalStorage<String, Map<String, String>> legacy = new WalStorage<>(tempDir.resolve("svc-items-snapshot.json"),
                 tempDir.resolve("svc-items.wal"), TYPE, Long.MAX_VALUE);
         legacy.load();
