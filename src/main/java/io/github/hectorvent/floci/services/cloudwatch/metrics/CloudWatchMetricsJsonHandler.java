@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Handles CloudWatch Metrics requests via the JSON 1.0 protocol.
@@ -35,6 +36,17 @@ import java.util.Map;
 public class CloudWatchMetricsJsonHandler {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsJsonHandler.class);
+
+    /**
+     * The operations the console's {@code CloudWatchVersion20130116.} target shares with the
+     * current API, each with the request members only the console's API defines.
+     */
+    private static final Map<String, Set<String>> CONSOLE_TARGET_OPERATIONS = Map.of(
+            "ListMetrics", Set.of("CountOnlyRequest", "SegmentId", "TotalSegments"),
+            "DescribeAlarms", Set.of("ExcludeAutoscalingAlarms", "ExcludeManagedAlarms"),
+            "GetMetricStatistics", Set.of(),
+            "DeleteAlarms", Set.of());
+
     private final CloudWatchMetricsService metricsService;
     private final CloudWatchDashboardsService dashboardsService;
     private final CloudWatchMetricStreamsService metricStreamsService;
@@ -79,6 +91,36 @@ public class CloudWatchMetricsJsonHandler {
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported by CloudWatch JSON."))
                     .build();
         };
+    }
+
+    /**
+     * Handles an operation named with the {@code CloudWatchVersion20130116.} target of the
+     * CloudWatch console's API. Only the operations whose shapes that API shares with the current
+     * one are served: the others take members this handler would silently ignore, such as the
+     * console's {@code GetMetricData} with {@code Defaults} and {@code Metrics}, or its
+     * {@code PutMetricAlarm} metric items with {@code Alias} and {@code MetricName}. A served
+     * operation's request members that only the console's API defines are not implemented either,
+     * so a request setting one is refused rather than answered as if it were unset.
+     */
+    public Response handleLegacy(String action, JsonNode request, String region) {
+        Set<String> consoleOnlyMembers = CONSOLE_TARGET_OPERATIONS.get(action);
+        if (consoleOnlyMembers == null) {
+            return unsupportedWithConsoleTarget("Operation " + action);
+        }
+        for (String member : consoleOnlyMembers) {
+            JsonNode value = request.get(member);
+            if (value != null && !value.isNull() && !(value.isBoolean() && !value.booleanValue())) {
+                return unsupportedWithConsoleTarget("Parameter " + member + " of " + action);
+            }
+        }
+        return handle(action, request, region);
+    }
+
+    private static Response unsupportedWithConsoleTarget(String subject) {
+        return Response.status(400)
+                .entity(new AwsErrorResponse("UnsupportedOperation", subject
+                        + " is not supported by CloudWatch JSON with the CloudWatchVersion20130116 target."))
+                .build();
     }
 
     private Response handlePutMetricData(JsonNode request, String region) {
