@@ -17,11 +17,11 @@ class LambdaWebEnvironmentManagerTest {
 
     private static final List<String> BASE = List.of("--expose-gc", "--max-http-header-size", "135168",
             "--no-experimental-require-module");
+    private static final List<String> DEFAULT_HEAP = List.of("--max-semi-space-size=102", "--max-old-space-size=1024");
 
     @Test
     void heapFlagsInNodeOptionsReplaceBothDefaultHeapFlags() {
-        List<String> defaults = List.of("--max-semi-space-size=102", "--max-old-space-size=1024");
-        assertEquals(flags(defaults), LambdaWebEnvironmentManager.nodeFlags(null));
+        assertEquals(flags(DEFAULT_HEAP), LambdaWebEnvironmentManager.nodeFlags(null));
         assertEquals(flags(List.of("--max-old-space-size=1536")),
                 LambdaWebEnvironmentManager.nodeFlags("--max-old-space-size=1536"));
         assertEquals(flags(List.of("--max-semi-space-size=64")),
@@ -46,7 +46,7 @@ class LambdaWebEnvironmentManagerTest {
 
     @Test
     void otherFlagsInNodeOptionsKeepTheDefaults() {
-        List<String> defaults = flags(List.of("--max-semi-space-size=102", "--max-old-space-size=1024"));
+        List<String> defaults = flags(DEFAULT_HEAP);
         assertEquals(defaults, LambdaWebEnvironmentManager.nodeFlags("--expose-gc"));
         assertEquals(defaults, LambdaWebEnvironmentManager.nodeFlags("--max-http-header-size=1000"));
         assertEquals(defaults, LambdaWebEnvironmentManager.nodeFlags("--require ./pre.js"));
