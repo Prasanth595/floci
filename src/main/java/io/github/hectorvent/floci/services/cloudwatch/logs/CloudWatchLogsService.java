@@ -56,6 +56,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     private static final Logger LOG = Logger.getLogger(CloudWatchLogsService.class);
     private static final int MAX_REGEX_FILTERS_PER_LOG_GROUP = 5;
     private static final int MAX_FILTER_PATTERN_LENGTH = 1024;
+    private static final Set<String> LOG_GROUP_CLASSES = Set.of("STANDARD", "INFREQUENT_ACCESS", "DELIVERY");
 
     /**
      * Orders events by timestamp, then by ingestion sequence so that events sharing the same
@@ -273,6 +274,11 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, region);
     }
 
+    public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
+                               boolean deletionProtectionEnabled, String kmsKeyId, String logGroupClass, String region) {
+        createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, logGroupClass, region);
+    }
+
     public void createLogGroupForAccount(
             String accountId, String name, Integer retentionInDays,
             Map<String, String> tags, String region) {
@@ -288,10 +294,17 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     public void createLogGroupForAccount(
             String accountId, String name, Integer retentionInDays,
             Map<String, String> tags, boolean deletionProtectionEnabled, String kmsKeyId, String region) {
+        createLogGroupForAccount(accountId, name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, null, region);
+    }
+
+    public void createLogGroupForAccount(
+            String accountId, String name, Integer retentionInDays,
+            Map<String, String> tags, boolean deletionProtectionEnabled, String kmsKeyId, String logGroupClass, String region) {
         synchronized (metricFilterStore) {
             if (name == null || name.isBlank()) {
                 throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
             }
+            validateLogGroupClass(logGroupClass);
             String key = groupKey(region, name);
             if (getForAccount(groupStore, accountId, key).isPresent()) {
                 throw new AwsException("ResourceAlreadyExistsException",
@@ -299,6 +312,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
             }
             LogGroup group = new LogGroup();
             group.setLogGroupName(name);
+            group.setLogGroupClass(logGroupClass == null ? "STANDARD" : logGroupClass);
             group.setCreatedTime(System.currentTimeMillis());
             group.setRetentionInDays(retentionInDays);
             group.setDeletionProtectionEnabled(deletionProtectionEnabled);
@@ -369,6 +383,12 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     }
 
     PaginatedResult<LogGroup> describeLogGroups(String prefix, String region, int limit, String nextToken) {
+        return describeLogGroups(prefix, null, region, limit, nextToken);
+    }
+
+    PaginatedResult<LogGroup> describeLogGroups(String prefix, String logGroupClass, String region,
+                                               int limit, String nextToken) {
+        validateLogGroupClass(logGroupClass);
         if (limit < 1 || limit > 50) {
             String constraint = limit < 1 ? "greater than or equal to 1" : "less than or equal to 50";
             throw SmithyValidationErrors.exception("InvalidParameterException",
@@ -377,9 +397,20 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         if (nextToken != null && nextToken.isEmpty()) {
             throw invalidNextToken();
         }
-        return Pagination.paginate(matchingLogGroups(prefix, region), LogGroup::getLogGroupName, limit, nextToken,
-                "DescribeLogGroups:" + region + ":" + (prefix == null ? "" : prefix),
+        List<LogGroup> groups = matchingLogGroups(prefix, region).stream()
+                .filter(group -> logGroupClass == null || logGroupClass.equals(group.getLogGroupClass()))
+                .toList();
+        return Pagination.paginate(groups, LogGroup::getLogGroupName, limit, nextToken,
+                "DescribeLogGroups" + (logGroupClass == null ? "" : "/" + logGroupClass)
+                        + ":" + region + ":" + (prefix == null ? "" : prefix),
                 token -> invalidNextToken());
+    }
+
+    private static void validateLogGroupClass(String logGroupClass) {
+        if (logGroupClass != null && !LOG_GROUP_CLASSES.contains(logGroupClass)) {
+            throw new AwsException("InvalidParameterException",
+                    "logGroupClass must be STANDARD, INFREQUENT_ACCESS, or DELIVERY.", 400);
+        }
     }
 
     private List<LogGroup> matchingLogGroups(String prefix, String region) {
