@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.codeartifact;
 
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -15,6 +17,8 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -162,6 +166,69 @@ class SidecarConcurrencyTest {
                 + "1 had already failed, instead of leaving it blocked indefinitely");
         assertTrue(otherItemInterrupted.get(), "expected item 2 to be interrupted rather than complete normally "
                 + "after item 1 had already failed");
+    }
+
+    @Test
+    void releaseDropsTheCachedPermitForASidecarKey() throws Exception {
+        Object key = new Object();
+        SidecarConcurrency.mapBounded(key, List.of(1, 2), i -> i);
+        assertTrue(sidecarPermitsContainsKey(key), "expected mapBounded to have cached a permit for this key");
+
+        SidecarConcurrency.release(key);
+
+        assertFalse(sidecarPermitsContainsKey(key), "expected release to drop the cached permit for this key, "
+                + "otherwise it leaks one Semaphore per repository ever deleted for the life of the process");
+    }
+
+    @Test
+    void releaseIsANoOpForAKeyThatWasNeverUsed() {
+        assertDoesNotThrow(() -> SidecarConcurrency.release(new Object()));
+    }
+
+    @Test
+    void releaseDuringAnActiveUseDefersRemovalUntilTheMatchingEndUse() throws Exception {
+        Object key = new Object();
+        SidecarConcurrency.beginUse(key);
+        assertTrue(sidecarPermitsContainsKey(key), "expected beginUse to register this key");
+
+        SidecarConcurrency.release(key);
+        assertTrue(sidecarPermitsContainsKey(key), "expected release to defer removal while a call is still "
+                + "using this key; otherwise a listPackageVersions call that fetched its version listing before "
+                + "the repository was deleted, but had not yet reached mapBounded, would cache a fresh permit "
+                + "for a container that is already gone, orphaned forever since nothing calls release twice");
+
+        SidecarConcurrency.endUse(key);
+        assertFalse(sidecarPermitsContainsKey(key), "expected the matching endUse to drop the entry once "
+                + "release had already marked it for removal");
+    }
+
+    @Test
+    void releaseWithNoActiveUseRemovesImmediately() throws Exception {
+        Object key = new Object();
+        SidecarConcurrency.release(key);
+        assertFalse(sidecarPermitsContainsKey(key), "release on a key nobody is using must not leave anything "
+                + "behind");
+    }
+
+    @Test
+    void mapBoundedReusesThePermitABeginUseAlreadyCreated() throws Exception {
+        Object key = new Object();
+        SidecarConcurrency.beginUse(key);
+        try {
+            List<Integer> result = SidecarConcurrency.mapBounded(key, List.of(1, 2, 3), i -> i);
+            assertThat(result, equalTo(List.of(1, 2, 3)));
+        } finally {
+            SidecarConcurrency.endUse(key);
+        }
+        assertTrue(sidecarPermitsContainsKey(key), "expected endUse, with no release pending, to leave the "
+                + "cache entry alone instead of removing it");
+    }
+
+    private static boolean sidecarPermitsContainsKey(Object key) throws Exception {
+        Field field = SidecarConcurrency.class.getDeclaredField("SIDECAR_PERMITS");
+        field.setAccessible(true);
+        Map<?, ?> permits = (Map<?, ?>) field.get(null);
+        return permits.containsKey(key);
     }
 
     @Test
