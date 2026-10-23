@@ -144,7 +144,11 @@ class RedshiftFinalSnapshotIntegrationTest {
                     return other.createClusterSnapshot(request -> request.clusterIdentifier(source)
                             .snapshotIdentifier(backup)).snapshot();
                 });
-                assertTrue(independent.get(2, TimeUnit.SECONDS).snapshotArn().contains(":222222222222:"));
+                Snapshot created = independent.get(2, TimeUnit.SECONDS);
+                assertTrue(created.snapshotArn().contains(":222222222222:"));
+                assertEquals(-1, created.manualSnapshotRetentionPeriod());
+                assertEquals(-1, other.describeClusterSnapshots(request -> request.snapshotIdentifier(backup))
+                        .snapshots().getFirst().manualSnapshotRetentionPeriod());
             } finally {
                 release.countDown();
                 snapshot.get(3, TimeUnit.SECONDS);

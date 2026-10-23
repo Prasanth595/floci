@@ -88,8 +88,10 @@ the dump is retained for the committed snapshot.
 
 `FinalClusterSnapshotRetentionPeriod` defaults to `-1` and accepts `-1` or 1 to 3,653 days.
 It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`; automatic
-expiration is not implemented. Snapshot metadata uses the configured storage mode. Persistent
-and WAL metadata commit failures are reported before teardown; hybrid retains its existing
+expiration is not implemented. Manual snapshots created by `CreateClusterSnapshot`, and older
+snapshots without stored retention metadata, also return the default `-1`. Snapshot metadata
+uses the configured storage mode. Persistent and WAL metadata commit failures are reported
+before teardown; hybrid retains its existing
 write-behind durability and logged flush failures.
 
 If teardown fails after the final snapshot was created, the snapshot is retained. A retry

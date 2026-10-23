@@ -111,7 +111,7 @@ public class Snapshot {
     }
 
     public Integer getManualSnapshotRetentionPeriod() {
-        return manualSnapshotRetentionPeriod;
+        return manualSnapshotRetentionPeriod == null ? -1 : manualSnapshotRetentionPeriod;
     }
 
     public void setManualSnapshotRetentionPeriod(Integer manualSnapshotRetentionPeriod) {

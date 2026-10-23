@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -489,10 +490,27 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<Port>5439</Port>"));
         assertTrue(xml.contains("<MasterUsername>admin</MasterUsername>"));
         assertTrue(xml.contains("<RequestId>test-req-id</RequestId>"));
+        assertTrue(xml.contains("<ManualSnapshotRetentionPeriod>-1</ManualSnapshotRetentionPeriod>"));
         // A Snapshot built via this constructor carries no ARN/CreateTime; the elements
         // must be omitted rather than serialized as empty or "null".
         assertFalse(xml.contains("<SnapshotArn>"));
         assertFalse(xml.contains("<SnapshotCreateTime>"));
+    }
+
+    @Test
+    void describeLegacySnapshotsDefaultsMissingAndNullRetention() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        for (String json : List.of("{\"snapshotIdentifier\":\"legacy\"}",
+                "{\"snapshotIdentifier\":\"legacy\",\"manualSnapshotRetentionPeriod\":null}")) {
+            Snapshot snapshot = mapper.readValue(json, Snapshot.class);
+            when(service.describeSnapshots("legacy", null)).thenReturn(List.of(snapshot));
+            MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+            params.putSingle("SnapshotIdentifier", "legacy");
+
+            String xml = handler.handle("DescribeClusterSnapshots", params).getEntity().toString();
+
+            assertTrue(xml.contains("<ManualSnapshotRetentionPeriod>-1</ManualSnapshotRetentionPeriod>"));
+        }
     }
 
     @Test
