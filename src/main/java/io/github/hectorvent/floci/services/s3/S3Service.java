@@ -1040,7 +1040,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 checkLockProtection(prev, false);
             }
 
-            checkArchivedNullLock(bucketOwnerAccount, bucketName, key, false);
+            boolean hasArchivedNull = checkArchivedNullLock(bucketOwnerAccount, bucketName, key, false);
 
             // Apply lock fields from request or bucket default
             applyObjectLock(object, bucket,
@@ -1063,7 +1063,14 @@ public class S3Service implements Resettable, ResourceProvider {
             // Release the cached payload before publishing - see the comment in the versioned
             // branch above; the same race applies here.
             object.setData(null);
-            putObjectForAccount(bucketOwnerAccount, objectKey(bucketName, key), object);
+            try {
+                putObjectForAccount(bucketOwnerAccount, objectKey(bucketName, key), object);
+            } catch (RuntimeException e) {
+                if (hasArchivedNull && prev != null) {
+                    restoreCurrentAfterFailedPublication(bucketOwnerAccount, bucketName, key, prev, e);
+                }
+                throw e;
+            }
             // Retain archived null history and annotations until publication succeeds.
             // Annotation readers share this bucket monitor, so they cannot observe the
             // replacement with the old annotations while cleanup is pending.
@@ -7549,12 +7556,37 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private void checkArchivedNullLock(String accountId, String bucketName, String key,
-                                      boolean bypassGovernance) {
-        resolveObjectForAccount(accountId, versionedKey(bucketName, key, "null"))
+    private void restoreCurrentAfterFailedPublication(String accountId, String bucketName, String key,
+                                                       S3Object previous, RuntimeException failure) {
+        try {
+            if (previous.isDeleteMarker()) {
+                deleteFile(accountId, bucketName, key);
+            } else if (inMemory) {
+                byte[] original = memoryDataStore.get(
+                        physicalVersionedKey(accountId, bucketName, key, storedVersionId(previous)));
+                memoryDataStore.put(physicalKey(accountId, bucketName, key), Objects.requireNonNull(original));
+            } else {
+                linkIntoPlace(resolveVersionedPathForRead(accountId, bucketName, key, storedVersionId(previous)),
+                        resolveObjectPath(accountId, bucketName, key));
+            }
+            S3Object restored = copyObject(previous);
+            restored.setDataGeneration(UUID.randomUUID().toString());
+            putObjectForAccount(accountId, versionedKey(bucketName, key, storedVersionId(restored)), restored);
+            putObjectForAccount(accountId, objectKey(bucketName, key), restored);
+        } catch (RuntimeException recoveryFailure) {
+            failure.addSuppressed(recoveryFailure);
+            LOG.errorv(recoveryFailure, "Failed to restore current version after failed publication: {0}/{1}",
+                    bucketName, key);
+        }
+    }
+
+    private boolean checkArchivedNullLock(String accountId, String bucketName, String key,
+                                         boolean bypassGovernance) {
+        Optional<S3Object> archived = resolveObjectForAccount(accountId, versionedKey(bucketName, key, "null"))
                 .filter(object -> key.equals(object.getKey()))
-                .filter(object -> object.getVersionId() == null && !object.isDeleteMarker())
-                .ifPresent(object -> checkLockProtection(object, bypassGovernance));
+                .filter(object -> object.getVersionId() == null && !object.isDeleteMarker());
+        archived.ifPresent(object -> checkLockProtection(object, bypassGovernance));
+        return archived.isPresent();
     }
 
     private void deleteArchivedNullVersion(
@@ -7718,11 +7750,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void deleteFile(String bucketName, String key) {
+        deleteFile(ownerId(), bucketName, key);
+    }
+
+    private void deleteFile(String accountId, String bucketName, String key) {
         if (inMemory) {
-            memoryDataStore.remove(physicalKey(bucketName, key));
+            memoryDataStore.remove(physicalKey(accountId, bucketName, key));
             return;
         }
-        Path filePath = resolveObjectPath(bucketName, key);
+        Path filePath = resolveObjectPath(accountId, bucketName, key);
         ReentrantLock lock = diskFileLock(filePath);
         lock.lock();
         try {
