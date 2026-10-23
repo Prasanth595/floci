@@ -2015,11 +2015,13 @@ public class NativeDynamoDbJsonHandler {
      */
     private Response handleRestoreTableFromBackup(JsonNode request, String region) {
         String backupArn = textOrNull(request, "BackupArn");
-        dynamoDbService.requireOwnBackupArn(backupArn);
+        DynamoDbBackupArns.BackupArn arn = dynamoDbService.requireOwnBackupArn(backupArn);
         String targetTableName = requireTableNameParameter(request, "TargetTableName");
         throwValidationErrors(restoreViolations(request, targetTableName));
+        DynamoDbService.requireSseOverrideAcrossRegions(arn.region(), region,
+                request.path("SSESpecificationOverride").isObject());
 
-        TableBackup backup = dynamoDbService.describeBackup(backupArn, region);
+        TableBackup backup = dynamoDbService.describeBackup(backupArn, arn.region());
         TableDefinition table = tableService.restoreTable(DynamoDbService.snapshotOf(backup.getTable()),
                 targetTableName, parseRestoreOverrides(request), region);
         ObjectNode description = tableToNode(table);

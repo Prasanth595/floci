@@ -488,7 +488,7 @@ aws dynamodb restore-table-from-backup --backup-arn $BACKUP_ARN \
   --target-table-name UsersRestored --endpoint-url $AWS_ENDPOINT_URL
 ```
 
-`RestoreTableFromBackup` creates a new table with the keys, indexes, billing mode, throughput and encryption of the backup. As on AWS, the new table has no stream, TTL, point-in-time recovery, tags or deletion protection, and its table class is `STANDARD`. The overrides follow AWS. A GSI or LSI override must match a source index by key schema and projection, and a vector index override must match one by name. `BillingModeOverride` `PROVISIONED` needs throughput for the table and for every GSI that is kept.
+`RestoreTableFromBackup` creates a new table with the keys, indexes, billing mode, throughput and encryption of the backup. As on AWS, the new table has no stream, TTL, point-in-time recovery, tags or deletion protection, and its table class is `STANDARD`. The overrides follow AWS. A GSI or LSI override must match a source index by key schema and projection, and a vector index override must match one by name. `BillingModeOverride` `PROVISIONED` needs throughput for the table and for every GSI that is kept. To restore a backup into another region, call `RestoreTableFromBackup` in that region with `SSESpecificationOverride`.
 
 Deviations from AWS: a restore is done before the response is sent. The response still says `CREATING` with `RestoreInProgress: true`, as on AWS, but the table is `ACTIVE` right away. So `BackupInUseException` and `TableInUseException` for a restore in progress never happen. `BackupSizeBytes` is always 0. Backups made by AWS Backup (`BackupType` `AWS_BACKUP`) are not emulated.
 

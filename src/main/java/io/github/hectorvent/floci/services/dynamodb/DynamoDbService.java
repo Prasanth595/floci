@@ -2981,11 +2981,15 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "This action is only supported by accounts that match the resource owner’s account.", 400);
         }
-        if (!arn.region().equals(region) && !sseOverride) {
+        requireSseOverrideAcrossRegions(arn.region(), region, sseOverride);
+        return new DynamoDbTableNames.ResolvedTableRef(tableName, arn.region());
+    }
+
+    static void requireSseOverrideAcrossRegions(String sourceRegion, String region, boolean sseOverride) {
+        if (!sourceRegion.equals(region) && !sseOverride) {
             throw new AwsException("ValidationException",
                     "Invalid Request: sseSpecificationOverride must be provided for cross-region restores", 400);
         }
-        return new DynamoDbTableNames.ResolvedTableRef(tableName, arn.region());
     }
 
     private static AwsException invalidParameter(String message) {

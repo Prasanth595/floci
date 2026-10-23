@@ -564,6 +564,44 @@ class DynamoDbBackupIntegrationTest {
     }
 
     @Test
+    void restoreAcrossRegionsNeedsAnSseOverride() {
+        String table = "BackupIT-cross-region";
+        createPlainTable(table);
+        putItem(table, "k1");
+        String backupArn = createBackup(table, "cross-region");
+        String sse = ", \"SSESpecificationOverride\": {\"Enabled\": true, \"SSEType\": \"KMS\"}";
+        String missing = TABLE_ARN_PREFIX + table + "/backup/01700000000000-abcdef12";
+        String badId = TABLE_ARN_PREFIX + table + "/backup/1700000000000-abcdef12";
+
+        for (String request : List.of(restoreRequest(backupArn, ""), restoreRequest(missing, ""),
+                restoreRequest(badId, ""), restoreRequest(backupArn, ", \"SSESpecificationOverride\": null"))) {
+            inOtherRegion("RestoreTableFromBackup", request)
+                    .statusCode(400)
+                    .body("message", equalTo(
+                            "Invalid Request: sseSpecificationOverride must be provided for cross-region restores"));
+        }
+        inOtherRegion("RestoreTableFromBackup", restoreRequest(badId, sse))
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: BackupArn is not valid"));
+        inOtherRegion("RestoreTableFromBackup", restoreRequest(missing, sse))
+                .statusCode(400)
+                .body("__type", containsString("BackupNotFoundException"));
+
+        inOtherRegion("RestoreTableFromBackup", """
+                {"BackupArn": "%s", "TargetTableName": "BackupIT-cross-region-copy"%s}
+                """.formatted(backupArn, sse))
+                .statusCode(200)
+                .body("TableDescription.TableArn",
+                        equalTo("arn:aws:dynamodb:eu-west-2:000000000000:table/BackupIT-cross-region-copy"))
+                .body("TableDescription.RestoreSummary.SourceBackupArn", equalTo(backupArn))
+                .body("TableDescription.RestoreSummary.SourceTableArn", equalTo(TABLE_ARN_PREFIX + table))
+                .body("TableDescription.SSEDescription.KMSMasterKeyArn", startsWith("arn:aws:kms:eu-west-2:"));
+        inOtherRegion("Scan", "{\"TableName\": \"BackupIT-cross-region-copy\"}")
+                .statusCode(200)
+                .body("Items.pk.S", contains("k1"));
+    }
+
+    @Test
     void restoreReportsEveryViolationBeforeTheBackupLookup() {
         String arn = TABLE_ARN_PREFIX + "BackupIT-none/backup/01700000000000-abcdef12";
         String notNull = "failed to satisfy constraint: Member must not be null";
@@ -897,6 +935,19 @@ class DynamoDbBackupIntegrationTest {
         return ddb("RestoreTableFromBackup", """
                 {"BackupArn": "%s", "TargetTableName": "%s", %s}
                 """.formatted(backupArn, target, overrides));
+    }
+
+    private static String restoreRequest(String backupArn, String overrides) {
+        return "{\"BackupArn\": \"" + backupArn + "\", \"TargetTableName\": \"BackupIT-never\"" + overrides + "}";
+    }
+
+    private static ValidatableResponse inOtherRegion(String action, String body) {
+        return given().header("Authorization", OTHER_REGION_AUTH)
+                .header("X-Amz-Target", "DynamoDB_20120810." + action)
+                .contentType(CONTENT_TYPE)
+                .body(body)
+                .when().post("/")
+                .then();
     }
 
     private static ValidatableResponse listBackupsBetween(String lowerBound, String upperBound) {
