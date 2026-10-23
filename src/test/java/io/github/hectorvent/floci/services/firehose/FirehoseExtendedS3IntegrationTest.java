@@ -446,6 +446,30 @@ class FirehoseExtendedS3IntegrationTest {
         assertTrue(key.matches("events/" + TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
     }
 
+    @Test
+    @Order(17)
+    void createDeliveryStreamRefusesEnabledLoggingWithoutAStreamName() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateDeliveryStream")
+            .body("""
+                    {
+                      "DeliveryStreamName": "logging-without-stream-name",
+                      "ExtendedS3DestinationConfiguration": {
+                        "RoleARN": "%s",
+                        "BucketARN": "%s",
+                        "CloudWatchLoggingOptions": { "Enabled": true, "LogGroupName": "g" }
+                      }
+                    }
+                    """.formatted(ROLE_ARN, BUCKET_ARN))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"))
+            .body("message", equalTo("CloudWatch Log Stream Name is required if CloudWatch Logging is enabled"));
+    }
+
     private void createDeliveryStream(String streamName, String bucket, String extraDestinationJson) {
         given()
             .contentType(CONTENT_TYPE)

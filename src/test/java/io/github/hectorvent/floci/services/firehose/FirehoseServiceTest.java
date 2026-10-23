@@ -411,6 +411,74 @@ class FirehoseServiceTest {
         assertEquals("stream", logging.getLogStreamName());
     }
 
+    private static final String LOG_GROUP_REQUIRED =
+            "CloudWatch Log Group Name is required if CloudWatch Logging is enabled";
+    private static final String LOG_STREAM_REQUIRED =
+            "CloudWatch Log Stream Name is required if CloudWatch Logging is enabled";
+
+    @Test
+    void enabledLoggingRequiresTheGroupThenTheStreamName() {
+        assertLoggingRefused(LOG_GROUP_REQUIRED, () -> firehoseService.createDeliveryStream("no-names",
+                loggedDestination(logging(true, null, null))));
+        assertLoggingRefused(LOG_STREAM_REQUIRED, () -> firehoseService.createDeliveryStream("group-only",
+                loggedDestination(logging(true, "g", null))));
+        assertLoggingRefused(LOG_GROUP_REQUIRED, () -> firehoseService.createDeliveryStream("empty-names",
+                loggedDestination(logging(true, "", ""))));
+
+        firehoseService.createDeliveryStream("disabled-no-names", loggedDestination(logging(false, null, null)));
+        assertEquals(Boolean.FALSE, firehoseService.describeDeliveryStream("disabled-no-names")
+                .s3Destination().getCloudWatchLoggingOptions().getEnabled());
+    }
+
+    @Test
+    void anUpdateEnablingLoggingIsCheckedAgainstTheStoredNames() {
+        S3Destination s3 = new S3Destination();
+        s3.setBucketArn("arn:aws:s3:::logging-bucket");
+        firehoseService.createDeliveryStream("enable-later", s3);
+
+        assertLoggingRefused(LOG_GROUP_REQUIRED, () -> firehoseService.updateDestination("enable-later", "1",
+                "destinationId-000000000001", loggedDestination(logging(true, null, null))));
+        assertEquals("1", firehoseService.describeDeliveryStream("enable-later").getVersionId());
+
+        firehoseService.updateDestination("enable-later", "1", "destinationId-000000000001",
+                loggedDestination(logging(false, "g", "s")));
+        firehoseService.updateDestination("enable-later", "2", "destinationId-000000000001",
+                loggedDestination(logging(true, null, null)));
+        DeliveryStreamDescription.CloudWatchLoggingOptions logging =
+                firehoseService.describeDeliveryStream("enable-later").s3Destination().getCloudWatchLoggingOptions();
+        assertEquals(Boolean.TRUE, logging.getEnabled());
+        assertEquals("g", logging.getLogGroupName());
+        assertEquals("s", logging.getLogStreamName());
+
+        assertLoggingRefused(LOG_STREAM_REQUIRED, () -> firehoseService.updateDestination("enable-later", "3",
+                "destinationId-000000000001", loggedDestination(logging(null, null, ""))));
+        assertEquals("s", firehoseService.describeDeliveryStream("enable-later")
+                .s3Destination().getCloudWatchLoggingOptions().getLogStreamName());
+    }
+
+    @Test
+    void theLoggingErrorPrecedesTheBufferingHintsOne() {
+        S3Destination s3 = loggedDestination(logging(true, null, null));
+        DeliveryStreamDescription.BufferingHints hints = new DeliveryStreamDescription.BufferingHints();
+        hints.setSizeInMBs(5);
+        s3.setBufferingHints(hints);
+
+        assertLoggingRefused(LOG_GROUP_REQUIRED, () -> firehoseService.createDeliveryStream("partial-hints", s3));
+    }
+
+    private static S3Destination loggedDestination(DeliveryStreamDescription.CloudWatchLoggingOptions logging) {
+        S3Destination s3 = new S3Destination();
+        s3.setBucketArn("arn:aws:s3:::logging-bucket");
+        s3.setCloudWatchLoggingOptions(logging);
+        return s3;
+    }
+
+    private static void assertLoggingRefused(String message, Runnable call) {
+        AwsException e = assertThrows(AwsException.class, call::run);
+        assertEquals("InvalidArgumentException", e.getErrorCode());
+        assertEquals(message, e.getMessage());
+    }
+
     private static DeliveryStreamDescription.CloudWatchLoggingOptions logging(Boolean enabled, String group,
                                                                              String stream) {
         DeliveryStreamDescription.CloudWatchLoggingOptions options = new DeliveryStreamDescription.CloudWatchLoggingOptions();

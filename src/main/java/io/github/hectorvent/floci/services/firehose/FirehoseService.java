@@ -395,8 +395,11 @@ public class FirehoseService implements ResourceProvider {
                     "Delivery stream " + name + " already exists.", 409);
         }
 
+        validateLogging(null, s3Config);
         validateBufferingHints(s3Config);
         if (redshift != null) {
+            validateLogging(null, redshift.getS3());
+            validateLogging(null, redshift.getS3Backup());
             validateBufferingHints(redshift.getS3());
             validateBufferingHints(redshift.getS3Backup());
         }
@@ -475,6 +478,7 @@ public class FirehoseService implements ResourceProvider {
             throw new AwsException("InvalidArgumentException",
                     "The delivery stream " + name + " has a Redshift destination; use RedshiftDestinationUpdate.", 400);
         }
+        validateLogging(destination.getExtendedS3DestinationDescription(), update);
         validateBufferingHints(update);
         S3Destination current = destination.getExtendedS3DestinationDescription();
         if (current == null) {
@@ -522,6 +526,8 @@ public class FirehoseService implements ResourceProvider {
                 throw new AwsException("InvalidArgumentException",
                         "S3BackupMode is Enabled but no S3 backup configuration is set.", 400);
             }
+            validateLogging(current.getS3(), update.getS3());
+            validateLogging(current.getS3Backup(), update.getS3Backup());
             validateBufferingHints(update.getS3());
             validateBufferingHints(update.getS3Backup());
             if (update.getS3Backup() != null && current.getS3Backup() == null) {
@@ -651,6 +657,29 @@ public class FirehoseService implements ResourceProvider {
             throw new AwsException("InvalidArgumentException",
                     "If you specify a value for SizeInMBs, you must also specify a value for IntervalInSeconds, and vice versa.",
                     400);
+        }
+    }
+
+    /**
+     * Once logging is on, both names are required, checked on the merged result for an update
+     * (probed 2026-10-23). An update without a logging block leaves the stored one as it was.
+     */
+    private static void validateLogging(S3Destination stored, S3Destination update) {
+        if (update == null || update.getCloudWatchLoggingOptions() == null) {
+            return;
+        }
+        DeliveryStreamDescription.CloudWatchLoggingOptions effective = mergeLogging(
+                stored == null ? null : stored.getCloudWatchLoggingOptions(), update.getCloudWatchLoggingOptions());
+        if (!Boolean.TRUE.equals(effective.getEnabled())) {
+            return;
+        }
+        if (effective.getLogGroupName() == null || effective.getLogGroupName().isEmpty()) {
+            throw new AwsException("InvalidArgumentException",
+                    "CloudWatch Log Group Name is required if CloudWatch Logging is enabled", 400);
+        }
+        if (effective.getLogStreamName() == null || effective.getLogStreamName().isEmpty()) {
+            throw new AwsException("InvalidArgumentException",
+                    "CloudWatch Log Stream Name is required if CloudWatch Logging is enabled", 400);
         }
     }
 
