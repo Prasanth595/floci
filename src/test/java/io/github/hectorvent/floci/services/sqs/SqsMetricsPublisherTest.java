@@ -42,8 +42,7 @@ class SqsMetricsPublisherTest {
     @BeforeEach
     void setUp() {
         RegionResolver resolver = new RegionResolver(REGION, ACCOUNT);
-        sqs = new SqsService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                30, 1048576, BASE_URL, resolver);
+        sqs = SqsServiceFactory.createInMemory(BASE_URL, resolver);
         cloudWatch = new CloudWatchMetricsService(new InMemoryStorageFactory(ACCOUNT), resolver);
         publisher = new SqsMetricsPublisher(sqs, cloudWatch, mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS));
     }
