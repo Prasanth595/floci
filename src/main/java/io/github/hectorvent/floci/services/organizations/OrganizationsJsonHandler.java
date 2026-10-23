@@ -172,7 +172,7 @@ public class OrganizationsJsonHandler {
         OrganizationalUnit unit = service.createOrganizationalUnit(caller,
                 text(request, "ParentId"), text(request, "Name"), parseTags(request.path("Tags")));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("OrganizationalUnit", organizationalUnitNode(unit));
+        response.set("OrganizationalUnit", organizationalUnitNode(unit, caller));
         return Response.ok(response).build();
     }
 
@@ -180,7 +180,7 @@ public class OrganizationsJsonHandler {
         OrganizationalUnit unit = service.updateOrganizationalUnit(caller,
                 text(request, "OrganizationalUnitId"), text(request, "Name"));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("OrganizationalUnit", organizationalUnitNode(unit));
+        response.set("OrganizationalUnit", organizationalUnitNode(unit, caller));
         return Response.ok(response).build();
     }
 
@@ -192,7 +192,7 @@ public class OrganizationsJsonHandler {
     private Response describeOrganizationalUnit(JsonNode request, String caller) {
         OrganizationalUnit unit = service.describeOrganizationalUnit(caller, text(request, "OrganizationalUnitId"));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("OrganizationalUnit", organizationalUnitNode(unit));
+        response.set("OrganizationalUnit", organizationalUnitNode(unit, caller));
         return Response.ok(response).build();
     }
 
@@ -201,7 +201,7 @@ public class OrganizationsJsonHandler {
         PaginatedResult<OrganizationalUnit> page = page(all, OrganizationalUnit::getId, request);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode units = response.putArray("OrganizationalUnits");
-        page.items().forEach(unit -> units.add(organizationalUnitNode(unit)));
+        page.items().forEach(unit -> units.add(organizationalUnitNode(unit, caller)));
         putNextToken(response, page.nextToken());
         return Response.ok(response).build();
     }
@@ -267,19 +267,19 @@ public class OrganizationsJsonHandler {
     private Response describeAccount(JsonNode request, String caller) {
         OrganizationAccount account = service.describeAccount(caller, text(request, "AccountId"));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Account", accountNode(account));
+        response.set("Account", accountNode(account, caller));
         return Response.ok(response).build();
     }
 
     private Response listAccounts(JsonNode request, String caller) {
         PaginatedResult<OrganizationAccount> page =
                 page(service.listAccounts(caller), OrganizationAccount::getId, request);
-        return accountsResponse(page);
+        return accountsResponse(page, caller);
     }
 
     private Response listAccountsForParent(JsonNode request, String caller) {
         List<OrganizationAccount> all = service.listAccountsForParent(caller, text(request, "ParentId"));
-        return accountsResponse(page(all, OrganizationAccount::getId, request));
+        return accountsResponse(page(all, OrganizationAccount::getId, request), caller);
     }
 
     /**
@@ -296,7 +296,7 @@ public class OrganizationsJsonHandler {
         PaginatedResult<OrganizationAccount> page = page(accounts, OrganizationAccount::getId, request);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode accountsNode = response.putArray("Accounts");
-        page.items().forEach(account -> accountsNode.add(accountNode(account)));
+        page.items().forEach(account -> accountsNode.add(accountNode(account, caller)));
         putNextToken(response, page.nextToken());
         // PolicyType is the only field this operation's response can carry any
         // information in - Accounts is always empty by design (see javadoc above) - so
@@ -305,10 +305,10 @@ public class OrganizationsJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response accountsResponse(PaginatedResult<OrganizationAccount> page) {
+    private Response accountsResponse(PaginatedResult<OrganizationAccount> page, String caller) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode accounts = response.putArray("Accounts");
-        page.items().forEach(account -> accounts.add(accountNode(account)));
+        page.items().forEach(account -> accounts.add(accountNode(account, caller)));
         putNextToken(response, page.nextToken());
         return Response.ok(response).build();
     }
@@ -656,11 +656,18 @@ public class OrganizationsJsonHandler {
         return node;
     }
 
-    private ObjectNode organizationalUnitNode(OrganizationalUnit unit) {
+    private ObjectNode organizationalUnitNode(OrganizationalUnit unit, String caller) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", unit.getId());
         node.put("Arn", unit.getArn());
         node.put("Name", unit.getName());
+        node.put("Path", service.organizationPath(caller, unit.getId()));
+        return node;
+    }
+
+    private ObjectNode accountNode(OrganizationAccount account, String caller) {
+        ObjectNode node = accountNode(account);
+        node.putArray("Paths").add(service.organizationPath(caller, account.getId()));
         return node;
     }
 

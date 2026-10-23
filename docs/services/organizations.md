@@ -33,6 +33,9 @@ call `LeaveOrganization`. An account in no organization gets
 
 ## Behaviour notes
 
+- OU responses include `Path`, and account responses include a single-entry `Paths` array.
+  Both use the current organization/root/OU ancestry, include the resource ID and trailing slash,
+  and reflect account moves. Delegated-administrator responses retain their separate shape.
 - Management policy types include `INSPECTOR_POLICY`, `UPGRADE_ROLLOUT_POLICY`, `BEDROCK_POLICY`,
   `S3_POLICY`, `NETWORK_SECURITY_DIRECTOR_POLICY`, and `GUARDDUTY_POLICY`. They use the existing
   enable, create, attach, list, effective-policy, detach, delete, and disable flows. Policy content
