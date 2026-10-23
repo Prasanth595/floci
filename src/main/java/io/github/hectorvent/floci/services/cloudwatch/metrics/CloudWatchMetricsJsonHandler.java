@@ -39,13 +39,17 @@ public class CloudWatchMetricsJsonHandler {
 
     /**
      * The operations the console's {@code CloudWatchVersion20130116.} target shares with the
-     * current API, each with the request members only the console's API defines.
+     * current API, each with the request members the current API defines for it, as botocore's
+     * cloudwatch 2010-08-01 model lists them.
      */
     private static final Map<String, Set<String>> CONSOLE_TARGET_OPERATIONS = Map.of(
-            "ListMetrics", Set.of("CountOnlyRequest", "SegmentId", "TotalSegments"),
-            "DescribeAlarms", Set.of("ExcludeAutoscalingAlarms", "ExcludeManagedAlarms"),
-            "GetMetricStatistics", Set.of(),
-            "DeleteAlarms", Set.of());
+            "ListMetrics", Set.of("Namespace", "MetricName", "Dimensions", "NextToken", "RecentlyActive",
+                    "IncludeLinkedAccounts", "OwningAccount"),
+            "DescribeAlarms", Set.of("AlarmNames", "AlarmNamePrefix", "AlarmTypes", "ChildrenOfAlarmName",
+                    "ParentsOfAlarmName", "StateValue", "ActionPrefix", "MaxRecords", "NextToken"),
+            "GetMetricStatistics", Set.of("Namespace", "MetricName", "Dimensions", "StartTime", "EndTime",
+                    "Period", "Statistics", "ExtendedStatistics", "Unit"),
+            "DeleteAlarms", Set.of("AlarmNames"));
 
     private final CloudWatchMetricsService metricsService;
     private final CloudWatchDashboardsService dashboardsService;
@@ -98,22 +102,35 @@ public class CloudWatchMetricsJsonHandler {
      * CloudWatch console's API. Only the operations whose shapes that API shares with the current
      * one are served: the others take members this handler would silently ignore, such as the
      * console's {@code GetMetricData} with {@code Defaults} and {@code Metrics}, or its
-     * {@code PutMetricAlarm} metric items with {@code Alias} and {@code MetricName}. A served
-     * operation's request members that only the console's API defines are not implemented either,
-     * so a request setting one is refused rather than answered as if it were unset.
+     * {@code PutMetricAlarm} metric items with {@code Alias} and {@code MetricName}. A request that
+     * sets a member the current API does not define, such as the console's
+     * {@code CountOnlyRequest}, is refused rather than answered as if the member were unset; a
+     * {@code null} or {@code false} value counts as unset. A {@code DescribeAlarms} answer that
+     * would list a metric math alarm is refused too, since the console's API gives alarm metric
+     * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}.
      */
     public Response handleLegacy(String action, JsonNode request, String region) {
-        Set<String> consoleOnlyMembers = CONSOLE_TARGET_OPERATIONS.get(action);
-        if (consoleOnlyMembers == null) {
+        Set<String> currentMembers = CONSOLE_TARGET_OPERATIONS.get(action);
+        if (currentMembers == null) {
             return unsupportedWithConsoleTarget("Operation " + action);
         }
-        for (String member : consoleOnlyMembers) {
-            JsonNode value = request.get(member);
-            if (value != null && !value.isNull() && !(value.isBoolean() && !value.booleanValue())) {
-                return unsupportedWithConsoleTarget("Parameter " + member + " of " + action);
+        for (Map.Entry<String, JsonNode> member : request.properties()) {
+            JsonNode value = member.getValue();
+            if (!currentMembers.contains(member.getKey()) && !value.isNull()
+                    && !(value.isBoolean() && !value.booleanValue())) {
+                return unsupportedWithConsoleTarget("Parameter " + member.getKey() + " of " + action);
             }
         }
-        return handle(action, request, region);
+        Response response = handle(action, request, region);
+        if ("DescribeAlarms".equals(action) && response.getEntity() instanceof JsonNode body) {
+            for (JsonNode alarm : body.path("MetricAlarms")) {
+                if (alarm.has("Metrics")) {
+                    return unsupportedWithConsoleTarget("DescribeAlarms of metric math alarm "
+                            + alarm.path("AlarmName").asText());
+                }
+            }
+        }
+        return response;
     }
 
     private static Response unsupportedWithConsoleTarget(String subject) {

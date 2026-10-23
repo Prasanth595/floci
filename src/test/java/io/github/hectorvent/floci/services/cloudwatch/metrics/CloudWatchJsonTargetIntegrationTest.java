@@ -26,10 +26,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * CloudWatch JSON 1.0 requests name their operation with either target prefix: the
  * {@code GraniteServiceVersion20100801.} prefix of the AWS SDKs, or the
  * {@code CloudWatchVersion20130116.} prefix of the CloudWatch console's API. The console prefix
- * reaches the same metrics and alarms for the operations whose shapes the two APIs share, and
- * refuses the others and the request members only the console's API defines, which the handler
- * would otherwise ignore. It is JSON only, so CBOR and Smithy RPC v2 requests that name it stay
- * unknown.
+ * reaches the same metrics and alarms for the operations whose shapes the two APIs share. It
+ * refuses the other operations, request members the current API does not define, and a
+ * {@code DescribeAlarms} answer listing a metric math alarm, which the handler would otherwise
+ * ignore or answer in a shape the console's API does not have. It is JSON only, so CBOR and
+ * Smithy RPC v2 requests that name it stay unknown.
  */
 @QuarkusTest
 class CloudWatchJsonTargetIntegrationTest {
@@ -139,24 +140,48 @@ class CloudWatchJsonTargetIntegrationTest {
                 .body("__type", equalTo("UnsupportedOperation"));
     }
 
+    @Test
+    void consoleDescribeAlarmsRefusesAMetricMathAlarm() {
+        String alarm = "json-target-" + UUID.randomUUID();
+        json(CURRENT_TARGET, "PutMetricAlarm", """
+                {"AlarmName":"%s","EvaluationPeriods":1,"Threshold":1,
+                 "ComparisonOperator":"GreaterThanThreshold",
+                 "Metrics":[{"Id":"m1","ReturnData":false,"MetricStat":{"Metric":{
+                     "Namespace":"Example/JsonTarget","MetricName":"Requests"},"Period":60,"Stat":"Sum"}},
+                   {"Id":"e1","Expression":"m1*2","Label":"doubled","ReturnData":true}]}
+                """.formatted(alarm)).then().statusCode(200);
+        try {
+            json(LEGACY_TARGET, "DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
+                    .then().statusCode(400).body("__type", equalTo("UnsupportedOperation"))
+                    .body("message", containsString(alarm));
+            json(CURRENT_TARGET, "DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
+                    .then().statusCode(200).body("MetricAlarms[0].Metrics.Id", contains("m1", "e1"));
+        } finally {
+            json(CURRENT_TARGET, "DeleteAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}");
+        }
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
-            ListMetrics    | {"CountOnlyRequest":true}
-            ListMetrics    | {"SegmentId":0,"TotalSegments":2}
-            DescribeAlarms | {"ExcludeAutoscalingAlarms":true}
-            DescribeAlarms | {"ExcludeManagedAlarms":true}
+            ListMetrics         | {"CountOnlyRequest":true}
+            ListMetrics         | {"SegmentId":1}
+            ListMetrics         | {"TotalSegments":2}
+            DescribeAlarms      | {"AlarmNames":["json-target-none"],"ExcludeAutoscalingAlarms":true}
+            DescribeAlarms      | {"AlarmNames":["json-target-none"],"ExcludeManagedAlarms":true}
+            GetMetricStatistics | {"Namespace":"Example/JsonTarget","MetricName":"Requests","Period":60,"Unexpected":"x"}
+            DeleteAlarms        | {"AlarmNames":["json-target-none"],"Unexpected":"x"}
             """)
-    void consoleOnlyMembersAreRefused(String operation, String body) {
+    void membersTheCurrentApiDoesNotDefineAreRefused(String operation, String body) {
         json(LEGACY_TARGET, operation, body).then().statusCode(400)
                 .body("__type", equalTo("UnsupportedOperation"));
     }
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
-            ListMetrics    | {"CountOnlyRequest":false}
-            DescribeAlarms | {"ExcludeAutoscalingAlarms":false,"ExcludeManagedAlarms":null}
+            ListMetrics    | {"Namespace":"json-target-none","CountOnlyRequest":false}
+            DescribeAlarms | {"AlarmNames":["json-target-none"],"ExcludeAutoscalingAlarms":false,"ExcludeManagedAlarms":null}
             """)
-    void consoleOnlyMembersLeftAtTheirDefaultsAreServed(String operation, String body) {
+    void otherMembersLeftUnsetAreServed(String operation, String body) {
         json(LEGACY_TARGET, operation, body).then().statusCode(200);
     }
 

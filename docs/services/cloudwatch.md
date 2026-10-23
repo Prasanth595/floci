@@ -367,12 +367,12 @@ HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action p
 JSON 1.0 requests name their operation in `X-Amz-Target` with the `GraniteServiceVersion20100801.`
 prefix the AWS SDKs send, or with `CloudWatchVersion20130116.`, the prefix of the CloudWatch
 console's API. Both get the same signature validation and IAM checks. The console prefix serves
-the operations whose shapes the two APIs share, `ListMetrics`, `DescribeAlarms`,
-`GetMetricStatistics` and `DeleteAlarms`, on the same metrics and alarms; `DescribeAlarms` lists a
-metric-math alarm's `Metrics` in the current API's shape. Every other operation through it, such
-as the console's `GetMetricData` with `Defaults` and `Metrics`, and a request setting a member
-only the console API has (`CountOnlyRequest`, `SegmentId`, `TotalSegments`,
-`ExcludeAutoscalingAlarms`, `ExcludeManagedAlarms`), returns HTTP 400 `UnsupportedOperation`.
+`ListMetrics`, `DescribeAlarms`, `GetMetricStatistics` and `DeleteAlarms` on the same metrics and
+alarms, for requests that set only members the current API defines. It returns HTTP 400
+`UnsupportedOperation` for every other operation, such as the console's `GetMetricData` with
+`Defaults` and `Metrics`; for a request that sets any other member, such as the console's
+`CountOnlyRequest`, to a value other than `false` or `null`; and for a `DescribeAlarms` answer
+that would list a metric math alarm, whose `Metrics` items the console's API shapes differently.
 The console prefix is JSON only: a CBOR request naming it returns HTTP 404
 `UnknownOperationException`, and a Smithy RPC v2 request HTTP 404.
 
