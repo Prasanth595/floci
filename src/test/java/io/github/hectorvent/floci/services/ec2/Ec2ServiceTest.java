@@ -5332,6 +5332,29 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createImageOfAnInstanceStoredWithItsRootAtXvdaIsRootedThere() {
+        // Before launches took their root device from the AMI, every instance was rooted at
+        // /dev/xvda whatever its AMI said; such a stored instance is captured as it is.
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Image sourceAmi = service.registerImage("us-east-1", "sda1-rooted", null, null, "/dev/sda1",
+                List.of(blockDeviceMapping("snap-stored", 16)));
+        Instance inst = service.runInstances("us-east-1", sourceAmi.getImageId(), "t3.micro", 1, 1,
+                null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        inst.setRootDeviceName("/dev/xvda");
+        service.describeVolumes("us-east-1", List.of(inst.getRootVolumeId()), Map.of())
+                .getFirst().getAttachments().getFirst().setDevice("/dev/xvda");
+
+        Image image = service.createImage("us-east-1", inst.getInstanceId(), "captured", null, true);
+
+        assertEquals("/dev/xvda", image.getRootDeviceName());
+        assertEquals(List.of("/dev/xvda"), image.getBlockDeviceMappings().stream()
+                .map(BlockDeviceMapping::getDeviceName).toList());
+        assertEquals(16, image.getBlockDeviceMappings().getFirst().getEbs().getVolumeSize());
+    }
+
+    @Test
     void createImageCapturesAVolumeAttachedAfterLaunch() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),

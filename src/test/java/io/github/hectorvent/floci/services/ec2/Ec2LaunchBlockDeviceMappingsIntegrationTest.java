@@ -299,6 +299,140 @@ class Ec2LaunchBlockDeviceMappingsIntegrationTest {
     }
 
     @Test
+    void createImageRecordsAnAliasedRootAsTheRootAndEachDeviceOnce() {
+        String account = account();
+        String image = ec2(account, "RegisterImage", "Name", "aliased-capture-" + account,
+                "RootDeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.DeviceName", "xvda",
+                "BlockDeviceMapping.1.Ebs.VolumeSize", "30",
+                "BlockDeviceMapping.1.Ebs.VolumeType", "gp2",
+                "BlockDeviceMapping.2.DeviceName", "/dev/sdf",
+                "BlockDeviceMapping.2.Ebs.VolumeSize", "10")
+                .getString("RegisterImageResponse.imageId");
+        String instance = launch(account, image,
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.VolumeType", "io1",
+                "BlockDeviceMapping.1.Ebs.Iops", "3000",
+                "BlockDeviceMapping.2.DeviceName", "/dev/sdf",
+                "BlockDeviceMapping.2.NoDevice", "");
+        String zone = ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".placement.availabilityZone");
+        String attached = ec2(account, "CreateVolume", "Size", "4", "AvailabilityZone", zone)
+                .getString("CreateVolumeResponse.volumeId");
+        ec2(account, "AttachVolume", "VolumeId", attached, "InstanceId", instance, "Device", "sdf");
+
+        String captured = ec2(account, "CreateImage", "InstanceId", instance, "Name", "capture-" + account)
+                .getString("CreateImageResponse.imageId");
+
+        // The root entry the AMI spells "xvda" is recorded from the root volume, io1, with a
+        // snapshot of its own. "sdf" is the device the AMI maps as "/dev/sdf", recorded once and as
+        // the instance has it: the 4 GiB volume attached there, kept on termination, not the AMI's
+        // 10 GiB.
+        String item = "DescribeImagesResponse.imagesSet.item.blockDeviceMapping.item";
+        XmlPath described = ec2(account, "DescribeImages", "ImageId.1", captured);
+        assertEquals(List.of("xvda", "/dev/sdf"), described.getList(item + ".deviceName", String.class));
+        assertEquals("io1", described.getString(item + "[0].ebs.volumeType"));
+        assertEquals("30", described.getString(item + "[0].ebs.volumeSize"));
+        assertTrue(described.getString(item + "[0].ebs.snapshotId").startsWith("snap-"));
+        assertEquals("4", described.getString(item + "[1].ebs.volumeSize"));
+        assertEquals("false", described.getString(item + "[1].ebs.deleteOnTermination"));
+        assertTrue(described.getString(item + "[1].ebs.snapshotId").startsWith("snap-"));
+    }
+
+    @Test
+    void createImageRecordsTheVolumesTheInstanceHas() {
+        String account = account();
+        String image = registerImage(account);
+        String instance = launch(account, image,
+                "BlockDeviceMapping.1.DeviceName", "/dev/sda1",
+                "BlockDeviceMapping.1.Ebs.VolumeSize", "30",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false");
+        // The AMI's /dev/sdf volume leaves the instance before the capture.
+        ec2(account, "DetachVolume", "VolumeId", deviceVolume(account, instance, "/dev/sdf"));
+
+        String captured = ec2(account, "CreateImage", "InstanceId", instance, "Name", "volumes-" + account)
+                .getString("CreateImageResponse.imageId");
+
+        String item = "DescribeImagesResponse.imagesSet.item.blockDeviceMapping.item";
+        XmlPath described = ec2(account, "DescribeImages", "ImageId.1", captured);
+        assertEquals(List.of("/dev/sda1"), described.getList(item + ".deviceName", String.class));
+        assertEquals("30", described.getString(item + ".ebs.volumeSize"));
+        assertEquals("false", described.getString(item + ".ebs.deleteOnTermination"));
+        assertEquals("gp2", described.getString(item + ".ebs.volumeType"));
+        // A launch from the new AMI gets the root as the instance had it, and no /dev/sdf.
+        String relaunched = launch(account, captured);
+        XmlPath relaunchedDevices = ec2(account, "DescribeInstances", "InstanceId.1", relaunched);
+        assertEquals(List.of("/dev/sda1"),
+                relaunchedDevices.getList(INSTANCE + ".blockDeviceMapping.item.deviceName", String.class));
+        assertEquals("false", relaunchedDevices.getString(INSTANCE + ".blockDeviceMapping.item.ebs.deleteOnTermination"));
+        volume(account, deviceVolume(account, relaunched, "/dev/sda1"))
+                .body("DescribeVolumesResponse.volumeSet.item.size", equalTo("30"));
+    }
+
+    @Test
+    void createImageKeepsTheAmiRootEntryWhenTheInstanceHasNoRootVolume() {
+        String account = account();
+        String image = registerImage(account);
+        String instance = launch(account, image);
+        ec2(account, "StopInstances", "InstanceId.1", instance);
+        ec2(account, "DetachVolume", "VolumeId", deviceVolume(account, instance, "/dev/sda1"), "Force", "true");
+
+        String captured = ec2(account, "CreateImage", "InstanceId", instance, "Name", "rootless-" + account,
+                "NoReboot", "true").getString("CreateImageResponse.imageId");
+
+        // The root is the AMI's, on its 16 GiB snapshot; /dev/sdf is the volume the instance has.
+        String item = "DescribeImagesResponse.imagesSet.item.blockDeviceMapping.item";
+        XmlPath described = ec2(account, "DescribeImages", "ImageId.1", captured);
+        assertEquals(List.of("/dev/sda1", "/dev/sdf"), described.getList(item + ".deviceName", String.class));
+        assertEquals("16", described.getString(item + "[0].ebs.volumeSize"));
+    }
+
+    @Test
+    void createImageRecordsTheVolumeAtTheRootDeviceAsTheRoot() {
+        String account = account();
+        String image = registerImage(account);
+        String instance = launch(account, image);
+        String zone = ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".placement.availabilityZone");
+        String formerRoot = deviceVolume(account, instance, "/dev/sda1");
+        ec2(account, "StopInstances", "InstanceId.1", instance);
+        ec2(account, "DetachVolume", "VolumeId", formerRoot, "Force", "true");
+        String newRoot = ec2(account, "CreateVolume", "Size", "20", "AvailabilityZone", zone)
+                .getString("CreateVolumeResponse.volumeId");
+        ec2(account, "AttachVolume", "VolumeId", newRoot, "InstanceId", instance, "Device", "/dev/sda1");
+        ec2(account, "AttachVolume", "VolumeId", formerRoot, "InstanceId", instance, "Device", "/dev/sdh");
+
+        String captured = ec2(account, "CreateImage", "InstanceId", instance, "Name", "swapped-root-" + account,
+                "NoReboot", "true").getString("CreateImageResponse.imageId");
+
+        // The root is the 20 GiB volume now at /dev/sda1; the former root is a data device.
+        String item = "DescribeImagesResponse.imagesSet.item.blockDeviceMapping.item";
+        XmlPath described = ec2(account, "DescribeImages", "ImageId.1", captured);
+        assertEquals(List.of("/dev/sda1", "/dev/sdf", "/dev/sdh"), described.getList(item + ".deviceName", String.class));
+        assertEquals("20", described.getString(item + "[0].ebs.volumeSize"));
+        assertEquals("16", described.getString(item + "[2].ebs.volumeSize"));
+    }
+
+    @Test
+    void createImageOfAnInstanceFromAnUnknownAmiIsRootedWhereTheInstanceIs() {
+        String account = account();
+        String instance = launch(account, "ami-0c55b159cbfafe1f0");
+
+        String captured = ec2(account, "CreateImage", "InstanceId", instance, "Name", "unknown-source-" + account)
+                .getString("CreateImageResponse.imageId");
+
+        XmlPath described = ec2(account, "DescribeImages", "ImageId.1", captured);
+        assertEquals("/dev/xvda", described.getString("DescribeImagesResponse.imagesSet.item.rootDeviceName"));
+        assertEquals(List.of("/dev/xvda"), described.getList(
+                "DescribeImagesResponse.imagesSet.item.blockDeviceMapping.item.deviceName", String.class));
+        // A launch from it gets that root alone.
+        String relaunched = launch(account, captured);
+        assertEquals(List.of("/dev/xvda"), ec2(account, "DescribeInstances", "InstanceId.1", relaunched)
+                .getList(INSTANCE + ".blockDeviceMapping.item.deviceName", String.class));
+        assertEquals(2, volumeIds(account).size());
+    }
+
+    @Test
     void anAmiEntryWithoutAnEbsBlockCreatesNoVolume() {
         String account = account();
         String image = ec2(account, "RegisterImage", "Name", "instance-store-" + account,
@@ -316,6 +450,11 @@ class Ec2LaunchBlockDeviceMappingsIntegrationTest {
         assertEquals(List.of("/dev/xvda"), ec2(account, "DescribeInstances", "InstanceId.1", instance)
                 .getList(INSTANCE + ".blockDeviceMapping.item.deviceName", String.class));
         assertEquals(1, volumeIds(account).size());
+        // A capture keeps the entries that describe no EBS volume.
+        String captured = ec2(account, "CreateImage", "InstanceId", instance, "Name", "instance-store-capture-" + account)
+                .getString("CreateImageResponse.imageId");
+        assertEquals(List.of("/dev/xvda", "/dev/sdb", "/dev/sdc"), ec2(account, "DescribeImages", "ImageId.1", captured)
+                .getList("DescribeImagesResponse.imagesSet.item.blockDeviceMapping.item.deviceName", String.class));
     }
 
     @Test

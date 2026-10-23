@@ -8154,10 +8154,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // The new AMI inherits what it was captured from rather than the registerImage defaults,
         // so DescribeImages does not report a generic x86_64 / /dev/sda1 image with no devices.
         Image sourceImage = findImageForCapture(region, source.getImageId());
+        // The image is rooted where the instance is: at its AMI's RootDeviceName for a launch, at
+        // the default root for one from an AMI Floci does not know, and at /dev/xvda for an
+        // instance stored before launches took their AMI's root device.
+        String rootDeviceName = source.getRootDeviceName() != null ? source.getRootDeviceName()
+                : sourceImage != null ? sourceImage.getRootDeviceName() : null;
         Image image = registerImage(region, name, description,
-                sourceImage != null ? sourceImage.getArchitecture() : null,
-                sourceImage != null ? sourceImage.getRootDeviceName() : null,
-                captureBlockDeviceMappings(region, source, sourceImage));
+                sourceImage != null ? sourceImage.getArchitecture() : null, rootDeviceName,
+                captureBlockDeviceMappings(region, source, sourceImage, rootDeviceName));
 
         // Carry the launchable ancestor so RunInstances on this AMI starts the same guest instead
         // of falling through to the catalog default. This is also the fallback when the file
@@ -8221,41 +8225,56 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * The devices the captured AMI reports. AWS captures what the source AMI describes plus any
-     * volume attached to the instance afterwards, so a data volume added post-launch is part of
-     * the image rather than being dropped.
+     * The devices the captured AMI reports. AWS snapshots the instance's root volume and every
+     * other EBS volume attached to it, so the image records those volumes as the instance has
+     * them, each with a snapshot of its own, under the source AMI's spelling where that AMI maps
+     * the device. The AMI's entries that describe no EBS volume, such as instance store volumes,
+     * are kept; an EBS device the instance no longer has, one its launch suppressed or a volume
+     * since detached, is left out. A root the instance has no volume for keeps the AMI's entry.
      */
     private List<BlockDeviceMapping> captureBlockDeviceMappings(String region, Instance source,
-                                                                Image sourceImage) {
+                                                                Image sourceImage, String rootDevice) {
         List<BlockDeviceMapping> mappings = new ArrayList<>(sourceImageMappings(sourceImage));
-        // The root is captured from the volume the instance actually has, which a launch mapping
-        // may have given a different type from the source AMI's.
-        Volume rootVolume = source.getRootVolumeId() == null ? null
-                : volumes.get(key(region, source.getRootVolumeId())).orElse(null);
-        if (rootVolume != null && sourceImage != null) {
-            mappings.stream()
-                    .filter(m -> m.getEbs() != null
-                            && Objects.equals(m.getDeviceName(), sourceImage.getRootDeviceName()))
-                    .forEach(m -> m.getEbs().setVolumeType(rootVolume.getVolumeType()));
+        // Devices compare as AttachVolume compares them, "sdf" being the AMI's "/dev/sdf", and the
+        // volume attached at the image's root device takes the root entry.
+        Map<String, Integer> devices = new HashMap<>();
+        for (int i = 0; i < mappings.size(); i++) {
+            if (mappings.get(i).getDeviceName() != null) {
+                devices.putIfAbsent(normalizedDevice(mappings.get(i).getDeviceName()), i);
+            }
         }
-        Set<String> devices = mappings.stream()
-                .map(BlockDeviceMapping::getDeviceName)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
+        Set<Integer> held = new HashSet<>();
         for (Volume volume : volumes.scan(k -> true)) {
-            if (!region.equals(volume.getRegion())
-                    || volume.getVolumeId().equals(source.getRootVolumeId())) {
+            if (!region.equals(volume.getRegion())) {
                 continue;
             }
             for (VolumeAttachment attachment : volume.getAttachments()) {
-                if (!source.getInstanceId().equals(attachment.getInstanceId())
-                        || !devices.add(attachment.getDevice())) {
+                if (!source.getInstanceId().equals(attachment.getInstanceId()) || attachment.getDevice() == null) {
                     continue;
                 }
-                mappings.add(attachedMapping(volume, attachment));
+                String device = attachment.getDevice();
+                BlockDeviceMapping captured = attachedMapping(volume, attachment);
+                Integer mapped = devices.get(normalizedDevice(device));
+                if (mapped == null) {
+                    devices.put(normalizedDevice(device), mappings.size());
+                    held.add(mappings.size());
+                    mappings.add(captured);
+                } else {
+                    captured.setDeviceName(mappings.get(mapped).getDeviceName());
+                    mappings.set(mapped, captured);
+                    held.add(mapped);
+                }
             }
         }
-        return mappings.isEmpty() ? null : mappings;
+        List<BlockDeviceMapping> recorded = new ArrayList<>();
+        for (int i = 0; i < mappings.size(); i++) {
+            BlockDeviceMapping mapping = mappings.get(i);
+            if (held.contains(i) || !describesVolume(mapping.getEbs())
+                    || isSameDevice(mapping.getDeviceName(), rootDevice)) {
+                recorded.add(mapping);
+            }
+        }
+        return recorded.isEmpty() ? null : recorded;
     }
 
     /** The device an attached volume contributes, snapshotted as of the capture. */
@@ -8283,7 +8302,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<BlockDeviceMapping> declared = sourceImage.getBlockDeviceMappings();
         if (declared != null && !declared.isEmpty()) {
             return declared.stream()
-                    .map(m -> recapture(m, Objects.equals(m.getDeviceName(), sourceImage.getRootDeviceName())))
+                    .map(m -> recapture(m, isSameDevice(m.getDeviceName(), sourceImage.getRootDeviceName())))
                     .toList();
         }
         String rootDeviceName = sourceImage.getRootDeviceName();
