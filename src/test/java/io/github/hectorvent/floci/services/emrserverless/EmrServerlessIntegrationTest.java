@@ -17,6 +17,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 
 import static org.hamcrest.Matchers.*;
@@ -337,5 +338,35 @@ public class EmrServerlessIntegrationTest {
         assertTrue(createdAt.stripTrailingZeros().scale() <= 3, "createdAt " + createdAt + " is finer than milliseconds");
         assertEquals(0, createdAt.compareTo(updatedAt), "updatedAt " + updatedAt + " differs from createdAt " + createdAt);
         assertEquals(0, createdAt.compareTo(listed), "ListApplications reports createdAt " + listed);
+    }
+
+    @Test
+    @Order(10)
+    void listApplicationsRefusesStatesThatDoNotExistAndPagesOutsideOneToFifty() {
+        givenReq()
+            .queryParam("states", "RUNNING")
+            .queryParam("maxResults", 51)
+        .when()
+            .get("/applications")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("2 validation errors detected: "
+                    + "Value '51' at 'maxResults' failed to satisfy constraint: "
+                    + "Member must have value less than or equal to 50; "
+                    + "Value '[RUNNING]' at 'states' failed to satisfy constraint: Member must satisfy constraint: "
+                    + "[Member must satisfy enum value set: "
+                    + "[CREATING, CREATED, STARTING, STARTED, STOPPING, STOPPED, TERMINATED]]"));
+
+        givenReq()
+            .queryParam("states", List.of("CREATING", "CREATED", "STARTING", "STARTED", "STOPPING", "STOPPED",
+                    "TERMINATED", "CREATED"))
+        .when()
+            .get("/applications")
+        .then()
+            .statusCode(400)
+            .body("message", equalTo("1 validation error detected: "
+                    + "Value '[CREATING, CREATED, STARTING, STARTED, STOPPING, STOPPED, TERMINATED, CREATED]' "
+                    + "at 'states' failed to satisfy constraint: Member must have length less than or equal to 7"));
     }
 }

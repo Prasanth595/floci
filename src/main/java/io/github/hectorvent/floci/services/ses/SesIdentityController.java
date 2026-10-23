@@ -436,9 +436,7 @@ public class SesIdentityController {
                 // clear). Within a valid object, an omitted or explicit-null ConfigurationSetName
                 // clears the association (as does an empty body / {}).
                 JsonNode request = objectMapper.readTree(body);
-                if (request == null || !request.isObject()) {
-                    throw new AwsException("SerializationException", null, 400);
-                }
+                requireJsonObject(request);
                 JsonNode node = request.path("ConfigurationSetName");
                 if (!node.isMissingNode() && !node.isNull()) {
                     if (!node.isTextual()) {

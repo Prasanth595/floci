@@ -46,6 +46,8 @@ public class ResourceArnBuilder {
     /** The only scheme IAM accepts on an OIDC provider URL, and the part its ARN drops. */
     private static final String OIDC_URL_SCHEME = "https://";
 
+    private static final String DELEGATION_REQUEST_RESOURCE = "delegation-request/";
+
     /** What a service-linked role deletion task identifier starts with; see its resolver. */
     private static final String DELETION_TASK_PREFIX = "task" + ServiceLinkedRoles.PATH;
 
@@ -105,9 +107,9 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resources a request is checked against. Scheduler and Pipes ARNs are minted in {@code partition},
-     * the request's, as those services mint theirs, so a Region no partition publishes gets the deployment's
-     * partition rather than {@code aws}.
+     * The resources a request is checked against. Scheduler, Pipes and DSQL ARNs are minted in
+     * {@code partition}, the request's, as those services mint theirs, so a Region no partition publishes gets
+     * the deployment's partition rather than {@code aws}.
      */
     public List<String> buildResources(String credentialScope, ContainerRequestContext ctx,
                                        String region, String accountId, String partition) {
@@ -128,6 +130,7 @@ public class ResourceArnBuilder {
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
             case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
+            case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             default               -> List.of("*");
         };
     }
@@ -285,7 +288,8 @@ public class ResourceArnBuilder {
             "AcceptDelegationRequest", ResourceArnBuilder::delegationRequestArn,
             "RejectDelegationRequest", ResourceArnBuilder::delegationRequestArn,
             "GetDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "SendDelegationToken", ResourceArnBuilder::delegationRequestArn);
+            "SendDelegationToken", ResourceArnBuilder::delegationRequestArn,
+            "GetHumanReadableSummary", ResourceArnBuilder::summarizedRequestArn);
 
     /** How one of {@link #DERIVED_RESOLVERS} reads its resource out of the request. */
     interface DerivedResolver {
@@ -484,8 +488,40 @@ public class ResourceArnBuilder {
         if (id == null || id.isBlank()) {
             return List.of("*");
         }
-        return List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
-                "delegation-request/" + id).toString());
+        return List.of(delegationRequestArn(region, accountId, id));
+    }
+
+    /**
+     * The delegation request a summary is asked for, named by the ARN Floci mints rather than
+     * the one the caller spelled.
+     *
+     * <p>{@code GetHumanReadableSummary} is the one action of this family that takes an ARN, and
+     * the lookup reads only the request id out of it, deliberately: the id is what resolves a
+     * request across accounts. So the string as it arrived cannot be what the request is
+     * authorized against. A caller allowed by a wildcard and denied on one request could
+     * otherwise respell that request's ARN, under another account or another service, and miss
+     * the deny while still reading the summary. The id is lifted out and the canonical ARN is
+     * minted around it instead, which is the same ARN the five by-id actions resolve to.
+     *
+     * <p>A value that is no ARN, or an ARN naming anything but an IAM delegation request, leaves
+     * the wildcard standing: the service answers {@code NOT_SUPPORTED} or {@code InvalidInput}
+     * for those without reading a request at all.
+     */
+    private List<String> summarizedRequestArn(ContainerRequestContext ctx, String region,
+                                              String accountId) {
+        return AwsArnUtils
+                .resourceIfArnFor(RequestBodyReader.formField(ctx, "EntityArn"), "iam")
+                .filter(resource -> resource.startsWith(DELEGATION_REQUEST_RESOURCE))
+                .map(resource -> resource.substring(DELEGATION_REQUEST_RESOURCE.length()))
+                .filter(id -> !id.isBlank())
+                .map(id -> List.of(delegationRequestArn(region, accountId, id)))
+                .orElseGet(() -> List.of("*"));
+    }
+
+    /** The ARN a delegation request carries, which is its id under the calling account. */
+    private static String delegationRequestArn(String region, String accountId, String id) {
+        return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                DELEGATION_REQUEST_RESOURCE + id).toString();
     }
 
     /** An OIDC provider URL as its ARN carries it, which is the URL without its scheme. */
@@ -570,10 +606,21 @@ public class ResourceArnBuilder {
         if (iamService == null) {
             return List.of("*");
         }
-        return SigV4CredentialScope.accessKeyId(ctx.getHeaderString("Authorization"))
-                .flatMap(accessKeyId -> iamService.get().findUserNameByAccessKeyId(accessKeyId))
+        Optional<String> accessKeyId = SigV4CredentialScope.accessKeyId(ctx.getHeaderString("Authorization"));
+        Optional<List<String>> user = accessKeyId
+                .flatMap(key -> iamService.get().findUserNameByAccessKeyId(key))
                 .flatMap(userName -> storedIamEntity("user", userName, accountId))
-                .map(stored -> List.of(stored.arn()))
+                .map(stored -> List.of(stored.arn()));
+        if (user.isPresent()) {
+            return user.get();
+        }
+        // A caller that is the account root names the root user, which is what these actions act
+        // on when they are called with no UserName. AWS's own task policy for auditing root
+        // credentials is written against arn:aws:iam::*:root, so a privileged session calling
+        // GetUser or ListAccessKeys has to name that resource rather than the wildcard.
+        return accessKeyId.flatMap(key -> iamService.get().resolveCallerArn(key))
+                .filter(arn -> arn.endsWith(":root"))
+                .map(List::of)
                 .orElse(List.of("*"));
     }
 
@@ -708,10 +755,11 @@ public class ResourceArnBuilder {
         // path: /2015-03-31/functions/name or similar
         String name = extractSegmentAfter(path, "functions");
         if (name == null) return "*";
-        boolean invoke = path.endsWith("/functions/" + name + "/invocations")
-                || path.endsWith("/functions/" + name + "/response-streaming-invocations");
+        boolean qualifiedTarget = path.endsWith("/functions/" + name + "/invocations")
+                || path.endsWith("/functions/" + name + "/response-streaming-invocations")
+                || path.endsWith("/functions/" + name + "/provisioned-concurrency");
         try {
-            if (!invoke) {
+            if (!qualifiedTarget) {
                 LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(name);
                 boolean namedAccount = readsInTheAccountItNames(path, name, ref, ctx);
                 return AwsArnUtils.Arn.of("lambda",
@@ -933,6 +981,29 @@ public class ResourceArnBuilder {
         if (scheduleGroup != null) {
             return new AwsArnUtils.Arn(partition, "scheduler", region, accountId,
                     "schedule-group/" + scheduleGroup).toString();
+        }
+        return taggedResource(ctx);
+    }
+
+    /**
+     * The resource of an Aurora DSQL route, as the Service Authorization Reference names it: the cluster
+     * a cluster route names, the stream a stream route names (its cluster, to create or list streams), or
+     * the ARN a tagging route names. CreateCluster and ListClusters are checked against
+     * {@code cluster/*}, as DSQL checks them (measured).
+     */
+    private String buildDsqlArn(String path, ContainerRequestContext ctx, String region, String accountId,
+                                String partition) {
+        String cluster = "/cluster".equals(path) ? "*" : segmentAfterPrefix(path, "/cluster/");
+        if (cluster == null) {
+            cluster = segmentAfterPrefix(path, "/clusters/");
+        }
+        String streamCluster = segmentAfterPrefix(path, "/stream/");
+        if (streamCluster != null) {
+            String stream = segmentAfterPrefix(path, "/stream/" + streamCluster + "/");
+            cluster = stream == null ? streamCluster : streamCluster + "/stream/" + stream;
+        }
+        if (cluster != null) {
+            return new AwsArnUtils.Arn(partition, "dsql", region, accountId, "cluster/" + cluster).toString();
         }
         return taggedResource(ctx);
     }

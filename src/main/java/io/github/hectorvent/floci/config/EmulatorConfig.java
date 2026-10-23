@@ -435,6 +435,21 @@ public interface EmulatorConfig {
 
         @WithDefault("5000")
         long flushIntervalMs();
+
+        /**
+         * How table items are laid out on disk: {@code single-file} keeps every table in one
+         * {@code dynamodb-items.json}, rewritten on any change; {@code per-table} writes one file
+         * per table under {@code dynamodb-items/}, so a change rewrites only its own table.
+         */
+        @WithDefault("single-file")
+        String itemLayout();
+
+        /**
+         * With the {@code per-table} layout, how many files each table is split into. An item's
+         * write rewrites only its own file. Changing it rewrites the files on the next start.
+         */
+        @WithDefault("1")
+        int itemShards();
     }
 
     interface SnsStorageConfig {
@@ -1368,6 +1383,13 @@ public interface EmulatorConfig {
 
         @WithDefault("local-emulator-secret")
         String receiptHandleSecret();
+
+        /**
+         * Publish the AWS/SQS CloudWatch metrics of every active queue once a minute, as SQS does.
+         * Env: FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED
+         */
+        @WithDefault("true")
+        boolean cloudwatchMetricsEnabled();
 
         /**
          * Shape of the QueueUrl returned by CreateQueue, GetQueueUrl, ListQueues and
@@ -2987,6 +3009,15 @@ public interface EmulatorConfig {
 
         @WithDefault("300")
         int containerIdleTimeoutSeconds();
+
+        /**
+         * One shutdown drain budget shared by provisioned and on-demand Lambda containers.
+         * Values outside 1 through 300 seconds fail initialization.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_CONTAINER_DRAIN_TIMEOUT_SECONDS
+         */
+        @WithDefault("15")
+        int containerDrainTimeoutSeconds();
 
         /**
          * Maximum idle (warm) containers kept per function. A container released when the

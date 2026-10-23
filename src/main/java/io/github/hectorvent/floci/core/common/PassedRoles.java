@@ -28,6 +28,11 @@ import java.util.regex.Pattern;
  * role to an instance even if they don't have the iam:PassRole permission", so the role is checked
  * where the template is created.
  *
+ * <p>IAM's {@code AddRoleToInstanceProfile} passes the role it adds to {@code ec2.amazonaws.com}, since
+ * every instance running with the profile then gets that role's credentials: "The caller of this
+ * operation must be granted the PassRole permission on the IAM role by a permissions policy." The
+ * request names the role without its path, so it is checked on the ARN IAM holds the role under.
+ *
  * <p>An Auto Scaling group is different: the EC2 Auto Scaling user guide has the permission "needed on
  * the IAM identity (user or role) that creates or updates an Auto Scaling group using a launch template
  * that specifies an instance profile", and an instance refresh to a desired configuration needs it
@@ -54,6 +59,16 @@ import java.util.regex.Pattern;
  * "Even when you don't specify the AdministrationRoleARN parameter, the IAM principal calling
  * CreateStackSet or UpdateStackSet must have iam:PassRole permission for the
  * AWSCloudFormationStackSetAdministrationRole role."
+ *
+ * <p>A Redshift request passes the roles it associates with a cluster, to {@code redshift.amazonaws.com}:
+ * the Redshift management guide has "To associate an IAM role with a cluster, a user must have
+ * iam:PassRole permission for that IAM role." A role a request names only as the cluster's default
+ * passes nothing of its own, since the default is one of the roles the cluster holds ("To set an
+ * associated IAM role as the default for the cluster"). A Redshift Serverless namespace's roles and a
+ * scheduled action's role go to {@code redshift-serverless.amazonaws.com}, and so does a namespace's
+ * default, which Floci keeps whether or not the namespace's roles hold it. Redshift takes a role only
+ * under the ARN IAM holds it under, path included, so the ARN as the request names it is the role it
+ * passes.
  */
 final class PassedRoles {
 
@@ -77,6 +92,8 @@ final class PassedRoles {
     private static final String CLOUDFORMATION = ServicePrincipals.of("cloudformation");
     private static final String AUTOSCALING = ServicePrincipals.of("autoscaling");
     private static final String APPLICATION_AUTOSCALING = ServicePrincipals.of("application-autoscaling");
+    private static final String REDSHIFT = ServicePrincipals.of("redshift");
+    private static final String REDSHIFT_SERVERLESS = ServicePrincipals.of("redshift-serverless");
 
     private static final String STACK_SET_ADMINISTRATION_ROLE = "AWSCloudFormationStackSetAdministrationRole";
     private static final String SERVICE_MANAGED = "SERVICE_MANAGED";
@@ -118,6 +135,9 @@ final class PassedRoles {
 
         /** The ARN of the role {@code roleName}, a name with any path, names in the request's account. */
         String roleArn(String roleName);
+
+        /** The ARN, path included, of the role IAM holds under {@code roleName}; empty when it holds none. */
+        Optional<String> heldRoleArn(String roleName);
     }
 
     private PassedRoles() {
@@ -137,6 +157,7 @@ final class PassedRoles {
             case "ec2:CreateLaunchTemplate", "ec2:CreateLaunchTemplateVersion" ->
                     fromInstanceProfile(ctx, lookups, "LaunchTemplateData.IamInstanceProfile");
             case "ec2:CreateFlowLogs" -> fromForm(ctx, VPC_FLOW_LOGS, "DeliverLogsPermissionArn");
+            case "iam:AddRoleToInstanceProfile" -> instanceProfileRole(ctx, lookups);
             case "ecs:RegisterTaskDefinition" -> ecsTaskDefinition(jsonBody(ctx), lookups);
             case "ecs:RunTask", "ecs:StartTask" -> ecsTask(jsonBody(ctx), lookups);
             case "ecs:CreateService", "ecs:UpdateService" -> ecsService(jsonBody(ctx), lookups);
@@ -162,8 +183,23 @@ final class PassedRoles {
             case "autoscaling:StartInstanceRefresh" -> instanceRefresh(ctx, lookups);
             case "autoscaling:PutLifecycleHook" -> fromForm(ctx, AUTOSCALING, "RoleARN");
             case "application-autoscaling:RegisterScalableTarget" -> fromJson(ctx, APPLICATION_AUTOSCALING, "RoleARN");
+            case "redshift:CreateCluster", "redshift:RestoreFromClusterSnapshot" -> redshiftRoles(ctx, "IamRoles");
+            case "redshift:ModifyClusterIamRoles" -> redshiftRoles(ctx, "AddIamRoles");
+            case "redshift-serverless:CreateNamespace", "redshift-serverless:UpdateNamespace" -> namespaceRoles(ctx);
+            case "redshift-serverless:CreateScheduledAction", "redshift-serverless:UpdateScheduledAction" ->
+                    fromJson(ctx, REDSHIFT_SERVERLESS, "roleArn");
             default -> List.of();
         };
+    }
+
+    /**
+     * The role AddRoleToInstanceProfile adds, which {@code RoleName} names without its path: the ARN IAM
+     * holds it under, or else the one the name gives, so a role IAM does not hold is checked as named.
+     */
+    private static List<PassedRole> instanceProfileRole(ContainerRequestContext ctx, Lookups lookups) {
+        String name = blankToNull(IamConditionContextResolver.formParameters(ctx).get("RoleName"));
+        return name == null
+                ? List.of() : passed(List.of(lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name))), EC2);
     }
 
     private static List<PassedRole> ecsTaskDefinition(JsonNode body, Lookups lookups) {
@@ -333,6 +369,33 @@ final class PassedRoles {
             }
             members.add(member);
         }
+    }
+
+    /**
+     * The roles a Redshift request lists under {@code list}, every member the Redshift handler reads: the
+     * list's shape names them {@code IamRoleArn}.
+     */
+    private static List<PassedRole> redshiftRoles(ContainerRequestContext ctx, String list) {
+        Pattern member = AwsQueryLists.memberKeys(list, "IamRoleArn");
+        List<String> roles = new ArrayList<>();
+        IamConditionContextResolver.formParameters(ctx).forEach((key, value) -> {
+            if (member.matcher(key).matches()) {
+                roles.add(value);
+            }
+        });
+        return passed(roles, REDSHIFT);
+    }
+
+    /** A Redshift Serverless namespace's roles, and its default when they do not hold it. */
+    private static List<PassedRole> namespaceRoles(ContainerRequestContext ctx) {
+        JsonNode body = jsonBody(ctx);
+        List<String> roles = new ArrayList<>(values(body, "iamRoles", "[]"));
+        for (String defaultRole : values(body, "defaultIamRoleArn")) {
+            if (!roles.contains(defaultRole)) {
+                roles.add(defaultRole);
+            }
+        }
+        return passed(roles, REDSHIFT_SERVERLESS);
     }
 
     private static List<PassedRole> fromJson(ContainerRequestContext ctx, String service, String... path) {

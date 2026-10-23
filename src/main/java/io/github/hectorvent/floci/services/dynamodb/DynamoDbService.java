@@ -53,6 +53,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -169,8 +170,7 @@ public class DynamoDbService {
                            EmulatorConfig config) {
         this(storageFactory.create("dynamodb", "dynamodb-tables.json",
                 new TypeReference<Map<String, TableDefinition>>() {}),
-             storageFactory.create("dynamodb", "dynamodb-items.json",
-                new TypeReference<Map<String, Map<String, JsonNode>>>() {}),
+             itemStore(storageFactory, config),
              storageFactory.create("dynamodb", "dynamodb-exports.json",
                 new TypeReference<Map<String, ExportDescription>>() {}),
              storageFactory.create("dynamodb", "dynamodb-imports.json",
@@ -183,6 +183,20 @@ public class DynamoDbService {
              config.services().dynamodb().vectorIndexAllocationSeconds(),
              config.services().dynamodb().vectorIndexBackfillSeconds(),
              config.services().dynamodb().latestRestorableLagSeconds(), Clock.systemUTC());
+    }
+
+    /** The item store the configured {@code item-layout} selects; package-private for tests. */
+    static StorageBackend<String, Map<String, JsonNode>> itemStore(StorageFactory storageFactory,
+                                                                  EmulatorConfig config) {
+        TypeReference<Map<String, Map<String, JsonNode>>> type = new TypeReference<>() {};
+        String layout = Objects.requireNonNullElse(config.storage().services().dynamodb().itemLayout(), "single-file");
+        return switch (layout) {
+            case "single-file" -> storageFactory.create("dynamodb", "dynamodb-items.json", type);
+            case "per-table" -> storageFactory.createPartitioned("dynamodb", "dynamodb-items.json", type,
+                    JsonNode.class, config.storage().services().dynamodb().itemShards());
+            default -> throw new IllegalArgumentException(
+                    "Unknown floci.storage.services.dynamodb.item-layout: " + layout);
+        };
     }
 
     /** Package-private constructor for testing. */
@@ -316,8 +330,17 @@ public class DynamoDbService {
         // scanAllAccountsRaw() returns every account's items already in the "accountId/
         // region::tableName" key format itemsByTable expects.
         if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
-            aware.scanAllAccountsRaw().forEach((rawKey, items) ->
-                itemsByTable.put(rawKey, rekeyPersistedItems(persistedTables.get(rawKey), items)));
+            aware.scanAllAccountsRaw().forEach((rawKey, items) -> {
+                ConcurrentSkipListMap<String, JsonNode> rekeyed = rekeyPersistedItems(persistedTables.get(rawKey), items);
+                itemsByTable.put(rawKey, rekeyed);
+                int slash = rawKey.indexOf('/');
+                if (aware.writesEntries() && slash > 0 && !rekeyed.keySet().equals(items.keySet())) {
+                    // Entry writes address items by their current key, so a store still holding
+                    // older keys would keep an item that is later deleted under its new one.
+                    aware.putForAccount(rawKey.substring(0, slash), rawKey.substring(slash + 1),
+                            new HashMap<>(rekeyed));
+                }
+            });
             return;
         }
         for (String key : itemStore.keys()) {
@@ -359,6 +382,50 @@ public class DynamoDbService {
         } else {
             itemStore.delete(storageKey);
         }
+    }
+
+    /**
+     * Persists the current state of the given items of one table. A store that writes single map
+     * entries gets only those items; any other store gets the whole table, as before.
+     */
+    private void persistItems(String storageKey, Collection<String> itemKeys) {
+        AccountAwareStorageBackend<Map<String, JsonNode>> entryStore = entryWritingItemStore();
+        if (entryStore == null) {
+            persistItems(storageKey);
+            return;
+        }
+        ConcurrentSkipListMap<String, JsonNode> items = currentItems(storageKey, false);
+        if (items == null) {
+            itemStore.delete(storageKey);
+            return;
+        }
+        for (String itemKey : itemKeys) {
+            JsonNode item = items.get(itemKey);
+            if (item == null) {
+                entryStore.removeEntry(storageKey, itemKey);
+            } else {
+                entryStore.putEntry(storageKey, itemKey, item);
+            }
+        }
+    }
+
+    private void persistItem(String storageKey, String itemKey) {
+        persistItems(storageKey, List.of(itemKey));
+    }
+
+    /** Persists the given items of every table a multi-item write touched. */
+    private void persistItems(Collection<String> storageKeys, Map<String, Set<String>> itemKeysByTable) {
+        for (String storageKey : storageKeys) {
+            persistItems(storageKey, itemKeysByTable.getOrDefault(storageKey, Set.of()));
+        }
+    }
+
+    /** The item store when it persists one item at a time, otherwise {@code null}. */
+    private AccountAwareStorageBackend<Map<String, JsonNode>> entryWritingItemStore() {
+        if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware && aware.writesEntries()) {
+            return aware;
+        }
+        return null;
     }
 
     public TableDefinition createTable(String tableName,
@@ -967,10 +1034,24 @@ public class DynamoDbService {
                          String conditionExpression,
                          JsonNode exprAttrNames, JsonNode exprAttrValues,
                          String region, String returnValuesOnConditionCheckFailure) {
-        var canonicalTableName = canonicalTableName(region, tableName);
+        return putItem(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
+                region, returnValuesOnConditionCheckFailure, null);
+    }
+
+    /**
+     * As above, and {@code existingItemCheck}, when present, receives the stored item (null when
+     * absent) under the item's lock and rejects the put by throwing. A check made against an item
+     * read before the lock is taken can be invalidated by a concurrent write.
+     */
+    public JsonNode putItem(String tableName, JsonNode item,
+                         String conditionExpression,
+                         JsonNode exprAttrNames, JsonNode exprAttrValues,
+                         String region, String returnValuesOnConditionCheckFailure,
+                         Consumer<JsonNode> existingItemCheck) {
+        String canonicalTableName = canonicalTableName(region, tableName);
         requireActiveTable(regionKey(region, canonicalTableName));
         return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
-                        region, returnValuesOnConditionCheckFailure, true);
+                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck);
     }
 
     private JsonNode putItemInternal(String tableName, JsonNode item,
@@ -989,7 +1070,7 @@ public class DynamoDbService {
                                   boolean shouldPersist,
                                   Consumer<Runnable> deferredStreamEvents) {
         return putItemInternal(tableName, item, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null);
+                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null);
     }
 
     private JsonNode putItemInternal(String tableName, JsonNode item,
@@ -998,7 +1079,8 @@ public class DynamoDbService {
                                   String region, String returnValuesOnConditionCheckFailure,
                                   boolean shouldPersist,
                                   Consumer<Runnable> deferredStreamEvents,
-                                  Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems) {
+                                  Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
+                                  Consumer<JsonNode> existingItemCheck) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -1018,6 +1100,9 @@ public class DynamoDbService {
             if (conditionExpression != null) {
                 evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
             }
+            if (existingItemCheck != null) {
+                existingItemCheck.accept(existing);
+            }
             requireItemNestingWithinLimit(normalizedItem);
 
             if (stagedItems == null) {
@@ -1025,7 +1110,7 @@ public class DynamoDbService {
             }
             tableItems.put(itemKey, normalizedItem);
             if (shouldPersist) {
-                persistItems(storageKey);
+                persistItem(storageKey, itemKey);
             }
             LOG.debugv("Put item in {0}: key={1}", canonicalTableName, itemKey);
             LOG.tracev("Put item in {0}: key={1} item={2}", canonicalTableName, itemKey, item);
@@ -1076,8 +1161,21 @@ public class DynamoDbService {
                                 String conditionExpression,
                                 JsonNode exprAttrNames, JsonNode exprAttrValues,
                                 String region, String returnValuesOnConditionCheckFailure) {
+        return deleteItem(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
+                region, returnValuesOnConditionCheckFailure, null);
+    }
+
+    /**
+     * As above, and {@code existingItemCheck}, when present, receives the stored item (null when
+     * absent) under the item's lock and rejects the delete by throwing.
+     */
+    public JsonNode deleteItem(String tableName, JsonNode key,
+                                String conditionExpression,
+                                JsonNode exprAttrNames, JsonNode exprAttrValues,
+                                String region, String returnValuesOnConditionCheckFailure,
+                                Consumer<JsonNode> existingItemCheck) {
         return deleteItemInternal(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
-                                  region, returnValuesOnConditionCheckFailure, true);
+                region, returnValuesOnConditionCheckFailure, true, null, null, existingItemCheck);
     }
 
     private JsonNode deleteItemInternal(String tableName, JsonNode key,
@@ -1096,7 +1194,7 @@ public class DynamoDbService {
                                          boolean shouldPersist,
                                          Consumer<Runnable> deferredStreamEvents) {
         return deleteItemInternal(tableName, key, conditionExpression, exprAttrNames, exprAttrValues,
-                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null);
+                region, returnValuesOnConditionCheckFailure, shouldPersist, deferredStreamEvents, null, null);
     }
 
     private JsonNode deleteItemInternal(String tableName, JsonNode key,
@@ -1105,7 +1203,8 @@ public class DynamoDbService {
                                          String region, String returnValuesOnConditionCheckFailure,
                                          boolean shouldPersist,
                                          Consumer<Runnable> deferredStreamEvents,
-                                         Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems) {
+                                         Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
+                                         Consumer<JsonNode> existingItemCheck) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = requireActiveTable(storageKey);
@@ -1114,6 +1213,9 @@ public class DynamoDbService {
 
         return withItemLock(storageKey, itemKey, () -> {
             var items = itemsFor(storageKey, stagedItems, false);
+            if (existingItemCheck != null) {
+                existingItemCheck.accept(items == null ? null : items.get(itemKey));
+            }
             if (items == null) return null;
 
             if (conditionExpression != null) {
@@ -1127,7 +1229,7 @@ public class DynamoDbService {
             }
             JsonNode removed = items.remove(itemKey);
             if (shouldPersist) {
-                persistItems(storageKey);
+                persistItem(storageKey, itemKey);
             }
             LOG.debugv("Deleted item from {0}: key={1}", canonicalTableName, itemKey);
             LOG.tracev("Deleted item from {0}: key={1} removed={2}", canonicalTableName, itemKey, removed);
@@ -1174,6 +1276,22 @@ public class DynamoDbService {
                 returnValuesOnConditionCheckFailure, UpdateSizeRule.UPDATE_ITEM);
     }
 
+    /**
+     * As above, and {@code existingItemCheck}, when present, receives the stored item (null when
+     * absent) under the item's lock and rejects the update by throwing.
+     */
+    public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
+                                    String updateExpression,
+                                    JsonNode expressionAttrNames, JsonNode expressionAttrValues,
+                                    String returnValues, String conditionExpression, String region,
+                                    String returnValuesOnConditionCheckFailure,
+                                    Consumer<JsonNode> existingItemCheck) {
+        return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
+                expressionAttrNames, expressionAttrValues, returnValues,
+                conditionExpression, region, returnValuesOnConditionCheckFailure, true, null, null,
+                UpdateSizeRule.UPDATE_ITEM, existingItemCheck);
+    }
+
     UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
                                     String updateExpression,
                                     JsonNode expressionAttrNames, JsonNode expressionAttrValues,
@@ -1209,7 +1327,7 @@ public class DynamoDbService {
         return updateItemInternal(tableName, key, attributeUpdates, updateExpression,
                 expressionAttrNames, expressionAttrValues, returnValues,
                 conditionExpression, region, returnValuesOnConditionCheckFailure, shouldPersist,
-                deferredStreamEvents, null, sizeRule);
+                deferredStreamEvents, null, sizeRule, null);
     }
 
     private UpdateResult updateItemInternal(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -1220,7 +1338,8 @@ public class DynamoDbService {
                                              boolean shouldPersist,
                                              Consumer<Runnable> deferredStreamEvents,
                                              Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
-                                             UpdateSizeRule sizeRule) {
+                                             UpdateSizeRule sizeRule,
+                                             Consumer<JsonNode> existingItemCheck) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = requireActiveTable(storageKey);
@@ -1235,6 +1354,9 @@ public class DynamoDbService {
 
             if (conditionExpression != null) {
                 evaluateCondition(existing, conditionExpression, expressionAttrNames, expressionAttrValues, returnValuesOnConditionCheckFailure);
+            }
+            if (existingItemCheck != null) {
+                existingItemCheck.accept(existing);
             }
 
             ObjectNode item;
@@ -1343,7 +1465,7 @@ public class DynamoDbService {
             }
             items.put(itemKey, item);
             if (shouldPersist) {
-                persistItems(storageKey);
+                persistItem(storageKey, itemKey);
             }
             LOG.tracev("Updated item in {0}: key={1} updateExpression={2} item={3}",
                     canonicalTableName, itemKey, updateExpression, item);
@@ -1685,6 +1807,7 @@ public class DynamoDbService {
 
     public BatchWriteResult batchWriteItem(Map<String, List<JsonNode>> requestItems, String region) {
         // Pre-validate all write requests before applying any mutation to memory or streams
+        Map<String, Set<String>> requestedItemKeys = new HashMap<>();
         for (Map.Entry<String, List<JsonNode>> entry : requestItems.entrySet()) {
             String tableName = canonicalTableName(region, entry.getKey());
             String storageKey = regionKey(region, tableName);
@@ -1714,9 +1837,15 @@ public class DynamoDbService {
                     throw new AwsException("ValidationException",
                             "Provided list of item keys contains duplicates", 400);
                 }
+                requestedItemKeys.computeIfAbsent(storageKey, ignored -> new HashSet<>()).add(itemKey);
             }
         }
 
+        // A store that writes single items saves each one inside its item lock, as PutItem does: a
+        // pass after the locks are released could read an item, lose the race to a concurrent
+        // write of the same key, and then save the stale copy over it. A whole-table store is
+        // saved once at the end, as a copy of the live table.
+        boolean persistEachItem = entryWritingItemStore() != null;
         Set<String> affectedStorageKeys = new LinkedHashSet<>();
         try {
             for (Map.Entry<String, List<JsonNode>> entry : requestItems.entrySet()) {
@@ -1725,18 +1854,18 @@ public class DynamoDbService {
                 for (JsonNode writeRequest : entry.getValue()) {
                     if (writeRequest.has("PutRequest")) {
                         JsonNode item = writeRequest.get("PutRequest").get("Item");
-                        putItemInternal(tableName, item, null, null, null, region, "NONE", false);
+                        putItemInternal(tableName, item, null, null, null, region, "NONE", persistEachItem);
                         affectedStorageKeys.add(storageKey);
                     } else if (writeRequest.has("DeleteRequest")) {
                         JsonNode key = writeRequest.get("DeleteRequest").get("Key");
-                        deleteItemInternal(tableName, key, null, null, null, region, "NONE", false);
+                        deleteItemInternal(tableName, key, null, null, null, region, "NONE", persistEachItem);
                         affectedStorageKeys.add(storageKey);
                     }
                 }
             }
         } finally {
-            for (String storageKey : affectedStorageKeys) {
-                persistItems(storageKey);
+            if (!persistEachItem) {
+                persistItems(affectedStorageKeys, requestedItemKeys);
             }
         }
         return new BatchWriteResult(Map.of());
@@ -1896,14 +2025,14 @@ public class DynamoDbService {
                     String tableName = put.path("TableName").asText();
                     String storageKey = regionKey(region, canonicalTableName(region, tableName));
                     putItemInternal(tableName, put.get("Item"), null, null, null, region, "NONE", false,
-                            pendingStreamEvents::add, staged);
+                            pendingStreamEvents::add, staged, null);
                     affectedStorageKeys.add(storageKey);
                 } else if (transactItem.has("Delete")) {
                     JsonNode del = transactItem.get("Delete");
                     String tableName = del.path("TableName").asText();
                     String storageKey = regionKey(region, canonicalTableName(region, tableName));
                     deleteItemInternal(tableName, del.get("Key"), null, null, null, region, "NONE", false,
-                            pendingStreamEvents::add, staged);
+                            pendingStreamEvents::add, staged, null);
                     affectedStorageKeys.add(storageKey);
                 } else if (transactItem.has("Update")) {
                     JsonNode upd = transactItem.get("Update");
@@ -1914,7 +2043,7 @@ public class DynamoDbService {
                             upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null,
                             upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null,
                             "NONE", null, region, "NONE", false, pendingStreamEvents::add, staged,
-                            UpdateSizeRule.FINISHED_ITEM);
+                            UpdateSizeRule.FINISHED_ITEM, null);
                     affectedStorageKeys.add(storageKey);
                 }
             }
@@ -1943,9 +2072,12 @@ public class DynamoDbService {
                     live.put(participant.itemKey(), value);
                 }
             }
-            for (String storageKey : affectedStorageKeys) {
-                persistItems(storageKey);
+            Map<String, Set<String>> participantKeys = new HashMap<>();
+            for (TransactParticipant participant : toAcquire.keySet()) {
+                participantKeys.computeIfAbsent(participant.storageKey(), ignored -> new HashSet<>())
+                        .add(participant.itemKey());
             }
+            persistItems(affectedStorageKeys, participantKeys);
             for (Runnable streamEvent : pendingStreamEvents) {
                 streamEvent.run();
             }
@@ -2947,6 +3079,10 @@ public class DynamoDbService {
             ConcurrentSkipListMap<String, JsonNode> items = scan.items();
 
             int deletedForTable = 0;
+            // A store that writes single entries drops each item under its item lock, so a write
+            // that replaces the item right after cannot be overtaken by this removal.
+            AccountAwareStorageBackend<Map<String, JsonNode>> entryStore =
+                    scan.accountId() == null ? null : entryWritingItemStore();
             for (String itemKey : scan.itemKeys()) {
                 // A table deleted, or deleted and recreated, since the scan or during this sweep: its items are not this scan's.
                 if (itemsByTable.get(scan.rawKey()) != items) {
@@ -2958,7 +3094,18 @@ public class DynamoDbService {
                         return null;
                     }
                     pointInTimeRecovery.recordItem(scan.accountId(), scan.storageKey(), scan.table(), itemKey, current);
-                    return items.remove(itemKey);
+                    JsonNode gone = items.remove(itemKey);
+                    if (entryStore != null) {
+                        // Under the table entry's lock, so a DeleteTable and a recreate cannot slip
+                        // in and have this removal drop the new table's item of the same key.
+                        itemsByTable.computeIfPresent(scan.rawKey(), (key, live) -> {
+                            if (live == items) {
+                                entryStore.removeEntryForAccount(scan.accountId(), scan.storageKey(), itemKey);
+                            }
+                            return live;
+                        });
+                    }
+                    return gone;
                 });
                 if (removed == null) {
                     continue;
@@ -2974,7 +3121,7 @@ public class DynamoDbService {
                             true);
                 }
             }
-            if (deletedForTable > 0) {
+            if (deletedForTable > 0 && entryStore == null) {
                 // A DeleteTable during the loop detached this map; writing it back would revive its items.
                 // Persisting under the entry's lock holds off DeleteTable, which removes the entry before
                 // it deletes the stored items.
@@ -2984,8 +3131,8 @@ public class DynamoDbService {
                     }
                     return live;
                 });
-                totalDeleted += deletedForTable;
             }
+            totalDeleted += deletedForTable;
         }
         if (totalDeleted > 0) {
             LOG.infov("TTL sweeper removed {0} expired items", totalDeleted);
@@ -4703,6 +4850,14 @@ public class DynamoDbService {
         return requireActiveTable(regionKey(region, canonicalTableName));
     }
 
+    /**
+     * Resolves the table for an item call and validates the key it names, without reading the
+     * stored item, so a caller can report table and key errors before its own validation.
+     */
+    public void requireItemCallKey(String tableName, JsonNode keyOrItem, boolean isKeyArg, String region) {
+        buildItemKey(requireTableForItemCall(tableName, region), keyOrItem, isKeyArg);
+    }
+
     public record UpdateResult(JsonNode newItem, JsonNode oldItem, List<TouchedPath> touched) {}
 
     // One path the update expression acted on, with the value there before and after.
@@ -4748,7 +4903,8 @@ public class DynamoDbService {
 
         TableDefinition table = requireBackupSource(storageKey, tableArn);
         Instant startTime = clock.instant().truncatedTo(ChronoUnit.MILLIS);
-        // Seconds, as CreationDateTime is shown, so an EarliestRestorableDateTime in the creation second passes.
+        // AWS cannot enable point-in-time recovery until seconds after the creation, so its
+        // EarliestRestorableDateTime is never in the creation second.
         if (exportTime != null && (exportTime.isBefore(table.getCreationDateTime().truncatedTo(ChronoUnit.SECONDS))
                 || startTime.isBefore(exportTime))) {
             throw new AwsException("InvalidExportTimeException", "Export Time is invalid", 400);
@@ -5067,10 +5223,17 @@ public class DynamoDbService {
         return backup;
     }
 
-    public TableBackup describeBackup(String backupArn, String region) {
-        DynamoDbBackupArns.BackupArn arn = DynamoDbBackupArns.parse(backupArn);
-        if (!arn.accountId().equals(regionResolver.getAccountId())) {
+    /** AWS checks the account of a backup ARN before the rest of it. */
+    DynamoDbBackupArns.BackupArn requireOwnBackupArn(String backupArn) {
+        if (!DynamoDbBackupArns.split(backupArn).accountId().equals(regionResolver.getAccountId())) {
             throw new AwsException("AccessDeniedException", "Access is denied", 400);
+        }
+        return DynamoDbBackupArns.parse(backupArn);
+    }
+
+    public TableBackup describeBackup(String backupArn, String region) {
+        if (!requireOwnBackupArn(backupArn).isValid()) {
+            throw invalidBackupArnValue();
         }
         return backupStore.get(backupArn)
                 .filter(backup -> backup.getRegion().equals(region))
@@ -5098,7 +5261,7 @@ public class DynamoDbService {
     public ListBackupsResult listBackups(String tableName, Integer limit, Instant lowerBound, Instant upperBound,
                                          String exclusiveStartBackupArn, String backupType, String region) {
         DynamoDbBackupArns.BackupArn start = exclusiveStartBackupArn != null
-                ? DynamoDbBackupArns.parse(exclusiveStartBackupArn) : null;
+                ? exclusiveStart(exclusiveStartBackupArn, tableName, region) : null;
         Set<String> types = "ALL".equals(backupType) ? Set.of("USER", "SYSTEM") : Set.of(backupType);
         List<TableBackup> matching = backupStore.scan(key -> true).stream()
                 .filter(backup -> backup.getRegion().equals(region))
@@ -5159,6 +5322,33 @@ public class DynamoDbService {
 
     private boolean isUnexpired(TableBackup backup) {
         return backup.getExpiryDateTime() == null || clock.instant().isBefore(backup.getExpiryDateTime());
+    }
+
+    private DynamoDbBackupArns.BackupArn exclusiveStart(String exclusiveStartBackupArn, String tableName,
+                                                        String region) {
+        DynamoDbBackupArns.BackupArn start = DynamoDbBackupArns.parse(exclusiveStartBackupArn);
+        if (!start.isValid()) {
+            throw invalidExclusiveStart("is not a valid backup arn");
+        }
+        if (!start.region().equals(region)) {
+            throw invalidExclusiveStart("does not match the region");
+        }
+        if (!start.accountId().equals(regionResolver.getAccountId())) {
+            throw invalidExclusiveStart("does not match the account");
+        }
+        if (tableName != null && !tableName.equals(start.tableName())) {
+            throw invalidExclusiveStart("does not match the table name predicate");
+        }
+        return start;
+    }
+
+    private static AwsException invalidExclusiveStart(String problem) {
+        return new AwsException("ValidationException",
+                "Invalid Request: The supplied ExclusiveStartBackupArn " + problem, 400);
+    }
+
+    private static AwsException invalidBackupArnValue() {
+        return new AwsException("ValidationException", "Invalid Request: BackupArn is not valid", 400);
     }
 
     private static boolean isAfter(TableBackup backup, DynamoDbBackupArns.BackupArn start) {

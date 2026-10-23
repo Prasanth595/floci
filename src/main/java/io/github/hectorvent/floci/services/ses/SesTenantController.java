@@ -227,14 +227,8 @@ public class SesTenantController {
                     : objectMapper.readTree(body);
             requireJsonObject(request);
             String tenantName = stringMemberOrAbsent(request, "TenantName");
-            String resourceTypeFilter = null;
-            JsonNode filter = request.path("Filter");
-            if (!filter.isMissingNode() && !filter.isNull()) {
-                if (!filter.isObject()) {
-                    throw new AwsException("SerializationException", null, 400);
-                }
-                resourceTypeFilter = stringMemberOrAbsent(filter, "RESOURCE_TYPE");
-            }
+            Map<String, String> filter = stringMapMemberOrAbsent(request, "Filter");
+            String resourceTypeFilter = filter == null ? null : filter.get("RESOURCE_TYPE");
             Integer pageSize = intMemberOrAbsent(request, "PageSize");
             String nextToken = stringMemberOrAbsent(request, "NextToken");
             PaginatedResult<TenantResourceAssociation> page = tenantService.listTenantResources(

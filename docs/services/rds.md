@@ -202,6 +202,12 @@ checked against the instance's other window. Modifications apply immediately —
     `arn:aws:rds:<region>:<account>:cluster-snapshot:<name>`. RDS reserved instances aren't
     modeled (there's no reserved-instance API), so tagging doesn't apply to them.
 
+## Cluster parameter groups
+
+`DescribeDBClusterParameterGroups` includes `DBClusterParameterGroupArn` for managed `default.*`
+groups as well as customer-created groups, in both named and list responses. Managed default ARNs
+use the request's account, region, and partition with the `cluster-pg:<group-name>` resource form.
+
 ## Boolean parameters
 
 The following parameters accept `true` or `false` (case-insensitive). Other values,

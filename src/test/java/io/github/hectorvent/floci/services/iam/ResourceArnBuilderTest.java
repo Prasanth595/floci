@@ -1181,6 +1181,18 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void provisionedConcurrencyKeepsTheOwnerAndQualifierItConfigures() {
+        when(uriInfo.getPath()).thenReturn(
+                "/2019-09-30/functions/arn:aws:lambda:us-east-1:111122223333:function:example/provisioned-concurrency");
+        queryParams.putSingle("Qualifier", "live");
+        assertEquals("arn:aws:lambda:us-east-1:111122223333:function:example:live",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2019-09-30/functions/example/provisioned-concurrency");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:example:live",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
     void lambdaWebRoutesResolveTheFunctionRevisionOrEndpointTheyActOn() {
         String fn = "arn:aws:lambda:us-east-1:000000000000:web-function/app";
         when(uriInfo.getPath()).thenReturn("/2025-03-07/web-functions/app");
@@ -1357,6 +1369,37 @@ class ResourceArnBuilderTest {
         }
         when(uriInfo.getPath()).thenReturn("/2025-09-09/microvms/microvm-2");
         assertEquals("*", backed.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void dsqlRoutesResolveTheClusterTheTaggedArnOrNone() {
+        String cluster = "arn:aws:dsql:eu-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz";
+        for (String path : List.of("/cluster/abcdefghijklmnopqrstuvwxyz", "/cluster/abcdefghijklmnopqrstuvwxyz/policy",
+                "/clusters/abcdefghijklmnopqrstuvwxyz/vpc-endpoint-service-name", "/tags/" + cluster)) {
+            when(uriInfo.getPath()).thenReturn(path);
+            assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"), path);
+        }
+        // The same tagging is served at /tags, the ARN in the resourceArn query parameter or body field.
+        when(uriInfo.getPath()).thenReturn("/tags");
+        queryParams.putSingle("resourceArn", cluster);
+        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        queryParams.clear();
+        when(ctx.getMethod()).thenReturn("POST");
+        setJsonBody("{\"resourceArn\":\"" + cluster + "\",\"tags\":{}}");
+        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        when(ctx.getMethod()).thenReturn("GET");
+        // A stream route names the stream, or its cluster to create or list streams.
+        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz/s1");
+        assertEquals(List.of(cluster + "/stream/s1"), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        // CreateCluster and ListClusters are checked against every cluster, as DSQL checks them (measured).
+        when(uriInfo.getPath()).thenReturn("/cluster");
+        assertEquals(List.of("arn:aws:dsql:eu-west-1:000000000000:cluster/*"),
+                builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/cluster/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of("arn:aws-cn:dsql:polygondwanaland-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz"),
+                builder.buildResources("dsql", ctx, "polygondwanaland-west-1", "000000000000", "aws-cn"));
     }
 
     @Test

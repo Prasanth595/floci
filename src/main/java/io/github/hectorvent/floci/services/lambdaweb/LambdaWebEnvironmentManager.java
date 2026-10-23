@@ -47,6 +47,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
@@ -85,7 +86,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     static final Duration LISTEN_TIMEOUT = Duration.ofSeconds(9);
     static final Duration SUMMARY_PERIOD = Duration.ofSeconds(60);
     static final List<String> NODE_FLAGS = List.of("--expose-gc", "--max-http-header-size", "135168",
-            "--no-experimental-require-module", "--max-semi-space-size=102", "--max-old-space-size=1024");
+            "--no-experimental-require-module");
+    static final List<String> HEAP_FLAGS = List.of("--max-semi-space-size=102", "--max-old-space-size=1024");
     private static final Logger LOG = Logger.getLogger(LambdaWebEnvironmentManager.class);
     private static final DateTimeFormatter LOG_STREAM_DATE =
             DateTimeFormatter.ofPattern("yyyy/MM/dd").withZone(ZoneOffset.UTC);
@@ -264,6 +266,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private final ZipExtractor zipExtractor;
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
+    private final LambdaWebExecutionRole executionRole;
     private final LambdaWebLogs logs;
     private final LambdaWebMetrics metrics;
     private final byte[] runtime;
@@ -281,7 +284,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                                        @StreamingDocker DockerClient streamingDocker, ImageResolver imageResolver,
                                        EcrRegistryManager ecrRegistryManager, LambdaWebCode code,
                                        ZipExtractor zipExtractor, LaunchedContainerAwsEnv awsEnv,
-                                       LambdaExecutionRoleCredentials executionRoleCredentials, LambdaWebLogs logs,
+                                       LambdaExecutionRoleCredentials executionRoleCredentials,
+                                       LambdaWebExecutionRole executionRole, LambdaWebLogs logs,
                                        LambdaWebMetrics metrics) {
         this.config = config;
         this.containerBuilder = containerBuilder;
@@ -293,6 +297,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         this.zipExtractor = zipExtractor;
         this.awsEnv = awsEnv;
         this.executionRoleCredentials = executionRoleCredentials;
+        this.executionRole = executionRole;
         this.logs = logs;
         this.metrics = metrics;
         this.runtime = runtimeScript();
@@ -539,6 +544,9 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     }
 
     private void start(Environment environment, String region, WebFunction fn, WebFunctionRevision revision) {
+        if (!executionRole.assumableFor(region, fn.functionArn, revision.serviceConfig.executionRoleArn)) {
+            throw new StartFailure(LambdaWebErrorPages.CANNOT_ASSUME_ROLE);
+        }
         String accountId = environment.accountId;
         String image = ecrRegistryManager.rewriteImageUri(imageResolver.resolve(revision.buildConfig.runtime));
         String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
@@ -546,10 +554,14 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                 fn.functionName + "-" + revision.revisionId + "-" + shortId);
         Map<String, String> userEnv = revision.serviceConfig.environmentVariables == null
                 ? Map.of() : revision.serviceConfig.environmentVariables;
-        List<String> cmd = new ArrayList<>(NODE_FLAGS);
+        List<String> cmd = nodeFlags(userEnv.get("NODE_OPTIONS"));
         cmd.add(RUNTIME_DIR + "/index.js");
         Optional<SessionCreds> roleCredentials = executionRoleCredentials.forRole(
                 revision.serviceConfig.executionRoleArn, accountId, fn.functionName);
+        // The role can be deleted after the trust check.
+        if (roleCredentials.isEmpty()) {
+            throw new StartFailure(LambdaWebErrorPages.CANNOT_ASSUME_ROLE);
+        }
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(name)
                 .withEnv(environment(accountId, region, revision, userEnv, roleCredentials))
@@ -655,6 +667,21 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             LOG.debugv(e, "Could not read the usage of the Lambda Web environment {0}", containerId);
             return null;
         }
+    }
+
+    /** AWS swaps both of its heap flags for the ones {@code NODE_OPTIONS} names, and keeps its other flags. */
+    static List<String> nodeFlags(String nodeOptions) {
+        List<String> heap = nodeOptions == null ? List.of()
+                : Arrays.stream(nodeOptions.split("\\s+")).filter(LambdaWebEnvironmentManager::isHeapFlag).toList();
+        List<String> flags = new ArrayList<>(NODE_FLAGS);
+        flags.addAll(heap.isEmpty() ? HEAP_FLAGS : heap);
+        return flags;
+    }
+
+    /** AWS reads {@code _} as {@code -}, as V8 does, but not a flag in quotes. */
+    private static boolean isHeapFlag(String option) {
+        String name = option.split("=", 2)[0].replace('_', '-');
+        return name.equals("--max-old-space-size") || name.equals("--max-semi-space-size");
     }
 
     private List<String> environment(String accountId, String region, WebFunctionRevision revision,

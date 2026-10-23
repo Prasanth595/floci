@@ -40,7 +40,8 @@ class PassedRolesTest {
      * names one profile by name, and {@code arn-template}, whose version 2 names the other by ARN. The
      * instance {@code i-arn} runs with that other profile, and the group {@code g} launches from
      * {@code lt-web} once a refresh names only a version, or from {@code arn-template} at the group's
-     * version 2 once a refresh names that template alone.
+     * version 2 once a refresh names that template alone. IAM holds the role {@code app-role} under the
+     * path {@code /app/}.
      */
     private static final PassedRoles.Lookups LOOKUPS = new PassedRoles.Lookups() {
         @Override
@@ -94,6 +95,11 @@ class PassedRolesTest {
         @Override
         public String roleArn(String roleName) {
             return ROLES + roleName;
+        }
+
+        @Override
+        public Optional<String> heldRoleArn(String roleName) {
+            return "app-role".equals(roleName) ? Optional.of(ROLES + "app/app-role") : Optional.empty();
         }
     };
 
@@ -326,6 +332,56 @@ class PassedRolesTest {
                         json("{\"ServiceNamespace\":\"ecs\",\"RoleARN\":\"" + ROLES + "scaling\"}"), LOOKUPS));
         assertEquals(List.of(), PassedRoles.of("application-autoscaling:RegisterScalableTarget",
                 json("{\"ServiceNamespace\":\"ecs\"}"), LOOKUPS));
+    }
+
+    @Test
+    void aRoleAddedToAnInstanceProfileIsPassedToEc2AsTheArnIamHoldsItUnder() {
+        assertEquals(List.of(new PassedRole(ROLES + "app/app-role", EC2)), PassedRoles.of(
+                "iam:AddRoleToInstanceProfile", form("InstanceProfileName=p&RoleName=app-role"), LOOKUPS));
+        // A role IAM does not hold is checked as the one its name gives.
+        assertEquals(List.of(passed("gone", EC2)), PassedRoles.of("iam:AddRoleToInstanceProfile",
+                form("InstanceProfileName=p&RoleName=gone"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("iam:AddRoleToInstanceProfile", form("InstanceProfileName=p"), LOOKUPS));
+    }
+
+    @Test
+    void aRedshiftClusterPassesTheRolesItAssociatesToRedshift() {
+        String redshift = "redshift.amazonaws.com";
+        // Every list form the Redshift handler reads; the default names a role the cluster holds and passes nothing.
+        assertEquals(List.of(passed("copy", redshift), passed("unload", redshift), passed("spectrum", redshift)),
+                PassedRoles.of("redshift:CreateCluster", form("ClusterIdentifier=c&IamRoles.IamRoleArn.1=" + ROLES
+                        + "copy&IamRoles.member.2=" + ROLES + "unload&IamRoles.5=" + ROLES + "spectrum"
+                        + "&DefaultIamRoleArn=" + ROLES + "copy&IamRolesExtra.1=" + ROLES + "other"), LOOKUPS));
+        assertEquals(List.of(passed("copy", redshift)), PassedRoles.of("redshift:RestoreFromClusterSnapshot",
+                form("ClusterIdentifier=c&SnapshotIdentifier=s&IamRoles.IamRoleArn.1=" + ROLES + "copy"), LOOKUPS));
+        // Removing a role, or setting one the cluster holds as the default, passes nothing.
+        assertEquals(List.of(passed("added", redshift)), PassedRoles.of("redshift:ModifyClusterIamRoles",
+                form("ClusterIdentifier=c&AddIamRoles.IamRoleArn.1=" + ROLES + "added&RemoveIamRoles.IamRoleArn.1="
+                        + ROLES + "removed&DefaultIamRoleArn=" + ROLES + "kept"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("redshift:CreateCluster", form("ClusterIdentifier=c"), LOOKUPS));
+    }
+
+    @Test
+    void aRedshiftServerlessNamespaceAndScheduledActionPassTheirRolesToRedshiftServerless() {
+        String serverless = "redshift-serverless.amazonaws.com";
+        for (String action : new String[] {"redshift-serverless:CreateNamespace",
+                "redshift-serverless:UpdateNamespace"}) {
+            assertEquals(List.of(passed("copy", serverless), passed("unload", serverless)), PassedRoles.of(action,
+                    json("{\"namespaceName\":\"n\",\"iamRoles\":[\"" + ROLES + "copy\",\"" + ROLES + "unload\"],"
+                            + "\"defaultIamRoleArn\":\"" + ROLES + "copy\"}"), LOOKUPS), action);
+            // Floci keeps a default the namespace's roles do not hold, so that one is passed too.
+            assertEquals(List.of(passed("copy", serverless), passed("other", serverless)), PassedRoles.of(action,
+                    json("{\"namespaceName\":\"n\",\"iamRoles\":[\"" + ROLES + "copy\"],"
+                            + "\"defaultIamRoleArn\":\"" + ROLES + "other\"}"), LOOKUPS), action);
+            assertEquals(List.of(passed("other", serverless)), PassedRoles.of(action,
+                    json("{\"namespaceName\":\"n\",\"defaultIamRoleArn\":\"" + ROLES + "other\"}"), LOOKUPS), action);
+            assertEquals(List.of(), PassedRoles.of(action, json("{\"namespaceName\":\"n\"}"), LOOKUPS), action);
+        }
+        for (String action : new String[] {"redshift-serverless:CreateScheduledAction",
+                "redshift-serverless:UpdateScheduledAction"}) {
+            assertEquals(List.of(passed("snapshots", serverless)), PassedRoles.of(action,
+                    json("{\"scheduledActionName\":\"a\",\"roleArn\":\"" + ROLES + "snapshots\"}"), LOOKUPS), action);
+        }
     }
 
     private static PassedRole passed(String roleName, String service) {

@@ -154,6 +154,55 @@ class DynamoDbBackupIntegrationTest {
     }
 
     @Test
+    void backupArnTableNameAndPartitionAreChecked() {
+        String backup = "/backup/01700000000000-abcdef12";
+        for (String table : List.of("tt", "t".repeat(256))) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + TABLE_ARN_PREFIX + table + backup + "\"}")
+                    .statusCode(400)
+                    .body("message", equalTo("Invalid Backup ARN"));
+        }
+        for (String arn : List.of("arn:aws-cn:dynamodb:us-east-1:000000000000:table/BackupIT-none" + backup,
+                "arn:aws:dynamodb:cn-north-1:000000000000:table/BackupIT-none" + backup)) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                    .statusCode(400)
+                    .body("message", equalTo("Invalid Request: BackupArn is not valid"));
+        }
+        for (String arn : List.of(TABLE_ARN_PREFIX + "ttt" + backup, TABLE_ARN_PREFIX + "t".repeat(255) + backup,
+                "arn:aws-cn:dynamodb:cn-north-1:000000000000:table/BackupIT-none" + backup)) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                    .statusCode(400)
+                    .body("__type", containsString("BackupNotFoundException"));
+        }
+    }
+
+    @Test
+    void backupArnOfAnotherAccountIsDeniedOnceItSplitsIntoFields() {
+        String id = "01700000000000-abcdef12";
+        String other = "arn:aws:dynamodb:us-east-1:123456789012:";
+        for (String arn : List.of(other + "table/BackupIT-none/backup/xy", other + "table/BackupIT-none",
+                "arn:aws:s3:nowhere-1:123456789012:table/BackupIT-none/backup/1700000000000-abcdef12",
+                "arn:aws:dynamodb:us-east-1::table/BackupIT-none/backup/" + id)) {
+            for (String action : List.of("DescribeBackup", "DeleteBackup")) {
+                ddb(action, "{\"BackupArn\": \"" + arn + "\"}")
+                        .statusCode(400)
+                        .body("__type", containsString("AccessDeniedException"))
+                        .body("message", equalTo("Access is denied"));
+            }
+            ddb("RestoreTableFromBackup", "{\"BackupArn\": \"" + arn + "\", \"TargetTableName\": \"a b\"}")
+                    .statusCode(400)
+                    .body("__type", containsString("AccessDeniedException"));
+        }
+        for (String arn : List.of("arn:aws:dynamodb:us-east-1:123456789012", other,
+                "arn::dynamodb:us-east-1:123456789012:table/BackupIT-none/backup/" + id,
+                "arn:aws::us-east-1:123456789012:table/BackupIT-none/backup/" + id,
+                "ARN:aws:dynamodb:us-east-1:123456789012:table/BackupIT-none/backup/" + id)) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                    .statusCode(400)
+                    .body("message", equalTo("Invalid Backup ARN"));
+        }
+    }
+
+    @Test
     void unknownBackupIsBackupNotFound() {
         String arn = TABLE_ARN_PREFIX + "BackupIT-none/backup/01700000000000-ABCDEF12";
         ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
@@ -291,6 +340,46 @@ class DynamoDbBackupIntegrationTest {
                 .statusCode(400)
                 .body("message", equalTo(after.formatted("TimeRangeLowerBound")));
         listBackupsBetween("100000000000", "-0.001")
+                .statusCode(400)
+                .body("message", equalTo("One or more parameter values were invalid: "
+                        + "Time range lower bound must be less than or equal to upper bound"));
+    }
+
+    @Test
+    void listBackupsChecksTheExclusiveStartBackupArn() {
+        String table = "BackupIT-start";
+        String backup = "/backup/01700000000000-abcdef12";
+        String start = TABLE_ARN_PREFIX + table + backup;
+        String supplied = "Invalid Request: The supplied ExclusiveStartBackupArn ";
+
+        listBackupsFrom(table, TABLE_ARN_PREFIX + "tt" + backup)
+                .statusCode(400)
+                .body("message", equalTo("Invalid Backup ARN"));
+        listBackupsFrom(table, TABLE_ARN_PREFIX + table + "/backup/1700000000000-abcdef12")
+                .statusCode(400)
+                .body("message", equalTo(supplied + "is not a valid backup arn"));
+        listBackupsFrom(table, start.replace("000000000000", ""))
+                .statusCode(400)
+                .body("message", equalTo(supplied + "is not a valid backup arn"));
+        listBackupsFrom(table, start.replace("us-east-1:000000000000", "eu-west-2:123456789012"))
+                .statusCode(400)
+                .body("message", equalTo(supplied + "does not match the region"));
+        listBackupsFrom(table, start.replace("000000000000", "123456789012"))
+                .statusCode(400)
+                .body("message", equalTo(supplied + "does not match the account"));
+        listBackupsFrom(table, TABLE_ARN_PREFIX + "BackupIT-other" + backup)
+                .statusCode(400)
+                .body("message", equalTo(supplied + "does not match the table name predicate"));
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + TABLE_ARN_PREFIX + "BackupIT-other" + backup + "\"}")
+                .statusCode(200);
+
+        String reversedRange = "\"TimeRangeLowerBound\": 2, \"TimeRangeUpperBound\": 1";
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + TABLE_ARN_PREFIX + "tt" + backup + "\", "
+                + reversedRange + "}")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Backup ARN"));
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + start.replace("000000000000", "123456789012")
+                + "\", " + reversedRange + "}")
                 .statusCode(400)
                 .body("message", equalTo("One or more parameter values were invalid: "
                         + "Time range lower bound must be less than or equal to upper bound"));
@@ -461,6 +550,17 @@ class DynamoDbBackupIntegrationTest {
                         + "failed to satisfy constraint: Member must satisfy enum value set: "
                         + "[PROVISIONED, PAY_PER_REQUEST]; Value 'a b' at 'targetTableName' failed to satisfy "
                         + "constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"));
+    }
+
+    @Test
+    void restoreTableFromBackupChecksTheBackupIdAfterTheRequest() {
+        String arn = TABLE_ARN_PREFIX + "BackupIT-none/backup/1700000000000-abcdef12";
+        ddb("RestoreTableFromBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                .statusCode(400)
+                .body("message", equalTo("The parameter 'TableName' is required but was not present in the request"));
+        ddb("RestoreTableFromBackup", "{\"BackupArn\": \"" + arn + "\", \"TargetTableName\": \"BackupIT-never\"}")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: BackupArn is not valid"));
     }
 
     @Test
@@ -803,5 +903,11 @@ class DynamoDbBackupIntegrationTest {
         return ddb("ListBackups", """
                 {"TimeRangeLowerBound": %s, "TimeRangeUpperBound": %s}
                 """.formatted(lowerBound, upperBound));
+    }
+
+    private static ValidatableResponse listBackupsFrom(String tableName, String exclusiveStartBackupArn) {
+        return ddb("ListBackups", """
+                {"TableName": "%s", "ExclusiveStartBackupArn": "%s"}
+                """.formatted(tableName, exclusiveStartBackupArn));
     }
 }
