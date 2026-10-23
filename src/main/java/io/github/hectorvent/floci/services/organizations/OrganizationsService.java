@@ -39,6 +39,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -471,7 +472,13 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
      */
     public String organizationPath(String callerAccountId, String resourceId) {
         Organization organization = requireOrganizationForCaller(callerAccountId);
-        return organization.getId() + "/" + String.join("/", ancestryOf(organization, resourceId)) + "/";
+        return organizationPath(organization.getId(), organization.getRoot().getId(), resourceId,
+                id -> parentOf(organization, id));
+    }
+
+    private static String organizationPath(String organizationId, String rootId, String resourceId,
+                                           Function<String, String> parentLookup) {
+        return organizationId + "/" + String.join("/", ancestryOf(rootId, resourceId, parentLookup)) + "/";
     }
 
     /** Capture parent IDs before selecting a list page, not once for every serialized row. */
@@ -509,31 +516,25 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             if (!organizationId.equals(selectedOrganizationId)) {
                 throw accessDenied("The selected resource does not belong to the authorized organization.");
             }
-            List<String> chain = new ArrayList<>();
-            chain.add(id);
-            String current = parentId;
-            while (current != null && !rootId.equals(current)) {
-                chain.add(current);
-                String parent = parents.get(current);
-                if (parent == null) {
-                    try {
-                        parent = requireOrganizationalUnit(organization, current).getParentId();
-                        parents.put(current, parent);
-                    } catch (AwsException missingAncestor) {
-                        if (!"OrganizationalUnitNotFoundException".equals(missingAncestor.getErrorCode())) {
-                            throw missingAncestor;
-                        }
-                        if (removedOrMoved(id, parentId)) {
-                            return null;
-                        }
-                        throw missingAncestor;
-                    }
+            try {
+                return organizationPath(organizationId, rootId, id,
+                        current -> id.equals(current) ? parentId : cachedParent(current));
+            } catch (AwsException missingAncestor) {
+                if ("OrganizationalUnitNotFoundException".equals(missingAncestor.getErrorCode())
+                        && removedOrMoved(id, parentId)) {
+                    return null;
                 }
-                current = parent;
+                throw missingAncestor;
             }
-            chain.add(rootId);
-            Collections.reverse(chain);
-            return organizationId + "/" + String.join("/", chain) + "/";
+        }
+
+        private String cachedParent(String id) {
+            String parent = parents.get(id);
+            if (parent == null) {
+                parent = requireOrganizationalUnit(organization, id).getParentId();
+                parents.put(id, parent);
+            }
+            return parent;
         }
 
         private boolean removedOrMoved(String id, String capturedParent) {
@@ -1683,14 +1684,18 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
 
     /** The chain from the root down to (and including) {@code targetId}. */
     private List<String> ancestryOf(Organization organization, String targetId) {
+        return ancestryOf(organization.getRoot().getId(), targetId, id -> parentOf(organization, id));
+    }
+
+    private static List<String> ancestryOf(String rootId, String targetId, Function<String, String> parentLookup) {
         List<String> chain = new ArrayList<>();
         String current = targetId;
-        while (current != null && !organization.getRoot().getId().equals(current)) {
+        while (current != null && !rootId.equals(current)) {
             chain.add(current);
-            current = parentOf(organization, current);
+            current = parentLookup.apply(current);
         }
-        chain.add(organization.getRoot().getId());
-        java.util.Collections.reverse(chain);
+        chain.add(rootId);
+        Collections.reverse(chain);
         return chain;
     }
 

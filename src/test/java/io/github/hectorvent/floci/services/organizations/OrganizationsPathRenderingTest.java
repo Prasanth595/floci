@@ -52,6 +52,28 @@ class OrganizationsPathRenderingTest {
     }
 
     @ParameterizedTest
+    @ValueSource(ints = {0, 1, 3})
+    void liveAndCachedPathsUseTheSameRootToLeafFormat(int depth) {
+        String parent = root;
+        String prefix = organization.getId() + "/" + root + "/";
+        assertEquals(prefix, service.organizationPath(OWNER, root));
+        for (int level = 0; level < depth; level++) {
+            OrganizationalUnit unit = service.createOrganizationalUnit(OWNER, parent, "Level" + level, null);
+            parent = unit.getId();
+            prefix += parent + "/";
+            assertEquals(prefix, service.organizationPath(OWNER, parent));
+            assertEquals(prefix, service.organizationPaths(OWNER).unitPath(unit));
+        }
+        String member = member("parity@example.test");
+        if (depth > 0) {
+            service.moveAccount(OWNER, member, root, parent);
+        }
+        String expected = prefix + member + "/";
+        assertEquals(expected, service.organizationPath(OWNER, member));
+        assertEquals(expected, service.organizationPaths(OWNER).accountPath(service.describeAccount(OWNER, member)));
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"ListAccounts", "ListAccountsForParent", "ListOrganizationalUnitsForParent"})
     void selectedRowsStillRenderAfterTheirResourcesAndAncestorsAreRemoved(String action) {
         OrganizationalUnit parent = service.createOrganizationalUnit(OWNER, root, "Parent", null);
