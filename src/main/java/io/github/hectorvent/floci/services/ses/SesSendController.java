@@ -160,12 +160,12 @@ public class SesSendController {
                 List<MessageAttachment> attachments =
                         parseAttachmentsArray(simple.path("Attachments"), "content.simple.attachments");
                 requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
-                sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
-                        null, regionResolver.getAccountId(), region);
-                messageId = sesService.sendEmail(sendRequest
+                SendEmailRequest simpleRequest = sendRequest
                         .content(new EmailContent.Simple(subject, bodyText, bodyHtml, additionalHeaders,
                                 attachments))
-                        .build());
+                        .build();
+                sesService.checkTenantSendAccess(simpleRequest, null, regionResolver.getAccountId());
+                messageId = sesService.sendEmail(simpleRequest);
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     throw new AwsException("BadRequestException", "Source cannot be empty", 400);
@@ -194,11 +194,11 @@ public class SesSendController {
                             ? templateName
                             : SesTemplateService.templateNameFromArn(templateArn);
                     requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
-                    sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
-                            configurationSetName, resolvedName, regionResolver.getAccountId(), region);
-                    messageId = sesService.sendEmail(sendRequest
+                    SendEmailRequest templateRequest = sendRequest
                             .content(new EmailContent.Template(resolvedName, templateData, additionalHeaders))
-                            .build());
+                            .build();
+                    sesService.checkTenantSendAccess(templateRequest, resolvedName, regionResolver.getAccountId());
+                    messageId = sesService.sendEmail(templateRequest);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
                     String subject = inline.path("Subject").asText(null);
@@ -209,12 +209,12 @@ public class SesSendController {
                     // configuration set pass through the gate.
                     SesService.requireInlineTemplateContent(subject, text, html);
                     requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
-                    sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
-                            configurationSetName, null, regionResolver.getAccountId(), region);
-                    messageId = sesService.sendEmail(sendRequest
+                    SendEmailRequest inlineRequest = sendRequest
                             .content(new EmailContent.InlineTemplate(subject, text, html, templateData,
                                     additionalHeaders))
-                            .build());
+                            .build();
+                    sesService.checkTenantSendAccess(inlineRequest, null, regionResolver.getAccountId());
+                    messageId = sesService.sendEmail(inlineRequest);
                 }
             } else {
                 throw new AwsException("BadRequestException",
@@ -299,10 +299,9 @@ public class SesSendController {
                         ? templateName
                         : SesTemplateService.templateNameFromArn(templateArn);
                 gateTemplateName = resolvedName;
-                EmailTemplate stored = templateService.getTemplate(resolvedName, region);
-                subject = stored.getSubject();
-                text = stored.getTextPart();
-                html = stored.getHtmlPart();
+                subject = null;
+                text = null;
+                html = null;
             }
 
             JsonNode defaultTemplateData = parseTemplateData(template, "TemplateData");
@@ -338,8 +337,15 @@ public class SesSendController {
 
             // The tenant gate runs only after every part of the request has been parsed and
             // validated — AWS reports malformed content before a missing tenant (probe-confirmed).
-            sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
-                    gateTemplateName, regionResolver.getAccountId(), region);
+            sesService.checkTenantBulkSendAccess(tenantName, fromEmailAddress, configurationSetName,
+                    gateTemplateName, entries, regionResolver.getAccountId(), region);
+            // SES reports an unknown or DISABLED tenant before an unknown stored template (probe-confirmed).
+            if (gateTemplateName != null) {
+                EmailTemplate stored = templateService.getTemplate(gateTemplateName, region);
+                subject = stored.getSubject();
+                text = stored.getTextPart();
+                html = stored.getHtmlPart();
+            }
 
             List<BulkEmailEntryResult> results = sesService.sendBulkEmail(SendBulkEmailRequest.builder()
                     .source(fromEmailAddress)

@@ -87,6 +87,16 @@ class SesSendNullAddressIntegrationTest {
     }
 
     @Test
+    void sendBulkEmail_onlyEmptyDestinationsInTheRequest_answerEmptyDestination() {
+        bulk("", entry("{}") + ", " + entry("{\"ToAddresses\": [], \"CcAddresses\": [null]}"))
+            .statusCode(200)
+            .body("BulkEmailEntryResults[0].Status", equalTo("INVALID_PARAMETER"))
+            .body("BulkEmailEntryResults[0].Error", equalTo(EMPTY_DESTINATION))
+            .body("BulkEmailEntryResults[1].Status", equalTo("INVALID_PARAMETER"))
+            .body("BulkEmailEntryResults[1].Error", equalTo(EMPTY_DESTINATION));
+    }
+
+    @Test
     void sendBulkEmail_onlyNullRecipientsInTheRequest_answerEmptyDestination() {
         bulk("", entry("{\"ToAddresses\": [null]}") + ", " + entry("{\"ToAddresses\": [null]}"))
             .statusCode(200)

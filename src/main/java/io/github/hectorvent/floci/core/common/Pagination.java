@@ -112,6 +112,21 @@ public final class Pagination {
         }
     }
 
+    /**
+     * True when {@code token} decodes to a cursor that starts with {@code prefix}, for callers that
+     * need to tell a token they issued under another scope from one that is not theirs at all.
+     */
+    public static boolean tokenStartsWith(String token, String prefix) {
+        if (token == null || token.isEmpty()) {
+            return false;
+        }
+        try {
+            return new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8).startsWith(prefix);
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     private static String encodeToken(String cursor) {
         return Base64Url.encode(cursor);
     }
