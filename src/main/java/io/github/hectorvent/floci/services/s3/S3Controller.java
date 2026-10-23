@@ -482,8 +482,7 @@ public class S3Controller {
             }
             String lockEnabled = httpHeaders.getHeaderString("x-amz-bucket-object-lock-enabled");
             if ("true".equalsIgnoreCase(lockEnabled)) {
-                s3Service.putBucketVersioning(bucket, "Enabled");
-                s3Service.setBucketObjectLockEnabled(bucket);
+                s3Service.enableObjectLockOnCreate(bucket);
             }
             return Response.ok()
                     .header("Location", "/" + bucket)

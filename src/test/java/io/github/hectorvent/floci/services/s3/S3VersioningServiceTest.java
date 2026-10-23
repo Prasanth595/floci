@@ -48,6 +48,56 @@ class S3VersioningServiceTest {
     }
 
     @Test
+    void versioningCannotBeSuspendedOnABucketWithObjectLock() {
+        s3Service.enableObjectLockOnCreate("versioned-bucket");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> s3Service.putBucketVersioning("versioned-bucket", "Suspended"));
+        assertEquals("InvalidBucketState", refused.getErrorCode());
+        assertEquals(409, refused.getHttpStatus());
+        assertEquals("An Object Lock configuration is present on this bucket, so the versioning state "
+                + "cannot be changed.", refused.getMessage());
+        assertEquals("Enabled", s3Service.getBucketVersioning("versioned-bucket"));
+
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        assertEquals("Enabled", s3Service.getBucketVersioning("versioned-bucket"));
+    }
+
+    @Test
+    void objectLockConfigurationNeedsVersioningEnabled() {
+        assertObjectLockConfigurationRefused();
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putBucketVersioning("versioned-bucket", "Suspended");
+        assertObjectLockConfigurationRefused();
+
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObjectLockConfiguration("versioned-bucket", "GOVERNANCE", "Days", 1);
+        assertEquals("GOVERNANCE", s3Service.getObjectLockConfiguration("versioned-bucket").mode());
+    }
+
+    @Test
+    void aMissingBucketAndAnUnknownStatusAreReportedBeforeObjectLock() {
+        assertEquals("NoSuchBucket", assertThrows(AwsException.class,
+                () -> s3Service.putBucketVersioning("missing-bucket", "Bogus")).getErrorCode());
+        assertEquals("NoSuchBucket", assertThrows(AwsException.class,
+                () -> s3Service.putObjectLockConfiguration("missing-bucket", null, null, 0)).getErrorCode());
+        s3Service.enableObjectLockOnCreate("versioned-bucket");
+        assertEquals("MalformedXML", assertThrows(AwsException.class,
+                () -> s3Service.putBucketVersioning("versioned-bucket", "Bogus")).getErrorCode());
+    }
+
+    private void assertObjectLockConfigurationRefused() {
+        AwsException refused = assertThrows(AwsException.class,
+                () -> s3Service.putObjectLockConfiguration("versioned-bucket", "GOVERNANCE", "Days", 1));
+        assertEquals("InvalidBucketState", refused.getErrorCode());
+        assertEquals(409, refused.getHttpStatus());
+        assertEquals("Versioning must be 'Enabled' on the bucket to apply a Object Lock configuration",
+                refused.getMessage());
+        assertEquals("ObjectLockConfigurationNotFoundError", assertThrows(AwsException.class,
+                () -> s3Service.getObjectLockConfiguration("versioned-bucket")).getErrorCode());
+    }
+
+    @Test
     void suspendedPutReplacesAnArchivedNullVersionWithoutLeavingADuplicate() {
         s3Service.putObject("versioned-bucket", "key",
                 "original null".getBytes(StandardCharsets.UTF_8), "text/plain", null);

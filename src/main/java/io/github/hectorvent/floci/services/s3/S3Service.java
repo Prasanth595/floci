@@ -2915,16 +2915,28 @@ public class S3Service implements Resettable, ResourceProvider {
 
     // --- Versioning Operations ---
 
+    /**
+     * Sets the bucket's versioning status. Versioning cannot be suspended on a bucket with Object
+     * Lock, and S3 was recorded refusing it with {@code 409 InvalidBucketState}; enabling it again
+     * is accepted. The check and the write take the bucket monitor that
+     * {@link #putObjectLockConfiguration} takes, so a concurrent suspend and lock cannot both pass.
+     */
     public void putBucketVersioning(String bucketName, String status) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+        Bucket bucket = requireBucket(bucketName);
         if (!"Enabled".equals(status) && !"Suspended".equals(status)) {
             throw new AwsException("MalformedXML",
                     "Versioning status must be 'Enabled' or 'Suspended'.", 400);
         }
-        bucket.setVersioningStatus(status);
-        bucketStore.put(bucketName, bucket);
+        synchronized (bucket) {
+            requireSameRecord(bucketName, bucket);
+            if ("Suspended".equals(status) && bucket.isObjectLockEnabled()) {
+                throw new AwsException("InvalidBucketState",
+                        "An Object Lock configuration is present on this bucket, so the versioning state "
+                                + "cannot be changed.", 409);
+            }
+            bucket.setVersioningStatus(status);
+            bucketStore.put(bucketName, bucket);
+        }
         LOG.infov("Set versioning for bucket {0}: {1}", bucketName, status);
     }
 
@@ -4284,17 +4296,42 @@ public class S3Service implements Resettable, ResourceProvider {
         LOG.infov("Enabled Object Lock for bucket: {0}", bucketName);
     }
 
-    public void putObjectLockConfiguration(String bucketName, String mode, String unit, int value) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
-        bucket.setBucketObjectLockEnabled();
-        if (mode != null && unit != null && value > 0) {
-            bucket.setDefaultRetention(new ObjectLockRetention(mode, unit, value));
-        } else {
-            bucket.setDefaultRetention(null);
+    /**
+     * CreateBucket with Object Lock: enables versioning and Object Lock in one step under the bucket
+     * monitor, so no versioning request can suspend the new bucket between the two.
+     */
+    public void enableObjectLockOnCreate(String bucketName) {
+        Bucket bucket = requireBucket(bucketName);
+        synchronized (bucket) {
+            requireSameRecord(bucketName, bucket);
+            bucket.setVersioningStatus("Enabled");
+            bucket.setBucketObjectLockEnabled();
+            bucketStore.put(bucketName, bucket);
         }
-        bucketStore.put(bucketName, bucket);
+        LOG.infov("Enabled versioning and Object Lock for bucket: {0}", bucketName);
+    }
+
+    /**
+     * Object Lock works only with versioned buckets, and S3 was recorded refusing a configuration on a
+     * bucket whose versioning is unset or suspended with {@code 409 InvalidBucketState}. Takes the
+     * bucket monitor {@link #putBucketVersioning} takes.
+     */
+    public void putObjectLockConfiguration(String bucketName, String mode, String unit, int value) {
+        Bucket bucket = requireBucket(bucketName);
+        synchronized (bucket) {
+            requireSameRecord(bucketName, bucket);
+            if (!bucket.isVersioningEnabled()) {
+                throw new AwsException("InvalidBucketState",
+                        "Versioning must be 'Enabled' on the bucket to apply a Object Lock configuration", 409);
+            }
+            bucket.setBucketObjectLockEnabled();
+            if (mode != null && unit != null && value > 0) {
+                bucket.setDefaultRetention(new ObjectLockRetention(mode, unit, value));
+            } else {
+                bucket.setDefaultRetention(null);
+            }
+            bucketStore.put(bucketName, bucket);
+        }
         LOG.infov("Set Object Lock configuration for bucket: {0}, mode={1}, unit={2}, value={3}",
                 bucketName, mode, unit, value);
     }

@@ -36,6 +36,9 @@ class S3NullVersionReviewTest {
     @TempDir
     Path tempDir;
 
+    /** The bucket store of the service {@link #service} last built. */
+    private InMemoryStorage<String, Bucket> buckets;
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void rollbackThenPutListsTheReplacementNull(boolean memory) {
@@ -159,7 +162,7 @@ class S3NullVersionReviewTest {
             } else {
                 service.putObjectRetention("bucket", "key", "null", lock, Instant.now().plusSeconds(3600), false);
             }
-            service.putBucketVersioning("bucket", "Suspended");
+            suspendLockedBucket();
 
             assertDenied(() -> service.putObject("bucket", "key", bytes("replacement"), "text/plain", Map.of()));
             assertPreservedBodies(service);
@@ -455,7 +458,7 @@ class S3NullVersionReviewTest {
         service.putBucketVersioning("bucket", "Enabled");
         assertFalse(service.deleteOverridesGovernanceRetention("bucket", "key", null));
         service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of());
-        service.putBucketVersioning("bucket", "Suspended");
+        suspendLockedBucket();
         boolean overrides = service.deleteOverridesGovernanceRetention("bucket", "key", null);
         assertFalse(overrides);
         for (boolean s3Enforced : List.of(false, true)) {
@@ -486,9 +489,20 @@ class S3NullVersionReviewTest {
     }
 
     private S3Service service(boolean memory, InMemoryStorage<String, S3Object> objects) {
-        S3Service service = new S3Service(new InMemoryStorage<>(), objects, tempDir.resolve("s3"), memory);
+        buckets = new InMemoryStorage<>();
+        S3Service service = new S3Service(buckets, objects, tempDir.resolve("s3"), memory);
         service.createBucket("bucket", "us-east-1");
         return service;
+    }
+
+    /**
+     * Suspends versioning on a bucket that already has Object Lock. PutBucketVersioning refuses
+     * this, but a bucket stored before it did can still be in this state.
+     */
+    private void suspendLockedBucket() {
+        Bucket bucket = buckets.get("bucket").orElseThrow();
+        bucket.setVersioningStatus("Suspended");
+        buckets.put("bucket", bucket);
     }
 
     private static Object readSnapshot(S3Service service, boolean explicitNull, Function<Object, String> reader)
