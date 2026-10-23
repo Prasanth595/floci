@@ -4707,8 +4707,9 @@ class Ec2ServiceTest {
 
     /**
      * Whether {@code waiter} waits, in the named Ec2Service method, to enter a monitor {@code owner}
-     * holds. The method is named on purpose: if the request came to wait anywhere else, the race tests
-     * would no longer exercise the code under the lock, so they time out instead.
+     * holds. The method is named on purpose: a wait anywhere else may not be at the lock under test, so
+     * the race tests time out rather than pass without exercising it. Moving that lock into another
+     * method means updating the name here.
      */
     private static boolean isBlockedIn(Thread waiter, String method, Thread owner) {
         if (waiter == null) {
