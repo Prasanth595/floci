@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -200,6 +201,50 @@ class SamRestApiAuthIntegrationTest {
                     .then().statusCode(200)
                     .body("authorizationType", equalTo("AWS_IAM"))
                     .body("apiKeyRequired", equalTo(false));
+            String path = "/execute-api/" + apiId + "/test/items";
+            given().post(path).then().statusCode(403);
+            given().headers(signed(path)).post(path).then().statusCode(200).body("accepted", equalTo(true));
+        } finally {
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DeleteStack").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200);
+            CfnStackWaits.awaitStackDeleted(stack);
+        }
+    }
+
+    @Test
+    void nestedFnIfAroundAnOperationDeploysAndThePlainBranchGetsTheSamDefault() throws Exception {
+        ObjectNode template = template(false);
+        template.set("Conditions", mapper.readTree("""
+                {"Outer":{"Fn::Equals":["on","off"]},"Inner":{"Fn::Equals":["on","on"]}}
+                """));
+        template.set("Outputs", mapper.readTree("{\"ApiId\":{\"Value\":{\"Ref\":\"Api\"}}}"));
+        ((ObjectNode) template.at("/Resources/Api/Properties/Auth")).remove("ApiKeyRequired");
+        ObjectNode items = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody/paths/~1items");
+        JsonNode post = items.get("post").deepCopy();
+        ObjectNode nested = mapper.createObjectNode();
+        nested.putArray("Fn::If").add("Inner").add(post.deepCopy())
+                .add(mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        ObjectNode outer = mapper.createObjectNode();
+        outer.putArray("Fn::If").add("Outer").add(nested).add(post);
+        items.set("post", outer);
+        String stack = "sam-nested-condition-auth-" + UUID.randomUUID();
+        given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack").formParam("StackName", stack)
+                .formParam("TemplateBody", template.toString())
+                .formParam("Capabilities.member.1", "CAPABILITY_AUTO_EXPAND")
+                .when().post("/").then().statusCode(200);
+        try {
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
+            assertEquals("CREATE_COMPLETE", state.status(), state.reason());
+            String outputs = given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DescribeStacks").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200).extract().asString();
+            String apiId = XmlParser.extractPairs(outputs, "Outputs", "OutputKey", "OutputValue").get("ApiId");
+            String resourceId = given().get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200).extract().path("item.find { it.path == '/items' }.id");
+            given().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST")
+                    .then().statusCode(200).body("authorizationType", equalTo("AWS_IAM"));
             String path = "/execute-api/" + apiId + "/test/items";
             given().post(path).then().statusCode(403);
             given().headers(signed(path)).post(path).then().statusCode(200).body("accepted", equalTo(true));

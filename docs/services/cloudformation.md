@@ -764,7 +764,9 @@ controls are selected. Existing operation requirements and their scheme definiti
 preserved. Defaults are selected by the SAM names `AWS_IAM` and `api_key`; an existing
 scheme with another name does not suppress either default.
 As in SAM, the defaults are added to each operation's own `security`, inside each branch of
-an `Fn::If` written around a path or an operation, skipping an `AWS::NoValue` branch.
+an `Fn::If` written around a path or an operation, skipping an `AWS::NoValue` branch. A
+nested `Fn::If` around an operation is left as written, without the defaults, as SAM leaves
+it.
 Root-level `security` stays in the document as written and is not copied into operations,
 and an `Auth` that selects no default, such as `ApiKeyRequired: false` alone, leaves the
 document unchanged. floci's REST importer still applies root-level `security` to an
@@ -775,7 +777,7 @@ a `paths` map written as an `Fn::If` is rejected.
 
 Other `Auth` properties, custom default authorizers and external definitions are rejected.
 When a default applies, so are unresolved or malformed security requirements, method
-override markers, a nested `Fn::If` around a path or an operation, a body or security
+override markers, a nested `Fn::If` around a path item, a body or security
 scheme map written as an intrinsic function, an `AWS_IAM` or `api_key` scheme that contains
 one, and a body that declares both `swagger` and `openapi`. Existing
 custom schemes remain subject to API Gateway's importer and invocation support; preserving

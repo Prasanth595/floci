@@ -187,7 +187,6 @@ class SamRestApiAuthTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
-            "{\"get\":{\"Fn::If\":[\"Enabled\",{\"Fn::If\":[\"Other\",{},{}]},{}]}}",
             "{\"Fn::If\":[\"Enabled\",{\"Fn::If\":[\"Other\",{\"get\":{}},{}]},{}]}",
             "{\"get\":{\"Fn::If\":\"Enabled\"}}", "{\"get\":{\"Fn::If\":[\"Enabled\",\"get\",{}]}}"
     })
@@ -199,6 +198,20 @@ class SamRestApiAuthTest {
         AwsException failure = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
         assertEquals("ValidationError", failure.getErrorCode());
         assertEquals(original, template);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void leavesANestedFnIfAroundAnOperationAsWrittenAsSamDoes(boolean swagger) throws Exception {
+        ObjectNode template = template(swagger);
+        ObjectNode items = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody/paths/~1items");
+        JsonNode get = items.get("get");
+        JsonNode nested = conditional(get, mapper.readTree("{\"Ref\":\"AWS::NoValue\"}"));
+        items.set("get", conditional(nested, get));
+        JsonNode branches = processor.expandSamTemplate(template)
+                .at("/Resources/Api/Properties/Body/paths/~1items/get/Fn::If");
+        assertEquals(nested, branches.get(1));
+        assertEquals(mapper.readTree("[{\"AWS_IAM\":[]},{\"api_key\":[]}]"), branches.at("/2/security"));
     }
 
     @Test

@@ -93,7 +93,12 @@ final class SamRestApiAuth {
                     if (!METHODS.contains(method.getKey())) {
                         continue;
                     }
-                    for (JsonNode branch : branches(method.getValue())) {
+                    for (JsonNode branch : conditionalContents(method.getValue())) {
+                        // SAM reads one level of Fn::If around an operation and skips a branch without
+                        // an integration, so a nested Fn::If there is left as written, without defaults.
+                        if (branch.has("Fn::If")) {
+                            continue;
+                        }
                         if (!(branch instanceof ObjectNode operation)) {
                             throw invalid("Auth requires inline operation objects.");
                         }
@@ -138,10 +143,10 @@ final class SamRestApiAuth {
     }
 
     /**
-     * The values a path item or an operation may take, when a default is added to them: as
-     * {@link #conditionalContents}, refusing a nested {@code Fn::If}. The template engine keeps only
-     * the chosen branch, so a default must be written inside each branch, not beside the
-     * {@code Fn::If}.
+     * The values a path item may take when a default is added to its operations: as
+     * {@link #conditionalContents}, refusing a nested {@code Fn::If}, as SAM does once it reads the
+     * methods of the inner one. The template engine keeps only the chosen branch, so a default must
+     * be written inside each branch, not beside the {@code Fn::If}.
      */
     private List<JsonNode> branches(JsonNode node) {
         List<JsonNode> branches = conditionalContents(node);
