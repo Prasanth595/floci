@@ -12,6 +12,7 @@ import java.net.URI;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public final class RdsRequests {
     private RdsRequests() {}
@@ -29,5 +30,34 @@ public final class RdsRequests {
                 .region(Region.of(region))
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test-secret-key")))
                 .build();
+    }
+
+    /** Skips the test when no Docker daemon answers, which a real PostgreSQL instance needs. */
+    public static void assumeDocker() throws InterruptedException {
+        assumeTrue(DockerAvailability.isAvailable(), "Docker is not available");
+    }
+
+    /** Creates a PostgreSQL instance with database {@code appdb} and returns its endpoint port. */
+    public static int createPostgresInstance(String id, String masterUsername, String masterPassword,
+                                             boolean iamDatabaseAuthentication) {
+        return rds("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", id)
+                .formParam("Engine", "postgres")
+                .formParam("MasterUsername", masterUsername)
+                .formParam("MasterUserPassword", masterPassword)
+                .formParam("DBName", "appdb")
+                .formParam("AllocatedStorage", "20")
+                .formParam("DBInstanceClass", "db.t3.micro")
+                .formParam("EnableIAMDatabaseAuthentication", iamDatabaseAuthentication)
+        .when().post("/").then().statusCode(200)
+                .extract().xmlPath()
+                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+    }
+
+    public static void deleteInstance(String id) {
+        rds("DeleteDBInstance")
+                .formParam("DBInstanceIdentifier", id)
+                .formParam("SkipFinalSnapshot", "true")
+        .when().post("/");
     }
 }
