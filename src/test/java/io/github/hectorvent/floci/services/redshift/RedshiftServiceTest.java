@@ -57,6 +57,29 @@ import static org.mockito.Mockito.*;
 class RedshiftServiceTest {
 
     @Test
+    void blankDefaultRoleCreatesWithoutDefaultAndClearsExistingDefault() {
+        String role = "arn:aws:iam::111111111111:role/copy";
+        when(cm.start(anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "cluster", "localhost", 5432));
+        for (String blank : List.of("", " \t")) {
+            String identifier = blank.isEmpty() ? "empty-default" : "whitespace-default";
+            Cluster cluster = service.createCluster(identifier, "dc2.large", "admin", "pw",
+                    null, List.of(), List.of(role), blank);
+            assertNull(cluster.getDefaultIamRoleArn());
+            when(clusterBackend.get(identifier)).thenReturn(Optional.of(cluster));
+
+            service.modifyClusterIamRoles(identifier, List.of(), List.of(), role);
+            service.modifyClusterIamRoles(identifier, List.of(), List.of());
+            assertEquals(role, cluster.getDefaultIamRoleArn());
+
+            service.modifyClusterIamRoles(identifier, List.of(), List.of(), blank);
+            assertNull(cluster.getDefaultIamRoleArn());
+            assertEquals(List.of(role), cluster.getIamRoleArns());
+            verify(proxyManager).updateIamRoles("111111111111:" + identifier, List.of(role), null);
+        }
+    }
+
+    @Test
     void modifyDefaultIamRoleValidatesBeforeMutatingAndClearsWhenRemoved() throws Exception {
         String first = "arn:aws:iam::111111111111:role/first";
         String second = "arn:aws:iam::111111111111:role/second";

@@ -103,8 +103,10 @@ cannot distinguish an explicit assignment of a default value from an unchanged d
 
 `CreateCluster` and `ModifyClusterIamRoles` accept `DefaultIamRoleArn`. It must name a role
 in the cluster's associated `IamRoles` list, including roles added in the same request.
-`DescribeClusters` returns the configured ARN. Removing that role clears the default;
-omitting `DefaultIamRoleArn` otherwise keeps the existing default. The setting uses the
+`DescribeClusters` returns the configured ARN. Removing that role clears the default.
+An explicit empty or whitespace-only `DefaultIamRoleArn` means no default: it creates a cluster
+without one or clears an existing default while retaining the associated roles. Omitting the field
+on an update otherwise keeps the existing default. The setting uses the
 cluster's configured storage backend and is reapplied when its proxy restarts.
 
 Both `COPY ... IAM_ROLE default` and `UNLOAD ... IAM_ROLE default` use that role, in Simple

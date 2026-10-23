@@ -205,7 +205,7 @@ public class RedshiftService {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
         }
         List<String> roles = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
-        validateDefaultIamRole(defaultIamRoleArn, roles);
+        String defaultRole = validateDefaultIamRole(defaultIamRoleArn, roles);
         // A previous cluster with this identifier may have been deleted without its temp
         // credentials being cleared; drop them so the new cluster starts with none.
         credentialBroker.revokeCluster(clusters.accountId(), identifier);
@@ -218,7 +218,7 @@ public class RedshiftService {
         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
         cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds != null ? vpcSecurityGroupIds : List.of());
         cluster.setIamRoleArns(roles);
-        cluster.setDefaultIamRoleArn(defaultIamRoleArn);
+        cluster.setDefaultIamRoleArn(defaultRole);
         // A group named at create time is applied afterwards via modifyCluster.
         cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
         cluster.setClusterStatus("creating");
@@ -714,7 +714,7 @@ public class RedshiftService {
         if (defaultIamRoleArn == null && !roles.contains(defaultRole)) {
             defaultRole = null;
         }
-        validateDefaultIamRole(defaultRole, List.copyOf(roles));
+        defaultRole = validateDefaultIamRole(defaultRole, List.copyOf(roles));
         cluster.setIamRoleArns(List.copyOf(roles));
         cluster.setDefaultIamRoleArn(defaultRole);
 
@@ -724,15 +724,16 @@ public class RedshiftService {
         return cluster;
     }
 
-    private static void validateDefaultIamRole(String defaultIamRoleArn, List<String> iamRoleArns) {
-        if (defaultIamRoleArn == null) {
-            return;
+    private static String validateDefaultIamRole(String defaultIamRoleArn, List<String> iamRoleArns) {
+        if (defaultIamRoleArn == null || defaultIamRoleArn.isBlank()) {
+            return null;
         }
         requireIamRoleArn(defaultIamRoleArn);
         if (!iamRoleArns.contains(defaultIamRoleArn)) {
             throw new AwsException("InvalidParameterValue",
                     "Default IAM role must be associated with the cluster: " + defaultIamRoleArn, 400);
         }
+        return defaultIamRoleArn;
     }
 
     private static void requireIamRoleArn(String arn) {

@@ -328,7 +328,7 @@ class RedshiftQueryHandlerTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("test-cluster");
         cluster.setClusterStatus("available");
-        when(service.createCluster(any(), any(), any(), any(), any(), any())).thenReturn(cluster);
+        when(service.createCluster(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(cluster);
 
         Response response = handler.handle("CreateCluster", params);
 
@@ -354,7 +354,7 @@ class RedshiftQueryHandlerTest {
         cluster.setClusterStatus("available");
         cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:acc:secret:redshift-managed");
         cluster.setMasterPasswordSecretKmsKeyId("arn:aws:kms:us-east-1:acc:key/key-1");
-        when(service.createClusterWithManagedMasterPassword(any(), any(), any(), any(), any(), any(), any(), any()))
+        when(service.createClusterWithManagedMasterPassword(any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(cluster);
 
         Response response = handler.handle("CreateCluster", params,
@@ -367,7 +367,7 @@ class RedshiftQueryHandlerTest {
         assertFalse(xml.contains("<MasterUserSecret>"));
         verify(service).createClusterWithManagedMasterPassword(eq("managed-cluster"), eq("dc2.large"),
                 eq("admin"), isNull(), eq(List.of()), eq(List.of()),
-                eq("arn:aws:kms:us-east-1:acc:key/key-1"), eq("us-east-1"));
+                eq("arn:aws:kms:us-east-1:acc:key/key-1"), eq("us-east-1"), isNull());
     }
 
     @Test
@@ -383,13 +383,13 @@ class RedshiftQueryHandlerTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("test-cluster");
         cluster.setClusterStatus("available");
-        when(service.createCluster(any(), any(), any(), any(), any(), any(), any())).thenReturn(cluster);
+        when(service.createCluster(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(cluster);
 
         handler.handle("CreateCluster", params);
 
         verify(service).createCluster(eq("test-cluster"), eq("dc2.large"), eq("admin"), eq("password123"),
                 isNull(), eq(List.of()), eq(List.of("arn:aws:iam::000000000000:role/first",
-                        "arn:aws:iam::000000000000:role/second")));
+                        "arn:aws:iam::000000000000:role/second")), isNull());
     }
     
     @Test
@@ -432,7 +432,7 @@ class RedshiftQueryHandlerTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("test-cluster");
         cluster.setClusterStatus("creating");
-        when(service.createCluster(any(), any(), any(), any(), any(), any())).thenReturn(cluster);
+        when(service.createCluster(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(cluster);
 
         Response response = handler.handle("CreateCluster", params);
         String xml = (String) response.getEntity();
@@ -855,13 +855,13 @@ class RedshiftQueryHandlerTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("c1");
         cluster.setIamRoleArns(List.of("arn:aws:iam::111111111111:role/a"));
-        when(service.modifyClusterIamRoles(eq("c1"), any(), any())).thenReturn(cluster);
+        when(service.modifyClusterIamRoles(eq("c1"), any(), any(), isNull())).thenReturn(cluster);
 
         Response response = handler.handle("ModifyClusterIamRoles", params);
 
         assertEquals(200, response.getStatus());
         verify(service).modifyClusterIamRoles("c1",
-                List.of("arn:aws:iam::111111111111:role/a"), List.of("arn:aws:iam::111111111111:role/b"));
+                List.of("arn:aws:iam::111111111111:role/a"), List.of("arn:aws:iam::111111111111:role/b"), null);
         String body = response.getEntity().toString();
         assertTrue(body.contains("<ModifyClusterIamRolesResult>"));
         assertTrue(body.contains("<IamRoleArn>arn:aws:iam::111111111111:role/a</IamRoleArn>"));

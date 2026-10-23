@@ -92,25 +92,12 @@ public class RedshiftQueryHandler {
 
             String region = regionResolver.resolveRegionFromAuth(authorizationHeader);
             String defaultIamRoleArn = params.getFirst("DefaultIamRoleArn");
-            Cluster cluster;
-            if (defaultIamRoleArn != null) {
-                cluster = manageMasterPassword
-                        ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
-                                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
-                                params.getFirst("MasterPasswordSecretKmsKeyId"), region, defaultIamRoleArn)
-                        : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
-            } else {
-                cluster = manageMasterPassword
-                        ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
-                                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
-                                params.getFirst("MasterPasswordSecretKmsKeyId"), region)
-                        : iamRoleArns.isEmpty()
-                        ? service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                                clusterSubnetGroupName, vpcSecurityGroupIds)
-                        : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
-            }
+            Cluster cluster = manageMasterPassword
+                    ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
+                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
+                            params.getFirst("MasterPasswordSecretKmsKeyId"), region, defaultIamRoleArn)
+                    : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
+                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
             String parameterGroupName = params.getFirst("ClusterParameterGroupName");
             String multiAz = params.getFirst("MultiAZ");
             boolean hasParameterGroup = parameterGroupName != null && !parameterGroupName.isBlank();
@@ -758,12 +745,9 @@ public class RedshiftQueryHandler {
             if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
                 throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
             }
-            String defaultIamRoleArn = params.getFirst("DefaultIamRoleArn");
-            Cluster cluster = defaultIamRoleArn == null
-                    ? service.modifyClusterIamRoles(clusterIdentifier,
-                            memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"))
-                    : service.modifyClusterIamRoles(clusterIdentifier,
-                            memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"), defaultIamRoleArn);
+            Cluster cluster = service.modifyClusterIamRoles(clusterIdentifier,
+                    memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"),
+                    params.getFirst("DefaultIamRoleArn"));
             String xml = new XmlBuilder()
                     .start("ModifyClusterIamRolesResponse")
                       .start("ModifyClusterIamRolesResult")

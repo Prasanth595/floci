@@ -5,7 +5,8 @@ import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerM
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
@@ -30,8 +31,9 @@ class RedshiftDefaultIamRoleIntegrationTest {
     @TestHTTPResource
     URI endpoint;
 
-    @Test
-    void sdkCreatesChangesAndRemovesDefaultRole() {
+    @ParameterizedTest
+    @ValueSource(strings = {"", "arn:aws:iam::000000000000:role/first"})
+    void sdkCreatesChangesAndRemovesDefaultRole(String initialDefault) {
         String clusterId = "sdk-default-role";
         String first = "arn:aws:iam::000000000000:role/first";
         String second = "arn:aws:iam::000000000000:role/second";
@@ -44,9 +46,19 @@ class RedshiftDefaultIamRoleIntegrationTest {
                 .build()) {
             Cluster created = client.createCluster(request -> request.clusterIdentifier(clusterId)
                     .nodeType("dc2.large").masterUsername("admin").masterUserPassword("Secret123")
-                    .iamRoles(first).defaultIamRoleArn(first)).cluster();
+                    .iamRoles(first).defaultIamRoleArn(initialDefault)).cluster();
             try {
-                assertEquals(first, created.defaultIamRoleArn());
+                assertEquals(initialDefault.isBlank() ? null : initialDefault, created.defaultIamRoleArn());
+                Cluster addedWithoutDefault = client.modifyClusterIamRoles(request -> request.clusterIdentifier(clusterId)
+                        .addIamRoles(second).defaultIamRoleArn("")).cluster();
+                assertNull(addedWithoutDefault.defaultIamRoleArn());
+                assertEquals(2, addedWithoutDefault.iamRoles().size());
+                Cluster removedWithoutDefault = client.modifyClusterIamRoles(request -> request.clusterIdentifier(clusterId)
+                        .removeIamRoles(second).defaultIamRoleArn("")).cluster();
+                assertNull(removedWithoutDefault.defaultIamRoleArn());
+                assertEquals(first, removedWithoutDefault.iamRoles().getFirst().iamRoleArn());
+                assertEquals(first, client.modifyClusterIamRoles(request -> request.clusterIdentifier(clusterId)
+                        .defaultIamRoleArn(first)).cluster().defaultIamRoleArn());
                 assertEquals(first, client.describeClusters(request -> request.clusterIdentifier(clusterId))
                         .clusters().getFirst().defaultIamRoleArn());
 
@@ -58,6 +70,12 @@ class RedshiftDefaultIamRoleIntegrationTest {
                 Cluster updated = client.modifyClusterIamRoles(request -> request.clusterIdentifier(clusterId)
                         .addIamRoles(second).defaultIamRoleArn(second)).cluster();
                 assertEquals(second, updated.defaultIamRoleArn());
+
+                Cluster cleared = client.modifyClusterIamRoles(request -> request.clusterIdentifier(clusterId)
+                        .defaultIamRoleArn("")).cluster();
+                assertNull(cleared.defaultIamRoleArn());
+                assertEquals(2, cleared.iamRoles().size());
+                client.modifyClusterIamRoles(request -> request.clusterIdentifier(clusterId).defaultIamRoleArn(second));
 
                 Cluster removed = client.modifyClusterIamRoles(request -> request.clusterIdentifier(clusterId)
                         .removeIamRoles(second)).cluster();
