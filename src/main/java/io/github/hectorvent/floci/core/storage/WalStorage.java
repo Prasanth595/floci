@@ -222,8 +222,12 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
             dirty = false;
 
             closeWalWriter();
-            Files.deleteIfExists(walPath);
-            openWalWriter();
+            try {
+                Files.deleteIfExists(walPath);
+            } finally {
+                // Reopen even when the delete failed, so later records are still appended.
+                openWalWriter();
+            }
 
             LOG.debugv("Compacted {0} entries to snapshot, WAL truncated", store.size());
         } catch (IOException e) {
