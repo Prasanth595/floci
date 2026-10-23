@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -248,7 +249,7 @@ class S3NullVersionReviewTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
-    void failedNonEnabledPublicationRetainsArchivedNullHistory(boolean memory) {
+    void failedNonEnabledPublicationRetainsArchivedNullHistory(boolean memory) throws Exception {
         for (String current : List.of("numbered", "promoted", "marker")) {
             for (boolean rollback : List.of(true, false)) {
                 for (boolean afterPut : List.of(false, true)) {
@@ -288,6 +289,15 @@ class S3NullVersionReviewTest {
                     if ("marker".equals(current)) {
                         assertEquals("NoSuchKey", assertThrows(AwsException.class,
                                 () -> service.getObject("bucket", "key")).getErrorCode());
+                        if (memory) {
+                            assertFalse(memoryBodies(service).values().stream()
+                                    .anyMatch(body -> body instanceof byte[] payload
+                                            && Arrays.equals(payload, bytes("replacement"))),
+                                    "failed marker replacement must not retain canonical bytes");
+                        } else {
+                            assertFalse(Files.exists(tempDir.resolve("s3/.accounts/000000000000/bucket/key.s3data")),
+                                    "failed marker replacement must remove the canonical body");
+                        }
                     } else {
                         String previous = "promoted".equals(current) ? "original" : "numbered";
                         assertArrayEquals(bytes(previous), service.getObject("bucket", "key").getData());
