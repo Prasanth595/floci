@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -442,10 +443,14 @@ class CloudWatchLogsServiceTest {
         assertEquals(List.of(), logs.describeLogStreams("/app", null, REGION));
     }
 
-    /** Runs the thread until it ends or waits on a lock the caller may hold. */
+    /**
+     * Runs the thread until it ends or waits on a lock the caller may hold. Gives up after five
+     * seconds, well inside the callers' ten-second timeout, so a stuck thread is reported by its
+     * state and the test still has time to finish.
+     */
     private static void startAndWaitUntilFinishedOrStuck(Thread thread) {
         thread.start();
-        ThreadStates.awaitParkedOrDone(thread);
+        ThreadStates.awaitState(thread, ThreadStates.PARKED_OR_DONE, Duration.ofSeconds(5), "the worker");
     }
 
     @Test
