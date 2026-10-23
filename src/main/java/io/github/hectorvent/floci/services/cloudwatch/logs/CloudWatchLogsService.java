@@ -408,8 +408,9 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     private static void validateLogGroupClass(String logGroupClass) {
         if (logGroupClass != null && !LOG_GROUP_CLASSES.contains(logGroupClass)) {
-            throw new AwsException("InvalidParameterException",
-                    "logGroupClass must be STANDARD, INFREQUENT_ACCESS, or DELIVERY.", 400);
+            throw SmithyValidationErrors.exception("InvalidParameterException",
+                    "Value '" + logGroupClass + "' at 'logGroupClass' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [STANDARD, INFREQUENT_ACCESS, DELIVERY]");
         }
     }
 

@@ -79,7 +79,7 @@ class CloudWatchLogsGroupClassIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"COLD", "", "standard"})
+    @ValueSource(strings = {"FOO", "COLD", "", "standard"})
     void sdkRejectsAnInvalidClassOnCreate(String invalidClass) {
         String group = "/class-invalid-6232/" + UUID.randomUUID();
         try (CloudWatchLogsClient client = client()) {
@@ -88,6 +88,9 @@ class CloudWatchLogsGroupClassIntegrationTest {
                         () -> client.createLogGroup(request -> request.logGroupName(group).logGroupClass(invalidClass)));
                 assertEquals("InvalidParameterException", invalid.awsErrorDetails().errorCode());
                 assertEquals(400, invalid.statusCode());
+                assertEquals("1 validation error detected: Value '" + invalidClass
+                        + "' at 'logGroupClass' failed to satisfy constraint: Member must satisfy enum value set: "
+                        + "[STANDARD, INFREQUENT_ACCESS, DELIVERY]", invalid.awsErrorDetails().errorMessage());
             } finally {
                 if (!client.describeLogGroups(request -> request.logGroupNamePrefix(group)).logGroups().isEmpty()) {
                     client.deleteLogGroup(request -> request.logGroupName(group));
@@ -97,13 +100,16 @@ class CloudWatchLogsGroupClassIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"COLD", "", "standard"})
+    @ValueSource(strings = {"FOO", "COLD", "", "standard"})
     void sdkRejectsAnInvalidClassOnDescribe(String invalidClass) {
         try (CloudWatchLogsClient client = client()) {
             CloudWatchLogsException invalid = assertThrows(CloudWatchLogsException.class,
                     () -> client.describeLogGroups(request -> request.logGroupClass(invalidClass)));
             assertEquals("InvalidParameterException", invalid.awsErrorDetails().errorCode());
             assertEquals(400, invalid.statusCode());
+            assertEquals("1 validation error detected: Value '" + invalidClass
+                    + "' at 'logGroupClass' failed to satisfy constraint: Member must satisfy enum value set: "
+                    + "[STANDARD, INFREQUENT_ACCESS, DELIVERY]", invalid.awsErrorDetails().errorMessage());
         }
     }
 
