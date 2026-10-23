@@ -117,6 +117,10 @@ Configuration tags are reachable only through the tag endpoints, because AWS's
 
 ### SCRAM Secrets Association 
 
+Manages credentials only: the broker does not enable SASL authentication or
+validate these users when clients connect. Clients can still connect without
+credentials. Authenticated SASL_SSL listeners is not implemented.
+
 `BatchAssociateScramSecret` accepts up to 10 Secrets Manager ARNs and creates kafka
 `SCRAM-SHA-512` users.
 Secrets must belong to the cluster's account, region and partition, use the `AmazonMSK_`
