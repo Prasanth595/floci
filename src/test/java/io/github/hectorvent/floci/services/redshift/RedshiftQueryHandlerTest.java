@@ -32,6 +32,46 @@ import static org.mockito.Mockito.*;
 
 class RedshiftQueryHandlerTest {
 
+    @Test
+    void modifyClusterIamRolesParsesAndReturnsDefaultRole() {
+        String role = "arn:aws:iam::111111111111:role/default";
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("AddIamRoles.IamRoleArn.1", role);
+        params.putSingle("DefaultIamRoleArn", role);
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setDefaultIamRoleArn(role);
+        when(service.modifyClusterIamRoles("c1", List.of(role), List.of(), role)).thenReturn(cluster);
+
+        Response response = handler.handle("ModifyClusterIamRoles", params);
+
+        verify(service).modifyClusterIamRoles("c1", List.of(role), List.of(), role);
+        assertTrue(response.getEntity().toString().contains("<DefaultIamRoleArn>" + role + "</DefaultIamRoleArn>"));
+    }
+
+    @Test
+    void createClusterPassesDefaultRoleToService() {
+        String role = "arn:aws:iam::111111111111:role/default";
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "c1");
+        params.putSingle("NodeType", "dc2.large");
+        params.putSingle("MasterUsername", "admin");
+        params.putSingle("MasterUserPassword", "pw");
+        params.putSingle("IamRoles.IamRoleArn.1", role);
+        params.putSingle("DefaultIamRoleArn", role);
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setDefaultIamRoleArn(role);
+        when(service.createCluster("c1", "dc2.large", "admin", "pw", null, List.of(), List.of(role), role))
+                .thenReturn(cluster);
+
+        Response response = handler.handle("CreateCluster", params);
+
+        assertTrue(response.getEntity().toString().contains("<DefaultIamRoleArn>" + role + "</DefaultIamRoleArn>"));
+        verify(service).createCluster("c1", "dc2.large", "admin", "pw", null, List.of(), List.of(role), role);
+    }
+
     private RedshiftQueryHandler handler;
     private RedshiftService service;
     private RedshiftCredentialBroker credentialBroker;

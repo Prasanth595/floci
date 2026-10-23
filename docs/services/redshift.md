@@ -56,7 +56,7 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `ModifyCluster` | Update node type, parameter group, security groups, Multi-AZ flag, or the master password |
 | `DescribeClusterVersions` | Return the single emulated engine version and its parameter group family |
 | `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
-| `ModifyClusterIamRoles` | Add or remove the IAM roles associated with a cluster; COPY and UNLOAD see the change on new connections. `DefaultIamRoleArn` is ignored |
+| `ModifyClusterIamRoles` | Add or remove associated IAM roles and set `DefaultIamRoleArn`; COPY and UNLOAD see the change on new connections |
 | `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
 | `EnableLogging` | Store audit-logging configuration (S3 bucket, CloudWatch, or S3 table via `LogDestinationType`); no logs are delivered |
 | `DisableLogging` | Clear a cluster's audit-logging configuration |
@@ -98,6 +98,35 @@ state. The reset response returns a descriptive `ParameterGroupStatus` message.
 Sources are persisted with parameter values. For older stored groups without a source, Floci
 reports `engine-default` when the value matches its catalog and `user` otherwise. The old format
 cannot distinguish an explicit assignment of a default value from an unchanged default.
+
+### Default IAM role for COPY and UNLOAD
+
+`CreateCluster` and `ModifyClusterIamRoles` accept `DefaultIamRoleArn`. It must name a role
+in the cluster's associated `IamRoles` list, including roles added in the same request.
+`DescribeClusters` returns the configured ARN. Removing that role clears the default;
+omitting `DefaultIamRoleArn` otherwise keeps the existing default. The setting uses the
+cluster's configured storage backend and is reapplied when its proxy restarts.
+
+Both `COPY ... IAM_ROLE default` and `UNLOAD ... IAM_ROLE default` use that role, in Simple
+Query and zero-parameter Extended Query statements. A cluster without a default fails these
+statements with SQLSTATE `42501`; it never falls back to unsigned S3 access. Role association,
+trust and S3 permission checks are the same as for an explicit role ARN. Existing connections
+keep the role configuration captured when they connected; open a new connection after changing it.
+
+```bash
+aws redshift modify-cluster-iam-roles \
+  --cluster-identifier my-warehouse \
+  --add-iam-roles "$REDSHIFT_ROLE_ARN" \
+  --default-iam-role-arn "$REDSHIFT_ROLE_ARN"
+```
+
+```sql
+COPY people FROM 's3://my-data/people.csv' IAM_ROLE default CSV;
+UNLOAD ('SELECT * FROM people') TO 's3://my-data/export/' IAM_ROLE default CSV;
+```
+
+See AWS's [default IAM role guide](https://docs.aws.amazon.com/redshift/latest/mgmt/default-iam-role.html)
+and [COPY authorization parameters](https://docs.aws.amazon.com/redshift/latest/dg/copy-parameters-authorization.html).
 
 ### Snapshot copy grants
 
@@ -449,7 +478,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   the local IAM service under that ARN, path included, and trust Redshift to assume it. With
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
-  request. `IAM_ROLE default` is not supported.
+  request. `IAM_ROLE default` uses the cluster's default role with the same permission checks.
 - `REGION '<region>'` is accepted and ignored: Floci has one S3.
 - `CREDENTIALS 'aws_iam_role=<arn>'` behaves like `IAM_ROLE`. `ACCESS_KEY_ID` with `SECRET_ACCESS_KEY`
   (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...'`,
@@ -549,7 +578,7 @@ the result to S3 as one or more objects under `<prefix>`.
   the local IAM service under that ARN, path included, and trust Redshift to assume it. With
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
-  request. `IAM_ROLE default` is not supported.
+  request. `IAM_ROLE default` uses the cluster's default role with the same permission checks.
 - Any other option (`PARQUET`, `JSON`, `FIXEDWIDTH`, `MASTER_SYMMETRIC_KEY`, `MANIFEST VERBOSE`,
   `ZSTD`, `BZIP2`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.
@@ -588,7 +617,7 @@ These views expose the documented Redshift column names, types, and ordering map
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
 - Resize, pause/resume, and IAM authentication. Snapshot schedules and cross-region snapshot copy are stored and reported, but no snapshot is taken on a schedule or copied to another region.
-- `IAM_ROLE default` and cross-account role ARNs are not supported for COPY or UNLOAD.
+- Cross-account role ARNs are not supported for COPY or UNLOAD.
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
 - A cluster using `ManageMasterPassword` keeps its generated password in sync with the
   Redshift-owned Secrets Manager secret. Updating `MasterUserPassword` through `ModifyCluster`

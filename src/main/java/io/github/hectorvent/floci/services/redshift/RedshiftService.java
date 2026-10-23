@@ -154,7 +154,7 @@ public class RedshiftService {
                         handle.getHost(), handle.getPort(), endpoint.getAddress(),
                         cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
                         passwordValidatorFor(entry.accountId(), cluster.getClusterIdentifier()),
-                        cluster.getIamRoleArns());
+                        cluster.getIamRoleArns(), cluster.getDefaultIamRoleArn());
                 cluster.setContainerHost(handle.getHost());
                 cluster.setContainerPort(handle.getPort());
                 cluster.setEndpoint(endpoint);
@@ -194,9 +194,18 @@ public class RedshiftService {
     public synchronized Cluster createCluster(String identifier, String nodeType, String username, String password,
                                                String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
                                                List<String> iamRoleArns) {
+        return createCluster(identifier, nodeType, username, password, clusterSubnetGroupName,
+                vpcSecurityGroupIds, iamRoleArns, null);
+    }
+
+    public synchronized Cluster createCluster(String identifier, String nodeType, String username, String password,
+                                               String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
+                                               List<String> iamRoleArns, String defaultIamRoleArn) {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
         }
+        List<String> roles = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
+        validateDefaultIamRole(defaultIamRoleArn, roles);
         // A previous cluster with this identifier may have been deleted without its temp
         // credentials being cleared; drop them so the new cluster starts with none.
         credentialBroker.revokeCluster(clusters.accountId(), identifier);
@@ -208,7 +217,8 @@ public class RedshiftService {
         cluster.setMasterPassword(password);
         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
         cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds != null ? vpcSecurityGroupIds : List.of());
-        cluster.setIamRoleArns(iamRoleArns != null ? List.copyOf(iamRoleArns) : List.of());
+        cluster.setIamRoleArns(roles);
+        cluster.setDefaultIamRoleArn(defaultIamRoleArn);
         // A group named at create time is applied afterwards via modifyCluster.
         cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
         cluster.setClusterStatus("creating");
@@ -228,7 +238,7 @@ public class RedshiftService {
             proxyManager.startProxy(relayKey(accountId, identifier), proxyPort,
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     username, password, CLUSTER_DB_NAME,
-                    passwordValidatorFor(accountId, identifier), cluster.getIamRoleArns());
+                    passwordValidatorFor(accountId, identifier), cluster.getIamRoleArns(), cluster.getDefaultIamRoleArn());
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
@@ -268,12 +278,20 @@ public class RedshiftService {
             String identifier, String nodeType, String username, String clusterSubnetGroupName,
             List<String> vpcSecurityGroupIds, List<String> iamRoleArns,
             String kmsKeyId, String region) {
+        return createClusterWithManagedMasterPassword(identifier, nodeType, username, clusterSubnetGroupName,
+                vpcSecurityGroupIds, iamRoleArns, kmsKeyId, region, null);
+    }
+
+    public synchronized Cluster createClusterWithManagedMasterPassword(
+            String identifier, String nodeType, String username, String clusterSubnetGroupName,
+            List<String> vpcSecurityGroupIds, List<String> iamRoleArns,
+            String kmsKeyId, String region, String defaultIamRoleArn) {
         if (secretsManagerService == null) {
             throw new AwsException("InternalFailure", "Secrets Manager is unavailable", 500);
         }
         String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
         Cluster cluster = createCluster(identifier, nodeType, username, password,
-                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
+                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
         String secretName = "redshift/" + identifier;
         String secretString = managedMasterSecret(cluster, password);
         Secret secret;
@@ -677,6 +695,11 @@ public class RedshiftService {
 
     public synchronized Cluster modifyClusterIamRoles(String clusterIdentifier, List<String> addIamRoles,
                                                       List<String> removeIamRoles) {
+        return modifyClusterIamRoles(clusterIdentifier, addIamRoles, removeIamRoles, null);
+    }
+
+    public synchronized Cluster modifyClusterIamRoles(String clusterIdentifier, List<String> addIamRoles,
+                                                      List<String> removeIamRoles, String defaultIamRoleArn) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
 
@@ -687,12 +710,29 @@ public class RedshiftService {
         Set<String> roles = new LinkedHashSet<>(cluster.getIamRoleArns());
         roles.addAll(addIamRoles);
         roles.removeAll(removeIamRoles);
+        String defaultRole = defaultIamRoleArn == null ? cluster.getDefaultIamRoleArn() : defaultIamRoleArn;
+        if (defaultIamRoleArn == null && !roles.contains(defaultRole)) {
+            defaultRole = null;
+        }
+        validateDefaultIamRole(defaultRole, List.copyOf(roles));
         cluster.setIamRoleArns(List.copyOf(roles));
+        cluster.setDefaultIamRoleArn(defaultRole);
 
-        proxyManager.updateIamRoles(relayKey(clusters.accountId(), clusterIdentifier), cluster.getIamRoleArns());
+        proxyManager.updateIamRoles(relayKey(clusters.accountId(), clusterIdentifier), cluster.getIamRoleArns(), defaultRole);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         return cluster;
+    }
+
+    private static void validateDefaultIamRole(String defaultIamRoleArn, List<String> iamRoleArns) {
+        if (defaultIamRoleArn == null) {
+            return;
+        }
+        requireIamRoleArn(defaultIamRoleArn);
+        if (!iamRoleArns.contains(defaultIamRoleArn)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Default IAM role must be associated with the cluster: " + defaultIamRoleArn, 400);
+        }
     }
 
     private static void requireIamRoleArn(String arn) {
@@ -829,7 +869,7 @@ public class RedshiftService {
             cluster.setProxyPort(proxyPort);
             proxyManager.startProxy(key, proxyPort, handle.getHost(), handle.getPort(),
                     endpoint.getAddress(), cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
-                    passwordValidatorFor(accountId, clusterIdentifier), cluster.getIamRoleArns());
+                    passwordValidatorFor(accountId, clusterIdentifier), cluster.getIamRoleArns(), cluster.getDefaultIamRoleArn());
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
@@ -1063,7 +1103,7 @@ public class RedshiftService {
             proxyManager.startProxy(relayKey(accountId, clusterIdentifier), proxyPort,
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     username, password, CLUSTER_DB_NAME,
-                    passwordValidatorFor(accountId, clusterIdentifier), cluster.getIamRoleArns());
+                    passwordValidatorFor(accountId, clusterIdentifier), cluster.getIamRoleArns(), cluster.getDefaultIamRoleArn());
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);

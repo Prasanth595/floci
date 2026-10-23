@@ -213,7 +213,7 @@ public final class CopyStatementParser {
     private static final Pattern NULL_AS_PATTERN = Pattern.compile(
             "(?i)\\bNULL\\s+(?:AS\\s+)?(?:'((?:[^']|'')*)'|\"([^\"]*)\")");
     private static final Pattern IAM_ROLE_PATTERN = Pattern.compile(
-            "(?i)\\bIAM_ROLE\\s+(?:'((?:[^']|'')*)'|\"([^\"]*)\")");
+            "(?i)\\bIAM_ROLE\\s+(?:'((?:[^']|'')*)'|\"([^\"]*)\"|(default)(?=\\s|;|$))");
     private static final Pattern BLANKSASNULL_PATTERN = Pattern.compile("(?i)\\bBLANKSASNULL\\b");
     private static final Pattern EMPTYASNULL_PATTERN = Pattern.compile("(?i)\\bEMPTYASNULL\\b");
     private static final Pattern REMOVEQUOTES_PATTERN = Pattern.compile("(?i)\\bREMOVEQUOTES\\b");
@@ -264,6 +264,10 @@ public final class CopyStatementParser {
     }
 
     public static S3Statement parse(String sql) {
+        return parse(sql, null);
+    }
+
+    public static S3Statement parse(String sql, String defaultIamRoleArn) {
         if (sql == null || sql.isBlank()) {
             return null;
         }
@@ -273,12 +277,12 @@ public final class CopyStatementParser {
         }
         Matcher unload = UNLOAD_PATTERN.matcher(cleaned);
         if (unload.matches()) {
-            return parseUnload(unload);
+            return parseUnload(unload, defaultIamRoleArn);
         }
-        return parseCopy(cleaned);
+        return parseCopy(cleaned, defaultIamRoleArn);
     }
 
-    private static S3Unload parseUnload(Matcher matcher) {
+    private static S3Unload parseUnload(Matcher matcher, String defaultIamRoleArn) {
         String select = unescapeSingleQuotes(matcher.group(1).trim());
         if (!isSafeUnloadSubquery(select)) {
             return null;
@@ -348,7 +352,7 @@ public final class CopyStatementParser {
         Matcher cleanPathM = CLEANPATH_PATTERN.matcher(options);
         Matcher encryptedM = ENCRYPTED_PATTERN.matcher(options);
         Matcher kmsKeyIdM = KMS_KEY_ID_PATTERN.matcher(options);
-        AuthClauses auth = new AuthClauses(options);
+        AuthClauses auth = new AuthClauses(options, defaultIamRoleArn);
 
         int next;
         int offset = 0;
@@ -512,7 +516,7 @@ public final class CopyStatementParser {
                 escape, cleanPath, encrypted, kmsKeyId);
     }
 
-    private static S3CopyFrom parseCopy(String cleaned) {
+    private static S3CopyFrom parseCopy(String cleaned, String defaultIamRoleArn) {
         Matcher matcher = COPY_PATTERN.matcher(cleaned);
         if (!matcher.matches()) {
             return null;
@@ -594,7 +598,7 @@ public final class CopyStatementParser {
         Matcher removeQuotesMatcher = REMOVEQUOTES_PATTERN.matcher(options);
         Matcher truncateColumnsMatcher = TRUNCATECOLUMNS_PATTERN.matcher(options);
         Matcher acceptInvCharsMatcher = ACCEPTINVCHARS_PATTERN.matcher(options);
-        AuthClauses auth = new AuthClauses(options);
+        AuthClauses auth = new AuthClauses(options, defaultIamRoleArn);
 
         int next;
         int offset = 0;
@@ -753,6 +757,7 @@ public final class CopyStatementParser {
         private final Matcher secretAccessKey;
         private final Matcher sessionToken;
         private final Matcher region;
+        private final String defaultIamRoleArn;
 
         private String iamRoleArn;
         private String credentialsRoleArn;
@@ -765,7 +770,8 @@ public final class CopyStatementParser {
         private boolean credentialsHaveKeys;
         private boolean credentialsMalformed;
 
-        AuthClauses(String options) {
+        AuthClauses(String options, String defaultIamRoleArn) {
+            this.defaultIamRoleArn = defaultIamRoleArn;
             iamRole = IAM_ROLE_PATTERN.matcher(options);
             credentials = CREDENTIALS_PATTERN.matcher(options);
             accessKeyId = ACCESS_KEY_ID_PATTERN.matcher(options);
@@ -780,7 +786,8 @@ public final class CopyStatementParser {
                     return REJECT;
                 }
                 seenIamRole = true;
-                iamRoleArn = extractNullValue(iamRole);
+                iamRoleArn = iamRole.group(3) == null ? extractNullValue(iamRole)
+                        : defaultIamRoleArn == null ? "default" : defaultIamRoleArn;
                 return isBlank(iamRoleArn) ? REJECT : iamRole.end();
             }
             if (matchClause(credentials, offset, end)) {
