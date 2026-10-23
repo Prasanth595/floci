@@ -148,7 +148,8 @@ class S3NullVersionReviewTest {
             S3Service service = service(memory, new InMemoryStorage<>());
             service.putObject("bucket", "key", bytes("original"), "text/plain", Map.of());
             service.putBucketVersioning("bucket", "Enabled");
-            String current = service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of())
+            service.putObject("bucket", "key", bytes("numbered"), "text/plain", Map.of());
+            String source = service.putObject("bucket", "source", bytes("copy source"), "text/plain", Map.of())
                     .getVersionId();
             service.setBucketObjectLockEnabled("bucket");
             if ("ON".equals(lock)) {
@@ -159,10 +160,11 @@ class S3NullVersionReviewTest {
             service.putBucketVersioning("bucket", "Suspended");
 
             assertDenied(() -> service.putObject("bucket", "key", bytes("replacement"), "text/plain", Map.of()));
-            assertDenied(() -> service.copyObject("bucket", "key", "bucket", "key", current, new CopyObjectOptions()));
+            assertPreservedBodies(service);
+            assertDenied(() -> service.copyObject("bucket", "source", "bucket", "key", source, new CopyObjectOptions()));
+            assertPreservedBodies(service);
             assertDenied(() -> service.deleteObject("bucket", "key", null, false));
-            assertArrayEquals(bytes("numbered"), service.getObject("bucket", "key").getData());
-            assertArrayEquals(bytes("original"), service.getObject("bucket", "key", "null").getData());
+            assertPreservedBodies(service);
             if ("GOVERNANCE".equals(lock)) {
                 service.deleteObject("bucket", "key", null, true);
                 AwsException missing = assertThrows(AwsException.class,
@@ -170,8 +172,14 @@ class S3NullVersionReviewTest {
                 assertEquals("NoSuchVersion", missing.getErrorCode());
             } else {
                 assertDenied(() -> service.deleteObject("bucket", "key", null, true));
+                assertPreservedBodies(service);
             }
         }
+    }
+
+    private void assertPreservedBodies(S3Service service) {
+        assertArrayEquals(bytes("numbered"), service.getObject("bucket", "key").getData());
+        assertArrayEquals(bytes("original"), service.getObject("bucket", "key", "null").getData());
     }
 
     @ParameterizedTest
