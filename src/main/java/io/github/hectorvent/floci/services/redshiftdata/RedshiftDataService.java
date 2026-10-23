@@ -64,15 +64,8 @@ public class RedshiftDataService implements Resettable {
     RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
                         RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
                         RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher) {
-        this(resolver, connectionFactory, store, objectMapper, preparation, executor, publisher, null, null);
-    }
-
-    public RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
-                               RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
-                               RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher,
-                               RequestContext requestContext, IamService iamService) {
-        this(resolver, connectionFactory, store, objectMapper, preparation, executor, publisher, requestContext,
-                iamService, new RedshiftDataIdempotencyStore(AccountAwareStorageBackend.inMemory("000000000000"),
+        this(resolver, connectionFactory, store, objectMapper, preparation, executor, publisher, null,
+                null, new RedshiftDataIdempotencyStore(AccountAwareStorageBackend.inMemory("000000000000"),
                         Clock.systemUTC()));
     }
 
