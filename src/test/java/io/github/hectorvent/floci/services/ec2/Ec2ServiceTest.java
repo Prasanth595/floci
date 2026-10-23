@@ -4622,7 +4622,7 @@ class Ec2ServiceTest {
                 return request.apply(second);
             });
             Awaitility.await().atMost(Duration.ofSeconds(30)).until(() -> secondResult.isDone()
-                    || isBlockedOnMonitorOf(secondWorker.get(), firstWorker.get()));
+                    || isBlockedIn(secondWorker.get(), "storeNewKeyPair", firstWorker.get()));
             releaseFirst.countDown();
 
             KeyPair stored = firstResult.get(30, TimeUnit.SECONDS);
@@ -4686,7 +4686,7 @@ class Ec2ServiceTest {
                 return service.deleteKeyPair("us-east-1", "retagged", null);
             });
             Awaitility.await().atMost(Duration.ofSeconds(30)).until(() -> deleting.isDone()
-                    || isBlockedOnMonitorOf(deleteWorker.get(), tagWorker.get()));
+                    || isBlockedIn(deleteWorker.get(), "deleteKeyPair", tagWorker.get()));
             releaseTagWrite.countDown();
             tagging.get(30, TimeUnit.SECONDS);
 
@@ -4703,13 +4703,17 @@ class Ec2ServiceTest {
         }
     }
 
-    private static boolean isBlockedOnMonitorOf(Thread waiter, Thread owner) {
+    /** Whether {@code waiter} waits, in the named Ec2Service method, to enter a monitor {@code owner} holds. */
+    private static boolean isBlockedIn(Thread waiter, String method, Thread owner) {
         if (waiter == null) {
             return false;
         }
-        ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(waiter.threadId());
+        ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(waiter.threadId(), 1);
         return info != null && info.getThreadState() == Thread.State.BLOCKED
-                && info.getLockOwnerId() == owner.threadId();
+                && info.getLockOwnerId() == owner.threadId()
+                && info.getStackTrace().length == 1
+                && Ec2Service.class.getName().equals(info.getStackTrace()[0].getClassName())
+                && method.equals(info.getStackTrace()[0].getMethodName());
     }
 
     @Test

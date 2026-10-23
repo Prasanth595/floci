@@ -33,8 +33,8 @@ class Ec2KeyPairConcurrentNameTest {
         String name = TestFixtures.uniqueName("contested-key");
         String publicKey = "ssh-ed25519 " + Base64.getEncoder().encodeToString(OpenSSHPublicKeyUtil.encodePublicKey(
                 new Ed25519PrivateKeyParameters(new SecureRandom()).generatePublicKey()));
-        ExecutorService requests = Executors.newFixedThreadPool(REQUESTS);
         try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            ExecutorService requests = Executors.newFixedThreadPool(REQUESTS);
             try {
                 CountDownLatch start = new CountDownLatch(1);
                 List<Future<String>> results = new ArrayList<>();
@@ -61,19 +61,23 @@ class Ec2KeyPairConcurrentNameTest {
                 }
 
                 assertThat(stored).hasSize(1);
+                // The message is not compared: AWS words it differently from Floci.
                 assertThat(refused).hasSize(REQUESTS - 1).allSatisfy(e ->
                         assertThat(e).isInstanceOfSatisfying(Ec2Exception.class, refusal -> {
                             assertThat(refusal.awsErrorDetails().errorCode()).isEqualTo("InvalidKeyPair.Duplicate");
-                            assertThat(refusal.awsErrorDetails().errorMessage())
-                                    .isEqualTo("The keypair '" + name + "' already exists");
+                            assertThat(refusal.statusCode()).isEqualTo(400);
                         }));
                 assertThat(ec2.describeKeyPairs(r -> r.keyNames(name)).keyPairs())
                         .extracting(KeyPairInfo::keyPairId).containsExactlyElementsOf(stored);
             } finally {
+                // The requests finish before the name is deleted, so a late one cannot store a key pair
+                // after the cleanup.
+                requests.shutdown();
+                if (!requests.awaitTermination(60, TimeUnit.SECONDS)) {
+                    requests.shutdownNow();
+                }
                 ec2.deleteKeyPair(r -> r.keyName(name));
             }
-        } finally {
-            requests.shutdownNow();
         }
     }
 }

@@ -7655,8 +7655,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * Stores a key pair CreateKeyPair or ImportKeyPair built, unless its name was taken after they
      * checked it. The check and the write run under one lock on the region and name, so of two requests
      * for one name only one stores a key pair and the other is refused as a duplicate. No other lock of
-     * this service is taken while it is held. The callers' own earlier check still refuses a taken name
-     * before a key is generated for it.
+     * this service is taken while it is held; the store's own locks, taken inside it, never lead back to
+     * one. The callers' own earlier check still refuses a taken name before a key is generated for it.
      */
     private void storeNewKeyPair(String region, KeyPair keyPair) {
         synchronized (lockFor(key(region, "key-name:" + keyPair.getKeyName()))) {
