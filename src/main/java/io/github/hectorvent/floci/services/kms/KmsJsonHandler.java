@@ -407,7 +407,7 @@ public class KmsJsonHandler {
     private Response handleGenerateDataKeyPair(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
         String spec = readDataKeyPairSpec(request);
-        Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
+        Map<String, String> context = readStrictEncryptionContext(request.path("EncryptionContext"));
 
         KmsService.DataKeyPair result = service.generateDataKeyPair(keyId, spec, context, region);
 
@@ -419,7 +419,7 @@ public class KmsJsonHandler {
     private Response handleGenerateDataKeyPairWithoutPlaintext(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
         String spec = readDataKeyPairSpec(request);
-        Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
+        Map<String, String> context = readStrictEncryptionContext(request.path("EncryptionContext"));
 
         KmsService.DataKeyPair result = service.generateDataKeyPairWithoutPlaintext(keyId, spec, context, region);
 
@@ -465,6 +465,37 @@ public class KmsJsonHandler {
         Map<String, String> result = new HashMap<>();
         node.fields().forEachRemaining(e -> result.put(e.getKey(), e.getValue().asText()));
         return result;
+    }
+
+    /**
+     * EncryptionContextType is a map of string to string, so any other JSON value is refused rather
+     * than read as no context: a private key encrypted without the caller's context would decrypt
+     * without it too.
+     */
+    private static Map<String, String> readStrictEncryptionContext(JsonNode node) {
+        if (node.isMissingNode() || node.isNull()) {
+            return Map.of();
+        }
+        if (!node.isObject()) {
+            throw new AwsException("SerializationException", jsonToken(node) + " can not be converted to a Map", 400);
+        }
+        Map<String, String> result = new HashMap<>();
+        node.fields().forEachRemaining(e -> {
+            if (!e.getValue().isTextual()) {
+                throw new AwsException("SerializationException",
+                        jsonToken(e.getValue()) + " can not be converted to a String", 400);
+            }
+            result.put(e.getKey(), e.getValue().textValue());
+        });
+        return result;
+    }
+
+    private static String jsonToken(JsonNode node) {
+        return node.isTextual() ? "STRING_VALUE"
+                : node.isNumber() ? "NUMBER_VALUE"
+                : node.isBoolean() ? (node.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
+                : node.isNull() ? "VALUE_NULL"
+                : node.isArray() ? "START_ARRAY" : "START_OBJECT";
     }
 
     private Response handleSign(JsonNode request, String region) {

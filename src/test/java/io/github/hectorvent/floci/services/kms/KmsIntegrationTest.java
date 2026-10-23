@@ -2584,11 +2584,39 @@ class KmsIntegrationTest {
             "GenerateDataKeyPairWithoutPlaintext|,\"KeyPairSpec\":\"HMAC_256\"|Value 'HMAC_256' at 'keyPairSpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, SM2, ECC_NIST_EDWARDS25519]",
     })
     void generateDataKeyPairValidatesItsKeyPairSpecBeforeLookingUpTheKey(String operation, String member, String error) {
+        List<String> keysBefore = listKeyIds();
+
         callKms(operation, "{\"KeyId\":\"00000000-0000-0000-0000-000000000000\"%s}".formatted(member == null ? "" : member))
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"))
                 .body("message", equalTo("1 validation error detected: " + error));
+
+        assertEquals(keysBefore, listKeyIds());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "GenerateDataKeyPair|\"kid-1\"|STRING_VALUE can not be converted to a Map",
+            "GenerateDataKeyPair|[\"kid\",\"1\"]|START_ARRAY can not be converted to a Map",
+            "GenerateDataKeyPairWithoutPlaintext|1|NUMBER_VALUE can not be converted to a Map",
+            "GenerateDataKeyPairWithoutPlaintext|true|TRUE_VALUE can not be converted to a Map",
+            "GenerateDataKeyPair|{\"kid\":1}|NUMBER_VALUE can not be converted to a String",
+            "GenerateDataKeyPairWithoutPlaintext|{\"kid\":{\"nested\":\"1\"}}|START_OBJECT can not be converted to a String",
+    })
+    void generateDataKeyPairRejectsAnEncryptionContextThatIsNotAStringMap(String operation, String context,
+                                                                          String error) {
+        String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        List<String> keysBefore = listKeyIds();
+
+        callKms(operation, "{\"KeyId\":\"%s\",\"KeyPairSpec\":\"ECC_NIST_P256\",\"EncryptionContext\":%s}"
+                .formatted(keyArn, context))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo(error));
+
+        assertEquals(keysBefore, listKeyIds());
     }
 
     @ParameterizedTest
@@ -3234,6 +3262,10 @@ class KmsIntegrationTest {
                 .contentType(KMS_CONTENT_TYPE)
                 .body(body)
                 .when().post("/");
+    }
+
+    private static List<String> listKeyIds() {
+        return callKms("ListKeys", "{}").then().statusCode(200).extract().jsonPath().getList("Keys.KeyId");
     }
 
     private static String createKeyArn(String keySpec, String keyUsage) {
