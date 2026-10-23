@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -43,7 +44,9 @@ public class MskScramSecretsService {
     private static final int MAX_PAGE = 100;
 
     private final AccountAwareStorageBackend<MskScramAssociations> storage;
+    private final EmulatorConfig config;
     private final MskService mskService;
+    private final RedpandaManager redpandaManager;
     private final SecretsManagerService secretsManagerService;
     private final KmsService kmsService;
     private final ObjectMapper objectMapper;
@@ -51,12 +54,14 @@ public class MskScramSecretsService {
     private final Object lock = new Object();
 
     @Inject
-    public MskScramSecretsService(StorageFactory storageFactory, MskService mskService,
-                                  SecretsManagerService secretsManagerService,
+    public MskScramSecretsService(StorageFactory storageFactory, EmulatorConfig config, MskService mskService,
+                                  RedpandaManager redpandaManager, SecretsManagerService secretsManagerService,
                                   KmsService kmsService, ObjectMapper objectMapper) {
         this.storage = storageFactory.create("msk", "msk-scram-associations.json",
                 new TypeReference<Map<String, MskScramAssociations>>() {});
+        this.config = config;
         this.mskService = mskService;
+        this.redpandaManager = redpandaManager;
         this.secretsManagerService = secretsManagerService;
         this.kmsService = kmsService;
         this.objectMapper = objectMapper;
@@ -109,11 +114,7 @@ public class MskScramSecretsService {
                     validateSecretEncryption(secret);
                     // Amazon MSK reads only the AWSCURRENT version of an associated secret
                     BatchSecretValue secretValue = readSecret(secretArn);
-                    ScramSecretAssociation association = state.getAssociations()
-                            .computeIfAbsent(secretArn, ignored -> new ScramSecretAssociation());
-                    ScramCredentials credentials = readScramCredentials(secretValue.secretString());
-                    association.setUsername(credentials.username());
-                    putAssociations(clusterArn, state);
+                    applyScramCredentials(cluster, state, secretArn, secretValue);
                 } catch (AwsException e) {
                     if (newAssociation && state.getAssociations().remove(secretArn) != null) {
                         putAssociations(clusterArn, state);
@@ -135,16 +136,16 @@ public class MskScramSecretsService {
 
     public List<Map<String, String>> batchDisassociateScramSecret(String clusterArn, List<String> secretArns) {
         synchronized (lock) {
-            scramCluster(clusterArn);
+            MskCluster cluster = scramCluster(clusterArn);
             validateSecretArns(secretArns);
             MskScramAssociations state = associationsFor(clusterArn);
             List<Map<String, String>> unprocessedScramSecrets = new ArrayList<>();
             for (String secretArn : secretArns) {
                 try {
-                    if (state.getAssociations().remove(secretArn) == null) {
+                    if (!state.getAssociations().containsKey(secretArn)) {
                         throw new AwsException("InvalidSecretArn", "The provided secret ARN is invalid.", 400);
                     }
-                    putAssociations(clusterArn, state);
+                    removeScramAssociation(cluster, state, secretArn);
                 } catch (AwsException e) {
                     unprocessedScramSecrets.add(scramFailure(secretArn, e));
                 }
@@ -239,6 +240,30 @@ public class MskScramSecretsService {
         } else {
             storage.putForAccount(arn.accountId(), clusterArn, associations);
         }
+    }
+
+    private void applyScramCredentials(MskCluster cluster, MskScramAssociations state,
+                                       String secretArn, BatchSecretValue secretValue) {
+        ScramCredentials credentials = readScramCredentials(secretValue.secretString());
+        if (!config.services().msk().mock()) {
+            redpandaManager.createUser(cluster, credentials.username(), credentials.password());
+        }
+        ScramSecretAssociation association = new ScramSecretAssociation();
+        association.setUsername(credentials.username());
+        state.getAssociations().put(secretArn, association);
+        putAssociations(cluster.getClusterArn(), state);
+    }
+
+    private void removeScramAssociation(MskCluster cluster, MskScramAssociations state, String secretArn) {
+        ScramSecretAssociation association = state.getAssociations().get(secretArn);
+        if (association == null) {
+            return;
+        }
+        if (association.getUsername() != null && !config.services().msk().mock()) {
+            redpandaManager.deleteUser(cluster, association.getUsername());
+        }
+        state.getAssociations().remove(secretArn);
+        putAssociations(cluster.getClusterArn(), state);
     }
 
     private BatchSecretValue readSecret(String secretArn) {
