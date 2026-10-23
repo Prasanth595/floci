@@ -85,7 +85,13 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             "AISERVICES_OPT_OUT_POLICY",
             "CHATBOT_POLICY",
             "DECLARATIVE_POLICY_EC2",
-            "SECURITYHUB_POLICY");
+            "SECURITYHUB_POLICY",
+            "INSPECTOR_POLICY",
+            "UPGRADE_ROLLOUT_POLICY",
+            "BEDROCK_POLICY",
+            "S3_POLICY",
+            "NETWORK_SECURITY_DIRECTOR_POLICY",
+            "GUARDDUTY_POLICY");
 
     private static final Set<String> POLICY_TYPE_SET = Set.copyOf(POLICY_TYPES);
 
@@ -94,9 +100,8 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
      * rejects the two access-control types outright — they are evaluated as a deny-by-intersection
      * chain rather than merged into a single effective document, so there is nothing to return.
      *
-     * <p>This is floci's rendering of the model's {@code EffectivePolicyType} shape; the last five
-     * entries were added to the shape after it was first written here. Ordered for the same reason
-     * as {@link #POLICY_TYPES}.
+     * <p>This is floci's rendering of the model's {@code EffectivePolicyType} shape. Ordered for
+     * the same reason as {@link #POLICY_TYPES}.
      */
     private static final List<String> EFFECTIVE_POLICY_TYPES = List.of(
             "TAG_POLICY",
@@ -109,7 +114,8 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             "UPGRADE_ROLLOUT_POLICY",
             "BEDROCK_POLICY",
             "S3_POLICY",
-            "NETWORK_SECURITY_DIRECTOR_POLICY");
+            "NETWORK_SECURITY_DIRECTOR_POLICY",
+            "GUARDDUTY_POLICY");
 
     private static final Set<String> EFFECTIVE_POLICY_TYPE_SET = Set.copyOf(EFFECTIVE_POLICY_TYPES);
 
