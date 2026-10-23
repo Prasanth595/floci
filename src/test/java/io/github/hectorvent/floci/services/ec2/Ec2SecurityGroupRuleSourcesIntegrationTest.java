@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -29,6 +30,8 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
     private static final String ACCOUNT_ID = "000000000000";
+    private static final String INGRESS = "AuthorizeSecurityGroupIngress";
+    private static final String EGRESS = "AuthorizeSecurityGroupEgress";
 
     @Test
     void groupReferenceSurvivesAuthorizeAndBothDescribes() {
@@ -61,7 +64,7 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
                 "AuthorizeSecurityGroupIngress must echo the source group, got: " + authorizeBody);
 
         // Control: the same group with a CIDR rule, which already worked.
-        authorizeCidr("AuthorizeSecurityGroupIngress", targetId, "8443", "10.0.0.0/8", "control");
+        authorize(INGRESS, targetId, "8443", List.of(), "10.0.0.0/8", "control");
 
         given()
             .formParam("Action", "DescribeSecurityGroups")
@@ -297,7 +300,8 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
     void revokeIngressBySecurityGroupRuleIdRemovesTheRule() {
         String vpcId = createVpc();
         String groupId = createSecurityGroup(uniqueName("revoke-by-id"), vpcId);
-        String ruleId = authorizeCidr("AuthorizeSecurityGroupIngress", groupId, "5432", "10.0.0.0/16", null);
+        Response authorize = authorize(INGRESS, groupId, "5432", List.of(), "10.0.0.0/16", null);
+        String ruleId = ruleIdFor(INGRESS, authorize, "cidrIpv4", "10.0.0.0/16");
 
         revokeByRuleId("RevokeSecurityGroupIngress", groupId, ruleId)
             .then()
@@ -330,7 +334,8 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
     void revokeEgressBySecurityGroupRuleIdRemovesTheRule() {
         String vpcId = createVpc();
         String groupId = createSecurityGroup(uniqueName("revoke-egress-by-id"), vpcId);
-        String ruleId = authorizeCidr("AuthorizeSecurityGroupEgress", groupId, "8443", "10.5.0.0/16", null);
+        Response authorize = authorize(EGRESS, groupId, "8443", List.of(), "10.5.0.0/16", null);
+        String ruleId = ruleIdFor(EGRESS, authorize, "cidrIpv4", "10.5.0.0/16");
 
         revokeByRuleId("RevokeSecurityGroupEgress", groupId, ruleId)
             .then()
@@ -352,7 +357,8 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
         String vpcId = createVpc();
         String targetId = createSecurityGroup(uniqueName("revoke-target"), vpcId);
         String otherId = createSecurityGroup(uniqueName("revoke-other"), vpcId);
-        String otherRuleId = authorizeCidr("AuthorizeSecurityGroupIngress", otherId, "9999", "10.0.0.0/16", null);
+        Response authorize = authorize(INGRESS, otherId, "9999", List.of(), "10.0.0.0/16", null);
+        String otherRuleId = ruleIdFor(INGRESS, authorize, "cidrIpv4", "10.0.0.0/16");
 
         revokeByRuleId("RevokeSecurityGroupIngress", targetId, otherRuleId)
             .then()
@@ -375,9 +381,9 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
         String groupId = createSecurityGroup(uniqueName("revoke-pl-separate"), createVpc());
         String keptList = createPrefixList();
         String revokedList = createPrefixList();
-        authorizeIngress(groupId, "443", List.of(keptList), null);
-        String ruleId = ruleIdFor(authorizeIngress(groupId, "443", List.of(revokedList), null),
-                "prefixListId", revokedList);
+        authorize(INGRESS, groupId, "443", List.of(keptList), null, null);
+        Response authorize = authorize(INGRESS, groupId, "443", List.of(revokedList), null, null);
+        String ruleId = ruleIdFor(INGRESS, authorize, "prefixListId", revokedList);
 
         revokeByRuleId("RevokeSecurityGroupIngress", groupId, ruleId).then().statusCode(200);
 
@@ -391,8 +397,8 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
         String groupId = createSecurityGroup(uniqueName("revoke-pl-shared"), createVpc());
         String keptList = createPrefixList();
         String revokedList = createPrefixList();
-        String ruleId = ruleIdFor(authorizeIngress(groupId, "443", List.of(keptList, revokedList), null),
-                "prefixListId", revokedList);
+        Response authorize = authorize(INGRESS, groupId, "443", List.of(keptList, revokedList), null, null);
+        String ruleId = ruleIdFor(INGRESS, authorize, "prefixListId", revokedList);
 
         revokeByRuleId("RevokeSecurityGroupIngress", groupId, ruleId).then().statusCode(200);
 
@@ -405,8 +411,8 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
     void revokingAPrefixListRuleBesideACidrKeepsTheCidr() {
         String groupId = createSecurityGroup(uniqueName("revoke-pl-cidr"), createVpc());
         String prefixList = createPrefixList();
-        String ruleId = ruleIdFor(authorizeIngress(groupId, "443", List.of(prefixList), "10.9.0.0/16"),
-                "prefixListId", prefixList);
+        Response authorize = authorize(INGRESS, groupId, "443", List.of(prefixList), "10.9.0.0/16", null);
+        String ruleId = ruleIdFor(INGRESS, authorize, "prefixListId", prefixList);
 
         revokeByRuleId("RevokeSecurityGroupIngress", groupId, ruleId).then().statusCode(200);
 
@@ -419,9 +425,9 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
     void revokingACidrRuleBesideAPrefixListKeepsTheList() {
         String groupId = createSecurityGroup(uniqueName("revoke-cidr-pl"), createVpc());
         String prefixList = createPrefixList();
-        Response authorize = authorizeIngress(groupId, "443", List.of(prefixList), "10.9.0.0/16");
-        String cidrRuleId = ruleIdFor(authorize, "cidrIpv4", "10.9.0.0/16");
-        String listRuleId = ruleIdFor(authorize, "prefixListId", prefixList);
+        Response authorize = authorize(INGRESS, groupId, "443", List.of(prefixList), "10.9.0.0/16", null);
+        String cidrRuleId = ruleIdFor(INGRESS, authorize, "cidrIpv4", "10.9.0.0/16");
+        String listRuleId = ruleIdFor(INGRESS, authorize, "prefixListId", prefixList);
 
         revokeByRuleId("RevokeSecurityGroupIngress", groupId, cidrRuleId).then().statusCode(200);
 
@@ -502,30 +508,11 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
             .extract().path("CreateSecurityGroupResponse.groupId");
     }
 
-    private String authorizeCidr(String action, String groupId, String port, String cidr, String description) {
-        var request = given()
+    /** Authorizes one tcp permission on {@code port} naming every source given. */
+    private Response authorize(String action, String groupId, String port, List<String> prefixLists,
+                               String cidr, String description) {
+        RequestSpecification request = given()
             .formParam("Action", action)
-            .formParam("GroupId", groupId)
-            .formParam("IpPermissions.1.IpProtocol", "tcp")
-            .formParam("IpPermissions.1.FromPort", port)
-            .formParam("IpPermissions.1.ToPort", port)
-            .formParam("IpPermissions.1.IpRanges.1.CidrIp", cidr);
-        if (description != null) {
-            request.formParam("IpPermissions.1.IpRanges.1.Description", description);
-        }
-        return request
-            .header("Authorization", AUTH_HEADER)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().path(action + "Response.securityGroupRuleSet.item.securityGroupRuleId");
-    }
-
-    /** Authorizes one ingress permission naming every source given, and returns its rule set. */
-    private Response authorizeIngress(String groupId, String port, List<String> prefixLists, String cidr) {
-        var request = given()
-            .formParam("Action", "AuthorizeSecurityGroupIngress")
             .formParam("GroupId", groupId)
             .formParam("IpPermissions.1.IpProtocol", "tcp")
             .formParam("IpPermissions.1.FromPort", port)
@@ -536,13 +523,16 @@ class Ec2SecurityGroupRuleSourcesIntegrationTest {
         if (cidr != null) {
             request.formParam("IpPermissions.1.IpRanges.1.CidrIp", cidr);
         }
+        if (description != null) {
+            request.formParam("IpPermissions.1.IpRanges.1.Description", description);
+        }
         Response response = request.header("Authorization", AUTH_HEADER).when().post("/");
         response.then().statusCode(200);
         return response;
     }
 
-    private String ruleIdFor(Response authorize, String field, String value) {
-        return authorize.path("AuthorizeSecurityGroupIngressResponse.securityGroupRuleSet.item.find { it."
+    private String ruleIdFor(String action, Response authorize, String field, String value) {
+        return authorize.path(action + "Response.securityGroupRuleSet.item.find { it."
                 + field + " == '" + value + "' }.securityGroupRuleId");
     }
 
