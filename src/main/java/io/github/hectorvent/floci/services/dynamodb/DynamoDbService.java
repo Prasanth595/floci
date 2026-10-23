@@ -53,6 +53,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -169,8 +170,7 @@ public class DynamoDbService {
                            EmulatorConfig config) {
         this(storageFactory.create("dynamodb", "dynamodb-tables.json",
                 new TypeReference<Map<String, TableDefinition>>() {}),
-             storageFactory.create("dynamodb", "dynamodb-items.json",
-                new TypeReference<Map<String, Map<String, JsonNode>>>() {}),
+             itemStore(storageFactory, config),
              storageFactory.create("dynamodb", "dynamodb-exports.json",
                 new TypeReference<Map<String, ExportDescription>>() {}),
              storageFactory.create("dynamodb", "dynamodb-imports.json",
@@ -183,6 +183,20 @@ public class DynamoDbService {
              config.services().dynamodb().vectorIndexAllocationSeconds(),
              config.services().dynamodb().vectorIndexBackfillSeconds(),
              config.services().dynamodb().latestRestorableLagSeconds(), Clock.systemUTC());
+    }
+
+    /** The item store the configured {@code item-layout} selects; package-private for tests. */
+    static StorageBackend<String, Map<String, JsonNode>> itemStore(StorageFactory storageFactory,
+                                                                  EmulatorConfig config) {
+        TypeReference<Map<String, Map<String, JsonNode>>> type = new TypeReference<>() {};
+        String layout = Objects.requireNonNullElse(config.storage().services().dynamodb().itemLayout(), "single-file");
+        return switch (layout) {
+            case "single-file" -> storageFactory.create("dynamodb", "dynamodb-items.json", type);
+            case "per-table" -> storageFactory.createPartitioned("dynamodb", "dynamodb-items.json", type,
+                    JsonNode.class, config.storage().services().dynamodb().itemShards());
+            default -> throw new IllegalArgumentException(
+                    "Unknown floci.storage.services.dynamodb.item-layout: " + layout);
+        };
     }
 
     /** Package-private constructor for testing. */
@@ -316,8 +330,17 @@ public class DynamoDbService {
         // scanAllAccountsRaw() returns every account's items already in the "accountId/
         // region::tableName" key format itemsByTable expects.
         if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
-            aware.scanAllAccountsRaw().forEach((rawKey, items) ->
-                itemsByTable.put(rawKey, rekeyPersistedItems(persistedTables.get(rawKey), items)));
+            aware.scanAllAccountsRaw().forEach((rawKey, items) -> {
+                ConcurrentSkipListMap<String, JsonNode> rekeyed = rekeyPersistedItems(persistedTables.get(rawKey), items);
+                itemsByTable.put(rawKey, rekeyed);
+                int slash = rawKey.indexOf('/');
+                if (aware.writesEntries() && slash > 0 && !rekeyed.keySet().equals(items.keySet())) {
+                    // Entry writes address items by their current key, so a store still holding
+                    // older keys would keep an item that is later deleted under its new one.
+                    aware.putForAccount(rawKey.substring(0, slash), rawKey.substring(slash + 1),
+                            new HashMap<>(rekeyed));
+                }
+            });
             return;
         }
         for (String key : itemStore.keys()) {
@@ -359,6 +382,50 @@ public class DynamoDbService {
         } else {
             itemStore.delete(storageKey);
         }
+    }
+
+    /**
+     * Persists the current state of the given items of one table. A store that writes single map
+     * entries gets only those items; any other store gets the whole table, as before.
+     */
+    private void persistItems(String storageKey, Collection<String> itemKeys) {
+        AccountAwareStorageBackend<Map<String, JsonNode>> entryStore = entryWritingItemStore();
+        if (entryStore == null) {
+            persistItems(storageKey);
+            return;
+        }
+        ConcurrentSkipListMap<String, JsonNode> items = currentItems(storageKey, false);
+        if (items == null) {
+            itemStore.delete(storageKey);
+            return;
+        }
+        for (String itemKey : itemKeys) {
+            JsonNode item = items.get(itemKey);
+            if (item == null) {
+                entryStore.removeEntry(storageKey, itemKey);
+            } else {
+                entryStore.putEntry(storageKey, itemKey, item);
+            }
+        }
+    }
+
+    private void persistItem(String storageKey, String itemKey) {
+        persistItems(storageKey, List.of(itemKey));
+    }
+
+    /** Persists the given items of every table a multi-item write touched. */
+    private void persistItems(Collection<String> storageKeys, Map<String, Set<String>> itemKeysByTable) {
+        for (String storageKey : storageKeys) {
+            persistItems(storageKey, itemKeysByTable.getOrDefault(storageKey, Set.of()));
+        }
+    }
+
+    /** The item store when it persists one item at a time, otherwise {@code null}. */
+    private AccountAwareStorageBackend<Map<String, JsonNode>> entryWritingItemStore() {
+        if (itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware && aware.writesEntries()) {
+            return aware;
+        }
+        return null;
     }
 
     public TableDefinition createTable(String tableName,
@@ -1043,7 +1110,7 @@ public class DynamoDbService {
             }
             tableItems.put(itemKey, normalizedItem);
             if (shouldPersist) {
-                persistItems(storageKey);
+                persistItem(storageKey, itemKey);
             }
             LOG.debugv("Put item in {0}: key={1}", canonicalTableName, itemKey);
             LOG.tracev("Put item in {0}: key={1} item={2}", canonicalTableName, itemKey, item);
@@ -1162,7 +1229,7 @@ public class DynamoDbService {
             }
             JsonNode removed = items.remove(itemKey);
             if (shouldPersist) {
-                persistItems(storageKey);
+                persistItem(storageKey, itemKey);
             }
             LOG.debugv("Deleted item from {0}: key={1}", canonicalTableName, itemKey);
             LOG.tracev("Deleted item from {0}: key={1} removed={2}", canonicalTableName, itemKey, removed);
@@ -1398,7 +1465,7 @@ public class DynamoDbService {
             }
             items.put(itemKey, item);
             if (shouldPersist) {
-                persistItems(storageKey);
+                persistItem(storageKey, itemKey);
             }
             LOG.tracev("Updated item in {0}: key={1} updateExpression={2} item={3}",
                     canonicalTableName, itemKey, updateExpression, item);
@@ -1740,6 +1807,7 @@ public class DynamoDbService {
 
     public BatchWriteResult batchWriteItem(Map<String, List<JsonNode>> requestItems, String region) {
         // Pre-validate all write requests before applying any mutation to memory or streams
+        Map<String, Set<String>> requestedItemKeys = new HashMap<>();
         for (Map.Entry<String, List<JsonNode>> entry : requestItems.entrySet()) {
             String tableName = canonicalTableName(region, entry.getKey());
             String storageKey = regionKey(region, tableName);
@@ -1769,6 +1837,7 @@ public class DynamoDbService {
                     throw new AwsException("ValidationException",
                             "Provided list of item keys contains duplicates", 400);
                 }
+                requestedItemKeys.computeIfAbsent(storageKey, ignored -> new HashSet<>()).add(itemKey);
             }
         }
 
@@ -1790,9 +1859,7 @@ public class DynamoDbService {
                 }
             }
         } finally {
-            for (String storageKey : affectedStorageKeys) {
-                persistItems(storageKey);
-            }
+            persistItems(affectedStorageKeys, requestedItemKeys);
         }
         return new BatchWriteResult(Map.of());
     }
@@ -1998,9 +2065,12 @@ public class DynamoDbService {
                     live.put(participant.itemKey(), value);
                 }
             }
-            for (String storageKey : affectedStorageKeys) {
-                persistItems(storageKey);
+            Map<String, Set<String>> participantKeys = new HashMap<>();
+            for (TransactParticipant participant : toAcquire.keySet()) {
+                participantKeys.computeIfAbsent(participant.storageKey(), ignored -> new HashSet<>())
+                        .add(participant.itemKey());
             }
+            persistItems(affectedStorageKeys, participantKeys);
             for (Runnable streamEvent : pendingStreamEvents) {
                 streamEvent.run();
             }
@@ -3002,6 +3072,10 @@ public class DynamoDbService {
             ConcurrentSkipListMap<String, JsonNode> items = scan.items();
 
             int deletedForTable = 0;
+            // A store that writes single entries drops each item under its item lock, so a write
+            // that replaces the item right after cannot be overtaken by this removal.
+            AccountAwareStorageBackend<Map<String, JsonNode>> entryStore =
+                    scan.accountId() == null ? null : entryWritingItemStore();
             for (String itemKey : scan.itemKeys()) {
                 // A table deleted, or deleted and recreated, since the scan or during this sweep: its items are not this scan's.
                 if (itemsByTable.get(scan.rawKey()) != items) {
@@ -3013,7 +3087,18 @@ public class DynamoDbService {
                         return null;
                     }
                     pointInTimeRecovery.recordItem(scan.accountId(), scan.storageKey(), scan.table(), itemKey, current);
-                    return items.remove(itemKey);
+                    JsonNode gone = items.remove(itemKey);
+                    if (entryStore != null) {
+                        // Under the table entry's lock, so a DeleteTable and a recreate cannot slip
+                        // in and have this removal drop the new table's item of the same key.
+                        itemsByTable.computeIfPresent(scan.rawKey(), (key, live) -> {
+                            if (live == items) {
+                                entryStore.removeEntryForAccount(scan.accountId(), scan.storageKey(), itemKey);
+                            }
+                            return live;
+                        });
+                    }
+                    return gone;
                 });
                 if (removed == null) {
                     continue;
@@ -3029,7 +3114,7 @@ public class DynamoDbService {
                             true);
                 }
             }
-            if (deletedForTable > 0) {
+            if (deletedForTable > 0 && entryStore == null) {
                 // A DeleteTable during the loop detached this map; writing it back would revive its items.
                 // Persisting under the entry's lock holds off DeleteTable, which removes the entry before
                 // it deletes the stored items.
@@ -3039,8 +3124,8 @@ public class DynamoDbService {
                     }
                     return live;
                 });
-                totalDeleted += deletedForTable;
             }
+            totalDeleted += deletedForTable;
         }
         if (totalDeleted > 0) {
             LOG.infov("TTL sweeper removed {0} expired items", totalDeleted);

@@ -48,6 +48,8 @@ When not set for a service, it inherits `FLOCI_STORAGE_MODE`. Only override when
 | `FLOCI_STORAGE_SERVICES_S3_MODE` | global default | S3 storage mode |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_MODE` | global default | DynamoDB storage mode |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_FLUSH_INTERVAL_MS` | `5000` | DynamoDB flush interval (ms) |
+| `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT` | `single-file` | `single-file` or `per-table` item files, see [DynamoDB](../services/dynamodb.md#item-layout-on-disk) |
+| `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_SHARDS` | `1` | Files per table with the `per-table` item layout |
 | `FLOCI_STORAGE_SERVICES_SNS_MODE` | global default | SNS storage mode |
 | `FLOCI_STORAGE_SERVICES_SNS_FLUSH_INTERVAL_MS` | `5000` | SNS flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_LAMBDA_MODE` | global default | Lambda storage mode |

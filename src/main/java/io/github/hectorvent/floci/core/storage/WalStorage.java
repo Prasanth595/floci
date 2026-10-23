@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -191,6 +192,30 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
         StorageFiles.stop(scheduler);
         compact();
         closeWalWriter();
+    }
+
+    /**
+     * Reads the store a snapshot and its log hold, replaying the log over the snapshot, and
+     * leaves both files as they are: nothing is compacted or deleted.
+     */
+    static <K, V> Map<K, V> readContents(Path snapshotPath, Path walPath, TypeReference<Map<K, V>> typeReference) {
+        WalStorage<K, V> reader = new WalStorage<>(snapshotPath, walPath, typeReference, Long.MAX_VALUE);
+        boolean hadLog = Files.exists(walPath);
+        try {
+            reader.load();
+            return new HashMap<>(reader.store);
+        } finally {
+            StorageFiles.stop(reader.scheduler);
+            reader.closeWalWriter();
+            if (!hadLog) {
+                // load() opens the log for appends, creating it; this read must leave no file behind.
+                try {
+                    Files.deleteIfExists(walPath);
+                } catch (IOException e) {
+                    LOG.warnv(e, "Failed to remove the empty log {0} a read created", walPath);
+                }
+            }
+        }
     }
 
     private void compact() {
