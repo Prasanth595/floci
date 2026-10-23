@@ -3941,19 +3941,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * that matches nothing gets {@code NoSuchEntity}. Different mistakes, different answers.
      *
      * <p>The API Reference publishes a length of 20 to 128 as well as the pattern, so both are
-     * checked, and both are reported when both are broken, in the order it prints them. The
-     * pattern message is the one recorded against AWS; the length wording is the form AWS uses for
-     * a member carrying both bounds, which {@link #validatePassword} spells the same
-     * way.
+     * checked, and both are reported when both are broken, in the order it prints them.
+     *
+     * <p>Each message names the one bound the value broke, rather than both at once: every
+     * recorded IAM length violation reads that way, "Member must have length less than or equal to
+     * 64" for a user name over 64 and "Member must have length greater than or equal to 20" for an
+     * ARN under 20, and a short id told about a 128-character ceiling it is nowhere near would be
+     * reporting a constraint it did not break. The pattern message is the one recorded against
+     * AWS.
      */
     private void requireCredentialIdFormat(String credentialId) {
         String id = credentialId == null ? "" : credentialId;
         List<String> violations = new ArrayList<>();
-        if (id.length() < SERVICE_CREDENTIAL_ID_MIN_LENGTH
-                || id.length() > SERVICE_CREDENTIAL_ID_MAX_LENGTH) {
-            violations.add("Member must have length less than or equal to "
-                    + SERVICE_CREDENTIAL_ID_MAX_LENGTH + " and greater than or equal to "
+        if (id.length() < SERVICE_CREDENTIAL_ID_MIN_LENGTH) {
+            violations.add("Member must have length greater than or equal to "
                     + SERVICE_CREDENTIAL_ID_MIN_LENGTH);
+        } else if (id.length() > SERVICE_CREDENTIAL_ID_MAX_LENGTH) {
+            violations.add("Member must have length less than or equal to "
+                    + SERVICE_CREDENTIAL_ID_MAX_LENGTH);
         }
         if (!SERVICE_CREDENTIAL_ID_PATTERN.matcher(id).matches()) {
             violations.add("Member must satisfy regular expression pattern: [\\w]+");

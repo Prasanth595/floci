@@ -445,15 +445,21 @@ key in. A role named as the policy source is not a session, so there is no sessi
 `aws:userid` and no documented `aws:PrincipalType` for it; those keys stay absent and a statement
 matching on one does not match.
 
-`PolicySourceArn` on `SimulatePrincipalPolicy` and `GetContextKeysForPrincipalPolicy` resolves an IAM
-user or role only, not a group. `SimulateCustomPolicy` accepts only one
-`PermissionsBoundaryPolicyInputList` document, matching AWS's own documented limit; extra documents
-beyond the first are ignored. Neither simulation action evaluates a resource-based policy
-(`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither returns
-`MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`: only the
-top-level `EvalDecision` is populated. `ContextEntries.member.N.ContextKeyType` is accepted but not
-read; the comparison is driven entirely by the policy's own condition operator (`Bool`,
-`NumericEquals`, `DateEquals`, and so on), not by the declared type.
+`PolicySourceArn` on `SimulatePrincipalPolicy` and `GetContextKeysForPrincipalPolicy` resolves an
+IAM user or role only, not a group. It is held to the 20 characters `arnType` declares before it
+is resolved, so a value too short to be any ARN is a `ValidationError` with status 400 naming the
+length rather than an entity resolved out of whatever follows its last slash. A value that clears
+20 characters and still parses as no ARN is resolved as before: the member publishes a length and
+no pattern, and no source records what AWS answers for one, so inventing a refusal would be a
+guess. The length wording follows the captures of real IAM length violations, naming only the
+bound the value broke and leaving the value itself out of the message. `SimulateCustomPolicy`
+accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
+limit; extra documents beyond the first are ignored. Neither simulation action evaluates a
+resource-based policy (`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither
+returns `MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`:
+only the top-level `EvalDecision` is populated. `ContextEntries.member.N.ContextKeyType` is
+accepted but not read; the comparison is driven entirely by the policy's own condition operator
+(`Bool`, `NumericEquals`, `DateEquals`, and so on), not by the declared type.
 
 ### Last-Accessed Reporting
 
@@ -509,6 +515,16 @@ checks the whole ARN: an ARN whose account is not the caller's, or whose path is
 entity's own, names no entity and is rejected rather than falling back to a same-named local one. A
 job belongs to the account that created it, an unknown `JobId` is `NoSuchEntity`, and `Granularity`
 is validated against `SERVICE_LEVEL`/`ACTION_LEVEL` and echoed back as `JobType`.
+
+Declared constraints are read before any of those lookups, because the validation AWS runs ahead of
+an operation never reaches its store: a request that breaks one is a 400 whether or not the job or
+the entity exists, and checking it afterwards would answer `NoSuchEntity` 404 for a request AWS
+refuses with a `ValidationError`. So `JobId` is held to the fixed 36 characters `jobIDType`
+declares, `MaxItems` and `Marker` are read before the job they page is fetched, and `Granularity` is
+read before the ARN it is filed against is resolved. A fixed length reports as one constraint,
+"Member must have length equal to 36", which is the form Auto Scaling already uses for the same
+shape, and the offending value is left out, which is how the most recent IAM length and pattern
+recordings render one. Whether an id that clears the shape names a job is still a 404.
 
 The report is produced when the job is created and stored with it, matching AWS, where
 `GenerateServiceLastAccessedDetails` produces a report and the `Get*` operations retrieve that one.
@@ -994,7 +1010,11 @@ the model's `[\w]+` before anything goes looking for it, so one carrying charact
 class is a `ValidationError` with status 400 quoting the pattern, while an id that satisfies the
 pattern and names no credential of that user is `NoSuchEntity` with status 404 and the message
 "No such credential `<id>` exists". The published length of 20 to 128 is enforced the same way, and
-an id breaking both constraints is reported as two validation errors rather than one.
+an id breaking both constraints is reported as two validation errors rather than one. A length
+violation names only the bound the id broke, "Member must have length greater than or equal to 20"
+for a short one and "Member must have length less than or equal to 128" for a long one, which is
+how every recorded IAM length violation reads; reporting both at once would refuse a short id for a
+ceiling it is nowhere near.
 
 A user that still owns a credential cannot be deleted: `DeleteUser` is `DeleteConflict` with status
 409. Where access keys, policies and group memberships each get a message naming what is in the
