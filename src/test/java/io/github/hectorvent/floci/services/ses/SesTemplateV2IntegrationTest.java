@@ -685,6 +685,22 @@ class SesTemplateV2IntegrationTest {
     }
 
     @ParameterizedTest(name = "{0}")
+    @MethodSource("nonObjectBodies")
+    @Order(50)
+    void sendEmail_nonObjectBody_isASerializationException(String body, String message) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo(message));
+    }
+
+    @ParameterizedTest(name = "{0}")
     @MethodSource("wrongTypeSendEmailBodies")
     @Order(51)
     void sendEmail_wrongMemberType_returnsSerializationException(String label, String body) {
@@ -699,11 +715,15 @@ class SesTemplateV2IntegrationTest {
             .body("__type", equalTo("SerializationException"));
     }
 
+    static Stream<Arguments> nonObjectBodies() {
+        return Stream.of(
+                Arguments.of("[1,2,3]", "Start of list found where not expected"),
+                Arguments.of("null", null),
+                Arguments.of("\"hello\"", null));
+    }
+
     static Stream<Arguments> malformedSendEmailBodies() {
         return Stream.of(
-                Arguments.of("body is array", "[1,2,3]"),
-                Arguments.of("body is JSON null literal", "null"),
-                Arguments.of("body is JSON string", "\"hello\""),
                 Arguments.of("TemplateData as invalid JSON string", """
                     {
                       "FromEmailAddress": "sender@example.com",

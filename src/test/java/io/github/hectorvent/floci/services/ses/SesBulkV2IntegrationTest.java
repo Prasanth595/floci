@@ -333,6 +333,22 @@ class SesBulkV2IntegrationTest {
     }
 
     @ParameterizedTest(name = "{0}")
+    @MethodSource("nonObjectBodies")
+    @Order(11)
+    void sendBulkEmail_nonObjectBody_isASerializationException(String body, String message) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo(message));
+    }
+
+    @ParameterizedTest(name = "{0}")
     @MethodSource("wrongTypeSendBulkEmailBodies")
     @Order(12)
     void sendBulkEmail_wrongMemberType_returnsSerializationException(String label, String body) {
@@ -347,12 +363,16 @@ class SesBulkV2IntegrationTest {
             .body("__type", equalTo("SerializationException"));
     }
 
+    static Stream<Arguments> nonObjectBodies() {
+        return Stream.of(
+                Arguments.of("[1,2,3]", "Start of list found where not expected"),
+                Arguments.of("null", null),
+                Arguments.of("\"hello\"", null));
+    }
+
     static Stream<Arguments> malformedSendBulkEmailBodies() {
         String validDefaultTemplate = "\"DefaultContent\": {\"Template\": {\"TemplateName\": \"v2-bulk-welcome\", \"TemplateData\": \"{\\\"team\\\":\\\"floci\\\",\\\"name\\\":\\\"X\\\"}\"}}";
         return Stream.of(
-                Arguments.of("body is array", "[1,2,3]"),
-                Arguments.of("body is JSON null literal", "null"),
-                Arguments.of("body is JSON string", "\"hello\""),
                 Arguments.of("BulkEmailEntries element is null", """
                     {
                       "FromEmailAddress": "bulk@example.com",

@@ -17,6 +17,8 @@ final class SesV2SerializationErrors {
     static final String NUMBER = "NUMBER_VALUE can not be converted to a String";
     static final String EXPECTED_NULL = "Expected null";
     static final String EXPECTED_LIST = "Expected list or null";
+    static final String EXPECTED_MAP = "Expected map or null";
+    static final String STRING_FOR_INTEGER = "STRING_VALUE can not be converted to an Integer";
 
     private SesV2SerializationErrors() {
     }
