@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService.OrganizationPaths;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
 import io.github.hectorvent.floci.services.organizations.model.Handshake;
 import io.github.hectorvent.floci.services.organizations.model.HandshakeParty;
@@ -197,11 +198,17 @@ public class OrganizationsJsonHandler {
     }
 
     private Response listOrganizationalUnitsForParent(JsonNode request, String caller) {
+        OrganizationPaths paths = service.organizationPaths(caller);
         List<OrganizationalUnit> all = service.listOrganizationalUnitsForParent(caller, text(request, "ParentId"));
         PaginatedResult<OrganizationalUnit> page = page(all, OrganizationalUnit::getId, request);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode units = response.putArray("OrganizationalUnits");
-        page.items().forEach(unit -> units.add(organizationalUnitNode(unit, caller)));
+        for (OrganizationalUnit unit : page.items()) {
+            String path = paths.unitPath(unit);
+            if (path != null) {
+                units.add(organizationalUnitNodeWithPath(unit, path));
+            }
+        }
         putNextToken(response, page.nextToken());
         return Response.ok(response).build();
     }
@@ -272,14 +279,16 @@ public class OrganizationsJsonHandler {
     }
 
     private Response listAccounts(JsonNode request, String caller) {
+        OrganizationPaths paths = service.organizationPaths(caller);
         PaginatedResult<OrganizationAccount> page =
                 page(service.listAccounts(caller), OrganizationAccount::getId, request);
-        return accountsResponse(page, caller);
+        return accountsResponse(page, paths);
     }
 
     private Response listAccountsForParent(JsonNode request, String caller) {
+        OrganizationPaths paths = service.organizationPaths(caller);
         List<OrganizationAccount> all = service.listAccountsForParent(caller, text(request, "ParentId"));
-        return accountsResponse(page(all, OrganizationAccount::getId, request), caller);
+        return accountsResponse(page(all, OrganizationAccount::getId, request), paths);
     }
 
     /**
@@ -305,10 +314,15 @@ public class OrganizationsJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response accountsResponse(PaginatedResult<OrganizationAccount> page, String caller) {
+    private Response accountsResponse(PaginatedResult<OrganizationAccount> page, OrganizationPaths paths) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode accounts = response.putArray("Accounts");
-        page.items().forEach(account -> accounts.add(accountNode(account, caller)));
+        for (OrganizationAccount account : page.items()) {
+            String path = paths.accountPath(account);
+            if (path != null) {
+                accounts.add(accountNodeWithPath(account, path));
+            }
+        }
         putNextToken(response, page.nextToken());
         return Response.ok(response).build();
     }
@@ -657,17 +671,25 @@ public class OrganizationsJsonHandler {
     }
 
     private ObjectNode organizationalUnitNode(OrganizationalUnit unit, String caller) {
+        return organizationalUnitNodeWithPath(unit, service.organizationPath(caller, unit.getId()));
+    }
+
+    private ObjectNode organizationalUnitNodeWithPath(OrganizationalUnit unit, String path) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", unit.getId());
         node.put("Arn", unit.getArn());
         node.put("Name", unit.getName());
-        node.put("Path", service.organizationPath(caller, unit.getId()));
+        node.put("Path", path);
         return node;
     }
 
     private ObjectNode accountNode(OrganizationAccount account, String caller) {
+        return accountNodeWithPath(account, service.organizationPath(caller, account.getId()));
+    }
+
+    private ObjectNode accountNodeWithPath(OrganizationAccount account, String path) {
         ObjectNode node = accountNode(account);
-        node.putArray("Paths").add(service.organizationPath(caller, account.getId()));
+        node.putArray("Paths").add(path);
         return node;
     }
 

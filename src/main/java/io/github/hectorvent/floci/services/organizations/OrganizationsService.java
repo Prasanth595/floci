@@ -30,6 +30,7 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -471,6 +472,81 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
     public String organizationPath(String callerAccountId, String resourceId) {
         Organization organization = requireOrganizationForCaller(callerAccountId);
         return organization.getId() + "/" + String.join("/", ancestryOf(organization, resourceId)) + "/";
+    }
+
+    /** Capture parent IDs before selecting a list page, not once for every serialized row. */
+    public OrganizationPaths organizationPaths(String callerAccountId) {
+        return new OrganizationPaths(requireOrganizationForCaller(callerAccountId));
+    }
+
+    /**
+     * Request-local ancestry data. Selected objects can outlive their stored rows, so render
+     * their captured parent without looking the leaf up again. This is not an atomic snapshot:
+     * a newly created parent is resolved on demand, scoped to the originally authorized org.
+     */
+    public final class OrganizationPaths {
+        private final Organization organization;
+        private final String organizationId;
+        private final String rootId;
+        private final Map<String, String> parents = new LinkedHashMap<>();
+
+        private OrganizationPaths(Organization organization) {
+            this.organization = organization;
+            this.organizationId = organization.getId();
+            this.rootId = organization.getRoot().getId();
+            organizationalUnitsIn(organization).forEach(unit -> parents.put(unit.getId(), unit.getParentId()));
+        }
+
+        public String accountPath(OrganizationAccount account) {
+            return path(account.getOrganizationId(), account.getId(), account.getParentId());
+        }
+
+        public String unitPath(OrganizationalUnit unit) {
+            return path(unit.getOrganizationId(), unit.getId(), unit.getParentId());
+        }
+
+        private String path(String selectedOrganizationId, String id, String parentId) {
+            if (!organizationId.equals(selectedOrganizationId)) {
+                throw accessDenied("The selected resource does not belong to the authorized organization.");
+            }
+            List<String> chain = new ArrayList<>();
+            chain.add(id);
+            String current = parentId;
+            while (current != null && !rootId.equals(current)) {
+                chain.add(current);
+                String parent = parents.get(current);
+                if (parent == null) {
+                    try {
+                        parent = requireOrganizationalUnit(organization, current).getParentId();
+                        parents.put(current, parent);
+                    } catch (AwsException missingAncestor) {
+                        if (!"OrganizationalUnitNotFoundException".equals(missingAncestor.getErrorCode())) {
+                            throw missingAncestor;
+                        }
+                        if (removedOrMoved(id, parentId)) {
+                            return null;
+                        }
+                        throw missingAncestor;
+                    }
+                }
+                current = parent;
+            }
+            chain.add(rootId);
+            Collections.reverse(chain);
+            return organizationId + "/" + String.join("/", chain) + "/";
+        }
+
+        private boolean removedOrMoved(String id, String capturedParent) {
+            try {
+                return !capturedParent.equals(parentOf(organization, id));
+            } catch (AwsException missingTarget) {
+                if ("AccountNotFoundException".equals(missingTarget.getErrorCode())
+                        || "OrganizationalUnitNotFoundException".equals(missingTarget.getErrorCode())) {
+                    return true;
+                }
+                throw missingTarget;
+            }
+        }
     }
 
     public List<ChildRef> listChildren(String callerAccountId, String parentId, String childType) {
