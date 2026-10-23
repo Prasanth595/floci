@@ -270,9 +270,10 @@ public class IamActionRegistry {
         rule("dsql", "GET",    "^/stream/[^/]+$",                             "dsql:ListStreams"),
         rule("dsql", "GET",    "^/stream/[^/]+/[^/]+$",                       "dsql:GetStream"),
         rule("dsql", "DELETE", "^/stream/[^/]+/[^/]+$",                       "dsql:DeleteStream"),
-        rule("dsql", "GET",    "^/tags/.+$",                                  "dsql:ListTagsForResource"),
-        rule("dsql", "POST",   "^/tags/.+$",                                  "dsql:TagResource"),
-        rule("dsql", "DELETE", "^/tags/.+$",                                  "dsql:UntagResource"),
+        // Tagging is served at /tags/<arn> and at /tags, naming the ARN in the query or the body.
+        rule("dsql", "GET",    "^/tags(/.+)?$",                               "dsql:ListTagsForResource"),
+        rule("dsql", "POST",   "^/tags(/.+)?$",                               "dsql:TagResource"),
+        rule("dsql", "DELETE", "^/tags(/.+)?$",                               "dsql:UntagResource"),
 
         // ── EventBridge Pipes ──────────────────────────────────────────────────
         rule("pipes", "POST",   "^/v1/pipes/[^/]+/start$", "pipes:StartPipe"),

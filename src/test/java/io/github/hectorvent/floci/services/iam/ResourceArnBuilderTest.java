@@ -1379,6 +1379,15 @@ class ResourceArnBuilderTest {
             when(uriInfo.getPath()).thenReturn(path);
             assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"), path);
         }
+        // The same tagging is served at /tags, the ARN in the resourceArn query parameter or body field.
+        when(uriInfo.getPath()).thenReturn("/tags");
+        queryParams.putSingle("resourceArn", cluster);
+        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        queryParams.clear();
+        when(ctx.getMethod()).thenReturn("POST");
+        setJsonBody("{\"resourceArn\":\"" + cluster + "\",\"tags\":{}}");
+        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        when(ctx.getMethod()).thenReturn("GET");
         // A stream route names the stream, or its cluster to create or list streams.
         when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz");
         assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));

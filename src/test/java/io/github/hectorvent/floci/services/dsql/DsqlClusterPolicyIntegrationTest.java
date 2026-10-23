@@ -140,10 +140,18 @@ class DsqlClusterPolicyIntegrationTest {
 
         cluster.putPolicy("{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Principal\":{\"AWS\":"
                 + "\"arn:aws:iam::" + ACCOUNT + ":root\"},\"Action\":[\"dsql:GetCluster\",\"dsql:UpdateCluster\","
-                + "\"dsql:TagResource\",\"dsql:GetVpcEndpointServiceName\"],\"Resource\":\"*\"}]}");
+                + "\"dsql:TagResource\",\"dsql:UntagResource\",\"dsql:ListTagsForResource\","
+                + "\"dsql:GetVpcEndpointServiceName\"],\"Resource\":\"*\"}]}");
         as(user).get(clusterPath).then().statusCode(403).body("__type", equalTo("AccessDeniedException"));
         as(user).body(Map.of("deletionProtectionEnabled", false)).post(clusterPath).then().statusCode(403);
         as(user).urlEncodingEnabled(false).body(Map.of("tags", Map.of("team", "data"))).post(tagsPath)
+                .then().statusCode(403);
+        as(user).urlEncodingEnabled(false).get(tagsPath).then().statusCode(403);
+        // The same tagging is served at /tags, naming the ARN in the query or the body.
+        as(user).body(Map.of("resourceArn", cluster.arn(), "tags", Map.of("team", "data"))).post("/tags")
+                .then().statusCode(403);
+        as(user).queryParam("resourceArn", cluster.arn()).get("/tags").then().statusCode(403);
+        as(user).queryParam("resourceArn", cluster.arn()).queryParam("tagKeys", "team").delete("/tags")
                 .then().statusCode(403);
         as(user).get(vpcEndpointPath).then().statusCode(403);
         // The calls the policy does not name answer.
