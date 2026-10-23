@@ -134,6 +134,27 @@ class PartitionedFileStorageJournalTest {
         }
     }
 
+    @Test
+    void aRecordWithAKeyThatIsNotUtf8EndsReplay() throws Exception {
+        byte[] cborX = {0x61, 'x'};
+        byte[] notUtf8 = {'t', 'a', 'b', 'l', (byte) 0xFF};
+        List<byte[]> badRecords = List.of(
+                record(EntryJournal.OP_PUT_ENTRY, notUtf8, "k".getBytes(), cborX),
+                record(EntryJournal.OP_PUT_ENTRY, "table".getBytes(), new byte[]{(byte) 0xC3, 0x28}, cborX));
+        open(1).putEntry("table", "a", "1");
+
+        for (byte[] bad : badRecords) {
+            long goodLength = Files.size(journal());
+            Files.write(journal(), bad, StandardOpenOption.APPEND);
+
+            PartitionedFileStorage<String> restarted = open(1);
+
+            assertEquals(Set.of("table"), restarted.keys());
+            assertEquals(Map.of("a", "1"), restarted.get("table").orElseThrow());
+            assertEquals(goodLength, Files.size(journal()), "the unreadable record is cut off");
+        }
+    }
+
     /** One journal record: the op byte, then each part as a length-prefixed frame. */
     private static byte[] record(byte op, byte[]... parts) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();

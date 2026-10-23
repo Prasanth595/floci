@@ -14,7 +14,10 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -285,9 +288,22 @@ final class EntryJournal<E> {
         return false;
     }
 
+    /** Reads one frame as strict UTF-8, or {@code null} when it is torn or not valid UTF-8. */
     private static String readString(DataInputStream in, long fileSize, long[] position) throws IOException {
         byte[] bytes = readFrame(in, fileSize, position);
-        return bytes == null ? null : new String(bytes, StandardCharsets.UTF_8);
+        if (bytes == null) {
+            return null;
+        }
+        try {
+            // A lenient decode would swap bad bytes for U+FFFD and apply the change to another key.
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+        } catch (CharacterCodingException e) {
+            return null;
+        }
     }
 
     /** Reads one length-prefixed frame, or {@code null} when its length runs past the file. */
