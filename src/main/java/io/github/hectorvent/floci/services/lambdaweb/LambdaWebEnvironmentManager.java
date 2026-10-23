@@ -558,6 +558,10 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         cmd.add(RUNTIME_DIR + "/index.js");
         Optional<SessionCreds> roleCredentials = executionRoleCredentials.forRole(
                 revision.serviceConfig.executionRoleArn, accountId, fn.functionName);
+        // The role can be deleted after the trust check.
+        if (roleCredentials.isEmpty()) {
+            throw new StartFailure(LambdaWebErrorPages.CANNOT_ASSUME_ROLE);
+        }
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(name)
                 .withEnv(environment(accountId, region, revision, userEnv, roleCredentials))
