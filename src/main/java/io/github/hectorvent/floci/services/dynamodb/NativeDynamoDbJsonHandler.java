@@ -486,7 +486,7 @@ public class NativeDynamoDbJsonHandler {
         description.put("GlobalTableStatus", "ACTIVE");
         description.put("GlobalTableArn", table.getTableArn());
         if (table.getCreationDateTime() != null) {
-            description.put("CreationDateTime", table.getCreationDateTime().getEpochSecond());
+            description.put("CreationDateTime", epochSeconds(table.getCreationDateTime()));
         }
         description.set("ReplicationGroup", replicaNodes(table, objectMapper.createArrayNode(), true));
         return description;
@@ -3133,7 +3133,7 @@ public class NativeDynamoDbJsonHandler {
         node.put("TableId", table.getTableId());
         node.put("TableStatus", table.getTableStatus());
         node.put("TableArn", table.getTableArn());
-        node.put("CreationDateTime", table.getCreationDateTime().getEpochSecond());
+        node.put("CreationDateTime", epochSeconds(table.getCreationDateTime()));
         node.put("ItemCount", table.getItemCount());
         node.put("TableSizeBytes", table.getTableSizeBytes());
         node.put("DeletionProtectionEnabled", table.isDeletionProtectionEnabled());
@@ -3142,7 +3142,7 @@ public class NativeDynamoDbJsonHandler {
             ObjectNode billing = objectMapper.createObjectNode();
             billing.put("BillingMode", "PAY_PER_REQUEST");
             billing.put("LastUpdateToPayPerRequestDateTime",
-                    table.getCreationDateTime().getEpochSecond());
+                    epochSeconds(table.getCreationDateTime()));
             node.set("BillingModeSummary", billing);
         }
 

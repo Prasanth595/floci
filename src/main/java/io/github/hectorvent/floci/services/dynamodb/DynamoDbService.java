@@ -4811,7 +4811,8 @@ public class DynamoDbService {
 
         TableDefinition table = requireBackupSource(storageKey, tableArn);
         Instant startTime = clock.instant().truncatedTo(ChronoUnit.MILLIS);
-        // Seconds, as CreationDateTime is shown, so an EarliestRestorableDateTime in the creation second passes.
+        // AWS cannot enable point-in-time recovery until seconds after the creation, so its
+        // EarliestRestorableDateTime is never in the creation second.
         if (exportTime != null && (exportTime.isBefore(table.getCreationDateTime().truncatedTo(ChronoUnit.SECONDS))
                 || startTime.isBefore(exportTime))) {
             throw new AwsException("InvalidExportTimeException", "Export Time is invalid", 400);
