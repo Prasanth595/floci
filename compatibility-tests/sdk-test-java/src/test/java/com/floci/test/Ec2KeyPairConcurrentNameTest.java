@@ -70,8 +70,8 @@ class Ec2KeyPairConcurrentNameTest {
                 assertThat(ec2.describeKeyPairs(r -> r.keyNames(name)).keyPairs())
                         .extracting(KeyPairInfo::keyPairId).containsExactlyElementsOf(stored);
             } finally {
-                // The requests finish before the name is deleted, so a late one cannot store a key pair
-                // after the cleanup.
+                // Waits up to 60 s for the requests to finish before the name is deleted, so a slow one
+                // is not left to store a key pair after the cleanup.
                 requests.shutdown();
                 if (!requests.awaitTermination(60, TimeUnit.SECONDS)) {
                     requests.shutdownNow();

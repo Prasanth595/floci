@@ -4621,7 +4621,8 @@ class Ec2ServiceTest {
                 secondWorker.set(Thread.currentThread());
                 return request.apply(second);
             });
-            Awaitility.await().atMost(Duration.ofSeconds(30)).until(() -> secondResult.isDone()
+            Awaitility.await("the second request to finish or to wait in storeNewKeyPair")
+                    .atMost(Duration.ofSeconds(30)).until(() -> secondResult.isDone()
                     || isBlockedIn(secondWorker.get(), "storeNewKeyPair", firstWorker.get()));
             releaseFirst.countDown();
 
@@ -4685,7 +4686,8 @@ class Ec2ServiceTest {
                 deleteWorker.set(Thread.currentThread());
                 return service.deleteKeyPair("us-east-1", "retagged", null);
             });
-            Awaitility.await().atMost(Duration.ofSeconds(30)).until(() -> deleting.isDone()
+            Awaitility.await("the delete to finish or to wait in deleteKeyPair")
+                    .atMost(Duration.ofSeconds(30)).until(() -> deleting.isDone()
                     || isBlockedIn(deleteWorker.get(), "deleteKeyPair", tagWorker.get()));
             releaseTagWrite.countDown();
             tagging.get(30, TimeUnit.SECONDS);
@@ -4703,7 +4705,11 @@ class Ec2ServiceTest {
         }
     }
 
-    /** Whether {@code waiter} waits, in the named Ec2Service method, to enter a monitor {@code owner} holds. */
+    /**
+     * Whether {@code waiter} waits, in the named Ec2Service method, to enter a monitor {@code owner}
+     * holds. The method is named on purpose: if the request came to wait anywhere else, the race tests
+     * would no longer exercise the code under the lock, so they time out instead.
+     */
     private static boolean isBlockedIn(Thread waiter, String method, Thread owner) {
         if (waiter == null) {
             return false;
