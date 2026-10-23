@@ -262,6 +262,26 @@ class PartitionedFileStorageJournalTest {
         assertEquals(Map.of("early", "1", "late", "2"), recoverCopy().get("table").orElseThrow());
     }
 
+    @Test
+    void twoWritesToOneEntryReplayInTheOrderTheyWereApplied() throws Exception {
+        PartitionedFileStorage<String> live = open(1);
+        Thread[] second = new Thread[1];
+        live.setBeforeJournalAppend(() -> {
+            // The first write is in memory and about to be journaled. A second write to the same
+            // entry must wait, or its record lands first and a replay ends on the older value.
+            live.setBeforeJournalAppend(() -> { });
+            second[0] = Thread.ofPlatform().start(() -> live.putEntry("table", "a", "second"));
+            StorageTestThreads.awaitParkedOrDone(second[0]);
+        });
+
+        live.putEntry("table", "a", "first");
+        second[0].join(TimeUnit.SECONDS.toMillis(10));
+
+        assertFalse(second[0].isAlive());
+        assertEquals(Map.of("a", "second"), live.get("table").orElseThrow());
+        assertEquals(Map.of("a", "second"), recoverCopy().get("table").orElseThrow());
+    }
+
     /**
      * What a restart would recover right now, read from a copy of the directory so that opening
      * it, which replays and later compacts, cannot change the files the live store is using.

@@ -31,7 +31,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -131,6 +133,13 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     // so the journal never drops a record whose change is not yet in a shard file. In every mode,
     // shard writes hold the read lock and load and clear hold the write lock.
     private final ReentrantReadWriteLock compactionLock = new ReentrantReadWriteLock();
+    // Journal mode: a change holds its key's lock while it updates memory and appends its record,
+    // so two changes to one key are journaled in the order they were applied. Replay follows the
+    // journal's order; changes to different keys commute, so they need no common order.
+    private final ConcurrentHashMap<String, ReentrantLock> changeLocks = new ConcurrentHashMap<>();
+    // Runs inside a journaled change after memory was updated and before its record is appended:
+    // the moment a second change to the same key could overtake it. Tests use it to stage that.
+    private volatile Runnable beforeJournalAppend = () -> { };
     // Runs inside compaction between the last shard write and emptying the journal: the moment a
     // change that slipped past the lock would be lost. Tests use it to stage that change.
     private volatile Runnable beforeJournalTruncate = () -> { };
@@ -189,12 +198,12 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     @Override
     public void put(String key, Map<String, E> value) {
         boolean journaled;
-        beginChange();
+        ReentrantLock lock = beginChange(key);
         try {
             applyPut(key, value);
-            journaled = journal == null || journal.put(key, value);
+            journaled = journal == null || journalAppend(() -> journal.put(key, value));
         } finally {
-            endChange();
+            endChange(lock);
         }
         persistChange(journaled, allShardsOf(key));
     }
@@ -214,12 +223,12 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     @Override
     public void delete(String key) {
         boolean journaled;
-        beginChange();
+        ReentrantLock lock = beginChange(key);
         try {
             applyDelete(key);
-            journaled = journal == null || journal.delete(key);
+            journaled = journal == null || journalAppend(() -> journal.delete(key));
         } finally {
-            endChange();
+            endChange(lock);
         }
         persistChange(journaled, allShardsOf(key));
     }
@@ -313,12 +322,12 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     public void putEntry(String key, String entryKey, E entryValue) {
         ShardId id;
         boolean journaled;
-        beginChange();
+        ReentrantLock lock = beginChange(key);
         try {
             id = applyPutEntry(key, entryKey, entryValue);
-            journaled = journal == null || journal.putEntry(key, entryKey, entryValue);
+            journaled = journal == null || journalAppend(() -> journal.putEntry(key, entryKey, entryValue));
         } finally {
-            endChange();
+            endChange(lock);
         }
         persistChange(journaled, List.of(id));
     }
@@ -327,12 +336,12 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
     public void removeEntry(String key, String entryKey) {
         ShardId id;
         boolean journaled;
-        beginChange();
+        ReentrantLock lock = beginChange(key);
         try {
             id = applyRemoveEntry(key, entryKey);
-            journaled = id == null || journal == null || journal.removeEntry(key, entryKey);
+            journaled = id == null || journal == null || journalAppend(() -> journal.removeEntry(key, entryKey));
         } finally {
-            endChange();
+            endChange(lock);
         }
         if (id != null) {
             persistChange(journaled, List.of(id));
@@ -452,16 +461,27 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
         markAll(key);
     }
 
-    private void beginChange() {
-        if (journal != null) {
-            compactionLock.readLock().lock();
+    /** Journal mode: takes the change side of the compaction lock, then the key's lock, and returns the latter. */
+    private ReentrantLock beginChange(String key) {
+        if (journal == null) {
+            return null;
+        }
+        compactionLock.readLock().lock();
+        ReentrantLock lock = changeLocks.computeIfAbsent(key, ignored -> new ReentrantLock());
+        lock.lock();
+        return lock;
+    }
+
+    private void endChange(ReentrantLock lock) {
+        if (lock != null) {
+            lock.unlock();
+            compactionLock.readLock().unlock();
         }
     }
 
-    private void endChange() {
-        if (journal != null) {
-            compactionLock.readLock().unlock();
-        }
+    private boolean journalAppend(BooleanSupplier append) {
+        beforeJournalAppend.run();
+        return append.getAsBoolean();
     }
 
     /** Writes every dirty shard and returns how many could not be written. */
@@ -473,6 +493,10 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
             }
         }
         return failed;
+    }
+
+    void setBeforeJournalAppend(Runnable hook) {
+        this.beforeJournalAppend = hook;
     }
 
     void setBeforeJournalTruncate(Runnable hook) {
