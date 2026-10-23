@@ -772,7 +772,9 @@ operation that has none of its own, which API Gateway does not.
 
 Other `Auth` properties, custom default authorizers and external definitions are rejected.
 When a default applies, so are unresolved or malformed security requirements, method
-override markers, and a nested `Fn::If` around a path or an operation. Existing
+override markers, a nested `Fn::If` around a path or an operation, a body or security
+scheme map written as an intrinsic function, an `AWS_IAM` or `api_key` scheme that contains
+one, and a body that declares both `swagger` and `openapi`. Existing
 custom schemes remain subject to API Gateway's importer and invocation support; preserving
 them does not implement another authentication protocol. The importer rejects multiple
 authorizer or IAM requirements, including a defined custom authorizer alongside the

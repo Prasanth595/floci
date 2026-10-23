@@ -58,6 +58,14 @@ final class SamRestApiAuth {
             // leaves the document as written.
             return;
         }
+        // The template engine keeps only an intrinsic function's result, and the importer reads a
+        // document naming both versions as OpenAPI 3: either way the defaults would be lost.
+        if (CloudFormationTemplateEngine.callsIntrinsic(document)) {
+            throw invalid("Auth requires a DefinitionBody written inline, not as an intrinsic function.");
+        }
+        if (document.has("swagger") && document.has("openapi")) {
+            throw invalid("Auth requires a DefinitionBody that declares swagger or openapi, not both.");
+        }
         boolean swagger = "2.0".equals(body.path("swagger").asText());
         if (!swagger && !body.path("openapi").asText().startsWith("3.0.")) {
             throw invalid("Auth currently supports Swagger 2.0 and OpenAPI 3.0 only.");
@@ -190,7 +198,8 @@ final class SamRestApiAuth {
     }
 
     private boolean isScheme(JsonNode scheme, boolean iam) {
-        return "apiKey".equals(scheme.path("type").asText())
+        return !CloudFormationTemplateEngine.callsIntrinsic(scheme)
+                && "apiKey".equals(scheme.path("type").asText())
                 && "header".equals(scheme.path("in").asText())
                 && (iam ? "Authorization" : "x-api-key").equalsIgnoreCase(scheme.path("name").asText())
                 && !scheme.has("x-amazon-apigateway-authorizer")
@@ -204,6 +213,12 @@ final class SamRestApiAuth {
         }
         if (!(parent.get(name) instanceof ObjectNode result)) {
             throw invalid(name + " must be an object.");
+        }
+        // The template engine keeps only an intrinsic function's result, so a generated scheme
+        // written beside one would be dropped and the operations would name a scheme the importer
+        // ignores.
+        if (CloudFormationTemplateEngine.callsIntrinsic(result)) {
+            throw invalid(name + " must be written inline, not as an intrinsic function.");
         }
         return result;
     }

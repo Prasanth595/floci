@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -213,6 +214,47 @@ class SamRestApiAuthTest {
         ((ObjectNode) paths.at("/~1items/get")).set("security", mapper.readTree("[{\"undefined\":[]}]"));
         JsonNode expanded = processor.expandSamTemplate(template).at("/Resources/Api/Properties/Body");
         assertEquals(properties.get("DefinitionBody"), expanded);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "false|components|{\"Fn::If\":[\"Enabled\",{\"securitySchemes\":{}},{\"Ref\":\"AWS::NoValue\"}]}",
+            "false|components|{\"securitySchemes\":{\"Fn::If\":[\"Enabled\",{},{}]}}",
+            "true|securityDefinitions|{\"Fn::If\":[\"Enabled\",{},{}]}"
+    })
+    void refusesSchemeMapsWrittenAsIntrinsics(boolean swagger, String member, String value) throws Exception {
+        ObjectNode template = template(swagger);
+        ((ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody")).set(member, mapper.readTree(value));
+        JsonNode original = template.deepCopy();
+        AwsException failure = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals(original, template);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bothVersions", "bodyIf", "iamSchemeIf", "keySchemeIf"})
+    void refusesBodiesWhoseDefaultsWouldNotReachTheImporter(String shape) throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode body = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody");
+        JsonNode arguments = mapper.readTree("[\"Enabled\",{},{}]");
+        switch (shape) {
+            case "bothVersions" -> body.put("swagger", "2.0");
+            case "bodyIf" -> body.set("Fn::If", arguments);
+            default -> {
+                boolean iam = "iamSchemeIf".equals(shape);
+                ObjectNode scheme = mapper.createObjectNode().put("type", "apiKey").put("in", "header")
+                        .put("name", iam ? "Authorization" : "x-api-key");
+                if (iam) {
+                    scheme.put("x-amazon-apigateway-authtype", "awsSigv4");
+                }
+                scheme.set("Fn::If", arguments);
+                setSchemes(body, false, mapper.createObjectNode().set(iam ? "AWS_IAM" : "api_key", scheme));
+            }
+        }
+        JsonNode original = template.deepCopy();
+        AwsException failure = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals(original, template);
     }
 
     private ObjectNode conditional(JsonNode whenTrue, JsonNode whenFalse) {
