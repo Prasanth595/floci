@@ -1372,6 +1372,28 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void dsqlRoutesResolveTheClusterTheTaggedArnOrNone() {
+        String cluster = "arn:aws:dsql:eu-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz";
+        for (String path : List.of("/cluster/abcdefghijklmnopqrstuvwxyz", "/cluster/abcdefghijklmnopqrstuvwxyz/policy",
+                "/clusters/abcdefghijklmnopqrstuvwxyz/vpc-endpoint-service-name", "/tags/" + cluster)) {
+            when(uriInfo.getPath()).thenReturn(path);
+            assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"), path);
+        }
+        // A stream route names the stream, or its cluster to create or list streams.
+        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz/s1");
+        assertEquals(List.of(cluster + "/stream/s1"), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        // CreateCluster and ListClusters are checked against every cluster, as DSQL checks them (measured).
+        when(uriInfo.getPath()).thenReturn("/cluster");
+        assertEquals(List.of("arn:aws:dsql:eu-west-1:000000000000:cluster/*"),
+                builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/cluster/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of("arn:aws-cn:dsql:polygondwanaland-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz"),
+                builder.buildResources("dsql", ctx, "polygondwanaland-west-1", "000000000000", "aws-cn"));
+    }
+
+    @Test
     void schedulerRoutesResolveTheScheduleInItsGroupTheGroupOrTheTaggedArn() {
         when(uriInfo.getPath()).thenReturn("/schedules/nightly");
         assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule/default/nightly",
