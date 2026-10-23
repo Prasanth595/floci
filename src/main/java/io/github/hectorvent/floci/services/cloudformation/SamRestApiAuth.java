@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -70,30 +72,68 @@ final class SamRestApiAuth {
         }
         Iterator<Map.Entry<String, JsonNode>> paths = document.path("paths").fields();
         while (paths.hasNext()) {
-            JsonNode path = paths.next().getValue();
-            if (!path.isObject() || path.has("$ref")) {
-                throw invalid("Auth requires inline path objects.");
-            }
-            Iterator<Map.Entry<String, JsonNode>> methods = path.fields();
-            while (methods.hasNext()) {
-                Map.Entry<String, JsonNode> method = methods.next();
-                if (!METHODS.contains(method.getKey())) {
-                    continue;
+            for (JsonNode path : branches(paths.next().getValue())) {
+                if (!path.isObject() || path.has("$ref")) {
+                    throw invalid("Auth requires inline path objects.");
                 }
-                if (!(method.getValue() instanceof ObjectNode operation)) {
-                    throw invalid("Auth requires inline operation objects.");
+                Iterator<Map.Entry<String, JsonNode>> methods = path.fields();
+                while (methods.hasNext()) {
+                    Map.Entry<String, JsonNode> method = methods.next();
+                    if (!METHODS.contains(method.getKey())) {
+                        continue;
+                    }
+                    for (JsonNode branch : branches(method.getValue())) {
+                        if (!(branch instanceof ObjectNode operation)) {
+                            throw invalid("Auth requires inline operation objects.");
+                        }
+                        applyDefaults(operation, definitions, iam, keyRequired);
+                    }
                 }
-                // SAM starts from the operation's own security, never the document's root security.
-                ArrayNode security = security(operation.path("security"), definitions);
-                if (iam && !hasScheme(security, "AWS_IAM")) {
-                    security.add(mapper.createObjectNode().set("AWS_IAM", mapper.createArrayNode()));
-                }
-                if (keyRequired && !hasScheme(security, "api_key")) {
-                    security.add(mapper.createObjectNode().set("api_key", mapper.createArrayNode()));
-                }
-                operation.set("security", security);
             }
         }
+    }
+
+    private void applyDefaults(ObjectNode operation, ObjectNode definitions, boolean iam, boolean keyRequired) {
+        // SAM starts from the operation's own security, never the document's root security.
+        ArrayNode security = security(operation.path("security"), definitions);
+        if (iam && !hasScheme(security, "AWS_IAM")) {
+            security.add(mapper.createObjectNode().set("AWS_IAM", mapper.createArrayNode()));
+        }
+        if (keyRequired && !hasScheme(security, "api_key")) {
+            security.add(mapper.createObjectNode().set("api_key", mapper.createArrayNode()));
+        }
+        operation.set("security", security);
+    }
+
+    /**
+     * The values a path item or an operation may take, as SAM reads them: both branches of an
+     * {@code Fn::If} other than {@code AWS::NoValue}, or the node itself. The template engine keeps
+     * only the chosen branch, so a default must be written inside each branch, not beside the
+     * {@code Fn::If}.
+     */
+    private List<JsonNode> branches(JsonNode node) {
+        if (!node.has("Fn::If")) {
+            return List.of(node);
+        }
+        JsonNode arguments = node.get("Fn::If");
+        if (!arguments.isArray()) {
+            throw invalid("Fn::If must be a list.");
+        }
+        List<JsonNode> branches = new ArrayList<>();
+        for (int i = 1; i < arguments.size(); i++) {
+            JsonNode branch = arguments.get(i);
+            if (branch.has("Fn::If")) {
+                throw invalid("Auth does not support a nested Fn::If in paths.");
+            }
+            if (!isNoValue(branch)) {
+                branches.add(branch);
+            }
+        }
+        return branches;
+    }
+
+    private static boolean isNoValue(JsonNode node) {
+        return node.isObject() && node.size() == 1 && "AWS::NoValue".equals(node.path("Ref").asText());
     }
 
     private ArrayNode security(JsonNode value, ObjectNode definitions) {

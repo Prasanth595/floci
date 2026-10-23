@@ -3,12 +3,15 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.Map;
@@ -17,6 +20,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /** Exercises transformed auth through the REST importer and the real execute-api HTTP verifier. */
@@ -157,6 +161,53 @@ class SamRestApiAuthIntegrationTest {
             if (apiId != null) {
                 given().delete("/restapis/" + apiId).then().statusCode(202);
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void samIamDefaultReachesAnOperationInsideFnIf(boolean pathLevel) throws Exception {
+        ObjectNode template = template(false);
+        template.set("Conditions", mapper.readTree("{\"Enabled\":{\"Fn::Equals\":[\"on\",\"on\"]}}"));
+        template.set("Outputs", mapper.readTree("{\"ApiId\":{\"Value\":{\"Ref\":\"Api\"}}}"));
+        ((ObjectNode) template.at("/Resources/Api/Properties/Auth")).remove("ApiKeyRequired");
+        ObjectNode paths = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody/paths");
+        ObjectNode items = (ObjectNode) paths.get("/items");
+        ObjectNode conditional = mapper.createObjectNode();
+        conditional.putArray("Fn::If").add("Enabled").add(pathLevel ? items : items.get("post"))
+                .add(mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        if (pathLevel) {
+            paths.set("/items", conditional);
+        } else {
+            items.set("post", conditional);
+        }
+        String stack = "sam-conditional-auth-" + UUID.randomUUID();
+        given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack").formParam("StackName", stack)
+                .formParam("TemplateBody", template.toString())
+                .formParam("Capabilities.member.1", "CAPABILITY_AUTO_EXPAND")
+                .when().post("/").then().statusCode(200);
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status(),
+                    () -> CfnStackWaits.failedResourceReason(stack));
+            String outputs = given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DescribeStacks").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200).extract().asString();
+            String apiId = XmlParser.extractPairs(outputs, "Outputs", "OutputKey", "OutputValue").get("ApiId");
+            String resourceId = given().get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200).extract().path("item.find { it.path == '/items' }.id");
+            given().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST")
+                    .then().statusCode(200)
+                    .body("authorizationType", equalTo("AWS_IAM"))
+                    .body("apiKeyRequired", equalTo(false));
+            String path = "/execute-api/" + apiId + "/test/items";
+            given().post(path).then().statusCode(403);
+            given().headers(signed(path)).post(path).then().statusCode(200).body("accepted", equalTo(true));
+        } finally {
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DeleteStack").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200);
+            CfnStackWaits.awaitStackDeleted(stack);
         }
     }
 

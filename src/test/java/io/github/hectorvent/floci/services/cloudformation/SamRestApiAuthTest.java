@@ -159,6 +159,47 @@ class SamRestApiAuthTest {
         assertThrows(AwsException.class, () -> processor.expandSamTemplate(conflicting));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void addsTheDefaultsInsideEachFnIfBranch(boolean swagger) throws Exception {
+        ObjectNode template = template(swagger);
+        ObjectNode paths = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody/paths");
+        ObjectNode items = (ObjectNode) paths.get("/items");
+        JsonNode get = items.get("get");
+        items.set("get", conditional(get, mapper.readTree("{\"Ref\":\"AWS::NoValue\"}")));
+        items.set("put", conditional(get, items.get("x-amazon-apigateway-any-method")));
+        paths.set("/conditional", conditional(mapper.createObjectNode().set("post", get),
+                mapper.readTree("{\"Ref\":\"AWS::NoValue\"}")));
+        JsonNode original = template.deepCopy();
+        JsonNode expanded = processor.expandSamTemplate(template).at("/Resources/Api/Properties/Body/paths");
+        assertEquals(original, template);
+        JsonNode defaults = mapper.readTree("[{\"AWS_IAM\":[]},{\"api_key\":[]}]");
+        for (String branch : new String[] {
+                "/~1items/get/Fn::If/1", "/~1items/put/Fn::If/1", "/~1items/put/Fn::If/2",
+                "/~1conditional/Fn::If/1/post"}) {
+            assertEquals(defaults, expanded.at(branch + "/security"), branch);
+        }
+        assertFalse(expanded.at("/~1items/get").has("security"));
+        assertFalse(expanded.at("/~1items/put").has("security"));
+        assertEquals(mapper.readTree("{\"Ref\":\"AWS::NoValue\"}"), expanded.at("/~1items/get/Fn::If/2"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"get\":{\"Fn::If\":[\"Enabled\",{\"Fn::If\":[\"Other\",{},{}]},{}]}}",
+            "{\"Fn::If\":[\"Enabled\",{\"Fn::If\":[\"Other\",{\"get\":{}},{}]},{}]}",
+            "{\"get\":{\"Fn::If\":\"Enabled\"}}", "{\"get\":{\"Fn::If\":[\"Enabled\",\"get\",{}]}}"
+    })
+    void refusesFnIfShapesItCannotReachInside(String pathItem) throws Exception {
+        ObjectNode template = template(false);
+        ((ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody/paths"))
+                .set("/conditional", mapper.readTree(pathItem));
+        JsonNode original = template.deepCopy();
+        AwsException failure = assertThrows(AwsException.class, () -> processor.expandSamTemplate(template));
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals(original, template);
+    }
+
     @Test
     void changesNothingWhenNoDefaultIsSelected() throws Exception {
         ObjectNode template = template(false);

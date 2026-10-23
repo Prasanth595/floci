@@ -763,15 +763,16 @@ a valid SigV4 signature and an enabled API key associated with the invoked stage
 controls are selected. Existing operation requirements and their scheme definitions are
 preserved. Defaults are selected by the SAM names `AWS_IAM` and `api_key`; an existing
 scheme with another name does not suppress either default.
-As in SAM, the defaults are added to each operation's own `security`. Root-level `security`
-stays in the document as written and is not copied into operations, and an `Auth` that
-selects no default, such as `ApiKeyRequired: false` alone, leaves the document unchanged.
-floci's REST importer still applies root-level `security` to an operation that has none of
-its own, which API Gateway does not.
+As in SAM, the defaults are added to each operation's own `security`, inside each branch of
+an `Fn::If` written around a path or an operation, skipping an `AWS::NoValue` branch.
+Root-level `security` stays in the document as written and is not copied into operations,
+and an `Auth` that selects no default, such as `ApiKeyRequired: false` alone, leaves the
+document unchanged. floci's REST importer still applies root-level `security` to an
+operation that has none of its own, which API Gateway does not.
 
 Other `Auth` properties, custom default authorizers and external definitions are rejected.
-When a default applies, so are unresolved or malformed security requirements and method
-override markers. Existing
+When a default applies, so are unresolved or malformed security requirements, method
+override markers, and a nested `Fn::If` around a path or an operation. Existing
 custom schemes remain subject to API Gateway's importer and invocation support; preserving
 them does not implement another authentication protocol. The importer rejects multiple
 authorizer or IAM requirements, including a defined custom authorizer alongside the
