@@ -46,6 +46,11 @@ another.
 `ListApplications` refuses a `states` filter naming a state that does not exist, or more than 7, and a
 `maxResults` outside 1 to 50, with the `ValidationException` AWS's validation layer answers.
 
+`CreateApplication` stores every configuration `UpdateApplication` does, `runtimeConfiguration`,
+`monitoringConfiguration`, `schedulerConfiguration`, `diskEncryptionConfiguration`,
+`interactiveConfiguration`, `identityCenterConfiguration` and `jobLevelCostAllocationConfiguration`
+among them, and `GetApplication` returns each as it was written.
+
 `DeleteApplication` leaves the application in `TERMINATED` state. `GetApplication` continues to
 report that state so lifecycle waiters can observe it, while an unfiltered `ListApplications`
 omits the terminated application. A terminated application cannot be started or stopped again.
@@ -84,6 +89,9 @@ response shape, and settles when it is read.
   `ValidationException`.
 * `createdBy` is the caller's ARN, as `GetCallerIdentity` reports it. `releaseLabel` and
   `networkConfiguration` come from the application.
+
+A state machine drives applications and job runs through the `emr-serverless:` integrations, `.sync`
+included; see [Step Functions: Amazon EMR Serverless tasks](step-functions.md#amazon-emr-serverless-tasks).
 
 ## Limitations and Differences from AWS
 
