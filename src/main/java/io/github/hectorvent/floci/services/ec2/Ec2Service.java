@@ -7526,13 +7526,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         ensureDefaultResources(region);
         boolean byId = keyPairId != null && !keyPairId.isEmpty();
         // scan() returns detached copies, so each match is resolved to its store key and deleted
-        // through the backend; mutating the scan result does not touch the store.
+        // through the backend; mutating the scan result does not touch the store. Each delete holds
+        // the lock tag writes take on the key pair, so a tag write that has read the key pair cannot
+        // write it back once it is deleted.
         List<KeyPair> matches = keyPairs.scan(k -> true).stream()
                 .filter(k -> region.equals(k.getRegion()))
                 .filter(k -> byId ? keyPairId.equals(k.getKeyPairId()) : keyName != null && keyName.equals(k.getKeyName()))
                 .toList();
         for (KeyPair match : matches) {
-            keyPairs.delete(key(region, match.getKeyPairId()));
+            String storeKey = key(region, match.getKeyPairId());
+            synchronized (lockFor(storeKey)) {
+                keyPairs.delete(storeKey);
+            }
         }
         return matches.isEmpty() ? null : matches.getFirst();
     }

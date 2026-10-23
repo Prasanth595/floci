@@ -4641,6 +4641,68 @@ class Ec2ServiceTest {
         }
     }
 
+    /**
+     * A DeleteKeyPair arriving while a tag write has read the key pair and not yet written it back
+     * waits for that write, so the tag write cannot put back the key pair the delete removes, and the
+     * freed name then goes to one new key pair. The store holds the tag write until the delete has
+     * finished or waits on a lock the tag write holds.
+     */
+    @Test
+    void deleteKeyPairWaitsForATagWriteOnTheKeyPair() throws Exception {
+        CountDownLatch tagWriteStoring = new CountDownLatch(1);
+        CountDownLatch releaseTagWrite = new CountDownLatch(1);
+        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<KeyPair>(
+                new InMemoryStorage<>(), null, "000000000000") {
+            @Override
+            public void put(String key, KeyPair value) {
+                if (!value.getTags().isEmpty() && tagWriteStoring.getCount() > 0) {
+                    tagWriteStoring.countDown();
+                    try {
+                        assertTrue(releaseTagWrite.await(30, TimeUnit.SECONDS), "the tag write was never released");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(e);
+                    }
+                }
+                super.put(key, value);
+            }
+        };
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+        KeyPair original = service.createKeyPair("us-east-1", "retagged", "ed25519", null);
+        AtomicReference<Thread> tagWorker = new AtomicReference<>();
+        AtomicReference<Thread> deleteWorker = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> tagging = workers.submit(() -> {
+                tagWorker.set(Thread.currentThread());
+                service.createTags("us-east-1", List.of(original.getKeyPairId()), List.of(new Tag("Team", "blue")));
+            });
+            assertTrue(tagWriteStoring.await(10, TimeUnit.SECONDS), "the tag write never stored the key pair");
+            Future<KeyPair> deleting = workers.submit(() -> {
+                deleteWorker.set(Thread.currentThread());
+                return service.deleteKeyPair("us-east-1", "retagged", null);
+            });
+            Awaitility.await().atMost(Duration.ofSeconds(30)).until(() -> deleting.isDone()
+                    || isBlockedOnMonitorOf(deleteWorker.get(), tagWorker.get()));
+            releaseTagWrite.countDown();
+            tagging.get(30, TimeUnit.SECONDS);
+
+            assertEquals(original.getKeyPairId(), deleting.get(30, TimeUnit.SECONDS).getKeyPairId());
+            assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty(),
+                    "the tag write put the deleted key pair back");
+            KeyPair recreated = service.createKeyPair("us-east-1", "retagged", "ed25519", null);
+            assertEquals(List.of(recreated.getKeyPairId()), service.describeKeyPairs("us-east-1", List.of(), List.of())
+                    .stream().map(KeyPair::getKeyPairId).toList());
+        } finally {
+            releaseTagWrite.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
     private static boolean isBlockedOnMonitorOf(Thread waiter, Thread owner) {
         if (waiter == null) {
             return false;
