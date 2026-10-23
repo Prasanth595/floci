@@ -191,14 +191,6 @@ public class KinesisService implements ResourceProvider {
         }
     }
 
-    public List<String> listStreams(String region) {
-        String prefix = region + "::";
-        return store.scan(key -> key.startsWith(prefix)).stream()
-                .map(KinesisStream::getStreamName)
-                .sorted()
-                .toList();
-    }
-
     public List<KinesisStream> listStreamDetails(String region) {
         String prefix = region + "::";
         return store.scan(key -> key.startsWith(prefix)).stream()
