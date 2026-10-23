@@ -499,6 +499,10 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
         this.beforeJournalAppend = hook;
     }
 
+    void setBeforeJournalWrite(EntryJournal.WriteHook hook) {
+        journal.setBeforeWrite(hook);
+    }
+
     void setBeforeJournalTruncate(Runnable hook) {
         this.beforeJournalTruncate = hook;
     }

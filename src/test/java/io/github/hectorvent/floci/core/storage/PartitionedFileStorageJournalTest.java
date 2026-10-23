@@ -318,6 +318,32 @@ class PartitionedFileStorageJournalTest {
     }
 
     @Test
+    void aWriteAfterATornAppendIsNeverAcknowledgedBehindIt() throws Exception {
+        PartitionedFileStorage<String> crashed = open(1);
+        crashed.putEntry("table", "a", "1");
+        // A non-empty directory where the shard file goes makes every fallback compaction fail.
+        Path blocker = crashed.fileFor("table");
+        Files.createDirectories(blocker);
+        Files.writeString(blocker.resolve("child"), "x");
+        crashed.setBeforeJournalWrite(file -> {
+            // The write fails after part of the record reached the file.
+            crashed.setBeforeJournalWrite(ignored -> { });
+            Files.write(file, new byte[]{EntryJournal.OP_PUT_ENTRY, 0x00, 0x00, 0x7f}, StandardOpenOption.APPEND);
+            throw new IOException("disk full");
+        });
+
+        assertThrows(UncheckedIOException.class, () -> crashed.putEntry("table", "b", "2"));
+        assertThrows(UncheckedIOException.class, () -> crashed.putEntry("table", "c", "3"),
+                "a record appended behind the torn one would be lost on replay, so it is not acknowledged");
+
+        Files.delete(blocker.resolve("child"));
+        Files.delete(blocker);
+        crashed.putEntry("table", "d", "4");
+
+        assertEquals(Map.of("a", "1", "b", "2", "c", "3", "d", "4"), open(1).get("table").orElseThrow());
+    }
+
+    @Test
     void aShardThatCannotBeWrittenKeepsTheJournal() throws Exception {
         PartitionedFileStorage<String> crashed = open(1);
         crashed.putEntry("table", "a", "1");

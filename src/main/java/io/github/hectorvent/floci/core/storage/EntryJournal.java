@@ -67,6 +67,13 @@ final class EntryJournal<E> {
     private final JavaType entryType;
     private final JavaType entriesType;
     private volatile DataOutputStream writer;
+    // Runs just before a record is written to the file. Tests use it to make a write fail midway.
+    private volatile WriteHook beforeWrite = file -> { };
+
+    /** A step run against the journal file that may fail like a write to it. */
+    interface WriteHook {
+        void run(Path file) throws IOException;
+    }
 
     EntryJournal(Path path, JavaType entryType, JavaType entriesType) {
         this.path = path;
@@ -209,6 +216,10 @@ final class EntryJournal<E> {
         }
     }
 
+    void setBeforeWrite(WriteHook hook) {
+        this.beforeWrite = hook;
+    }
+
     private boolean append(byte op, String key, String entryKey, Object value) {
         DataOutputStream out = writer;
         if (out == null) {
@@ -229,13 +240,34 @@ final class EntryJournal<E> {
             }
             record.flush();
             synchronized (out) {
-                bytes.writeTo(out);
-                out.flush();
+                if (writer != out) {
+                    LOG.errorv("Journal {0} was closed; a change to {1} was not journaled", path, key);
+                    return false;
+                }
+                try {
+                    beforeWrite.run(path);
+                    bytes.writeTo(out);
+                    out.flush();
+                } catch (IOException e) {
+                    // Part of the record may be on disk. A later record appended behind it would be
+                    // cut off with it on replay, so stop appending until compaction replaces the file.
+                    writer = null;
+                    closeQuietly(out);
+                    throw e;
+                }
             }
             return true;
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to append to journal {0}", path);
+            LOG.errorv(e, "Failed to append to journal {0}; it takes no more records until it is compacted", path);
             return false;
+        }
+    }
+
+    private void closeQuietly(DataOutputStream out) {
+        try {
+            out.close();
+        } catch (IOException e) {
+            LOG.warnv(e, "Failed to close journal {0} after a failed append", path);
         }
     }
 
