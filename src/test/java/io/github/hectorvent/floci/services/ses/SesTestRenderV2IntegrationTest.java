@@ -139,7 +139,7 @@ class SesTestRenderV2IntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void testRenderEmailTemplate_arrayBody_isASerializationException() {
         given()
             .contentType("application/json")

@@ -333,8 +333,8 @@ class SesBulkV2IntegrationTest {
     }
 
     @ParameterizedTest(name = "{0}")
-    @MethodSource("nonObjectBodies")
-    @Order(11)
+    @MethodSource("io.github.hectorvent.floci.services.ses.SesV2SerializationErrors#nonObjectBodies")
+    @Order(12)
     void sendBulkEmail_nonObjectBody_isASerializationException(String body, String message) {
         given()
             .contentType("application/json")
@@ -350,7 +350,7 @@ class SesBulkV2IntegrationTest {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("wrongTypeSendBulkEmailBodies")
-    @Order(12)
+    @Order(13)
     void sendBulkEmail_wrongMemberType_returnsSerializationException(String label, String body) {
         given()
             .contentType("application/json")
@@ -361,13 +361,6 @@ class SesBulkV2IntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("SerializationException"));
-    }
-
-    static Stream<Arguments> nonObjectBodies() {
-        return Stream.of(
-                Arguments.of("[1,2,3]", "Start of list found where not expected"),
-                Arguments.of("null", null),
-                Arguments.of("\"hello\"", null));
     }
 
     static Stream<Arguments> malformedSendBulkEmailBodies() {

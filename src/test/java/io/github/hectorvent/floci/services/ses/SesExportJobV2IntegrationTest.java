@@ -552,7 +552,7 @@ class SesExportJobV2IntegrationTest {
     }
 
     @Test
-    @Order(18)
+    @Order(19)
     void createExportJob_keepsAFractionalMaxResultsAsTheIntItWasCheckedAs() {
         String jobId = insightsWith("\"MaxResults\": 1.5,").then().statusCode(200).extract().path("JobId");
 
@@ -572,7 +572,7 @@ class SesExportJobV2IntegrationTest {
     }
 
     @Test
-    @Order(19)
+    @Order(20)
     void cleanUpVdmAndIdentity() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")
