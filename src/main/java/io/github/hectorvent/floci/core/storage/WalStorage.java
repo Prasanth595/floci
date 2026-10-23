@@ -12,7 +12,6 @@ import java.io.*;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -73,13 +72,7 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
         this.walMapper.registerModule(new JavaTimeModule());
         this.walMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "wal-storage-compaction");
-            t.setDaemon(true);
-            return t;
-        });
-        this.scheduler.scheduleAtFixedRate(this::compact, compactionIntervalMs, compactionIntervalMs,
-                TimeUnit.MILLISECONDS);
+        this.scheduler = StorageFiles.scheduleEvery("wal-storage-compaction", compactionIntervalMs, this::compact);
     }
 
     @Override
@@ -195,15 +188,7 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     }
 
     public void shutdown() {
-        scheduler.shutdown();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
+        StorageFiles.stop(scheduler);
         compact();
         closeWalWriter();
     }
@@ -214,11 +199,7 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
             if (!dirty) {
                 return;
             }
-            Files.createDirectories(snapshotPath.getParent());
-            Path tempFile = snapshotPath.resolveSibling(snapshotPath.getFileName() + ".tmp");
-            snapshotMapper.writeValue(tempFile.toFile(), store);
-            Files.move(tempFile, snapshotPath, StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE);
+            StorageFiles.writeAtomically(snapshotPath, tempFile -> snapshotMapper.writeValue(tempFile.toFile(), store));
             dirty = false;
 
             closeWalWriter();

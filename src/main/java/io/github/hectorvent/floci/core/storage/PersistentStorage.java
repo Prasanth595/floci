@@ -9,7 +9,6 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -116,10 +115,7 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     private synchronized void persistToDisk() {
         try {
-            Files.createDirectories(filePath.getParent());
-            Path tempFile = filePath.resolveSibling(filePath.getFileName() + ".tmp");
-            objectMapper.writeValue(tempFile.toFile(), store);
-            Files.move(tempFile, filePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), store));
         } catch (IOException e) {
             LOG.errorv(e, "Failed to persist data to {0}", filePath);
         }

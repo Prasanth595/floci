@@ -9,7 +9,6 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -17,9 +16,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -47,12 +44,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
         this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
 
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "hybrid-storage-flush");
-            t.setDaemon(true);
-            return t;
-        });
-        this.scheduler.scheduleAtFixedRate(this::flushIfDirty, flushIntervalMs, flushIntervalMs, TimeUnit.MILLISECONDS);
+        this.scheduler = StorageFiles.scheduleEvery("hybrid-storage-flush", flushIntervalMs, this::flushIfDirty);
     }
 
     @Override
@@ -113,15 +105,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
     }
 
     public void shutdown() {
-        scheduler.shutdown();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
+        StorageFiles.stop(scheduler);
         flush();
     }
 
@@ -133,10 +117,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
 
     private synchronized void persistToDisk() {
         try {
-            Files.createDirectories(filePath.getParent());
-            Path tempFile = filePath.resolveSibling(filePath.getFileName() + ".tmp");
-            objectMapper.writeValue(tempFile.toFile(), store);
-            Files.move(tempFile, filePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), store));
             LOG.debugv("Flushed {0} entries to {1}", store.size(), filePath);
         } catch (IOException e) {
             LOG.errorv(e, "Failed to persist data to {0}", filePath);
