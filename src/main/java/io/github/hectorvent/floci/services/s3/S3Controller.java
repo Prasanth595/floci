@@ -244,6 +244,8 @@ public class S3Controller {
             return Response.ok(uiPages.landingHtml(), MediaType.TEXT_HTML).build();
         }
         try {
+            boolean includeRegion = List.of("bucket-region", "continuation-token", "max-buckets", "prefix")
+                    .stream().anyMatch(queryParams::containsKey);
             List<Bucket> buckets = s3Service.listBuckets();
             XmlBuilder xml = new XmlBuilder()
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -256,8 +258,12 @@ public class S3Controller {
             for (Bucket b : buckets) {
                 xml.start("Bucket")
                    .elem("Name", b.getName())
-                   .elem("CreationDate", ISO_FORMAT.format(b.getCreationDate()))
-                   .end("Bucket");
+                   .elem("CreationDate", ISO_FORMAT.format(b.getCreationDate()));
+                if (includeRegion) {
+                    String region = b.getRegion();
+                    xml.elem("BucketRegion", region == null || region.isBlank() ? regionResolver.getDefaultRegion() : region);
+                }
+                xml.end("Bucket");
             }
             xml.end("Buckets").end("ListAllMyBucketsResult");
             return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
