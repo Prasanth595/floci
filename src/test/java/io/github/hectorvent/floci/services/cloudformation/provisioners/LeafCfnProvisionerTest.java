@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -209,6 +210,16 @@ class LeafCfnProvisionerTest {
             repository.setRepositoryArn(arn);
             repository.setRepositoryUri(uri);
             return repository;
+        }
+
+        @Test
+        void servesNothingWhileTheEcrServiceIsDisabled() {
+            assertFalse(provisioner.serviceDisabled());
+
+            when(ecr.isDisabled()).thenReturn(true);
+
+            assertTrue(provisioner.serviceDisabled());
+            assertEquals("floci.services.ecr.enabled", provisioner.serviceEnabledFlag());
         }
 
         @Test
