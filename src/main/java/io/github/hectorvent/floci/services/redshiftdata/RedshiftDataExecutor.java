@@ -121,6 +121,10 @@ class RedshiftDataExecutor implements AutoCloseable {
         }
     }
 
+    synchronized RedshiftDataExecution execution(String account, String id) {
+        return executions.get(account + ":" + id);
+    }
+
     boolean cancel(String account, String id) {
         RedshiftDataExecution execution;
         synchronized (this) {

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
@@ -24,6 +25,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -54,6 +56,8 @@ public class RedshiftDataService implements Resettable {
     private final RedshiftDataEventPublisher publisher;
     private final RequestContext requestContext;
     private final IamService iamService;
+    private final RedshiftDataIdempotencyStore idempotency;
+    private final Object admissionLock = new Object();
 
     RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
                         RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
@@ -61,11 +65,20 @@ public class RedshiftDataService implements Resettable {
         this(resolver, connectionFactory, store, objectMapper, preparation, executor, publisher, null, null);
     }
 
-    @Inject
     public RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
                                RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
                                RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher,
                                RequestContext requestContext, IamService iamService) {
+        this(resolver, connectionFactory, store, objectMapper, preparation, executor, publisher, requestContext,
+                iamService, new RedshiftDataIdempotencyStore(AccountAwareStorageBackend.inMemory("000000000000"),
+                        Clock.systemUTC()));
+    }
+
+    @Inject
+    public RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
+                               RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
+                               RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher,
+                               RequestContext requestContext, IamService iamService, RedshiftDataIdempotencyStore idempotency) {
         this.resolver = resolver;
         this.connectionFactory = connectionFactory;
         this.store = store;
@@ -75,11 +88,17 @@ public class RedshiftDataService implements Resettable {
         this.publisher = publisher;
         this.requestContext = requestContext;
         this.iamService = iamService;
+        this.idempotency = idempotency;
     }
 
     @Override
     public void clear() {
-        executor.clear(store::clear);
+        synchronized (admissionLock) {
+            executor.clear(() -> {
+                store.clear();
+                idempotency.clear();
+            });
+        }
     }
 
     // ── ExecuteStatement ────────────────────────────────────────────────────
@@ -89,11 +108,41 @@ public class RedshiftDataService implements Resettable {
     }
 
     public ObjectNode executeStatement(JsonNode request, String region, String principal) {
-        int waitSeconds = waitSeconds(request);
-        return submit(prepareStatement(request, region), waitSeconds, principal);
+        return execute(request, region, principal, false);
     }
 
-    private ObjectNode submit(PendingStatement pending, int waitSeconds, String principal) {
+    private ObjectNode execute(JsonNode request, String region, String principal, boolean batch) {
+        String token = RedshiftDataIdempotencyStore.clientToken(request);
+        int waitSeconds = waitSeconds(request);
+        Admission admission;
+        synchronized (admissionLock) {
+            PendingStatement pending = batch ? prepareBatch(request, region) : prepareStatement(request, region);
+            RedshiftDataStatementStore.StoredStatement stored = pending.statement();
+            RedshiftDataIdempotencyStore.Scope scope = token == null ? null : new RedshiftDataIdempotencyStore.Scope(
+                    stored.accountId, region, batch ? "BatchExecuteStatement" : "ExecuteStatement", token);
+            RedshiftDataIdempotencyStore.Receipt receipt = scope == null ? null : idempotency.find(scope);
+            if (receipt == null) {
+                admission = submit(pending, principal, scope);
+            } else {
+                String id = receipt.response.path("Id").asText();
+                RedshiftDataStatementStore.StoredStatement current = store.getForAccount(stored.accountId, id);
+                admission = new Admission(stored.accountId, id,
+                        current == null ? receipt.response : executeResponse(current), executor.execution(stored.accountId, id));
+            }
+        }
+        if (waitSeconds > 0 && admission.execution() != null) {
+            admission.execution().await(Duration.ofSeconds(waitSeconds));
+            RedshiftDataStatementStore.StoredStatement current = store.getForAccount(admission.accountId(), admission.id());
+            if (current != null) {
+                return executeResponse(current);
+            }
+        }
+        return admission.response();
+    }
+
+    private record Admission(String accountId, String id, ObjectNode response, RedshiftDataExecution execution) { }
+
+    private Admission submit(PendingStatement pending, String principal, RedshiftDataIdempotencyStore.Scope scope) {
         RedshiftDataStatementStore.StoredStatement stored = pending.statement();
         if (principal != null) {
             stored.principal = principal;
@@ -102,7 +151,14 @@ public class RedshiftDataService implements Resettable {
         RedshiftDataExecution handle;
         try {
             handle = executor.submit(stored.accountId, stored.region, stored.id,
-                    () -> store.putForAccount(stored.accountId, stored),
+                    () -> {
+                        if (scope == null) {
+                            store.putForAccount(stored.accountId, stored);
+                        } else {
+                            store.admitForAccount(stored.accountId, stored);
+                            idempotency.put(scope, response);
+                        }
+                    },
                     execution -> {
                         try {
                             execution.checkCancellation();
@@ -116,18 +172,22 @@ public class RedshiftDataService implements Resettable {
                         complete(stored, execution);
                     },
                     (execution, failure) -> recoverStatement(stored, execution, failure));
-        } catch (AwsException failure) {
-            store.deleteForAccount(stored.accountId, stored.id);
+        } catch (RuntimeException failure) {
+            try {
+                if (scope != null) {
+                    idempotency.removeIfStatement(scope, stored.id);
+                }
+            } catch (RuntimeException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            try {
+                store.deleteForAccount(stored.accountId, stored.id);
+            } catch (RuntimeException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
             throw failure;
         }
-        if (waitSeconds > 0) {
-            handle.await(Duration.ofSeconds(waitSeconds));
-            RedshiftDataStatementStore.StoredStatement current = store.getForAccount(stored.accountId, stored.id);
-            if (current != null) {
-                return executeResponse(current);
-            }
-        }
-        return response;
+        return new Admission(stored.accountId, stored.id, response, handle);
     }
 
     private void complete(RedshiftDataStatementStore.StoredStatement stored, RedshiftDataExecution execution) {
@@ -477,8 +537,7 @@ public class RedshiftDataService implements Resettable {
     }
 
     public ObjectNode batchExecuteStatement(JsonNode request, String region, String principal) {
-        int waitSeconds = waitSeconds(request);
-        return submit(prepareBatch(request, region), waitSeconds, principal);
+        return execute(request, region, principal, true);
     }
 
     private PendingStatement prepareBatch(JsonNode request, String region) {
