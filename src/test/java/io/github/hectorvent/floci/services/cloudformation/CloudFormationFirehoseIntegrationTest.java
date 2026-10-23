@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
-import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
@@ -14,21 +13,20 @@ import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
+import static io.github.hectorvent.floci.testing.FirehoseRequests.answerTransforms;
+import static io.github.hectorvent.floci.testing.FirehoseRequests.encode;
+import static io.github.hectorvent.floci.testing.FirehoseRequests.firstKey;
+import static io.github.hectorvent.floci.testing.FirehoseRequests.putRecordBatch;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 
 /**
  * End-to-end check that CloudFormation provisions an AWS::KinesisFirehose::DeliveryStream for real
@@ -47,7 +45,6 @@ class CloudFormationFirehoseIntegrationTest {
             "DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.";
     private static final String LAMBDA_ARN = EXTENDED_DESTINATION
             + "ProcessingConfiguration.Processors[0].Parameters.find { it.ParameterName == 'LambdaArn' }.ParameterValue";
-    private static final Pattern KEY_PATTERN = Pattern.compile("<Key>([^<]+)</Key>");
 
     @InjectMock
     LambdaService lambdaService;
@@ -155,7 +152,8 @@ class CloudFormationFirehoseIntegrationTest {
             .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription"
                     + ".CloudWatchLoggingOptions.LogGroupName", equalTo(logGroup));
 
-        List<String> invokedArns = transformEveryRecord();
+        List<byte[]> payloads = answerTransforms(lambdaService, (recordId, index) ->
+                "{\"recordId\":\"" + recordId + "\",\"result\":\"Ok\",\"data\":\"" + encode("TRANSFORMED-" + index) + "\"}");
         putRecordBatch(streamName, "one", "two");
         firehoseService.flush(streamName);
 
@@ -165,7 +163,8 @@ class CloudFormationFirehoseIntegrationTest {
         .then()
             .statusCode(200)
             .body(equalTo("TRANSFORMED-0\nTRANSFORMED-1\n"));
-        assertEquals(List.of(firstArn), invokedArns);
+        assertEquals(1, payloads.size());
+        verify(lambdaService).invokeArn(eq(firstArn), any(), any());
 
         stackRequest("UpdateStack", stackName, transformTemplate(suffix, streamName, bucket, secondFunction));
         CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
@@ -243,68 +242,5 @@ class CloudFormationFirehoseIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-    }
-
-    /**
-     * Answers every record Ok with TRANSFORMED-index, reading the record ids from the payload
-     * because they are minted per batch. Returns the function ARNs the mock was invoked with.
-     */
-    private List<String> transformEveryRecord() {
-        List<String> invokedArns = new ArrayList<>();
-        Mockito.when(lambdaService.invokeArn(anyString(), any(), any())).thenAnswer(invocation -> {
-            invokedArns.add(invocation.getArgument(0));
-            byte[] payload = invocation.getArgument(1);
-            List<String> entries = new ArrayList<>();
-            Matcher recordIds = Pattern.compile("\"recordId\":\"([^\"]+)\"")
-                    .matcher(new String(payload, StandardCharsets.UTF_8));
-            for (int index = 0; recordIds.find(); index++) {
-                entries.add("{\"recordId\":\"" + recordIds.group(1) + "\",\"result\":\"Ok\",\"data\":\""
-                        + encode("TRANSFORMED-" + index) + "\"}");
-            }
-            InvokeResult result = new InvokeResult();
-            result.setStatusCode(200);
-            result.setPayload(("{\"records\":[" + String.join(",", entries) + "]}")
-                    .getBytes(StandardCharsets.UTF_8));
-            return result;
-        });
-        return invokedArns;
-    }
-
-    private static String encode(String body) {
-        return Base64.getEncoder().encodeToString(body.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static void putRecordBatch(String streamName, String... bodies) {
-        List<String> records = new ArrayList<>();
-        for (String body : bodies) {
-            records.add("{\"Data\": \"" + encode(body) + "\"}");
-        }
-        given()
-            .header("Authorization", FIREHOSE_AUTH)
-            .header("X-Amz-Target", "Firehose_20150804.PutRecordBatch")
-            .contentType(FIREHOSE_CONTENT_TYPE)
-            .body("{\"DeliveryStreamName\": \"" + streamName + "\", \"Records\": ["
-                    + String.join(",", records) + "]}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("FailedPutCount", equalTo(0));
-    }
-
-    private static String firstKey(String bucket, String prefix) {
-        String listing = given()
-        .when()
-            .get("/" + bucket)
-        .then()
-            .statusCode(200)
-            .extract().asString();
-        Matcher key = KEY_PATTERN.matcher(listing);
-        while (key.find()) {
-            if (key.group(1).startsWith(prefix)) {
-                return key.group(1);
-            }
-        }
-        throw new AssertionError("expected an object under " + prefix + " in " + bucket + ", got: " + listing);
     }
 }
