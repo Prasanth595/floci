@@ -80,6 +80,12 @@ source cluster is deleted, and `RestoreFromClusterSnapshot` can restore its data
 cluster. Deletion is synchronous: Floci returns `deleting` after teardown rather than exposing
 AWS's intermediate `final-snapshot` state.
 
+Database dumps run under account-scoped cluster and snapshot locks, so a slow dump does not
+hold the service-wide mutation monitor. Operations on the same cluster and snapshot identifier
+remain coordinated, including snapshot deletion and restore. A dump whose metadata was not
+committed is removed on failure; if the commit succeeded and a later flush reports an error,
+the dump is retained for the committed snapshot.
+
 `FinalClusterSnapshotRetentionPeriod` defaults to `-1` and accepts `-1` or 1 to 3,653 days.
 It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`; automatic
 expiration is not implemented. Snapshot metadata uses the configured storage mode. Persistent

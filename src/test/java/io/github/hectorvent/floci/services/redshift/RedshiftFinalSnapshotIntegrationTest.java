@@ -20,6 +20,11 @@ import software.amazon.awssdk.services.redshift.model.Snapshot;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -111,6 +116,48 @@ class RedshiftFinalSnapshotIntegrationTest {
                 verify(containerManager, never()).takeSnapshot(eq(ACCOUNT), eq(source), anyString(), any(Path.class));
             } finally {
                 deleteIfPresent(client, source);
+            }
+        }
+    }
+
+    @Test
+    void slowSnapshotDoesNotBlockTheSameNamesInAnotherAccount() throws Exception {
+        String source = "sdk-account-source";
+        String backup = "sdk-account-backup";
+        CountDownLatch dumping = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            dumping.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            Files.writeString(invocation.getArgument(3, Path.class), DUMP);
+            return null;
+        }).when(containerManager).takeSnapshot(eq(ACCOUNT), eq(source), anyString(), any(Path.class));
+        try (RedshiftClient first = client(ACCOUNT); RedshiftClient other = client("222222222222");
+             ExecutorService callers = Executors.newFixedThreadPool(2)) {
+            create(first, source);
+            Future<?> snapshot = callers.submit(() -> first.createClusterSnapshot(request -> request
+                    .clusterIdentifier(source).snapshotIdentifier(backup)));
+            try {
+                assertTrue(dumping.await(2, TimeUnit.SECONDS));
+                Future<Snapshot> independent = callers.submit(() -> {
+                    create(other, source);
+                    return other.createClusterSnapshot(request -> request.clusterIdentifier(source)
+                            .snapshotIdentifier(backup)).snapshot();
+                });
+                assertTrue(independent.get(2, TimeUnit.SECONDS).snapshotArn().contains(":222222222222:"));
+            } finally {
+                release.countDown();
+                snapshot.get(3, TimeUnit.SECONDS);
+                for (RedshiftClient client : new RedshiftClient[]{first, other}) {
+                    deleteIfPresent(client, source);
+                    try {
+                        client.deleteClusterSnapshot(request -> request.snapshotIdentifier(backup));
+                    } catch (RedshiftException expected) {
+                        if (!"ClusterSnapshotNotFound".equals(expected.awsErrorDetails().errorCode())) {
+                            throw expected;
+                        }
+                    }
+                }
             }
         }
     }

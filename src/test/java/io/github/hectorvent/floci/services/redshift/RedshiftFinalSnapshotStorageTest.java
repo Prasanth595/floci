@@ -58,9 +58,44 @@ class RedshiftFinalSnapshotStorageTest {
 
         assertEquals("available", fixture.service().describeClusters("final-cluster").getFirst().getClusterStatus());
         assertTrue(fixture.service().getSnapshot("final-backup").isEmpty());
+        assertFalse(Files.exists(directory.resolve("redshift-dumps").resolve(ACCOUNT).resolve("final-backup.sql")));
         verifyNoInteractions(fixture.proxy());
         verify(fixture.manager(), never()).stop(anyString(), anyString());
         assertTrue(Files.readString(directory.resolve("redshift-clusters.json")).contains("final-cluster"));
+    }
+
+    @Test
+    void failedDumpRemovesPartialOutputAndPreservesOriginalFailure() {
+        Fixture fixture = fixture();
+        seedCluster(fixture);
+        AwsException original = new AwsException("InternalFailure", "dump failed", 500);
+        doAnswer(invocation -> {
+            Files.writeString(invocation.getArgument(3, Path.class), "partial dump");
+            throw original;
+        }).when(fixture.manager()).takeSnapshot(anyString(), anyString(), anyString(), any(Path.class));
+
+        assertSame(original, assertThrows(AwsException.class, () -> delete(fixture)));
+        assertFalse(Files.exists(directory.resolve("redshift-dumps").resolve(ACCOUNT).resolve("final-backup.sql")));
+        assertTrue(fixture.service().getSnapshot("final-backup").isEmpty());
+        verifyNoInteractions(fixture.proxy());
+    }
+
+    @Test
+    void failedCleanupIsSuppressedOnTheOriginalDumpFailure() {
+        Fixture fixture = fixture();
+        seedCluster(fixture);
+        AwsException original = new AwsException("InternalFailure", "dump failed", 500);
+        doAnswer(invocation -> {
+            Path output = invocation.getArgument(3, Path.class);
+            Files.createDirectory(output);
+            Files.writeString(output.resolve("block-cleanup"), "partial output");
+            throw original;
+        }).when(fixture.manager()).takeSnapshot(anyString(), anyString(), anyString(), any(Path.class));
+
+        assertSame(original, assertThrows(AwsException.class, () -> delete(fixture)));
+        assertEquals(1, original.getSuppressed().length);
+        assertTrue(fixture.service().getSnapshot("final-backup").isEmpty());
+        verifyNoInteractions(fixture.proxy());
     }
 
     private Fixture fixture() {

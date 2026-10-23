@@ -47,6 +47,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -58,6 +66,132 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 class RedshiftServiceTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void slowSnapshotDoesNotBlockOtherClusterMutation(boolean finalSnapshot) throws Exception {
+        finalSnapshotCluster();
+        Cluster other = new Cluster();
+        other.setClusterIdentifier("other-cluster");
+        when(clusterBackend.get("other-cluster")).thenReturn(Optional.of(other));
+        CountDownLatch dumping = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            dumping.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(cm).takeSnapshot(eq("111111111111"), eq("final-cluster"), eq("admin"), any(Path.class));
+        try (ExecutorService callers = Executors.newFixedThreadPool(2)) {
+            Future<?> snapshot = callers.submit(() -> {
+                if (finalSnapshot) {
+                    finalSnapshotDelete("FinalClusterSnapshotIdentifier", "final-backup");
+                } else {
+                    service.createSnapshot("final-backup", "final-cluster");
+                }
+            });
+            try {
+                assertTrue(dumping.await(2, TimeUnit.SECONDS));
+                Future<Cluster> mutation = callers.submit(() -> service.modifyCluster("other-cluster", "ra3.large",
+                        null, null, null, null));
+                assertEquals("ra3.large", mutation.get(1, TimeUnit.SECONDS).getNodeType());
+            } finally {
+                release.countDown();
+                snapshot.get(3, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    void snapshotFlushFailureKeepsCommittedDump() throws Exception {
+        finalSnapshotCluster();
+        AtomicReference<Path> dump = new AtomicReference<>();
+        doAnswer(invocation -> {
+            Path path = invocation.getArgument(3, Path.class);
+            Files.writeString(path, "committed backup");
+            dump.set(path);
+            return null;
+        }).when(cm).takeSnapshot(eq("111111111111"), eq("final-cluster"), eq("admin"), any(Path.class));
+        doThrow(new IllegalStateException("flush failed")).when(snapshotBackend).flush();
+        try {
+            assertThrows(AwsException.class,
+                    () -> finalSnapshotDelete("FinalClusterSnapshotIdentifier", "final-backup"));
+            verify(snapshotBackend).putAllAtomically(anyMap());
+            assertEquals("committed backup", Files.readString(dump.get()));
+            verify(cm, never()).stop(anyString(), anyString());
+        } finally {
+            if (dump.get() != null) {
+                Files.deleteIfExists(dump.get());
+            }
+        }
+    }
+
+    @Test
+    void snapshotKeepsSameClusterMutationSerializedWithoutHoldingServiceMonitor() throws Exception {
+        finalSnapshotCluster();
+        CountDownLatch dumping = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch attemptingMutation = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            dumping.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(cm).takeSnapshot(anyString(), anyString(), anyString(), any(Path.class));
+        try (ExecutorService callers = Executors.newFixedThreadPool(2)) {
+            Future<Snapshot> snapshot = callers.submit(() -> service.createSnapshot("backup", "final-cluster"));
+            try {
+                assertTrue(dumping.await(2, TimeUnit.SECONDS));
+                Future<Cluster> mutation = callers.submit(() -> {
+                    attemptingMutation.countDown();
+                    return service.modifyCluster("final-cluster", "ra3.large", null, null, null, null);
+                });
+                assertTrue(attemptingMutation.await(2, TimeUnit.SECONDS));
+                assertThrows(TimeoutException.class, () -> mutation.get(150, TimeUnit.MILLISECONDS));
+                release.countDown();
+                assertNotNull(snapshot.get(2, TimeUnit.SECONDS));
+                assertEquals("ra3.large", mutation.get(2, TimeUnit.SECONDS).getNodeType());
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    void concurrentSnapshotsOnDifferentClustersCannotOverwriteTheSameBackup() throws Exception {
+        Cluster source = finalSnapshotCluster();
+        when(clusterBackend.get("other-cluster")).thenReturn(Optional.of(source));
+        Map<String, Snapshot> committed = new ConcurrentHashMap<>();
+        when(snapshotBackend.get(anyString())).thenAnswer(invocation -> Optional.ofNullable(committed.get(invocation.getArgument(0))));
+        doAnswer(invocation -> {
+            committed.putAll(invocation.getArgument(0));
+            return null;
+        }).when(snapshotBackend).putAllAtomically(anyMap());
+        CountDownLatch dumping = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch attempting = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            dumping.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(cm).takeSnapshot(anyString(), anyString(), anyString(), any(Path.class));
+        try (ExecutorService callers = Executors.newFixedThreadPool(2)) {
+            Future<Snapshot> first = callers.submit(() -> service.createSnapshot("backup", "final-cluster"));
+            try {
+                assertTrue(dumping.await(2, TimeUnit.SECONDS));
+                Future<AwsException> second = callers.submit(() -> {
+                    attempting.countDown();
+                    return assertThrows(AwsException.class, () -> service.createSnapshot("backup", "other-cluster"));
+                });
+                assertTrue(attempting.await(2, TimeUnit.SECONDS));
+                assertThrows(TimeoutException.class, () -> second.get(150, TimeUnit.MILLISECONDS));
+                release.countDown();
+                assertEquals("final-cluster", first.get(2, TimeUnit.SECONDS).getClusterIdentifier());
+                assertEquals("ClusterSnapshotAlreadyExists", second.get(2, TimeUnit.SECONDS).getErrorCode());
+                verify(cm, times(1)).takeSnapshot(anyString(), anyString(), anyString(), any(Path.class));
+            } finally {
+                release.countDown();
+            }
+        }
+    }
 
     @Test
     void deleteWithFinalSnapshotCommitsBackupBeforeStoppingCluster() {
