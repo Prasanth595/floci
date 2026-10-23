@@ -26,15 +26,16 @@ import static org.hamcrest.Matchers.notNullValue;
 /**
  * A CloudWatch JSON request is authenticated and then decided by IAM the same way whichever target
  * prefix names its operation: the console API's {@code CloudWatchVersion20130116.} prefix gets the
- * signature check, the unsigned-call refusal and the {@code cloudwatch:} action of the operation it
- * names, exactly as the SDKs' {@code GraniteServiceVersion20100801.} prefix does.
+ * header and presigned signature checks, the unsigned-call refusal and the {@code cloudwatch:}
+ * action of the operation it names, exactly as the SDKs' {@code GraniteServiceVersion20100801.}
+ * prefix does.
  */
 @QuarkusTest
 @TestProfile(SignedIamEnforcementProfile.class)
 class CloudWatchJsonTargetSignatureIntegrationTest {
 
     private static final String CURRENT_TARGET = "GraniteServiceVersion20100801.";
-    private static final String LEGACY_TARGET = "CloudWatchVersion20130116.";
+    private static final String CONSOLE_TARGET = "CloudWatchVersion20130116.";
 
     @TestHTTPResource("/")
     URI endpoint;
@@ -45,7 +46,7 @@ class CloudWatchJsonTargetSignatureIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {CURRENT_TARGET, LEGACY_TARGET})
+    @ValueSource(strings = {CURRENT_TARGET, CONSOLE_TARGET})
     void genuineSignaturesAreServedAndTamperingIsRefused(String prefix) {
         AwsRequestSigner root = AwsRequestSigner.signedAs("test", "test", "monitoring");
         json(prefix, "ListMetrics").filter(root).post("/")
@@ -55,14 +56,27 @@ class CloudWatchJsonTargetSignatureIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {CURRENT_TARGET, LEGACY_TARGET})
+    @ValueSource(strings = {CURRENT_TARGET, CONSOLE_TARGET})
+    void presignedRequestsAreServedAndTamperingIsRefused(String prefix) throws Exception {
+        AwsRequestSigner root = AwsRequestSigner.signedAs("test", "test", "monitoring");
+        byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
+        json(prefix, "ListMetrics").urlEncodingEnabled(false)
+                .post(root.presignedUri("POST", endpoint, Map.of(), body))
+                .then().statusCode(200).body("Metrics", notNullValue());
+        json(prefix, "ListMetrics").urlEncodingEnabled(false)
+                .post(root.withSecret("wrong-secret").presignedUri("POST", endpoint, Map.of(), body))
+                .then().statusCode(403).body("__type", equalTo("InvalidSignatureException"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {CURRENT_TARGET, CONSOLE_TARGET})
     void unsignedRequestsAreRefused(String prefix) {
         json(prefix, "ListMetrics").post("/")
                 .then().statusCode(403).body("__type", equalTo("MissingAuthenticationTokenException"));
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {CURRENT_TARGET, LEGACY_TARGET})
+    @ValueSource(strings = {CURRENT_TARGET, CONSOLE_TARGET})
     void iamDecidesEachOperationByItsCloudWatchAction(String prefix) throws Exception {
         String user = "cw-json-target-" + UUID.randomUUID();
         String key = null;

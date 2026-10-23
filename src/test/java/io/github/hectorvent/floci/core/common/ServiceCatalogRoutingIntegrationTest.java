@@ -41,7 +41,7 @@ class ServiceCatalogRoutingIntegrationTest {
     }
 
     @Test
-    void legacyCloudWatchTargetIsJsonOnly() {
+    void consoleCloudWatchTargetIsJsonOnly() {
         ServiceCatalog.TargetMatch match = catalog.matchTarget("CloudWatchVersion20130116.ListMetrics")
                 .orElseThrow();
 

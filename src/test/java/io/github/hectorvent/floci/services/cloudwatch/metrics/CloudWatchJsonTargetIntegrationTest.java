@@ -30,15 +30,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * reaches the same metrics and alarms for four operations and the request members the handler
  * honours for them. It refuses the other operations, other members that are set, and a
  * {@code DescribeAlarms} answer listing an alarm defined with {@code Metrics}, which the handler
- * would otherwise ignore or answer in a shape the console's API does not have; {@code null}
- * members count as unset. It is JSON only, so CBOR and Smithy RPC v2 requests that name it stay
+ * would otherwise ignore or answer in a shape the console's API does not have; top-level
+ * {@code null} members count as unset. It is JSON only, so CBOR and Smithy RPC v2 requests that name it stay
  * unknown.
  */
 @QuarkusTest
 class CloudWatchJsonTargetIntegrationTest {
 
     private static final String CURRENT_TARGET = "GraniteServiceVersion20100801.";
-    private static final String LEGACY_TARGET = "CloudWatchVersion20130116.";
+    private static final String CONSOLE_TARGET = "CloudWatchVersion20130116.";
     private static final String AUTHORIZATION =
             "AWS4-HMAC-SHA256 Credential=test/20261022/us-east-1/monitoring/aws4_request";
 
@@ -48,7 +48,7 @@ class CloudWatchJsonTargetIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {CURRENT_TARGET, LEGACY_TARGET})
+    @ValueSource(strings = {CURRENT_TARGET, CONSOLE_TARGET})
     void listMetricsThroughEitherTargetSeesTheSameMetrics(String prefix) {
         String namespace = "json-target-" + UUID.randomUUID();
         json(CURRENT_TARGET, "PutMetricData", """
@@ -61,7 +61,7 @@ class CloudWatchJsonTargetIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {CURRENT_TARGET, LEGACY_TARGET})
+    @ValueSource(strings = {CURRENT_TARGET, CONSOLE_TARGET})
     void getMetricStatisticsThroughEitherTargetSeesTheSameDatapoints(String prefix) {
         String namespace = "json-target-" + UUID.randomUUID();
         long now = Instant.now().getEpochSecond();
@@ -78,7 +78,7 @@ class CloudWatchJsonTargetIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {CURRENT_TARGET, LEGACY_TARGET})
+    @ValueSource(strings = {CURRENT_TARGET, CONSOLE_TARGET})
     void describeAlarmsThroughEitherTargetSeesTheSameAlarm(String prefix) {
         String alarm = "json-target-" + UUID.randomUUID();
         putAlarm(alarm);
@@ -97,7 +97,7 @@ class CloudWatchJsonTargetIntegrationTest {
         String alarm = "json-target-" + UUID.randomUUID();
         putAlarm(alarm);
         try {
-            json(LEGACY_TARGET, "DeleteAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
+            json(CONSOLE_TARGET, "DeleteAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
                     .then().statusCode(200);
             json(CURRENT_TARGET, "DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
                     .then().statusCode(200).body("MetricAlarms", empty());
@@ -108,7 +108,7 @@ class CloudWatchJsonTargetIntegrationTest {
 
     @Test
     void consoleGetMetricDataIsRefusedRatherThanAnsweredWithNoResults() {
-        json(LEGACY_TARGET, "GetMetricData", """
+        json(CONSOLE_TARGET, "GetMetricData", """
                 {"Defaults":{"Period":60,"Stat":"Sum","Range":{"StartTime":1761091200,"EndTime":1761094800}},
                  "Metrics":[{"Alias":"m1","Namespace":"Example/JsonTarget","MetricName":"Requests"}]}
                 """).then().statusCode(400).body("__type", equalTo("UnsupportedOperation"));
@@ -117,7 +117,7 @@ class CloudWatchJsonTargetIntegrationTest {
     @Test
     void consolePutMetricAlarmIsRefusedAndStoresNothing() {
         String alarm = "json-target-" + UUID.randomUUID();
-        json(LEGACY_TARGET, "PutMetricAlarm", """
+        json(CONSOLE_TARGET, "PutMetricAlarm", """
                 {"AlarmName":"%s","EvaluationPeriods":1,"Threshold":1,
                  "ComparisonOperator":"GreaterThanThreshold",
                  "Metrics":[{"Alias":"m1","Namespace":"Example/JsonTarget","MetricName":"Requests",
@@ -138,7 +138,7 @@ class CloudWatchJsonTargetIntegrationTest {
             getMetricData       | {}
             """)
     void operationsTheConsoleTargetDoesNotShareAreRefused(String operation, String body) {
-        json(LEGACY_TARGET, operation, body).then().statusCode(400)
+        json(CONSOLE_TARGET, operation, body).then().statusCode(400)
                 .body("__type", equalTo("UnsupportedOperation"));
     }
 
@@ -160,7 +160,7 @@ class CloudWatchJsonTargetIntegrationTest {
                  "ComparisonOperator":"GreaterThanThreshold","Metrics":%s}
                 """.formatted(alarm, metrics)).then().statusCode(200);
         try {
-            json(LEGACY_TARGET, "DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
+            json(CONSOLE_TARGET, "DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
                     .then().statusCode(400).body("__type", equalTo("UnsupportedOperation"))
                     .body("message", containsString(alarm));
             json(CURRENT_TARGET, "DescribeAlarms", "{\"AlarmNames\":[\"" + alarm + "\"]}")
@@ -190,19 +190,20 @@ class CloudWatchJsonTargetIntegrationTest {
             DeleteAlarms        | {"AlarmNames":["json-target-none"],"Unexpected":"x"}
             """)
     void membersTheConsoleTargetDoesNotServeAreRefused(String operation, String body) {
-        json(LEGACY_TARGET, operation, body).then().statusCode(400)
+        json(CONSOLE_TARGET, operation, body).then().statusCode(400)
                 .body("__type", equalTo("UnsupportedOperation"));
     }
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
             ListMetrics         | {"Namespace":"json-target-none","MetricName":"Requests","Dimensions":[{"Name":"Host","Value":"a"}],"NextToken":"t"}
-            DescribeAlarms      | {"AlarmNames":["json-target-none"],"AlarmNamePrefix":"json-target-none","MaxRecords":10,"NextToken":"t"}
+            DescribeAlarms      | {"AlarmNames":["json-target-none"],"MaxRecords":10,"NextToken":"t"}
+            DescribeAlarms      | {"AlarmNamePrefix":"json-target-none-","MaxRecords":10}
             GetMetricStatistics | {"Namespace":"json-target-none","MetricName":"Requests","Dimensions":[{"Name":"Host","Value":"a"}],"StartTime":1761091200,"EndTime":1761094800,"Period":60,"Statistics":["Sum"],"Unit":"Count"}
             DeleteAlarms        | {"AlarmNames":["json-target-none"]}
             """)
     void everyServedMemberIsAccepted(String operation, String body) {
-        json(LEGACY_TARGET, operation, body).then().statusCode(200);
+        json(CONSOLE_TARGET, operation, body).then().statusCode(200);
     }
 
     @ParameterizedTest
@@ -211,7 +212,7 @@ class CloudWatchJsonTargetIntegrationTest {
             DescribeAlarms | {"AlarmNames":["json-target-none"],"ExcludeAutoscalingAlarms":false,"ExcludeManagedAlarms":null,"StateValue":null}
             """)
     void membersLeftUnsetAreServed(String operation, String body) {
-        json(LEGACY_TARGET, operation, body).then().statusCode(200);
+        json(CONSOLE_TARGET, operation, body).then().statusCode(200);
     }
 
     @Test
@@ -222,7 +223,7 @@ class CloudWatchJsonTargetIntegrationTest {
                 {"Namespace":"%s","MetricData":[{"MetricName":"%s","Value":1}]}
                 """.formatted(namespace, metric)).then().statusCode(200);
 
-        json(LEGACY_TARGET, "ListMetrics", "{\"Namespace\":null,\"MetricName\":\"" + metric + "\"}")
+        json(CONSOLE_TARGET, "ListMetrics", "{\"Namespace\":null,\"MetricName\":\"" + metric + "\"}")
                 .then().statusCode(200).body("Metrics.Namespace", contains(namespace));
     }
 
@@ -234,10 +235,10 @@ class CloudWatchJsonTargetIntegrationTest {
     }
 
     @Test
-    void cborRequestsCannotNameTheLegacyTarget() throws Exception {
+    void cborRequestsCannotNameTheConsoleTarget() throws Exception {
         byte[] response = given().contentType("application/x-amz-cbor-1.1")
                 .header("Authorization", AUTHORIZATION)
-                .header("X-Amz-Target", LEGACY_TARGET + "ListMetrics")
+                .header("X-Amz-Target", CONSOLE_TARGET + "ListMetrics")
                 .body(new ObjectMapper(new CBORFactory()).writeValueAsBytes(Map.of()))
                 .post("/").then().statusCode(404).contentType("application/x-amz-cbor-1.1")
                 .extract().asByteArray();
@@ -247,7 +248,7 @@ class CloudWatchJsonTargetIntegrationTest {
     }
 
     @Test
-    void smithyRpcV2CannotNameTheLegacyService() throws Exception {
+    void smithyRpcV2CannotNameTheConsoleService() throws Exception {
         given().contentType("application/cbor").header("smithy-protocol", "rpc-v2-cbor")
                 .header("Authorization", AUTHORIZATION)
                 .body(new ObjectMapper(new CBORFactory()).writeValueAsBytes(Map.of()))

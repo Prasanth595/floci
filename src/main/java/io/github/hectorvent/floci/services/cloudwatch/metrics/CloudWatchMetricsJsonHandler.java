@@ -104,10 +104,11 @@ public class CloudWatchMetricsJsonHandler {
      * {@code Alias} and {@code MetricName}. So only the operations and top-level members in
      * {@code CONSOLE_TARGET_OPERATIONS} are served: any other operation, and any other member set
      * to a value other than {@code null} or {@code false}, is refused rather than answered as if it
-     * were unset. Members nested inside the served ones are not checked. A {@code DescribeAlarms}
-     * answer that would list an alarm defined with {@code Metrics} is refused too, since the
-     * console's API gives those items its own shape, with {@code Alias} instead of {@code Id} and
-     * {@code MetricStat}.
+     * were unset, and a top-level {@code null} member is dropped. Members nested inside the served
+     * ones are passed on unchecked, nulls included. A {@code DescribeAlarms} answer that would list
+     * an alarm defined with {@code Metrics} is refused too, since the console's API gives those
+     * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}. The name
+     * matches {@code DynamoDbJsonHandler.handleLegacy}, the entry point of the other JSON-only target.
      */
     public Response handleLegacy(String action, JsonNode request, String region) {
         Set<String> servedMembers = CONSOLE_TARGET_OPERATIONS.get(action);

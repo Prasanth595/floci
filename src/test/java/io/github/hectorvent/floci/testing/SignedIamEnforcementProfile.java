@@ -24,7 +24,7 @@ import java.util.Map;
  *   policies among them, on top of the signature check. No class fails with it off. It stays so
  *   that the signed S3 request in {@code CloudWatchQueryGetSignatureIntegrationTest}, which must
  *   reach S3 rather than CloudWatch, still runs under those checks, as that class was written to.
- *   It only acts on requests routed to S3, and neither STS class sends one.</li>
+ *   It only acts on requests routed to S3, and no other class sends one.</li>
  * </ul>
  */
 public class SignedIamEnforcementProfile implements QuarkusTestProfile {
