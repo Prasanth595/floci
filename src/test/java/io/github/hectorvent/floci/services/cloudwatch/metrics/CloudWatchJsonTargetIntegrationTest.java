@@ -31,8 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * honours for them. It refuses the other operations, other members that are set, and a
  * {@code DescribeAlarms} answer listing an alarm defined with {@code Metrics}, which the handler
  * would otherwise ignore or answer in a shape the console's API does not have; top-level
- * {@code null} members count as unset. It is JSON only, so CBOR and Smithy RPC v2 requests that name it stay
- * unknown.
+ * {@code null} members count as unset. Only JSON 1.0 requests with the bare prefix reach it: CBOR,
+ * Smithy RPC v2 and the console API's other wire forms stay unknown.
  */
 @QuarkusTest
 class CloudWatchJsonTargetIntegrationTest {
@@ -232,6 +232,22 @@ class CloudWatchJsonTargetIntegrationTest {
     void otherCloudWatchVersionsStayUnknown(String prefix) {
         json(prefix, "ListMetrics", "{}").then().statusCode(404)
                 .body("__type", equalTo("UnknownOperationException"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            application/json           | CloudWatchVersion20130116.
+            application/json           | com.amazonaws.cloudwatch.v2013_01_16.CloudWatchVersion20130116.
+            application/x-amz-json-1.0 | com.amazonaws.cloudwatch.v2013_01_16.CloudWatchVersion20130116.
+            application/x-amz-json-1.1 | CloudWatchVersion20130116.
+            """)
+    void otherWireFormsOfTheConsoleTargetStayUnknown(String contentType, String prefix) {
+        given().contentType(contentType)
+                .header("Authorization", AUTHORIZATION)
+                .header("Content-Encoding", "amz-1.0")
+                .header("X-Amz-Target", prefix + "ListMetrics")
+                .body("{}").post("/")
+                .then().statusCode(404).body("__type", equalTo("UnknownOperationException"));
     }
 
     @Test

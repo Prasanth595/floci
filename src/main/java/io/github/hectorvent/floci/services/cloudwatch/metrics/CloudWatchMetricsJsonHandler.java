@@ -107,8 +107,9 @@ public class CloudWatchMetricsJsonHandler {
      * were unset, and a top-level {@code null} member is dropped. Members nested inside the served
      * ones are passed on unchecked, nulls included. A {@code DescribeAlarms} answer that would list
      * an alarm defined with {@code Metrics} is refused too, since the console's API gives those
-     * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}. The name
-     * matches {@code DynamoDbJsonHandler.handleLegacy}, the entry point of the other JSON-only target.
+     * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}. The
+     * name matches {@code DynamoDbJsonHandler.handleLegacy}, the entry point of the other JSON-only
+     * target.
      */
     public Response handleLegacy(String action, JsonNode request, String region) {
         Set<String> servedMembers = CONSOLE_TARGET_OPERATIONS.get(action);

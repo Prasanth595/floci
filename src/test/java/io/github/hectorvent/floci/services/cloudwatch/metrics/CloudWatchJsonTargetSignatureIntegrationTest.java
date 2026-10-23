@@ -57,7 +57,7 @@ class CloudWatchJsonTargetSignatureIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {CURRENT_TARGET, CONSOLE_TARGET})
-    void presignedRequestsAreServedAndTamperingIsRefused(String prefix) throws Exception {
+    void presignedRequestsAreServedAndWrongSecretsAreRefused(String prefix) throws Exception {
         AwsRequestSigner root = AwsRequestSigner.signedAs("test", "test", "monitoring");
         byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
         json(prefix, "ListMetrics").urlEncodingEnabled(false)
