@@ -51,14 +51,17 @@ final class SamRestApiAuth {
         if (!(body instanceof ObjectNode document) || !body.path("paths").isObject()) {
             throw invalid("Auth requires an inline DefinitionBody with a paths object.");
         }
-        ObjectNode definitions;
-        if ("2.0".equals(body.path("swagger").asText())) {
-            definitions = object(document, "securityDefinitions");
-        } else if (body.path("openapi").asText().startsWith("3.0.")) {
-            definitions = object(object(document, "components"), "securitySchemes");
-        } else {
+        if (!iam && !keyRequired) {
+            // Like SAM, an Auth that selects no default, such as ApiKeyRequired: false alone,
+            // leaves the document as written.
+            return;
+        }
+        boolean swagger = "2.0".equals(body.path("swagger").asText());
+        if (!swagger && !body.path("openapi").asText().startsWith("3.0.")) {
             throw invalid("Auth currently supports Swagger 2.0 and OpenAPI 3.0 only.");
         }
+        ObjectNode definitions = swagger ? object(document, "securityDefinitions")
+                : object(object(document, "components"), "securitySchemes");
         if (iam) {
             addScheme(definitions, "AWS_IAM", true);
         }
@@ -80,9 +83,8 @@ final class SamRestApiAuth {
                 if (!(method.getValue() instanceof ObjectNode operation)) {
                     throw invalid("Auth requires inline operation objects.");
                 }
-                JsonNode existing = operation.has("security")
-                        ? operation.get("security") : document.path("security");
-                ArrayNode security = security(existing, definitions);
+                // SAM starts from the operation's own security, never the document's root security.
+                ArrayNode security = security(operation.path("security"), definitions);
                 if (iam && !hasScheme(security, "AWS_IAM")) {
                     security.add(mapper.createObjectNode().set("AWS_IAM", mapper.createArrayNode()));
                 }
