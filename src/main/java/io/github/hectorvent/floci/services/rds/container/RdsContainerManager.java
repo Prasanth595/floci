@@ -71,6 +71,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     private static final Set<String> FLOCI_CONTROLLED_MYSQL_PARAMETERS = Set.of(
             "bind_address", "datadir", "port", "require_secure_transport", "skip_grant_tables",
             "skip_networking", "socket");
+    /** RDS parameters whose server option has another name: {@code time_zone} has no option of its own. */
+    private static final Map<String, String> MYSQL_OPTION_NAMES = Map.of("time_zone", "default-time-zone");
+    /** How long a server started with a parameter group's options gets to start listening. */
+    private static final int PARAMETER_GROUP_START_SECONDS = 120;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -84,6 +88,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     private final Map<String, String> activeStorageOwners = new ConcurrentHashMap<>();
     private final Set<String> claimedRuntimes = ConcurrentHashMap.newKeySet();
     private final Set<String> cleanupPending = ConcurrentHashMap.newKeySet();
+    private final Set<String> parameterGroupRefusals = ConcurrentHashMap.newKeySet();
     private volatile boolean dockerUnavailableLogged;
     // Auto-pause state of every running container, by runtime id. The timer thread only keeps
     // time: each task it fires runs on a virtual thread of its own, since a pause first asks the
@@ -169,8 +174,12 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      * start that failed before Docker created anything, and is dropped when the daemon is
      * unreachable so the runtime can retry.
      *
+     * A server that stops while starting with its parameter group's options leaves no container
+     * either, and {@link #refusedParameterGroup} reports it until the runtime's next start.
+     *
      * @param engineParameters the overrides of the parameter group the engine runs with
-     * @return the container handle, or {@code null} when no Docker daemon is reachable
+     * @return the container handle, or {@code null} when no Docker daemon is reachable or the
+     *         server refused its parameter group
      */
     public RdsContainerHandle tryStart(
             String runtimeId, String instanceId, String containerStorageResourceId,
@@ -178,6 +187,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             String masterUsername, String masterPassword, String dbName,
             Map<String, String> engineParameters) {
         String effectiveRuntimeId = runtimeId == null || runtimeId.isBlank() ? instanceId : runtimeId;
+        parameterGroupRefusals.remove(effectiveRuntimeId);
         try {
             retryRetainedCleanup(effectiveRuntimeId);
             RdsContainerHandle handle = start(runtimeId, instanceId, containerStorageResourceId,
@@ -185,6 +195,12 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     engineParameters);
             dockerUnavailableLogged = false;
             return handle;
+        } catch (ParameterGroupRefusedException e) {
+            parameterGroupRefusals.add(effectiveRuntimeId);
+            LOG.warnv("The database of {0} did not start with its parameter group, so it reports "
+                    + "incompatible-parameters until a reboot starts it with values the server accepts: {1}",
+                    instanceId, e.getMessage());
+            return null;
         } catch (RuntimeException e) {
             if (isDockerReachable()) {
                 throw e;
@@ -203,6 +219,14 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             }
             return null;
         }
+    }
+
+    /**
+     * Whether the runtime's last start found its server refusing the parameter group's options,
+     * which AWS reports as incompatible-parameters.
+     */
+    public boolean refusedParameterGroup(String runtimeId) {
+        return runtimeId != null && parameterGroupRefusals.contains(runtimeId);
     }
 
     /**
@@ -348,6 +372,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             EndpointInfo endpoint = info.getEndpoint(enginePort);
 
             LOG.infov("RDS backend for instance {0}: {1}", instanceId, endpoint);
+            if (!engineParameterOptions(engine, engineParameters).isEmpty()) {
+                awaitServerWithParameterGroup(containerName, info.containerId(), enginePort);
+            }
             initializeEngine(containerName, info.containerId(), engine, masterUsername, masterPassword, dbName);
 
             handle = new RdsContainerHandle(
@@ -571,6 +598,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         for (String runtimeId : List.copyOf(autoPauses.keySet())) {
             releaseAutoPause(runtimeId);
         }
+        parameterGroupRefusals.clear();
     }
 
     @PreDestroy
@@ -922,6 +950,71 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         throw new IllegalStateException("Timed out initializing " + description + " in " + containerName + ": " + lastOutput);
     }
 
+    /**
+     * Waits for a MySQL or MariaDB server started with a parameter group's options to accept TCP
+     * connections. The image checks the options before it starts anything, and the server reads
+     * them again as it starts, so a container that stops here refused one of them. A server still
+     * starting when the wait ends is left to finish, as one started without a group is.
+     */
+    private void awaitServerWithParameterGroup(String containerName, String containerId, int enginePort) {
+        String[] probe = {"bash", "-c", ": < /dev/tcp/127.0.0.1/" + enginePort};
+        for (int attempt = 1; attempt <= PARAMETER_GROUP_START_SECONDS; attempt++) {
+            if (hasStopped(containerId)) {
+                throw new ParameterGroupRefusedException(serverErrors(containerId));
+            }
+            try {
+                if (execInContainer(containerId, probe, 5).exitCode() == 0) {
+                    return;
+                }
+            } catch (RuntimeException e) {
+                LOG.debugv("RDS container {0} is not accepting connections yet: {1}", containerName, e.getMessage());
+            }
+            try {
+                TimeUnit.SECONDS.sleep(1);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted waiting for the server in " + containerName, e);
+            }
+        }
+        LOG.warnv("The server in RDS container {0} was still starting after {1} s", containerName,
+                PARAMETER_GROUP_START_SECONDS);
+    }
+
+    /** Whether Docker reports the container stopped; false when Docker cannot say. */
+    private boolean hasStopped(String containerId) {
+        try {
+            InspectContainerResponse.ContainerState state =
+                    lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec().getState();
+            return state != null && Boolean.FALSE.equals(state.getRunning());
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not inspect RDS container {0}: {1}", containerId, e.getMessage());
+            return false;
+        }
+    }
+
+    /** The error lines of a stopped server's log, or its last lines when it named no error. */
+    private String serverErrors(String containerId) {
+        List<String> lines;
+        try {
+            lines = readLog(containerId);
+        } catch (RuntimeException e) {
+            return "its log could not be read: " + e.getMessage();
+        }
+        if (lines == null || lines.isEmpty()) {
+            return "the server stopped without writing a log";
+        }
+        List<String> errors = lines.stream().filter(line -> line.contains("ERROR")).toList();
+        List<String> reported = errors.isEmpty() ? lines : errors;
+        return String.join(" | ", reported.subList(Math.max(0, reported.size() - 5), reported.size()));
+    }
+
+    /** A server that stopped while starting with a parameter group's options. */
+    private static final class ParameterGroupRefusedException extends IllegalStateException {
+        ParameterGroupRefusedException(String serverErrors) {
+            super(serverErrors);
+        }
+    }
+
     /** The most recent lines {@link #readLog} reads, so one call never holds an unbounded history. */
     public static final int MAX_LOG_LINES = 100_000;
 
@@ -1237,7 +1330,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      * formula, such as {@code {DBInstanceClassMemory*3/4}}, is worked out by AWS from the
      * instance class and is left to the server's default, as are the parameters that decide
      * where the server listens and keeps its data, which Floci controls, and the ones that would
-     * lock Floci's proxy out.
+     * lock Floci's proxy out. {@code time_zone} is set through {@code --default-time-zone}, and
+     * Aurora's {@code binlog_format=OFF}, which turns binary logging off, through
+     * {@code --skip-log-bin}.
      */
     public static List<String> engineParameterOptions(
             DatabaseEngine engine, Map<String, String> engineParameters) {
@@ -1250,12 +1345,18 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             String name = parameter.getKey();
             String value = parameter.getValue();
             if (name == null || value == null || !MYSQL_PARAMETER_NAME.matcher(name).matches()
-                    || value.contains("{")
-                    || FLOCI_CONTROLLED_MYSQL_PARAMETERS.contains(
-                            name.replace('-', '_').toLowerCase(Locale.ROOT))) {
+                    || value.contains("{")) {
                 continue;
             }
-            options.add("--loose-" + name + "=" + value);
+            String normalizedName = name.replace('-', '_').toLowerCase(Locale.ROOT);
+            if (FLOCI_CONTROLLED_MYSQL_PARAMETERS.contains(normalizedName)) {
+                continue;
+            }
+            if (normalizedName.equals("binlog_format") && value.equalsIgnoreCase("OFF")) {
+                options.add("--skip-log-bin");
+                continue;
+            }
+            options.add("--loose-" + MYSQL_OPTION_NAMES.getOrDefault(normalizedName, name) + "=" + value);
         }
         return options;
     }

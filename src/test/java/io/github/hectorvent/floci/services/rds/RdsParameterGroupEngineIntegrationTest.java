@@ -1,9 +1,8 @@
 package io.github.hectorvent.floci.services.rds;
 
-import com.github.dockerjava.api.DockerClient;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
-import jakarta.inject.Inject;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -16,17 +15,18 @@ import java.sql.Statement;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
+import static io.github.hectorvent.floci.testing.RdsRequests.assumeDocker;
+import static io.github.hectorvent.floci.testing.RdsRequests.deleteInstance;
 import static io.github.hectorvent.floci.testing.RdsRequests.rds;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * A parameter group's overrides are the engine's configuration: an Aurora MySQL cluster runs with
  * its DB cluster parameter group with its writer's DB parameter group on top, a standalone MySQL
  * instance with its DB parameter group, and a value changed in the group, or a group switched by
- * ModifyDBCluster or ModifyDBInstance, takes effect when the database restarts. Skipped without
- * Docker.
+ * ModifyDBCluster or ModifyDBInstance, takes effect when the writer or the instance is rebooted. A
+ * value the server refuses leaves the instance incompatible-parameters. Skipped without Docker.
  */
 @QuarkusTest
 @Tag("docker")
@@ -35,16 +35,9 @@ class RdsParameterGroupEngineIntegrationTest {
     private static final String MASTER_USER = "admin";
     private static final String MASTER_PASSWORD = "Passw0rd12345";
 
-    @Inject
-    DockerClient dockerClient;
-
     @BeforeEach
-    void checkDocker() {
-        try {
-            dockerClient.pingCmd().exec();
-        } catch (Exception e) {
-            assumeTrue(false, "Docker is not available: " + e.getMessage());
-        }
+    void checkDocker() throws InterruptedException {
+        assumeDocker();
     }
 
     @Test
@@ -52,6 +45,7 @@ class RdsParameterGroupEngineIntegrationTest {
         String suffix = Long.toString(System.nanoTime(), 36);
         String group = "engine-cpg-" + suffix;
         String clusterId = "engine-cpg-cluster-" + suffix;
+        String writerId = "engine-cpg-writer-" + suffix;
         rds("CreateDBClusterParameterGroup")
                 .formParam("DBClusterParameterGroupName", group)
                 .formParam("DBParameterGroupFamily", "aurora-mysql8.0")
@@ -77,6 +71,10 @@ class RdsParameterGroupEngineIntegrationTest {
                     .formParam("Parameters.member.5.ParameterName", "innodb_buffer_pool_size")
                     .formParam("Parameters.member.5.ParameterValue", "{DBInstanceClassMemory*3/4}")
                     .formParam("Parameters.member.5.ApplyMethod", "pending-reboot")
+                    // Aurora's way of turning binary logging off, which MySQL itself does not accept.
+                    .formParam("Parameters.member.6.ParameterName", "binlog_format")
+                    .formParam("Parameters.member.6.ParameterValue", "OFF")
+                    .formParam("Parameters.member.6.ApplyMethod", "pending-reboot")
             .when().post("/").then().statusCode(200);
 
             XmlPath created = rds("CreateDBCluster")
@@ -89,7 +87,7 @@ class RdsParameterGroupEngineIntegrationTest {
             int port = created.getInt("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.Port");
 
             assertThat(query(port, "SELECT @@GLOBAL.max_connections, @@GLOBAL.slow_query_log, "
-                    + "@@GLOBAL.long_query_time"), equalTo("500 1 1.0"));
+                    + "@@GLOBAL.long_query_time, @@GLOBAL.log_bin"), equalTo("500 1 1.0 0"));
 
             String reported = rds("DescribeDBClusters")
                     .formParam("DBClusterIdentifier", clusterId)
@@ -98,18 +96,18 @@ class RdsParameterGroupEngineIntegrationTest {
                             + ".DBCluster.DBClusterParameterGroup");
             assertThat(reported, equalTo(group));
 
+            createWriter(writerId, clusterId, null);
             rds("ModifyDBClusterParameterGroup")
                     .formParam("DBClusterParameterGroupName", group)
                     .formParam("Parameters.member.1.ParameterName", "max_connections")
                     .formParam("Parameters.member.1.ParameterValue", "400")
                     .formParam("Parameters.member.1.ApplyMethod", "pending-reboot")
             .when().post("/").then().statusCode(200);
-            rds("RebootDBCluster")
-                    .formParam("DBClusterIdentifier", clusterId)
-            .when().post("/").then().statusCode(200);
+            rebootInstance(writerId);
 
             assertThat(query(port, "SELECT @@GLOBAL.max_connections"), equalTo("400"));
         } finally {
+            deleteInstance(writerId);
             rds("DeleteDBCluster")
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("SkipFinalSnapshot", "true")
@@ -143,13 +141,7 @@ class RdsParameterGroupEngineIntegrationTest {
             assertThat(query(port, "SELECT @@GLOBAL.max_connections, @@GLOBAL.slow_query_log"),
                     equalTo("500 1"));
 
-            rds("CreateDBInstance")
-                    .formParam("DBInstanceIdentifier", writerId)
-                    .formParam("DBClusterIdentifier", clusterId)
-                    .formParam("Engine", "aurora-mysql")
-                    .formParam("DBInstanceClass", "db.r6g.large")
-                    .formParam("DBParameterGroupName", writerGroup)
-            .when().post("/").then().statusCode(200);
+            createWriter(writerId, clusterId, writerGroup);
             assertThat(query(port, "SELECT @@GLOBAL.max_connections, @@GLOBAL.slow_query_log"),
                     equalTo("800 1"));
 
@@ -159,16 +151,11 @@ class RdsParameterGroupEngineIntegrationTest {
             .when().post("/").then().statusCode(200).extract().xmlPath()
                     .getString("ModifyDBClusterResponse.ModifyDBClusterResult.DBCluster.DBClusterParameterGroup");
             assertThat(reported, equalTo(switchedClusterGroup));
-            rds("RebootDBCluster")
-                    .formParam("DBClusterIdentifier", clusterId)
-            .when().post("/").then().statusCode(200);
+            rebootInstance(writerId);
             assertThat(query(port, "SELECT @@GLOBAL.max_connections, @@GLOBAL.slow_query_log"),
                     equalTo("800 0"));
         } finally {
-            rds("DeleteDBInstance")
-                    .formParam("DBInstanceIdentifier", writerId)
-                    .formParam("SkipFinalSnapshot", "true")
-            .when().post("/");
+            deleteInstance(writerId);
             rds("DeleteDBCluster")
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("SkipFinalSnapshot", "true")
@@ -193,18 +180,7 @@ class RdsParameterGroupEngineIntegrationTest {
         createParameterGroup(group, "mysql8.0", "max_connections", "300");
         createParameterGroup(switchedGroup, "mysql8.0", "max_connections", "600");
         try {
-
-            int port = rds("CreateDBInstance")
-                    .formParam("DBInstanceIdentifier", instanceId)
-                    .formParam("Engine", "mysql")
-                    .formParam("EngineVersion", "8.0")
-                    .formParam("DBInstanceClass", "db.t3.micro")
-                    .formParam("AllocatedStorage", "20")
-                    .formParam("DBParameterGroupName", group)
-                    .formParam("MasterUsername", MASTER_USER)
-                    .formParam("MasterUserPassword", MASTER_PASSWORD)
-            .when().post("/").then().statusCode(200).extract().xmlPath()
-                    .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+            int port = createMysqlInstance(instanceId, group);
 
             assertThat(query(port, "SELECT @@GLOBAL.max_connections"), equalTo("300"));
 
@@ -215,21 +191,84 @@ class RdsParameterGroupEngineIntegrationTest {
                     .getString("ModifyDBInstanceResponse.ModifyDBInstanceResult.DBInstance"
                             + ".DBParameterGroups.DBParameterGroup.DBParameterGroupName");
             assertThat(reported, equalTo(switchedGroup));
-            rds("RebootDBInstance")
-                    .formParam("DBInstanceIdentifier", instanceId)
-            .when().post("/").then().statusCode(200);
+            rebootInstance(instanceId);
             assertThat(query(port, "SELECT @@GLOBAL.max_connections"), equalTo("600"));
         } finally {
-            rds("DeleteDBInstance")
-                    .formParam("DBInstanceIdentifier", instanceId)
-                    .formParam("SkipFinalSnapshot", "true")
-            .when().post("/");
+            deleteInstance(instanceId);
             for (String name : new String[] {group, switchedGroup}) {
                 rds("DeleteDBParameterGroup")
                         .formParam("DBParameterGroupName", name)
                 .when().post("/");
             }
         }
+    }
+
+    @Test
+    void mysqlInstanceWhoseServerRefusesAValueIsIncompatibleParametersUntilRebootedWithAFix() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String group = "engine-bad-" + suffix;
+        String instanceId = "engine-bad-db-" + suffix;
+        createParameterGroup(group, "mysql8.0", "sql_mode", "NOT_A_MODE");
+        try {
+            int port = createMysqlInstance(instanceId, group);
+            assertThat(instanceStatus(instanceId), equalTo("incompatible-parameters"));
+
+            rds("ModifyDBParameterGroup")
+                    .formParam("DBParameterGroupName", group)
+                    .formParam("Parameters.member.1.ParameterName", "sql_mode")
+                    .formParam("Parameters.member.1.ParameterValue", "STRICT_TRANS_TABLES")
+                    .formParam("Parameters.member.1.ApplyMethod", "immediate")
+            .when().post("/").then().statusCode(200);
+            rebootInstance(instanceId);
+
+            assertThat(instanceStatus(instanceId), equalTo("available"));
+            assertThat(query(port, "SELECT @@GLOBAL.sql_mode"), equalTo("STRICT_TRANS_TABLES"));
+        } finally {
+            deleteInstance(instanceId);
+            rds("DeleteDBParameterGroup")
+                    .formParam("DBParameterGroupName", group)
+            .when().post("/");
+        }
+    }
+
+    private static int createMysqlInstance(String instanceId, String parameterGroup) {
+        return rds("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", instanceId)
+                .formParam("Engine", "mysql")
+                .formParam("EngineVersion", "8.0")
+                .formParam("DBInstanceClass", "db.t3.micro")
+                .formParam("AllocatedStorage", "20")
+                .formParam("DBParameterGroupName", parameterGroup)
+                .formParam("MasterUsername", MASTER_USER)
+                .formParam("MasterUserPassword", MASTER_PASSWORD)
+        .when().post("/").then().statusCode(200).extract().xmlPath()
+                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+    }
+
+    private static void createWriter(String writerId, String clusterId, String parameterGroup) {
+        RequestSpecification request = rds("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", writerId)
+                .formParam("DBClusterIdentifier", clusterId)
+                .formParam("Engine", "aurora-mysql")
+                .formParam("DBInstanceClass", "db.r6g.large");
+        if (parameterGroup != null) {
+            request = request.formParam("DBParameterGroupName", parameterGroup);
+        }
+        request.when().post("/").then().statusCode(200);
+    }
+
+    private static void rebootInstance(String instanceId) {
+        rds("RebootDBInstance")
+                .formParam("DBInstanceIdentifier", instanceId)
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static String instanceStatus(String instanceId) {
+        return rds("DescribeDBInstances")
+                .formParam("DBInstanceIdentifier", instanceId)
+        .when().post("/").then().statusCode(200).extract().xmlPath()
+                .getString("DescribeDBInstancesResponse.DescribeDBInstancesResult.DBInstances"
+                        + ".DBInstance.DBInstanceStatus");
     }
 
     private static void createParameterGroup(String name, String family, String parameter, String value) {

@@ -1725,6 +1725,56 @@ class RdsServiceTest {
     }
 
     @Test
+    void rebootingTheAuroraWriterRestartsTheClusterEngineWithItsGroupsAndAReaderRebootDoesNot() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 3306));
+        rdsService.createDbClusterParameterGroup("app-cluster-params", "aurora-mysql8.0", "app");
+        rdsService.createDbParameterGroup("writer-params", "aurora-mysql8.0", "writer");
+        rdsService.modifyDbParameterGroup("writer-params", Map.of("max_connections", "800"));
+        DbCluster cluster = rdsService.createDbCluster("app-cluster", "aurora-mysql",
+                "8.0.mysql_aurora.3.05.2", "admin", "password", null, false, "app-cluster-params");
+        rdsService.createDbInstance("writer", "aurora-mysql", "8.0.mysql_aurora.3.05.2", null, null, null,
+                "db.r6g.large", 0, false, "writer-params", null, "app-cluster");
+        rdsService.createDbInstance("reader", "aurora-mysql", "8.0.mysql_aurora.3.05.2", null, null, null,
+                "db.r6g.large", 0, false, null, null, "app-cluster");
+        clearInvocations(containerManager);
+
+        rdsService.rebootDbInstance("reader");
+        verify(containerManager, never())
+                .tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+
+        rdsService.modifyDbClusterParameterGroup("app-cluster-params", Map.of("slow_query_log", "1"));
+        DbInstance rebooted = rdsService.rebootDbInstance("writer");
+
+        verify(containerManager).stop(any());
+        verify(containerManager).tryStart(eq(cluster.getDbClusterArn()), eq("app-cluster"),
+                any(), any(), any(), any(), any(), any(), any(),
+                eq(Map.of("max_connections", "800", "slow_query_log", "1")));
+        assertEquals(DbInstanceStatus.AVAILABLE, rebooted.getStatus());
+        assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("reader").getStatus());
+    }
+
+    @Test
+    void aClusterMemberSharesItsClusterDatabaseRefusingItsParameterGroup() {
+        rdsService.createDbInstance("app-db", "mysql", "8.0.36", "admin", "password", "app",
+                "db.t3.micro", 20, false, null, null, null);
+        DbCluster cluster = rdsService.createDbCluster("app-cluster", "aurora-mysql",
+                "8.0.mysql_aurora.3.05.2", "admin", "password", null, false, null);
+        rdsService.createDbInstance("writer", "aurora-mysql", "8.0.mysql_aurora.3.05.2", null, null, null,
+                "db.r6g.large", 0, false, null, null, "app-cluster");
+        DbInstance standalone = rdsService.getDbInstance("app-db");
+        DbInstance member = rdsService.getDbInstance("writer");
+        assertFalse(rdsService.databaseRefusedParameterGroup(standalone));
+
+        when(containerManager.refusedParameterGroup(cluster.getDbClusterArn())).thenReturn(true);
+
+        assertTrue(rdsService.databaseRefusedParameterGroup(member));
+        assertFalse(rdsService.databaseRefusedParameterGroup(standalone));
+        when(containerManager.refusedParameterGroup(standalone.getDbInstanceArn())).thenReturn(true);
+        assertTrue(rdsService.databaseRefusedParameterGroup(standalone));
+    }
+
+    @Test
     void modifyDbInstanceSwitchesTheParameterGroupTheEngineRunsWithAfterAReboot() {
         when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new RdsContainerHandle("cont-id", "app-db", "localhost", 3306));

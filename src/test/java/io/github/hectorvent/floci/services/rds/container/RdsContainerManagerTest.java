@@ -3,6 +3,13 @@ package io.github.hectorvent.floci.services.rds.container;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.command.ExecCreateCmd;
+import com.github.dockerjava.api.command.ExecCreateCmdResponse;
+import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.InspectExecCmd;
+import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.LogContainerCmd;
 import com.github.dockerjava.api.command.PauseContainerCmd;
 import com.github.dockerjava.api.command.UnpauseContainerCmd;
@@ -51,7 +58,9 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -150,6 +159,18 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void timeZoneAndAuroraBinlogOffTakeTheServerOptionsThatSetThem() {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        overrides.put("time_zone", "UTC");
+        overrides.put("binlog_format", "OFF");
+
+        assertEquals(List.of("--skip-log-bin", "--loose-default-time-zone=UTC"),
+                RdsContainerManager.engineParameterOptions(DatabaseEngine.MYSQL, overrides));
+        assertEquals(List.of("--loose-binlog_format=ROW"),
+                RdsContainerManager.engineParameterOptions(DatabaseEngine.MYSQL, Map.of("binlog_format", "ROW")));
+    }
+
+    @Test
     void parameterGroupOverridesAreNotPassedToOtherEngines() {
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.POSTGRES, "postgres:18", Map.of("max_connections", "500")).isEmpty());
@@ -165,6 +186,8 @@ class RdsContainerManagerTest {
         stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
                 "mysql-container", Map.of(3306,
                 new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = databaseDockerClient("mysql-container");
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         ContainerDetector detector = mock(ContainerDetector.class);
         when(detector.isRunningInContainer()).thenReturn(false);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
@@ -182,6 +205,45 @@ class RdsContainerManagerTest {
         assertEquals(
                 List.of("--loose-max_connections=500", "--default-authentication-plugin=mysql_native_password"),
                 spec.getValue().cmd());
+    }
+
+    @Test
+    void aServerThatStopsOnItsParameterGroupLeavesNoContainerAndIsReportedUntilItStarts() {
+        EmulatorConfig config = config(tempDir.resolve("mysql-refused-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager,
+                new ContainerLifecycleManager.ContainerInfo("refused-container", Map.of(3306,
+                        new ContainerLifecycleManager.EndpointInfo("db1", 3306))),
+                new ContainerLifecycleManager.ContainerInfo("accepted-container", Map.of(3306,
+                        new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = databaseDockerClient("accepted-container");
+        stubStoppedServer(dockerClient, "refused-container",
+                "2026-10-23T10:00:00Z [ERROR] [MY-000077] [Server] mysqld: Error while setting value "
+                        + "'NOT_A_MODE' to 'sql_mode'.\n2026-10-23T10:00:01Z [ERROR] [MY-010119] [Server] Aborting\n");
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        ContainerDetector detector = mock(ContainerDetector.class);
+        when(detector.isRunningInContainer()).thenReturn(false);
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, detector, config,
+                new RegionResolver("us-east-1", "000000000000"), mock(ServiceConfigAccess.class));
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
+
+        assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1", DatabaseEngine.MYSQL,
+                "mysql:8.0.36", "root", "password", "db", Map.of("sql_mode", "NOT_A_MODE")));
+
+        assertTrue(manager.refusedParameterGroup(runtimeId));
+        assertNull(manager.getActiveHandle(runtimeId));
+        verify(lifecycleManager).stopAndRemoveStrict(eq("refused-container"), any());
+
+        RdsContainerHandle accepted = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0.36", "root", "password", "db",
+                Map.of("sql_mode", "STRICT_TRANS_TABLES"));
+
+        assertEquals("accepted-container", accepted.getContainerId());
+        assertFalse(manager.refusedParameterGroup(runtimeId));
     }
 
     @Test
@@ -1539,6 +1601,56 @@ class RdsContainerManagerTest {
         when(storage.hostPersistentPath()).thenReturn(hostRoot.toString());
         when(storage.mode()).thenReturn("persistent");
         return config;
+    }
+
+    /**
+     * A Docker client on which {@code runningContainerId} runs and every exec succeeds, so a
+     * server started with a parameter group is seen listening at once.
+     */
+    private static DockerClient databaseDockerClient(String runningContainerId) {
+        DockerClient dockerClient = mock(DockerClient.class);
+        stubContainerState(dockerClient, runningContainerId, true);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmdResponse created = mock(ExecCreateCmdResponse.class);
+        when(created.getId()).thenReturn("probe");
+        when(createCmd.exec()).thenReturn(created);
+        when(dockerClient.execCreateCmd(anyString())).thenReturn(createCmd);
+        ExecStartCmd startCmd = mock(ExecStartCmd.class);
+        when(startCmd.exec(any())).thenAnswer(invocation -> {
+            ResultCallback.Adapter<Frame> callback = invocation.getArgument(0);
+            callback.onComplete();
+            return callback;
+        });
+        when(dockerClient.execStartCmd(anyString())).thenReturn(startCmd);
+        InspectExecCmd inspectExec = mock(InspectExecCmd.class);
+        InspectExecResponse inspected = mock(InspectExecResponse.class);
+        when(inspected.getExitCodeLong()).thenReturn(0L);
+        when(inspectExec.exec()).thenReturn(inspected);
+        when(dockerClient.inspectExecCmd(anyString())).thenReturn(inspectExec);
+        return dockerClient;
+    }
+
+    /** {@code containerId} has stopped after writing {@code log}. */
+    private static void stubStoppedServer(DockerClient dockerClient, String containerId, String log) {
+        stubContainerState(dockerClient, containerId, false);
+        LogContainerCmd logCmd = mock(LogContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.logContainerCmd(containerId)).thenReturn(logCmd);
+        when(logCmd.exec(any())).thenAnswer(invocation -> {
+            ResultCallback.Adapter<Frame> callback = invocation.getArgument(0);
+            callback.onNext(new Frame(StreamType.STDERR, log.getBytes(StandardCharsets.UTF_8)));
+            callback.onComplete();
+            return callback;
+        });
+    }
+
+    private static void stubContainerState(DockerClient dockerClient, String containerId, boolean running) {
+        InspectContainerResponse.ContainerState state = mock(InspectContainerResponse.ContainerState.class);
+        when(state.getRunning()).thenReturn(running);
+        InspectContainerResponse response = mock(InspectContainerResponse.class);
+        when(response.getState()).thenReturn(state);
+        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);
+        when(inspectCmd.exec()).thenReturn(response);
+        when(dockerClient.inspectContainerCmd(containerId)).thenReturn(inspectCmd);
     }
 
     private static void stubStarts(

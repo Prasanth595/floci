@@ -349,6 +349,42 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_reportsIncompatibleParametersWhenTheDatabaseRefusedItsGroup() {
+        DbInstance refused = makeInstance("refused");
+        DbInstance rebooting = makeInstance("rebooting");
+        rebooting.setStatus(DbInstanceStatus.REBOOTING);
+        when(service.listDbInstances(null, null)).thenReturn(List.of(refused, rebooting));
+        when(service.databaseRefusedParameterGroup(any())).thenReturn(true);
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+
+        assertTrue(body.contains("<DBInstanceStatus>incompatible-parameters</DBInstanceStatus>"), body);
+        assertTrue(body.contains("<DBInstanceStatus>rebooting</DBInstanceStatus>"), body);
+    }
+
+    @Test
+    void describeDbClusters_namesOnlyADefaultClusterParameterGroupThatCanBeDescribed() {
+        DbCluster postgres = makeCluster("postgres-cluster");
+        postgres.setEngineIdentifier("postgres");
+        DbCluster mariadb = makeCluster("mariadb-cluster");
+        mariadb.setEngineIdentifier("mariadb");
+        mariadb.setEngine(DatabaseEngine.MARIADB);
+        mariadb.setEngineVersion("10.11");
+        DbCluster named = makeCluster("named-cluster");
+        named.setParameterGroupName("app-cluster-params");
+        when(service.listDbClusters(null, null)).thenReturn(List.of(postgres, mariadb, named));
+        when(service.expectedClusterParameterGroupFamily("postgres", "15")).thenReturn("postgres15");
+        when(service.expectedClusterParameterGroupFamily("mariadb", "10.11")).thenReturn("mariadb10.11");
+        when(service.isManagedClusterParameterGroup("default.postgres15")).thenReturn(true);
+
+        String body = (String) handler.handle("DescribeDBClusters", params()).getEntity();
+
+        assertTrue(body.contains("<DBClusterParameterGroup>default.postgres15</DBClusterParameterGroup>"), body);
+        assertTrue(body.contains("<DBClusterParameterGroup>app-cluster-params</DBClusterParameterGroup>"), body);
+        assertFalse(body.contains("default.mariadb10.11"), body);
+    }
+
+    @Test
     void modifyDbInstance_forwardsPubliclyAccessible() {
         when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), any(), isNull(), any(),
                 isNull(), any(DbInstanceSettings.class), eq(true), any(DbInstanceScalingChanges.class), isNull(), isNull()))

@@ -563,14 +563,19 @@ its DB parameter group. Floci passes each override to the server when it starts 
 container, so a value set in the group is the engine's value; creating a cluster's writer restarts
 the cluster's container when the writer's group changes anything. A later change to a group, or a
 new `DBClusterParameterGroupName` on `ModifyDBCluster` or `DBParameterGroupName` on
-`ModifyDBInstance`, takes effect the next time the container starts: `RebootDBCluster` for a
-cluster, `RebootDBInstance` for a standalone instance, a stop and start, or a Floci restart. A
-parameter the server does not know, such as one only Aurora has, is skipped with a warning in the
-database log. A formula value such as `{DBInstanceClassMemory*3/4}` keeps the server's default,
-and so do `port`, `bind_address`, `socket`, `datadir` and `skip_networking`, which Floci needs to
-reach the database, and `require_secure_transport` and `skip_grant_tables`, which would lock out
-Floci's proxy (it talks to the server without TLS). PostgreSQL and SQL Server databases do not
-take parameter group values yet.
+`ModifyDBInstance`, takes effect the next time the container starts: `RebootDBInstance` on the
+writer or on a standalone instance, a stop and start, or a Floci restart. A cluster's members share
+one database, so rebooting the writer restarts it for every member, and a reader's own DB
+parameter group is not applied. `time_zone` is passed as `--default-time-zone`, and Aurora's
+`binlog_format` of `OFF` turns binary logging off. A parameter the server does not know, such as
+one only Aurora has, is skipped with a warning in the database log. A formula value such as
+`{DBInstanceClassMemory*3/4}` keeps the server's default, and so do `port`, `bind_address`,
+`socket`, `datadir` and `skip_networking`, which Floci needs to reach the database, and
+`require_secure_transport` and `skip_grant_tables`, which would lock out Floci's proxy (it talks
+to the server without TLS). When the server refuses a value and stops, the instance, or every
+member of the cluster, reports `incompatible-parameters` and Floci logs the server's error; correct
+the group and reboot to start it again. PostgreSQL and SQL Server databases do not take parameter
+group values yet.
 
 ## Option Groups
 

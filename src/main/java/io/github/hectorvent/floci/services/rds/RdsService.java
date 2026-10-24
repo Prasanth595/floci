@@ -825,7 +825,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     containerId = handle.getContainerId();
                     containerHost = handle.getHost();
                     containerPort = handle.getPort();
-                } else {
+                } else if (!containerManager.refusedParameterGroup(dbInstanceArn)) {
                     LOG.warnv("DB instance {0} created without a backing database container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
                             + "the database do not until a daemon appears.", id);
@@ -3846,12 +3846,18 @@ public class RdsService implements Resettable, ResourceProvider {
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
 
         boolean mock = config.services().rds().mock();
+        DbCluster writtenCluster = mock ? null : availableClusterWrittenBy(instance, id, effectiveRegion);
+        if (writtenCluster != null) {
+            return rebootClusterWriter(instance, id, writtenCluster, effectiveRegion);
+        }
+        boolean startAttempted = false;
         if (!mock) {
             // Stop proxy during reboot
             proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
 
             // Restart container if it's a standalone instance
             if (instance.getDbClusterIdentifier() == null && instance.getContainerId() != null) {
+                startAttempted = true;
                 try {
                     containerManager.stop(buildHandle(instance));
                 } catch (RuntimeException | Error e) {
@@ -3901,14 +3907,66 @@ public class RdsService implements Resettable, ResourceProvider {
                         proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
                                 instance.getEndpoint().port(), instanceRegion, accountId,
                                 backendIdentity.dbUserResourceId()));
-            } else {
-                // No backing container: created or last rebooted while no daemon was reachable.
+            } else if (!startAttempted) {
+                // No backing container: created or last rebooted while no daemon was reachable,
+                // or its server did not start with its parameter group.
                 instance = doEnsureInstanceBackend(id, effectiveRegion);
             }
         }
 
         LOG.infov("DB instance {0} rebooted", id);
         return instance;
+    }
+
+    /** The available cluster whose writer {@code instance} is, or null. */
+    private DbCluster availableClusterWrittenBy(DbInstance instance, String id, String effectiveRegion) {
+        String clusterId = instance.getDbClusterIdentifier();
+        if (clusterId == null || clusterId.isBlank()) {
+            return null;
+        }
+        DbCluster cluster = findClusterForScope(
+                accountIdFromArn(instance.getDbInstanceArn()), effectiveRegion, clusterId);
+        if (cluster == null || !id.equals(cluster.resolveWriterIdentifier())
+                || (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE)) {
+            return null;
+        }
+        return cluster;
+    }
+
+    /**
+     * Rebooting an Aurora cluster's writer restarts the database the cluster's members share, which
+     * is how a changed DB cluster parameter group, or the writer's DB parameter group, reaches it.
+     */
+    private DbInstance rebootClusterWriter(
+            DbInstance writer, String id, DbCluster cluster, String effectiveRegion) {
+        String clusterId = cluster.getDbClusterIdentifier();
+        String accountId = accountIdFromArn(cluster.getDbClusterArn());
+        try {
+            stopDbClusterRuntime(cluster, clusterId, effectiveRegion, accountId);
+            startClusterBackend(cluster, clusterId, effectiveRegion);
+        } catch (RuntimeException | Error e) {
+            writer.setStatus(DbInstanceStatus.FAILED);
+            try {
+                putInstanceForScope(accountId, effectiveRegion, id, writer);
+            } catch (RuntimeException persistFailure) {
+                e.addSuppressed(persistFailure);
+            }
+            throw e;
+        }
+        putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
+        restoreClusterMemberBackends(cluster, effectiveRegion, true);
+        LOG.infov("DB instance {0} rebooted with the database of DB cluster {1}", id, clusterId);
+        return getDbInstance(id, effectiveRegion);
+    }
+
+    /**
+     * Whether the database an instance runs on did not start with its parameter group's values,
+     * which AWS reports as incompatible-parameters until a reboot starts it. A cluster member
+     * shares its cluster's database.
+     */
+    public boolean databaseRefusedParameterGroup(DbInstance instance) {
+        return !config.services().rds().mock()
+                && containerManager.refusedParameterGroup(instanceBackendRuntimeId(instance));
     }
 
     /** Returns the runtime that owns an instance's backing container. Cluster members share their cluster runtime. */
@@ -4541,7 +4599,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 cluster.setContainerId(handle.getContainerId());
                 cluster.setContainerHost(handle.getHost());
                 cluster.setContainerPort(handle.getPort());
-            } else {
+            } else if (!containerManager.refusedParameterGroup(clusterArn)) {
                 LOG.warnv("DB cluster {0} created without a backing database container: no Docker "
                         + "daemon is reachable. Metadata operations work; connections to the "
                         + "database do not until a daemon appears.", id);

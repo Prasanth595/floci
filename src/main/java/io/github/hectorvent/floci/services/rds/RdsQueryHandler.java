@@ -2944,7 +2944,7 @@ public class RdsQueryHandler {
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
         String engineStr = instanceEngine(i);
-        String statusStr = i.getStatus() != null ? statusLabel(i.getStatus()) : "available";
+        String statusStr = statusLabel(reportedStatus(i));
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("DBInstanceIdentifier", i.getDbInstanceIdentifier())
@@ -3147,18 +3147,21 @@ public class RdsQueryHandler {
 
     /**
      * The cluster's DB cluster parameter group, or the engine's default group when it was created
-     * without one, as AWS reports it. Null when the engine has no known parameter group family.
+     * without one, as AWS reports it. Null when the engine has no default group that
+     * DescribeDBClusterParameterGroups lists.
      */
     private String dbClusterParameterGroupName(DbCluster cluster, String engine) {
         String name = cluster.getParameterGroupName();
         if (name != null && !name.isBlank()) {
             return name;
         }
+        String defaultGroup;
         try {
-            return "default." + service.expectedClusterParameterGroupFamily(engine, cluster.getEngineVersion());
+            defaultGroup = "default." + service.expectedClusterParameterGroupFamily(engine, cluster.getEngineVersion());
         } catch (AwsException e) {
             return null;
         }
+        return service.isManagedClusterParameterGroup(defaultGroup) ? defaultGroup : null;
     }
 
     private String dbClusterXml(DbCluster c) {
@@ -3457,6 +3460,13 @@ public class RdsQueryHandler {
                 .build();
     }
 
+    /** An available instance whose database refused its parameter group reports incompatible-parameters, as on AWS. */
+    private DbInstanceStatus reportedStatus(DbInstance instance) {
+        DbInstanceStatus status = instance.getStatus() != null ? instance.getStatus() : DbInstanceStatus.AVAILABLE;
+        return status == DbInstanceStatus.AVAILABLE && service.databaseRefusedParameterGroup(instance)
+                ? DbInstanceStatus.INCOMPATIBLE_PARAMETERS : status;
+    }
+
     private String statusLabel(DbInstanceStatus status) {
         return switch (status) {
             case CREATING -> "creating";
@@ -3468,6 +3478,7 @@ public class RdsQueryHandler {
             case STOPPING -> "stopping";
             case STOPPED -> "stopped";
             case STARTING -> "starting";
+            case INCOMPATIBLE_PARAMETERS -> "incompatible-parameters";
         };
     }
 
