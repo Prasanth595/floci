@@ -1505,7 +1505,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
-     * Logs and Secrets Manager targets depend on the serving operation and the request's partition;
+     * Logs and Secrets Manager targets depend on the serving operation and the request's partition, STS
+     * targets on the serving operation;
      * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in.
      */
     private List<String> targetResources(String credentialScope, String action, ContainerRequestContext ctx,
@@ -1515,6 +1516,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
         if ("secretsmanager".equals(credentialScope)) {
             return arnBuilder.buildSecretsManagerResources(action, ctx, region, accountId, requestPartition());
+        }
+        if ("sts".equals(credentialScope)) {
+            return arnBuilder.buildStsResources(action, ctx);
         }
         if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope) || "dsql".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());

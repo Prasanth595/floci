@@ -1243,11 +1243,7 @@ public class ResourceArnBuilder {
 
     // ── SQS ─────────────────────────────────────────────────────────────────────
     private String buildSqsArn(ContainerRequestContext ctx, String region, String accountId) {
-        String queueUrl = ctx.getUriInfo().getQueryParameters().getFirst("QueueUrl");
-        if (queueUrl == null) {
-            // Try form param for Query-protocol
-            queueUrl = firstFormParam(ctx, "QueueUrl");
-        }
+        String queueUrl = firstFormParam(ctx, "QueueUrl");
         if (queueUrl == null) {
             JsonNode json = readJsonBody(ctx);
             if (json != null && json.isObject()) {
@@ -1586,9 +1582,37 @@ public class ResourceArnBuilder {
         return slash > 0 ? after.substring(0, slash) : after;
     }
 
+    // ── STS ─────────────────────────────────────────────────────────────────────
+    /**
+     * Uses the serving operation, as {@link #buildLogResources} does: {@code AssumeRole} is
+     * authorized against the role it names, so a policy can allow assuming one role and not another.
+     * Every other operation keeps {@code *}, so a {@code RoleArn} it never reads cannot choose its resource.
+     */
+    public List<String> buildStsResources(String action, ContainerRequestContext ctx) {
+        return List.of("sts:AssumeRole".equals(action) ? buildAssumeRoleArn(ctx) : "*");
+    }
+
+    private String buildAssumeRoleArn(ContainerRequestContext ctx) {
+        String roleArn = firstFormParam(ctx, "RoleArn");
+        // Untrimmed: the handler assumes the role named by this exact string.
+        return roleArn == null || roleArn.isBlank() ? "*" : roleArn;
+    }
+
+    /**
+     * A Query-protocol parameter, read from the same place the handler reads it. For a form POST
+     * that is the body alone: {@code AwsQueryController} dispatches on the form parameters and never
+     * sees the URL query, so authorizing a URL value would check one resource and act on another.
+     * A value with an invalid percent escape is read as absent, so the resource stays the default
+     * and the request goes on to be answered as it is without enforcement.
+     */
     private String firstFormParam(ContainerRequestContext ctx, String name) {
-        // Form params are typically available as query params in REST-Assured / JAX-RS
-        String v = ctx.getUriInfo().getQueryParameters().getFirst(name);
-        return v;
+        if (RequestBodyReader.isForm(ctx)) {
+            try {
+                return RequestBodyReader.formField(ctx, name);
+            } catch (IllegalArgumentException malformed) {
+                return null;
+            }
+        }
+        return ctx.getUriInfo().getQueryParameters().getFirst(name);
     }
 }

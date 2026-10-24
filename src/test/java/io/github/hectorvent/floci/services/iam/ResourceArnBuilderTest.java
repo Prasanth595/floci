@@ -767,6 +767,65 @@ class ResourceArnBuilderTest {
         }
     }
 
+    // ── STS ──────────────────────────────────────────────────────────────────────
+
+    @Test
+    void stsAssumeRoleIsAuthorizedAgainstTheRoleItNames() {
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
+        String arn = sts("sts:AssumeRole");
+        assertEquals("arn:aws:iam::729951873967:role/Admin", arn);
+    }
+
+    @Test
+    void stsAssumeRoleIgnoresARoleArnInTheUrlOfAFormPost() {
+        // The handler acts on the body's RoleArn, so authorization must check that one, never a
+        // decoy in the query string.
+        queryParams.add("RoleArn", "arn:aws:iam::729951873967:role/Allowed");
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
+        String arn = sts("sts:AssumeRole");
+        assertEquals("arn:aws:iam::729951873967:role/Admin", arn);
+    }
+
+    @Test
+    void stsReadsRoleArnOnlyForAssumeRole() {
+        // GetFederationToken never acts on a role, so a RoleArn added to it must not let a policy
+        // scoped to that role allow it.
+        setFormBody("Action=GetFederationToken&Version=2011-06-15&Name=robin"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin");
+        assertEquals("*", sts("sts:GetFederationToken"));
+    }
+
+    @Test
+    void stsMalformedRoleArnIsAuthorizedAsNoRole() {
+        // Read as absent, so the request reaches the form reader, which refuses it as it does today.
+        setFormBody("Action=AssumeRole&Version=2011-06-15&RoleArn=arn%3Aaws%ZZ&RoleSessionName=robin");
+        assertEquals("*", sts("sts:AssumeRole"));
+    }
+
+    @Test
+    void stsRoleArnIsCheckedAsTheHandlerReadsIt() {
+        // The handler does not trim, so neither does the check.
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=+arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
+        assertEquals(" arn:aws:iam::729951873967:role/Admin", sts("sts:AssumeRole"));
+    }
+
+    private String sts(String action) {
+        return builder.buildStsResources(action, ctx).getFirst();
+    }
+
+    @Test
+    void sqsBuildsArnFromFormBodyQueueUrl() {
+        // The handler acts on the body's QueueUrl, so a decoy in the query string must not be checked.
+        queryParams.add("QueueUrl", "http://localhost:4566/000000000000/allowed");
+        setFormBody("Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2Forders&MessageBody=x");
+        String arn = builder.build("sqs", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:orders", arn);
+    }
+
+
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
 
     @Test
@@ -1101,6 +1160,14 @@ class ResourceArnBuilderTest {
     }
 
     // ── SNS ─────────────────────────────────────────────────────────────────────
+
+    @Test
+    void snsBuildsArnFromFormBodyTopicArn() {
+        queryParams.add("TopicArn", "arn:aws:sns:us-east-1:000000000000:allowed");
+        setFormBody("Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A000000000000%3Aalerts&Message=hi");
+        String arn = builder.build("sns", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:sns:us-east-1:000000000000:alerts", arn);
+    }
 
     @Test
     void snsBuildsArnFromJsonTopicArn() {
