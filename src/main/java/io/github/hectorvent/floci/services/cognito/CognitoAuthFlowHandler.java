@@ -1878,17 +1878,14 @@ final class CognitoAuthFlowHandler {
      * subject/body Cognito would otherwise deliver. Non-blocking: an unconfigured or
      * failing trigger falls back to the pool's default templated message, mirroring how
      * {@link #firePostConfirmation} tolerates errors. {@code clientMetadata} is the request's
-     * ClientMetadata; a sign-in code's event carries none (measured, eu-west-1, 2026-10-20).
+     * ClientMetadata; a sign-in code's event omits the member when it carries none.
      */
     Map<String, Object> fireCustomMessage(UserPool pool, UserPoolClient client, CognitoUser user,
                                            String triggerSource, Map<String, String> clientMetadata) {
         Map<String, Object> req = new HashMap<>();
         req.put("codeParameter", CUSTOM_MESSAGE_CODE_PARAMETER);
         req.put("usernameParameter", user.getUsername());
-        Map<String, String> metadata = requestClientMetadata(clientMetadata);
-        if (metadata != null || "CustomMessage_Authentication".equals(triggerSource)) {
-            req.put("clientMetadata", metadata);
-        }
+        putCustomMessageClientMetadata(req, clientMetadata);
         return customMessageResponse(pool, client, user, triggerSource, req);
     }
 
@@ -1902,16 +1899,20 @@ final class CognitoAuthFlowHandler {
         Map<String, Object> req = new HashMap<>();
         req.put("codeParameter", CUSTOM_MESSAGE_CODE_PARAMETER);
         req.put("usernameParameter", CUSTOM_MESSAGE_USERNAME_PARAMETER);
+        putCustomMessageClientMetadata(req, clientMetadata);
+        return customMessageResponse(pool, null, user, "CustomMessage_AdminCreateUser", req);
+    }
+
+    private static void putCustomMessageClientMetadata(Map<String, Object> request, Map<String, String> clientMetadata) {
         Map<String, String> metadata = requestClientMetadata(clientMetadata);
         if (metadata != null) {
-            req.put("clientMetadata", metadata);
+            request.put("clientMetadata", metadata);
         }
-        return customMessageResponse(pool, null, user, "CustomMessage_AdminCreateUser", req);
     }
 
     /**
      * Normalizes absent or empty ClientMetadata for each trigger's event shape. CustomMessage
-     * omits the member for measured sources; CustomEmailSender includes it with null.
+     * omits the member; CustomEmailSender includes it with null.
      */
     private static Map<String, String> requestClientMetadata(Map<String, String> clientMetadata) {
         return clientMetadata == null || clientMetadata.isEmpty() ? null : clientMetadata;

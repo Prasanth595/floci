@@ -2806,9 +2806,11 @@ class CognitoLambdaTriggersTest {
         assertFalse(event.path("request").has("clientMetadata"));
     }
 
-    /** Measured (eu-west-1, 2026-10-20): a sign-in code's event carries no ClientMetadata, though InitiateAuth sends one. */
-    @Test
-    void customMessageForASignInCodeCarriesANullClientMetadata() throws Exception {
+    /** The raw-event measurement in #6190 distinguishes an absent key from a null value. */
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = "web")
+    void customMessageForASignInCodeOmitsClientMetadata(String metadataValue) throws Exception {
         CognitoService svc = customMessageService(mock(SesService.class), VerificationCode.Purpose.EMAIL_OTP, "555666");
         UserPool pool = customMessagePool(svc, Map.of("Policies", Map.of("SignInPolicy",
                 Map.of("AllowedFirstAuthFactors", List.of("PASSWORD", "EMAIL_OTP")))));
@@ -2819,12 +2821,14 @@ class CognitoLambdaTriggersTest {
         svc.adminSetUserPassword(pool.getId(), "spike", "Spike@Test1", true);
         ArgumentCaptor<byte[]> events = customMessageAnswers(Map.of());
 
+        Map<String, String> metadata = metadataValue == null ? null
+                : metadataValue.isEmpty() ? Map.of() : Map.of("app", metadataValue);
         svc.initiateAuth(client.getClientId(), "USER_AUTH",
-                Map.of("USERNAME", "spike", "PREFERRED_CHALLENGE", "EMAIL_OTP"), Map.of("app", "web"));
+                Map.of("USERNAME", "spike", "PREFERRED_CHALLENGE", "EMAIL_OTP"), metadata);
 
         JsonNode event = MAPPER.readTree(events.getValue());
         assertEquals("CustomMessage_Authentication", event.path("triggerSource").asText());
-        assertTrue(event.path("request").path("clientMetadata").isNull());
+        assertFalse(event.path("request").has("clientMetadata"));
     }
 
     @Test

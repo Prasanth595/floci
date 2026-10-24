@@ -524,6 +524,13 @@ empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`
 the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
 `USER_AUTH` must list the matching `ALLOW_` value.
 
+## Custom Message Trigger
+
+`CustomMessage` events omit `request.clientMetadata` when metadata is absent or empty,
+including `CustomMessage_Authentication`, which does not forward `InitiateAuth`
+metadata. Custom Email Sender events retain the key with `null` when
+there is no metadata; their event shape is distinct.
+
 ## Custom Email Sender Trigger
 
 A pool whose `LambdaConfig` names a `CustomEmailSender` function (`{"LambdaArn": ..., "LambdaVersion": "V1_0"}`)
