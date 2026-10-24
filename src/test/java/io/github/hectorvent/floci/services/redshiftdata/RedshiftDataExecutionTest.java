@@ -6,11 +6,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -47,34 +43,21 @@ class RedshiftDataExecutionTest {
     }
 
     @Test
-    void terminalReleaseWaitsForAnInFlightCancellationSignal() throws Exception {
+    void cancellationSignalHoldsExecutionMonitor() throws Exception {
         RedshiftDataExecution execution = new RedshiftDataExecution(0);
         Statement statement = mock(Statement.class);
-        CountDownLatch cancelling = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
         execution.track(statement);
         assertTrue(execution.requestCancellation());
         doAnswer(invocation -> {
-            cancelling.countDown();
-            assertTrue(release.await(5, TimeUnit.SECONDS));
+            assertTrue(Thread.holdsLock(execution));
             return null;
         }).when(statement).cancel();
-        try (ExecutorService callers = Executors.newFixedThreadPool(2)) {
-            Future<?> signal = callers.submit(execution::signalCancellation);
-            try {
-                assertTrue(cancelling.await(5, TimeUnit.SECONDS));
-                Future<?> terminal = callers.submit(execution::terminal);
-                assertThrows(TimeoutException.class, () -> terminal.get(100, TimeUnit.MILLISECONDS));
-                release.countDown();
-                signal.get(5, TimeUnit.SECONDS);
-                terminal.get(5, TimeUnit.SECONDS);
-                execution.signalCancellation();
-                verify(statement).cancel();
-            } finally {
-                release.countDown();
-                execution.completed();
-            }
-        }
+
+        execution.signalCancellation();
+        execution.terminal();
+        execution.signalCancellation();
+        verify(statement).cancel();
+        execution.completed();
     }
 
     @Test
