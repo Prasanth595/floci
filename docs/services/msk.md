@@ -137,6 +137,13 @@ Floci reconciles associated SCRAM secrets every five seconds by default, measure
 a delay after each completed sweep. Set `FLOCI_SERVICES_MSK_SCRAM_RECONCILIATION_INTERVAL_MS`
 to change this delay in milliseconds. This is Floci's timing, not an AWS synchronization guarantee.
 
+When an associated secret is scheduled for deletion or permanently deleted, reconciliation
+revokes its broker user but retains the association in `ListScramSecrets`. Restoring a secret
+whose deletion was scheduled causes reconciliation to recreate its broker user using the
+current credentials, without requiring reassociation. Permanently deleted secrets cannot
+be restored; creating a secret with the same name produces a different ARN and requires
+a new association.
+
 ## Examples
 
 ```bash
