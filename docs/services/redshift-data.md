@@ -43,6 +43,64 @@ A request identifies its target cluster or serverless workgroup one of three way
 
 A statement run against a workgroup reports `WorkgroupName` and omits `ClusterIdentifier`, and the reverse holds for a cluster statement. `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` accept `WorkgroupName` the same way.
 
+## Session reuse
+
+`ExecuteStatement` and `BatchExecuteStatement` accept `SessionKeepAliveSeconds`, an integer from
+0 to 86400. A positive value retains the JDBC connection after the statement completes and
+returns its `SessionId`. Subsequent execute or batch calls can send just that `SessionId` and
+their SQL. The database, cluster or workgroup, database user and secret are inherited from the
+first request. Optional target fields on a reuse request must match the original session.
+Temporary tables and session settings survive between calls, and Execute and Batch can share
+the same session. Metadata operations such as `ListTables` still open independent connections.
+
+`BEGIN` or `START TRANSACTION` opens an explicit transaction for later Execute calls;
+`COMMIT`/`END` commits it, and `ROLLBACK`/`ABORT` rolls it back. SQL errors and accepted running cancellation
+leave an explicit transaction aborted: later Execute calls fail until COMMIT or ROLLBACK ends
+the block, rolling back its changes. A batch remains a transaction boundary: its success commits the
+connection and its failure rolls it back, including any transaction opened by earlier Execute
+calls on that session. Transaction-control modifiers beyond optional `WORK` or `TRANSACTION`
+are rejected before execution. These cross-call transaction details have not been verified against live AWS.
+
+An omitted keep-alive on a reuse request preserves the previous idle timeout. A supplied value
+replaces it after successful admission, and the idle deadline starts when the query completes.
+Sending 0 with an existing `SessionId` closes the connection after that query. Omitting both
+fields, or sending 0 without a session id, keeps the existing connection-per-request behavior.
+
+Only one query can be admitted to a session at a time, including while that query waits for a
+worker. A different query against a busy session returns `ValidationException`; it is not queued
+behind the first query. Retrying the first query's `ClientToken` returns its original statement
+and session ids. Queue or admission-storage failures release their reservation without changing
+an existing session's idle deadline. Each cluster or workgroup supports up to 500 retained
+sessions, shared across callers and database names.
+
+Sessions are scoped to the signing account, Region and caller independently of `WithEvent`.
+Floci resolves the caller's IAM ARN when possible and otherwise uses the access key identity;
+an internal caller can supply its captured principal. A foreign, expired or reset session returns
+`ResourceNotFoundException`. These exact error choices and optional-field matching rules have
+not been compared with live AWS. A running session lasts at most 24 hours from creation;
+a one-second sweep cancels active work and closes connections at that deadline.
+
+Session ids appear in Execute, Batch, DescribeStatement and ListStatements responses. The id
+is saved with statement metadata and idempotency receipts, but live connections are runtime-only:
+reset and shutdown close them, and restarting Floci never reopens a session. A session request
+with an existing receipt can still replay its original response after the connection expires or
+after restart, subject to the normal receipt lifetime and caller ownership. `ListSessions` is
+not implemented.
+
+```python
+created = data.execute_statement(
+    WorkgroupName="analytics", Database="dev", SessionKeepAliveSeconds=60,
+    Sql="CREATE TEMP TABLE staging(id integer)")
+# Poll DescribeStatement until FINISHED before submitting another query in this session.
+session_id = created["SessionId"]
+inserted = data.execute_statement(SessionId=session_id, Sql="INSERT INTO staging VALUES (42)")
+# Poll inserted["Id"] before the next call.
+selected = data.execute_statement(SessionId=session_id, Sql="SELECT * FROM staging")
+```
+
+See [AWS session reuse guidance](https://docs.aws.amazon.com/redshift/latest/mgmt/data-api.html)
+for the idle timeout, 24-hour lifetime and single-query constraints.
+
 ## Compatibility Notes
 
 - **Execution is asynchronous.** `ExecuteStatement` and `BatchExecuteStatement` return an `Id` after admission to the shared bounded worker pool. `DescribeStatement` progresses through `SUBMITTED`, `STARTED`, and `FINISHED`, `FAILED` or `ABORTED`. Poll before reading results. Optional `WaitTimeSeconds` accepts integers from 1 to 30 and waits up to that duration. HTTP, Step Functions and Scheduler use the same executor. Saturation returns `ActiveStatementsExceededException`.
@@ -72,7 +130,7 @@ reported storage errors and queue-admission failures do not consume the token. A
 admission does consume it. `WaitTimeSeconds` on a retry can wait for the original execution without
 submitting another one.
 
-Request validation and database-target resolution run before admission coordination. Only requests
+Request validation and database-target resolution run before admission coordination for new connections. Only requests
 sharing an account, region, execute operation and token share an admission lock; tokenless requests
 use no token lock. The executor reserves queue capacity before writing admission state, so a full
 queue cannot create a receipt that reappears after restart. Workers run SQL only after admission
@@ -91,8 +149,10 @@ The token deadline is independent of result retention: if a configured result TT
 8 hours removes the statement, its receipt still returns the original admission response until
 the token expires, without restoring results.
 
-Floci scopes tokens by account, region and execute operation. It validates the request and resolves
-the database target before looking up a receipt, including on retries. Within that scope, reusing
+Floci scopes tokens by account, region and execute operation. Requests for new connections validate
+and resolve the database target before looking up a receipt, including on retries. SessionId-only
+retries check an existing receipt first so a closed connection does not prevent replay; receipts
+for retained sessions additionally check caller ownership. Within that scope, reusing
 a token with changed SQL, parameters or event settings replays the original operation; it does not
 change that operation. The precise AWS behavior for changed payloads, different IAM principals,
 cross-operation reuse and responses after result eviction has not been verified against a live
@@ -121,8 +181,7 @@ failure rolls back the batch. External read or preparation failures are stored a
 reported by `DescribeStatement`, as other SQL execution failures are.
 Create external schemas and tables outside a batch: `CREATE EXTERNAL TABLE` cannot run inside a transaction block on AWS, and a batch runs as one transaction, so both statements are rejected there.
 
-Data API session reuse is not supported. The legacy Phase 1 catalog
-is not the Glue-backed relational path.
+The legacy Phase 1 catalog is not the Glue-backed relational path.
 
 ## Configuration
 

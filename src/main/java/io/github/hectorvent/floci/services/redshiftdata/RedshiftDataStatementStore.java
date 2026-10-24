@@ -130,6 +130,10 @@ class RedshiftDataStatementStore {
         statements.clear();
     }
 
+    String accountId() {
+        return statements.accountId();
+    }
+
     void sweep() {
         if (idempotency != null) {
             try {
@@ -171,6 +175,7 @@ class RedshiftDataStatementStore {
         String workgroupName;
         String database;
         String dbUser;
+        String sessionId;
         String resultFormat = "JSON";
         Status status;
         String error;
@@ -214,6 +219,7 @@ class RedshiftDataStatementStore {
             copy.workgroupName = workgroupName;
             copy.database = database;
             copy.dbUser = dbUser;
+            copy.sessionId = sessionId;
             copy.resultFormat = resultFormat;
             copy.status = status;
             copy.error = error;
