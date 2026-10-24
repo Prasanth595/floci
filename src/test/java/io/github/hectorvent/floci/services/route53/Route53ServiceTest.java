@@ -249,6 +249,29 @@ class Route53ServiceTest {
     }
 
     @Test
+    void rootHostedZoneAcceptsAnyRecordName() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone(".", "ref-root", null, null).zone().getId();
+
+        service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("www.example.", 300, "1.2.3.4"))), null);
+
+        assertEquals(3, service.listResourceRecordSets(zoneId, null, null, 0).size());
+    }
+
+    @Test
+    void zoneCheckFoldsOnlyAsciiLettersLikeRecordIdentity() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone("k.example.", "ref-kelvin", null, null).zone().getId();
+
+        service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("www.K.example.", 300, "1.2.3.4"))), null);
+        AwsException e = assertThrows(AwsException.class, () -> service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("www.\u212A.example.", 300, "1.2.3.5"))), null));
+        assertEquals("InvalidChangeBatch", e.getErrorCode());
+    }
+
+    @Test
     void deleteFailsWithNotFoundMessageWhenNoRecordWithMatchingNameAndTypeExists() {
         Route53Service service = newService();
         String zoneId = service.createHostedZone("example.com.", "ref-missing", null, null).zone().getId();
