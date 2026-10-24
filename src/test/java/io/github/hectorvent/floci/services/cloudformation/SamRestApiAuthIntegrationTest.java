@@ -170,7 +170,6 @@ class SamRestApiAuthIntegrationTest {
     void samIamDefaultReachesAnOperationInsideFnIf(boolean pathLevel) throws Exception {
         ObjectNode template = template(false);
         template.set("Conditions", mapper.readTree("{\"Enabled\":{\"Fn::Equals\":[\"on\",\"on\"]}}"));
-        template.set("Outputs", mapper.readTree("{\"ApiId\":{\"Value\":{\"Ref\":\"Api\"}}}"));
         ((ObjectNode) template.at("/Resources/Api/Properties/Auth")).remove("ApiKeyRequired");
         ObjectNode paths = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody/paths");
         ObjectNode items = (ObjectNode) paths.get("/items");
@@ -182,19 +181,7 @@ class SamRestApiAuthIntegrationTest {
         } else {
             items.set("post", conditional);
         }
-        String stack = "sam-conditional-auth-" + UUID.randomUUID();
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateStack").formParam("StackName", stack)
-                .formParam("TemplateBody", template.toString())
-                .formParam("Capabilities.member.1", "CAPABILITY_AUTO_EXPAND")
-                .when().post("/").then().statusCode(200);
-        try {
-            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status(),
-                    () -> CfnStackWaits.failedResourceReason(stack));
-            String outputs = given().contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "DescribeStacks").formParam("StackName", stack)
-                    .when().post("/").then().statusCode(200).extract().asString();
-            String apiId = XmlParser.extractPairs(outputs, "Outputs", "OutputKey", "OutputValue").get("ApiId");
+        withDeployedApi(template, "sam-conditional-auth-", apiId -> {
             String resourceId = given().get("/restapis/" + apiId + "/resources")
                     .then().statusCode(200).extract().path("item.find { it.path == '/items' }.id");
             given().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST")
@@ -204,12 +191,7 @@ class SamRestApiAuthIntegrationTest {
             String path = "/execute-api/" + apiId + "/test/items";
             given().post(path).then().statusCode(403);
             given().headers(signed(path)).post(path).then().statusCode(200).body("accepted", equalTo(true));
-        } finally {
-            given().contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "DeleteStack").formParam("StackName", stack)
-                    .when().post("/").then().statusCode(200);
-            CfnStackWaits.awaitStackDeleted(stack);
-        }
+        });
     }
 
     @Test
@@ -218,7 +200,6 @@ class SamRestApiAuthIntegrationTest {
         template.set("Conditions", mapper.readTree("""
                 {"Outer":{"Fn::Equals":["on","off"]},"Inner":{"Fn::Equals":["on","on"]}}
                 """));
-        template.set("Outputs", mapper.readTree("{\"ApiId\":{\"Value\":{\"Ref\":\"Api\"}}}"));
         ((ObjectNode) template.at("/Resources/Api/Properties/Auth")).remove("ApiKeyRequired");
         ObjectNode items = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody/paths/~1items");
         JsonNode post = items.get("post").deepCopy();
@@ -228,19 +209,7 @@ class SamRestApiAuthIntegrationTest {
         ObjectNode outer = mapper.createObjectNode();
         outer.putArray("Fn::If").add("Outer").add(nested).add(post);
         items.set("post", outer);
-        String stack = "sam-nested-condition-auth-" + UUID.randomUUID();
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateStack").formParam("StackName", stack)
-                .formParam("TemplateBody", template.toString())
-                .formParam("Capabilities.member.1", "CAPABILITY_AUTO_EXPAND")
-                .when().post("/").then().statusCode(200);
-        try {
-            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
-            assertEquals("CREATE_COMPLETE", state.status(), state.reason());
-            String outputs = given().contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "DescribeStacks").formParam("StackName", stack)
-                    .when().post("/").then().statusCode(200).extract().asString();
-            String apiId = XmlParser.extractPairs(outputs, "Outputs", "OutputKey", "OutputValue").get("ApiId");
+        withDeployedApi(template, "sam-nested-condition-auth-", apiId -> {
             String resourceId = given().get("/restapis/" + apiId + "/resources")
                     .then().statusCode(200).extract().path("item.find { it.path == '/items' }.id");
             given().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST")
@@ -248,12 +217,7 @@ class SamRestApiAuthIntegrationTest {
             String path = "/execute-api/" + apiId + "/test/items";
             given().post(path).then().statusCode(403);
             given().headers(signed(path)).post(path).then().statusCode(200).body("accepted", equalTo(true));
-        } finally {
-            given().contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "DeleteStack").formParam("StackName", stack)
-                    .when().post("/").then().statusCode(200);
-            CfnStackWaits.awaitStackDeleted(stack);
-        }
+        });
     }
 
     @ParameterizedTest
@@ -261,7 +225,6 @@ class SamRestApiAuthIntegrationTest {
     void falseFnIfLeavesNoRouteWhileOtherRoutesGetTheSamDefault(boolean pathLevel) throws Exception {
         ObjectNode template = template(false);
         template.set("Conditions", mapper.readTree("{\"Disabled\":{\"Fn::Equals\":[\"on\",\"off\"]}}"));
-        template.set("Outputs", mapper.readTree("{\"ApiId\":{\"Value\":{\"Ref\":\"Api\"}}}"));
         ((ObjectNode) template.at("/Resources/Api/Properties/Auth")).remove("ApiKeyRequired");
         ObjectNode paths = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody/paths");
         ObjectNode items = (ObjectNode) paths.get("/items");
@@ -276,19 +239,7 @@ class SamRestApiAuthIntegrationTest {
             items.set("post", conditional);
             items.set("put", post);
         }
-        String stack = "sam-false-condition-auth-" + UUID.randomUUID();
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateStack").formParam("StackName", stack)
-                .formParam("TemplateBody", template.toString())
-                .formParam("Capabilities.member.1", "CAPABILITY_AUTO_EXPAND")
-                .when().post("/").then().statusCode(200);
-        try {
-            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status(),
-                    () -> CfnStackWaits.failedResourceReason(stack));
-            String outputs = given().contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "DescribeStacks").formParam("StackName", stack)
-                    .when().post("/").then().statusCode(200).extract().asString();
-            String apiId = XmlParser.extractPairs(outputs, "Outputs", "OutputKey", "OutputValue").get("ApiId");
+        withDeployedApi(template, "sam-false-condition-auth-", apiId -> {
             String resources = "/restapis/" + apiId + "/resources";
             String liveId = given().get(resources).then().statusCode(200)
                     .extract().path("item.find { it.path == '" + (pathLevel ? "/other" : "/items") + "' }.id");
@@ -299,12 +250,39 @@ class SamRestApiAuthIntegrationTest {
             }
             given().get(resources + "/" + liveId + "/methods/" + (pathLevel ? "POST" : "PUT"))
                     .then().statusCode(200).body("authorizationType", equalTo("AWS_IAM"));
+        });
+    }
+
+    /**
+     * Deploys the template as a stack with an {@code ApiId} output, hands that API id to the
+     * assertions once the stack is {@code CREATE_COMPLETE}, and deletes the stack afterwards.
+     */
+    private void withDeployedApi(ObjectNode template, String stackPrefix, ApiAssertions assertions) throws Exception {
+        template.set("Outputs", mapper.readTree("{\"ApiId\":{\"Value\":{\"Ref\":\"Api\"}}}"));
+        String stack = stackPrefix + UUID.randomUUID();
+        given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack").formParam("StackName", stack)
+                .formParam("TemplateBody", template.toString())
+                .formParam("Capabilities.member.1", "CAPABILITY_AUTO_EXPAND")
+                .when().post("/").then().statusCode(200);
+        try {
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
+            assertEquals("CREATE_COMPLETE", state.status(), state.reason());
+            String outputs = given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DescribeStacks").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200).extract().asString();
+            assertions.accept(XmlParser.extractPairs(outputs, "Outputs", "OutputKey", "OutputValue").get("ApiId"));
         } finally {
             given().contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "DeleteStack").formParam("StackName", stack)
                     .when().post("/").then().statusCode(200);
             CfnStackWaits.awaitStackDeleted(stack);
         }
+    }
+
+    @FunctionalInterface
+    private interface ApiAssertions {
+        void accept(String apiId) throws Exception;
     }
 
     private ObjectNode customAuthorizer() throws Exception {
