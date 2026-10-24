@@ -571,6 +571,18 @@ class LambdaWebIntegrationTest {
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(409)
                 .body("message", equalTo("The function " + ARN + " already exists."));
+        given().contentType("application/json")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/us-west-2/lambda/aws4_request")
+                .body("""
+                        {"functionName": "%s",
+                         "revisionConfig": {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s"}},
+                         "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
+                                            "authType": "ApplicationManaged"}}
+                        """.formatted(FN, BUILD.replace("nodejs24.x", "nodejs22.x"), ROLE))
+                .when().put(BASE + "/web-functions")
+                .then().statusCode(409)
+                .body("message", equalTo("A function named " + FN + " already exists in the account. Function names"
+                        + " must be unique across all regions in an account."));
         given().when().get(BASE + "/web-functions/does-not-exist")
                 .then().statusCode(404)
                 .body("message", equalTo("The function arn:aws:lambda:us-east-1:000000000000:web-function/does-not-exist"

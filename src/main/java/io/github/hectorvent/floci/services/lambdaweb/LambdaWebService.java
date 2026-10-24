@@ -335,19 +335,29 @@ public class LambdaWebService implements Resettable {
         }
     }
 
-    /** Stores a new function under its lock, refusing a name the region already has. */
+    /**
+     * Stores a new function under its lock, refusing a name the account already has in any region.
+     * Creates of one name in every region share a lock, so two regions cannot both take it.
+     */
     private WebFunction storeNewFunction(String region, String functionName, Map<String, String> tags,
                                          Consumer<WebFunction> populate) {
         String accountId = regionResolver.getAccountId();
-        synchronized (lockFor(region, functionName)) {
-            if (functions.get(key(region, functionName)).isPresent()) {
-                throw new AwsException("ConflictException",
-                        "The function " + functionArn(region, accountId, functionName) + " already exists.", 409);
+        synchronized (locks.computeIfAbsent(functionName, k -> new Object())) {
+            synchronized (lockFor(region, functionName)) {
+                if (functions.get(key(region, functionName)).isPresent()) {
+                    throw new AwsException("ConflictException",
+                            "The function " + functionArn(region, accountId, functionName) + " already exists.", 409);
+                }
+                if (functions.keys().stream().anyMatch(k -> k.endsWith("/" + functionName))) {
+                    throw new AwsException("ConflictException", "A function named " + functionName
+                            + " already exists in the account. Function names must be unique across all regions"
+                            + " in an account.", 409);
+                }
+                WebFunction fn = newFunction(region, accountId, functionName, tags == null ? Map.of() : tags);
+                populate.accept(fn);
+                functions.put(key(region, functionName), fn);
+                return copy(fn, WebFunction.class);
             }
-            WebFunction fn = newFunction(region, accountId, functionName, tags == null ? Map.of() : tags);
-            populate.accept(fn);
-            functions.put(key(region, functionName), fn);
-            return copy(fn, WebFunction.class);
         }
     }
 
