@@ -37,18 +37,18 @@ public final class UsagePlanLimits {
      */
     public static Limits fromRequest(Map<String, Object> request) {
         requireJsonTypes(request);
-        Throttle throttle = request.get("throttle") instanceof Map<?, ?> settings ? throttle(settings) : null;
-        Quota quota = null;
-        if (request.get("quota") instanceof Map<?, ?> settings) {
-            Object period = settings.get("period");
-            if (period != null && !PERIODS.contains(String.valueOf(period))) {
-                // CreateUsagePlan's input model refuses an unknown period before API Gateway's own check runs.
-                throw new AwsException("ValidationException", "1 validation error detected: Value '" + period
-                        + "' at 'createUsagePlanInput.quota.period' failed to satisfy constraint: "
-                        + "Member must satisfy enum value set: [MONTH, WEEK, DAY]", 400);
-            }
-            quota = quota(settings.get("limit"), settings.get("offset"), period);
+        Map<?, ?> quotaSettings = request.get("quota") instanceof Map<?, ?> settings ? settings : null;
+        Object period = quotaSettings == null ? null : quotaSettings.get("period");
+        if (period != null && !PERIODS.contains(String.valueOf(period))) {
+            // CreateUsagePlan's input model refuses an unknown period before any of API Gateway's own checks.
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + period
+                    + "' at 'createUsagePlanInput.quota.period' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [MONTH, WEEK, DAY]", 400);
         }
+        Throttle throttle = request.get("throttle") instanceof Map<?, ?> settings ? throttle(settings) : null;
+        Quota quota = quotaSettings == null
+                ? null
+                : quota(quotaSettings.get("limit"), quotaSettings.get("offset"), period);
         List<ApiStage> stages = new ArrayList<>();
         if (request.get("apiStages") instanceof List<?> entries) {
             for (Object entry : entries) {

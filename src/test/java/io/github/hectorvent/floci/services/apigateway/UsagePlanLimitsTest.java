@@ -100,6 +100,16 @@ class UsagePlanLimitsTest {
                 Arguments.of(Map.of("quota", Map.of("limit", 100, "period", "YEAR")), "ValidationException", 400,
                         "1 validation error detected: Value 'YEAR' at 'createUsagePlanInput.quota.period' failed to "
                                 + "satisfy constraint: Member must satisfy enum value set: [MONTH, WEEK, DAY]"),
+                // The input model's period check outranks every other check, measured on API Gateway.
+                Arguments.of(Map.of("quota", Map.of("limit", 1, "period", "YEAR"), "throttle", Map.of("burstLimit", -1)),
+                        "ValidationException", 400,
+                        "1 validation error detected: Value 'YEAR' at 'createUsagePlanInput.quota.period' failed to "
+                                + "satisfy constraint: Member must satisfy enum value set: [MONTH, WEEK, DAY]"),
+                Arguments.of(Map.of("quota", Map.of("limit", 1, "period", "YEAR"), "apiStages", List.of(
+                                Map.of("apiId", "a", "stage", "v1"), Map.of("apiId", "a", "stage", "v1"))),
+                        "ValidationException", 400,
+                        "1 validation error detected: Value 'YEAR' at 'createUsagePlanInput.quota.period' failed to "
+                                + "satisfy constraint: Member must satisfy enum value set: [MONTH, WEEK, DAY]"),
                 Arguments.of(Map.of("quota", Map.of("period", "DAY")), "BadRequestException", 400, limit),
                 Arguments.of(Map.of("quota", Map.of("limit", -1, "period", "DAY")), "BadRequestException", 400, limit),
                 Arguments.of(Map.of("quota", Map.of("limit", 1, "period", "DAY", "offset", 1)), "BadRequestException", 400,
