@@ -1733,7 +1733,7 @@ public class SesService {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
         requireInlineTemplateContent(template.subject(), template.textPart(), template.htmlPart());
-        requireBulkDestinationCount(request.entries().size());
+        requireBulkDestinationCount(sizeOf(request.entries()));
         configSetService.validateForSending(request.configurationSetName(), request.region());
         for (BulkEmailEntry entry : request.entries()) {
             int recipientCount = sizeOf(entry.toAddresses())
