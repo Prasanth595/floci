@@ -47,6 +47,7 @@ import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.endsWith;
@@ -469,10 +470,12 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertTrue(waited.stream().allMatch(response -> response.startsWith("HTTP/1.1 200 ")),
                 String.join("\n----\n", waited));
 
-        // The .local group is in the region that served and the centralized one in the home region.
+        // The .local group is in the region that served and the centralized one in the home region. Each batch
+        // reaches the .local group first.
         String group = "/aws/lambda/web/" + functionName;
         Predicate<List<String>> started = events -> events.stream().anyMatch(event -> event.contains("\"starting\""));
-        List<String> local = awaitLogEvents("us-west-2", group + ".local", westStream, started);
+        assertTrue(started.test(awaitLogEvents(group, westStream + "-000000000000-us-west-2", started)));
+        List<String> local = logEvents("us-west-2", group + ".local", westStream);
         JsonPath starting = JsonPath.from(local.stream().filter(event -> event.contains("\"starting\""))
                 .findFirst().orElseThrow());
         assertEquals("us-west-2", starting.getString("region"));
@@ -480,7 +483,6 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         assertEquals("us-west-2", initStart.getString("region"));
         assertTrue(initStart.getString("record.runtimeVersionArn").startsWith(
                 "arn:aws:lambda:us-west-2::runtime/nodejs24.x/version/"), initStart.prettify());
-        assertTrue(started.test(awaitLogEvents("us-east-1", group, westStream + "-000000000000-us-west-2", started)));
         assertEquals(List.of(), logEvents("us-east-1", group + ".local", westStream));
 
         // AWS/Lambda/Web is also centralized in the home region. The usage metrics are not.
@@ -816,16 +818,11 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     /** The messages of a log stream once they are {@code complete}, or what it holds after 15 seconds. */
     private static List<String> awaitLogEvents(String logGroup, String logStream, Predicate<List<String>> complete)
             throws InterruptedException {
-        return awaitLogEvents("us-east-1", logGroup, logStream, complete);
-    }
-
-    private static List<String> awaitLogEvents(String region, String logGroup, String logStream,
-                                               Predicate<List<String>> complete) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-        List<String> messages = logEvents(region, logGroup, logStream);
+        List<String> messages = logEvents(logGroup, logStream);
         while (!complete.test(messages) && System.nanoTime() < deadline) {
             Thread.sleep(200);
-            messages = logEvents(region, logGroup, logStream);
+            messages = logEvents(logGroup, logStream);
         }
         return messages;
     }
@@ -865,8 +862,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
     private static List<String> logEvents(String region, String logGroup, String logStream) {
         List<String> messages = given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/" + region
-                        + "/logs/aws4_request, SignedHeaders=host, Signature=abc")
+                .header("Authorization", auth("test", region, "logs"))
                 .header("X-Amz-Target", "Logs_20140328.GetLogEvents")
                 .contentType("application/x-amz-json-1.1")
                 .body("{\"logGroupName\": \"%s\", \"logStreamName\": \"%s\", \"startFromHead\": true}"

@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 
 /** Reads Web Function metrics back with GetMetricStatistics, as a client does. */
@@ -29,8 +30,7 @@ final class LambdaWebMetricStatistics {
                 .map(each -> "{\"Name\":\"" + each.getKey() + "\",\"Value\":\"" + each.getValue() + "\"}")
                 .collect(Collectors.joining(","));
         JsonPath result = given().contentType("application/x-amz-json-1.0")
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/" + region
-                        + "/monitoring/aws4_request, SignedHeaders=host, Signature=abc")
+                .header("Authorization", auth("test", region, "monitoring"))
                 .header("X-Amz-Target", "GraniteServiceVersion20100801.GetMetricStatistics")
                 .body("{\"Namespace\":\"" + namespace + "\",\"MetricName\":\"" + metric + "\",\"Dimensions\":[" + filter
                         + "],\"StartTime\":" + now.minusSeconds(600).getEpochSecond() + ",\"EndTime\":"

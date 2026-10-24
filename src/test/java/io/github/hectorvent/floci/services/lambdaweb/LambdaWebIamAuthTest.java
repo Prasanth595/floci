@@ -211,13 +211,14 @@ class LambdaWebIamAuthTest {
     @Test
     void underEnforcementTheRequestedRegionIsTheRegionOfTheDomain() {
         enforceFor(ACCOUNT);
-        function.policy = """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*",
-                 "Action":"lambda:InvokeWebFunctionEndpoint","Resource":"%s",
-                 "Condition":{"StringEquals":{"aws:RequestedRegion":"us-west-2"}}}]}""".formatted(ENDPOINT_ARN);
+        LambdaWebRequestSigner.Signed west = signer().credentials(USER_KEY, USER_SECRET, null).region("us-west-2")
+                .sign("GET", WEST_HOST, "/");
+        function.policy = denyRequestedRegion("us-west-2");
         assertTrue(allowsUserWith(allow(ENDPOINT_ARN, "")));
-        assertFalse(allows(signer().credentials(USER_KEY, USER_SECRET, null).region("us-west-2")
-                .sign("GET", WEST_HOST, "/"), WEST_HOST, "us-west-2"));
+        assertFalse(allows(west, WEST_HOST, "us-west-2"));
+        function.policy = denyRequestedRegion("us-east-1");
+        assertFalse(allowsUserWith(allow(ENDPOINT_ARN, "")));
+        assertTrue(allows(west, WEST_HOST, "us-west-2"));
     }
 
     @Test
@@ -318,6 +319,13 @@ class LambdaWebIamAuthTest {
                 {"Version":"2012-10-17","Statement":[{"Effect":"%s","Principal":{"AWS":"arn:aws:iam::%s:user/caller"},
                  "Action":"lambda:InvokeWebFunctionEndpoint","Resource":"%s"}]}"""
                 .formatted(effect, callerAccount, ENDPOINT_ARN);
+    }
+
+    private static String denyRequestedRegion(String region) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*",
+                 "Action":"lambda:InvokeWebFunctionEndpoint","Resource":"%s",
+                 "Condition":{"StringEquals":{"aws:RequestedRegion":"%s"}}}]}""".formatted(ENDPOINT_ARN, region);
     }
 
     private static String allow(String resource, String condition) {
