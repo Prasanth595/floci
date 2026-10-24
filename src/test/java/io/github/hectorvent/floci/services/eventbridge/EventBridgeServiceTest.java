@@ -39,8 +39,10 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -857,6 +859,57 @@ class EventBridgeServiceTest {
         service.putEvents(List.of(Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), REGION);
 
         verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), anyString(), eq(REGION), any());
+    }
+
+    @Test
+    void publishServiceEventSendsTheEventToTheRegionsDefaultBus() throws Exception {
+        Rule rule = service.putRule("emr", null, "{\"source\":[\"aws.emr\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("emr", null, List.of(target), REGION);
+
+        service.publishServiceEvent("aws.emr", "EMR Cluster State Change", "{\"state\":\"WAITING\"}", null, REGION);
+
+        ArgumentCaptor<String> eventJson = ArgumentCaptor.forClass(String.class);
+        verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), eventJson.capture(), eq(REGION), any());
+        JsonNode event = OBJECT_MAPPER.readTree(eventJson.getValue());
+        assertEquals("aws.emr", event.path("source").asText());
+        assertEquals("EMR Cluster State Change", event.path("detail-type").asText());
+        assertEquals(REGION, event.path("region").asText());
+        assertEquals(0, event.path("resources").size());
+        assertEquals("WAITING", event.path("detail").path("state").asText());
+    }
+
+    @Test
+    void publishServiceEventLeavesAnEntryTheBusRejectsUndelivered() {
+        service.putRule("emr", null, "{\"source\":[\"aws.emr\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        service.putTargets("emr", null,
+                List.of(new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null)), REGION);
+
+        assertDoesNotThrow(() -> service.publishServiceEvent("aws.emr", "EMR Cluster State Change", "not json",
+                null, REGION));
+
+        verify(dispatcherMock, never()).dispatch(anyString(), any(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void publishServiceEventPassesOverACallEventBridgeRefuses() {
+        EventBridgeService refusing = spy(service);
+        doThrow(new AwsException("InternalException", "unavailable", 500))
+                .when(refusing).putEvents(anyList(), eq(REGION));
+
+        assertDoesNotThrow(() -> refusing.publishServiceEvent("aws.emr", "EMR Cluster State Change", "{}", null,
+                REGION));
+    }
+
+    @Test
+    void publishServiceEventPassesOverAnyOtherFailure() {
+        EventBridgeService faulty = spy(service);
+        doThrow(new IllegalStateException("broken")).when(faulty).putEvents(anyList(), eq(REGION));
+
+        assertDoesNotThrow(() -> faulty.publishServiceEvent("aws.emr", "EMR Cluster State Change", "{}", null,
+                REGION));
     }
 
     private void assertPutTargetsValidation(String expectedMessage, Target... targets) {

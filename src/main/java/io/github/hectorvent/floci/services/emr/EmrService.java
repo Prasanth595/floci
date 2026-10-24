@@ -39,6 +39,8 @@ import java.util.function.Function;
  * leaving persistent clusters WAITING and transient clusters with steps TERMINATED.
  * The {@code clusterStartupDelaySeconds} config exists for
  * future deferred transitions; Phase 1 advances synchronously for deterministic tests.
+ * Every state a cluster or step enters is published as an {@code aws.emr} event, once the call that
+ * made the change no longer holds the service.
  */
 @ApplicationScoped
 public class EmrService {
@@ -54,6 +56,7 @@ public class EmrService {
     // Block public access is an account setting per Region, so this store is keyed by Region.
     private final StorageBackend<String, EmrBlockPublicAccess> blockPublicAccessStore;
     private final RegionResolver regionResolver;
+    private final EmrEventPublisher eventPublisher;
 
     private static final Set<String> COMPUTE_LIMITS_UNIT_TYPES = Set.of("InstanceFleetUnits", "Instances", "VCPU");
     private static final Set<String> SCALING_STRATEGIES = Set.of("DEFAULT", "ADVANCED");
@@ -67,7 +70,8 @@ public class EmrService {
     private final String defaultReleaseLabel;
 
     @Inject
-    public EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
+    public EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                      EmrEventPublisher eventPublisher) {
         this.clusterStore = storageFactory.create("emr", "emr-clusters.json",
                 new TypeReference<Map<String, EmrCluster>>() {});
         this.secConfigStore = storageFactory.create("emr", "emr-security-configs.json",
@@ -75,12 +79,21 @@ public class EmrService {
         this.blockPublicAccessStore = storageFactory.create("emr", "emr-block-public-access.json",
                 new TypeReference<Map<String, EmrBlockPublicAccess>>() {});
         this.regionResolver = regionResolver;
+        this.eventPublisher = eventPublisher;
         this.defaultReleaseLabel = config.services().emr().defaultReleaseLabel();
     }
 
     // ──────────────────────────── Cluster lifecycle ────────────────────────────
 
-    public synchronized EmrCluster runJobFlow(EmrCluster cluster, String region) {
+    public EmrCluster runJobFlow(EmrCluster cluster, String region) {
+        try {
+            return runJobFlowLocked(cluster, region);
+        } finally {
+            eventPublisher.publishQueued();
+        }
+    }
+
+    private synchronized EmrCluster runJobFlowLocked(EmrCluster cluster, String region) {
         // Only a missing Name fails AWS's framework validation: the member is REQUIRED but its
         // constraint is len=[0..256], so an explicit empty string is accepted by real EMR.
         if (cluster.getName() == null) {
@@ -109,13 +122,13 @@ public class EmrService {
             f.setProvisionedSpotCapacity(f.getTargetSpotCapacity());
             f.setState("RUNNING");
         }
-        for (EmrStep step : cluster.getSteps()) {
-            initStep(step);
-            completeStep(step);
-        }
+        eventPublisher.queue(eventPublisher.clusterStateChange(cluster, "STARTING"), region);
+        runSteps(cluster, cluster.getSteps(), region);
         advanceToWaiting(cluster);
         terminateAfterCompletedSteps(cluster);
         clusterStore.put(id, cluster);
+        // The WAITING a transient cluster passes through here is never seen, so it has no event.
+        eventPublisher.queue(eventPublisher.clusterStateChange(cluster, cluster.getState()), region);
         return cluster;
     }
 
@@ -153,7 +166,16 @@ public class EmrService {
         return result;
     }
 
-    public synchronized void terminateJobFlows(List<String> ids) {
+    public void terminateJobFlows(List<String> ids) {
+        try {
+            terminateJobFlowsLocked(ids);
+        } finally {
+            // A request naming a protected cluster still terminates the others before it fails.
+            eventPublisher.publishQueued();
+        }
+    }
+
+    private synchronized void terminateJobFlowsLocked(List<String> ids) {
         // AWS terminates the unprotected clusters in the request and then fails it with a
         // ValidationException if any were termination protected.
         boolean anyProtected = false;
@@ -175,6 +197,8 @@ public class EmrService {
             cluster.setStateChangeMessage("Terminated by user request");
             cluster.setEndDateTime(Instant.now());
             clusterStore.put(id, cluster);
+            eventPublisher.queue(eventPublisher.clusterStateChange(cluster, "TERMINATED"),
+                    regionResolver.getRegion());
         }
         if (anyProtected) {
             throw new AwsException("ValidationException",
@@ -212,7 +236,15 @@ public class EmrService {
 
     // ──────────────────────────── Steps ────────────────────────────
 
-    public synchronized List<String> addJobFlowSteps(String clusterId, List<EmrStep> steps) {
+    public List<String> addJobFlowSteps(String clusterId, List<EmrStep> steps) {
+        try {
+            return addJobFlowStepsLocked(clusterId, steps);
+        } finally {
+            eventPublisher.publishQueued();
+        }
+    }
+
+    private synchronized List<String> addJobFlowStepsLocked(String clusterId, List<EmrStep> steps) {
         // AWS's own wording for an unknown job flow here, not DescribeCluster's: a botocore ClientError
         // (raster-foundry/raster-foundry#352) and a CloudTrail record on AWS re:Post both show it.
         EmrCluster cluster = clusterId == null ? requireCluster(null) : findCluster(clusterId).orElseThrow(
@@ -220,17 +252,17 @@ public class EmrService {
         if ("TERMINATED".equals(cluster.getState())) {
             throw new AwsException("ValidationException", JOB_FLOW_SHUT_DOWN, 400);
         }
-        List<String> ids = new ArrayList<>();
-        for (EmrStep step : steps) {
-            initStep(step);
-            completeStep(step);
-            cluster.getSteps().add(step);
-            ids.add(step.getId());
-        }
+        String region = regionResolver.getRegion();
+        runSteps(cluster, steps, region);
+        cluster.getSteps().addAll(steps);
+        List<String> ids = steps.stream().map(EmrStep::getId).toList();
         if (!steps.isEmpty()) {
             terminateAfterCompletedSteps(cluster);
         }
         clusterStore.put(clusterId, cluster);
+        if ("TERMINATED".equals(cluster.getState())) {
+            eventPublisher.queue(eventPublisher.clusterStateChange(cluster, "TERMINATED"), region);
+        }
         return ids;
     }
 
@@ -263,7 +295,15 @@ public class EmrService {
 
     public record CancelStepInfo(String stepId, String status, String reason) {}
 
-    public synchronized List<CancelStepInfo> cancelSteps(String clusterId, List<String> stepIds) {
+    public List<CancelStepInfo> cancelSteps(String clusterId, List<String> stepIds) {
+        try {
+            return cancelStepsLocked(clusterId, stepIds);
+        } finally {
+            eventPublisher.publishQueued();
+        }
+    }
+
+    private synchronized List<CancelStepInfo> cancelStepsLocked(String clusterId, List<String> stepIds) {
         EmrCluster cluster = requireCluster(clusterId);
         List<CancelStepInfo> result = new ArrayList<>();
         for (String stepId : stepIds) {
@@ -275,6 +315,8 @@ public class EmrService {
                 step.setState("CANCELLED");
                 step.setEndDateTime(Instant.now());
                 result.add(new CancelStepInfo(stepId, "SUBMITTED", null));
+                eventPublisher.queue(eventPublisher.stepStatusChange(cluster, step, "CANCELLED"),
+                        regionResolver.getRegion());
             } else {
                 result.add(new CancelStepInfo(stepId, "FAILED",
                         "Step is not in a cancellable state: " + step.getState()));
@@ -823,6 +865,22 @@ public class EmrService {
         cluster.setStateChangeReasonCode(cluster.getSteps().isEmpty() ? null : "ALL_STEPS_COMPLETED");
         cluster.setStateChangeMessage("Cluster ready to run steps.");
         cluster.setReadyDateTime(Instant.now());
+    }
+
+    /**
+     * Runs a request's steps as the Management Guide describes ("Running steps to process data"): all
+     * are set PENDING, then each completes before the next starts. Here they complete at once. Each
+     * change queues its event as it is made, so the events follow the steps' recorded times.
+     */
+    private void runSteps(EmrCluster cluster, List<EmrStep> steps, String region) {
+        for (EmrStep step : steps) {
+            initStep(step);
+            eventPublisher.queue(eventPublisher.stepStatusChange(cluster, step, "PENDING"), region);
+        }
+        for (EmrStep step : steps) {
+            completeStep(step);
+            eventPublisher.queue(eventPublisher.stepStatusChange(cluster, step, "COMPLETED"), region);
+        }
     }
 
     private void terminateAfterCompletedSteps(EmrCluster cluster) {

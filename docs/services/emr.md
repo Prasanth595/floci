@@ -55,8 +55,9 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 
 ## Cluster lifecycle
 
-Steps complete immediately in this metadata-only emulator. A cluster created with
-`Instances.KeepJobFlowAliveWhenNoSteps` set to `false` terminates after its initial steps or
+Steps complete immediately in this metadata-only emulator, in the order the Management Guide gives:
+a request's steps are all created `PENDING`, then each completes before the next starts. A cluster
+created with `Instances.KeepJobFlowAliveWhenNoSteps` set to `false` terminates after its initial steps or
 steps added later complete, reporting `ALL_STEPS_COMPLETED`. A cluster with no steps remains
 `WAITING` until steps are added. Set `KeepJobFlowAliveWhenNoSteps` to `true` to keep the cluster
 `WAITING` after its steps complete. Automatic step-completion termination also applies when
@@ -83,6 +84,39 @@ still accepted.
 
 A state machine drives clusters and steps through the `elasticmapreduce:` integrations, `.sync`
 included; see [Step Functions: Amazon EMR tasks](step-functions.md#amazon-emr-tasks).
+
+## EventBridge events
+
+Every state a cluster or a step enters is sent to the default EventBridge bus of its Region, in the
+account that made the call, as AWS sends it: source `aws.emr`, detail type `EMR Cluster State Change`
+or `EMR Step Status Change`, an empty `resources`, and the detail of the EMR Management Guide's
+examples. A cluster's detail holds `severity`, `stateChangeReason`, `name`, `clusterId`, `state` and
+`message`; a step's holds `severity`, `actionOnFailure`, `stepId`, `name`, `clusterId`, `state` and
+`message`. The severity and message are the ones the guide's "Monitoring Amazon EMR events" tables
+give each state, with times to the minute (`2026-10-24 09:41 UTC`).
+
+Since steps complete at once, each call sends:
+
+| Call | Events, in order |
+|---|---|
+| `RunJobFlow` | the cluster `STARTING`; each step `PENDING`, then each `COMPLETED`; then the cluster `WAITING`, or `TERMINATED` with `ALL_STEPS_COMPLETED` when it ends after its steps |
+| `AddJobFlowSteps` | each step `PENDING`, then each `COMPLETED`; then the cluster `TERMINATED` with `ALL_STEPS_COMPLETED` when it ends after them |
+| `TerminateJobFlows` | `TERMINATED` with `USER_REQUEST` for each cluster it ends, also when a protected cluster fails the call |
+| `CancelSteps` | `CANCELLED` for each step it cancels, none while steps complete at once |
+
+A `STARTING` or `WAITING` cluster's `stateChangeReason` is `{"code":""}`, as in the guide's example,
+and a `TERMINATED` one's carries the reason's code and message, such as
+`{"code":"USER_REQUEST","message":"Terminated by user request"}`. `TERMINATED` is `INFO` for
+`USER_REQUEST` and `ALL_STEPS_COMPLETED` and `CRITICAL` for any other reason; a cancelled step is
+`WARN`. The tables have no row for a cluster's `BOOTSTRAPPING`, `RUNNING` or `TERMINATING`, which
+send nothing. A step is never seen `RUNNING`, and a `WAITING` cluster that runs added steps stays
+`WAITING`, so neither sends an event for it. The guide gives two `WAITING` messages without saying
+when each applies: a cluster that ran steps reports it "finished running all pending steps", one that
+did not that it "was created ... and is ready for use".
+
+Events go out in the order their changes were made, once the call that made them no longer holds the
+cluster. A rule's target that calls EMR while an event is delivered, such as one ending the cluster on
+its `STARTING` event, has its events sent after the rest of that call's.
 
 ## Release catalogue
 

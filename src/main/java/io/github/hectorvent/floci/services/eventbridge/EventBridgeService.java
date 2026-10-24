@@ -838,6 +838,26 @@ public class EventBridgeService implements ResourceProvider {
         return entry;
     }
 
+    /**
+     * Publishes one event an AWS service sends on its own behalf to {@code region}'s default bus, in the
+     * caller's account. Best effort, as the change it reports has already happened and its caller must
+     * not see it fail: an entry the bus rejects, or any failure publishing it, is logged and goes no
+     * further.
+     */
+    public void publishServiceEvent(String source, String detailType, String detail, String resourceArn,
+                                    String region) {
+        try {
+            PutEventsResult result = putEvents(List.of(serviceEventEntry(source, detailType, detail, resourceArn)),
+                    region);
+            if (result.failedCount() > 0) {
+                LOG.warnv("EventBridge rejected the {0} {1} event in {2}: {3}", source, detailType, region,
+                        result.entries());
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "EventBridge could not publish the {0} {1} event in {2}", source, detailType, region);
+        }
+    }
+
     public PutEventsResult putEvents(List<Map<String, Object>> entries, String region) {
         return putEvents(entries, region, null);
     }
