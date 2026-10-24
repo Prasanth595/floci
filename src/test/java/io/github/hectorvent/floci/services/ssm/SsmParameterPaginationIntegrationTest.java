@@ -56,6 +56,18 @@ class SsmParameterPaginationIntegrationTest {
     }
 
     @Test
+    void getParametersByPathResumesAfterTheLastItemOfAPageIsDeleted() {
+        String path = "/pagination-" + UUID.randomUUID();
+        IntStream.rangeClosed(1, 4).forEach(i -> put(path + "/p" + i, "v"));
+
+        String token = ok("GetParametersByPath", Map.of("Path", path, "MaxResults", 2)).getString("NextToken");
+        ok("DeleteParameter", Map.of("Name", path + "/p2"));
+
+        assertEquals(List.of(path + "/p3", path + "/p4"), ok("GetParametersByPath",
+                Map.of("Path", path, "MaxResults", 2, "NextToken", token)).getList("Parameters.Name", String.class));
+    }
+
+    @Test
     void getParametersByPathWithoutMaxResultsReturnsEverything() {
         String path = "/pagination-" + UUID.randomUUID();
         IntStream.rangeClosed(1, 12).forEach(i -> put(path + "/p" + i, "v"));
@@ -128,6 +140,8 @@ class SsmParameterPaginationIntegrationTest {
                 .getString("NextToken");
         String historyToken = ok("GetParameterHistory", Map.of("Name", first, "MaxResults", 1))
                 .getString("NextToken");
+        String describeToken = ok("DescribeParameters", Map.of("ParameterFilters", nameBeginsWith(root),
+                "MaxResults", 1)).getString("NextToken");
 
         error("GetParametersByPath", Map.of("Path", root + "/b", "NextToken", pathToken), "InvalidNextToken");
         error("GetParametersByPath", Map.of("Path", root + "/a", "Recursive", true, "NextToken", pathToken),
@@ -137,6 +151,8 @@ class SsmParameterPaginationIntegrationTest {
         error("GetParameterHistory", Map.of("Name", first, "NextToken", pathToken), "InvalidNextToken");
         error("DescribeParameters", Map.of("NextToken", pathToken), "InvalidNextToken");
         error("DescribeParameters", Map.of("NextToken", historyToken), "InvalidNextToken");
+        error("GetParametersByPath", Map.of("Path", root + "/a", "NextToken", describeToken), "InvalidNextToken");
+        error("GetParameterHistory", Map.of("Name", first, "NextToken", describeToken), "InvalidNextToken");
         // The token still resumes the listing it came from, with or without a trailing slash.
         assertEquals(List.of(root + "/a/p2"), ok("GetParametersByPath",
                 Map.of("Path", root + "/a/", "MaxResults", 1, "NextToken", pathToken))
@@ -157,16 +173,23 @@ class SsmParameterPaginationIntegrationTest {
                 .getString("NextToken");
         String historyToken = ok(issuer, "GetParameterHistory", Map.of("Name", path + "/p1", "MaxResults", 1))
                 .getString("NextToken");
+        String describeToken = ok(issuer, "DescribeParameters", Map.of("ParameterFilters", nameBeginsWith(path),
+                "MaxResults", 1)).getString("NextToken");
 
         error(other, "GetParametersByPath", Map.of("Path", path, "MaxResults", 1, "NextToken", pathToken),
                 "InvalidNextToken");
         error(other, "GetParameterHistory", Map.of("Name", path + "/p1", "MaxResults", 1, "NextToken", historyToken),
                 "InvalidNextToken");
+        error(other, "DescribeParameters", Map.of("ParameterFilters", nameBeginsWith(path), "MaxResults", 1,
+                "NextToken", describeToken), "InvalidNextToken");
         assertEquals(List.of(path + "/p2"), ok(issuer, "GetParametersByPath",
                 Map.of("Path", path, "MaxResults", 1, "NextToken", pathToken)).getList("Parameters.Name", String.class));
         assertEquals(List.of(2L), ok(issuer, "GetParameterHistory",
                 Map.of("Name", path + "/p1", "MaxResults", 1, "NextToken", historyToken))
                 .getList("Parameters.Version", Long.class));
+        assertEquals(List.of(path + "/p2"), ok(issuer, "DescribeParameters",
+                Map.of("ParameterFilters", nameBeginsWith(path), "MaxResults", 1, "NextToken", describeToken))
+                .getList("Parameters.Name", String.class));
     }
 
     @Test
@@ -177,6 +200,8 @@ class SsmParameterPaginationIntegrationTest {
         error("GetParametersByPath", Map.of("Path", "/pagination", "NextToken", 5), "SerializationException");
         error("GetParameterHistory", Map.of("Name", name, "MaxResults", "2"), "SerializationException");
         error("GetParameterHistory", Map.of("Name", name, "NextToken", 5), "SerializationException");
+        error("DescribeParameters", Map.of("MaxResults", "2"), "SerializationException");
+        error("DescribeParameters", Map.of("NextToken", 5), "SerializationException");
     }
 
     @Test
@@ -185,6 +210,10 @@ class SsmParameterPaginationIntegrationTest {
         error("GetParameterHistory", Map.of("Name", missing, "MaxResults", "2"), "SerializationException");
         error("GetParameterHistory", Map.of("Name", missing, "NextToken", 5), "SerializationException");
         error("GetParameterHistory", Map.of("Name", missing, "MaxResults", 51), "ValidationException");
+    }
+
+    private static List<Map<String, Object>> nameBeginsWith(String prefix) {
+        return List.of(Map.of("Key", "Name", "Option", "BeginsWith", "Values", List.of(prefix)));
     }
 
     private void put(String name, String value) {

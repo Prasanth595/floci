@@ -28,9 +28,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -240,7 +238,7 @@ public class SsmJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        PaginatedResult<Parameter> page = page(pageRequest, params, Parameter::getName,
+        PaginatedResult<Parameter> page = page(pageRequest, params, Parameter::getName, ALL_ITEMS,
                 GET_PARAMETERS_BY_PATH_TOKEN + ssmService.accountId() + ":" + region + ":" + recursive + ":"
                         + (path.endsWith("/") ? path : path + "/"));
         for (Parameter p : page.items()) {
@@ -289,7 +287,7 @@ public class SsmJsonHandler {
         ArrayNode historyArray = objectMapper.createArrayNode();
         // Zero-padded so the cursor's string order is version order ("10" would sort before "9").
         PaginatedResult<ParameterHistory> page = page(pageRequest, history,
-                h -> String.format("%019d", h.getVersion()),
+                h -> String.format("%019d", h.getVersion()), ALL_ITEMS,
                 GET_PARAMETER_HISTORY_TOKEN + ssmService.accountId() + ":" + region + ":" + name);
         for (ParameterHistory h : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
@@ -316,6 +314,8 @@ public class SsmJsonHandler {
     private static final int DESCRIBE_PARAMETERS_MAX_RESULTS = 50;
     private static final int GET_PARAMETERS_BY_PATH_MAX_RESULTS = 10;
     private static final int GET_PARAMETER_HISTORY_MAX_RESULTS = 50;
+    private static final int ALL_ITEMS = Integer.MAX_VALUE;
+    private static final String DESCRIBE_PARAMETERS_TOKEN = "DescribeParameters:";
     private static final String GET_PARAMETERS_BY_PATH_TOKEN = "GetParametersByPath:";
     private static final String GET_PARAMETER_HISTORY_TOKEN = "GetParameterHistory:";
 
@@ -339,38 +339,18 @@ public class SsmJsonHandler {
     }
 
     /**
-     * Pages a listing. An omitted {@code MaxResults} returns everything rather than AWS's single
+     * Pages a listing, returning {@code defaultPage} items when {@code MaxResults} is omitted.
+     * GetParametersByPath and GetParameterHistory pass {@link #ALL_ITEMS} rather than AWS's single
      * page, so callers that never follow {@code NextToken} still see every item. A token carries
      * {@code namespace}, so one minted for another operation, account, region, path or parameter is refused
      * instead of read as a position here.
      */
     private static <T> PaginatedResult<T> page(PageRequest pageRequest, List<T> items,
-                                               Function<T, String> cursorOf, String namespace) {
+                                               Function<T, String> cursorOf, int defaultPage, String namespace) {
         Integer maxResults = pageRequest.maxResults();
-        return Pagination.paginate(items, cursorOf, maxResults != null ? maxResults : Integer.MAX_VALUE,
+        return Pagination.paginate(items, cursorOf, maxResults != null ? maxResults : defaultPage,
                 pageRequest.nextToken(), namespace,
                 token -> new AwsException("InvalidNextToken", "The specified token isn't valid.", 400));
-    }
-
-    /**
-     * DescribeParameters' tokens are bare name cursors, so a GetParametersByPath or
-     * GetParameterHistory token would otherwise decode as a name and silently skip results. Their
-     * namespaces contain a colon, which AWS does not allow in a parameter name, so no cursor
-     * DescribeParameters mints for an AWS-valid name starts with either one.
-     */
-    private static void refuseListingToken(String nextToken) {
-        if (nextToken == null) {
-            return;
-        }
-        String decoded;
-        try {
-            decoded = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            return; // not base64 at all: Pagination reports it
-        }
-        if (decoded.startsWith(GET_PARAMETERS_BY_PATH_TOKEN) || decoded.startsWith(GET_PARAMETER_HISTORY_TOKEN)) {
-            throw new AwsException("InvalidNextToken", "The specified token isn't valid.", 400);
-        }
     }
 
     private static void putNextToken(ObjectNode response, PaginatedResult<?> page) {
@@ -390,18 +370,10 @@ public class SsmJsonHandler {
             filters.add(new ParameterStringFilter(key, "Equals", textValues(f.path("Values"))));
         }
 
-        Integer maxResults = request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
-        if (maxResults != null && (maxResults < 1 || maxResults > DESCRIBE_PARAMETERS_MAX_RESULTS)) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + maxResults + "' at 'maxResults' failed to "
-                            + "satisfy constraint: Member must have value between 1 and "
-                            + DESCRIBE_PARAMETERS_MAX_RESULTS);
-        }
-        refuseListingToken(request.path("NextToken").asText(null));
-        PaginatedResult<Parameter> page = Pagination.paginate(
-                ssmService.describeParameters(filters, region), Parameter::getName,
-                maxResults, request.path("NextToken").asText(null),
-                DESCRIBE_PARAMETERS_MAX_RESULTS, "InvalidNextToken");
+        PageRequest pageRequest = pageRequest(request, DESCRIBE_PARAMETERS_MAX_RESULTS);
+        PaginatedResult<Parameter> page = page(pageRequest, ssmService.describeParameters(filters, region),
+                Parameter::getName, DESCRIBE_PARAMETERS_MAX_RESULTS,
+                DESCRIBE_PARAMETERS_TOKEN + ssmService.accountId() + ":" + region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
@@ -435,9 +407,7 @@ public class SsmJsonHandler {
             parametersArray.add(node);
         }
         response.set("Parameters", parametersArray);
-        if (page.nextToken() != null) {
-            response.put("NextToken", page.nextToken());
-        }
+        putNextToken(response, page);
         return Response.ok(response).build();
     }
 
