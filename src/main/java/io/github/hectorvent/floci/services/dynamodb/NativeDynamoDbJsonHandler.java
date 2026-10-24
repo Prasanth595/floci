@@ -2021,7 +2021,7 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbService.requireSseOverrideAcrossRegions(arn.region(), region,
                 request.path("SSESpecificationOverride").isObject());
 
-        TableBackup backup = dynamoDbService.describeBackup(backupArn, arn.region());
+        TableBackup backup = dynamoDbService.restoreSourceBackup(arn, targetTableName, region);
         TableDefinition table = tableService.restoreTable(DynamoDbService.snapshotOf(backup.getTable()),
                 targetTableName, parseRestoreOverrides(request), region);
         ObjectNode description = tableToNode(table);
@@ -2065,6 +2065,7 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "Invalid Request: Must provide exactly one of: sourceTableArn, sourceTableName", 400);
         }
+        DynamoDbService.requireSourceInPartition(source.region(), region);
         boolean useLatestRestorableTime = request.path("UseLatestRestorableTime").asBoolean(false);
         Instant restoreDateTime = timestampOrNull(request, "RestoreDateTime");
         if (useLatestRestorableTime && restoreDateTime != null) {

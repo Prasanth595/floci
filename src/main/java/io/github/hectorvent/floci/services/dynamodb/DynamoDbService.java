@@ -11,6 +11,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
@@ -2966,7 +2967,10 @@ public class DynamoDbService {
         } catch (IllegalArgumentException e) {
             throw invalidParameter("sourceTableArn is not a valid ARN");
         }
-        if (!"dynamodb".equals(arn.service())) {
+        if (arn.partition().isEmpty()) {
+            throw invalidParameter("Partition must be non-empty: " + sourceTableArn);
+        }
+        if (!"dynamodb".equals(arn.service()) || !arn.partition().equals(AwsRegions.partitionFor(region))) {
             throw invalidParameter("Invalid resource Arn: " + sourceTableArn);
         }
         if (!arn.resource().startsWith("table/")) {
@@ -2989,6 +2993,12 @@ public class DynamoDbService {
         if (!sourceRegion.equals(region) && !sseOverride) {
             throw new AwsException("ValidationException",
                     "Invalid Request: sseSpecificationOverride must be provided for cross-region restores", 400);
+        }
+    }
+
+    static void requireSourceInPartition(String sourceRegion, String region) {
+        if (!AwsRegions.partitionFor(sourceRegion).equals(AwsRegions.partitionFor(region))) {
+            throw new AwsException("ValidationException", "Invalid Request: Table ARN is invalid.", 400);
         }
     }
 
@@ -5244,6 +5254,15 @@ public class DynamoDbService {
                 .filter(this::isUnexpired)
                 .orElseThrow(() -> new AwsException("BackupNotFoundException",
                         "Backup not found: " + backupArn, 400));
+    }
+
+    /** AWS fails with an internal error for a backup of another partition, after it checks the target. */
+    public TableBackup restoreSourceBackup(DynamoDbBackupArns.BackupArn arn, String targetTableName, String region) {
+        if (arn.isValid() && !arn.partition().equals(AwsRegions.partitionFor(region))) {
+            requireRestoreTarget(targetTableName, region);
+            throw new AwsException("InternalServerError", "Internal server error", 500);
+        }
+        return describeBackup(arn.arn(), arn.region());
     }
 
     public TableBackup deleteBackup(String backupArn, String region) {
