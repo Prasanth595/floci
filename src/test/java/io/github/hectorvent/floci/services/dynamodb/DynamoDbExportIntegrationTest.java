@@ -158,21 +158,48 @@ class DynamoDbExportIntegrationTest {
     }
 
     @Test
-    void exportTableToPointInTime_unsupportedExportType_returnsValidationException() {
-        given()
-            .header("X-Amz-Target", "DynamoDB_20120810.ExportTableToPointInTime")
-            .contentType(DYNAMODB_CONTENT_TYPE)
-            .body("""
-                {
-                    "TableArn": "%s",
-                    "S3Bucket": "%s",
-                    "ExportType": "INCREMENTAL_EXPORT"
-                }
-                """.formatted(TABLE_ARN, BUCKET_NAME))
-            .when().post("/")
-            .then()
-            .statusCode(400)
-            .body("__type", containsString("ValidationException"));
+    void incrementalExportRequestIsCheckedAsAwsChecksIt() {
+        String over1024 = "a".repeat(1025);
+        String enumSet = "' failed to satisfy constraint: Member must satisfy enum value set: ";
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3SseAlgorithm": "BAD", "S3Prefix": "%s", "ExportType": "BAD",
+             "IncrementalExportSpecification": {"ExportViewType": "BAD"}, "ExportFormat": "BAD"}
+            """.formatted(TABLE_ARN_PREFIX + "IncrementalMissing", BUCKET_NAME, over1024)), "ValidationException",
+                "5 validation errors detected: Value 'BAD' at 's3SseAlgorithm" + enumSet + "[AES256, KMS]; Value '"
+                + over1024 + "' at 's3Prefix' failed to satisfy constraint: Member must have length less than or equal to 1024; "
+                + "Value 'BAD' at 'exportType" + enumSet + "[FULL_EXPORT, INCREMENTAL_EXPORT]; "
+                + "Value 'BAD' at 'incrementalExportSpecification.exportViewType" + enumSet + "[NEW_AND_OLD_IMAGES, NEW_IMAGE]; "
+                + "Value 'BAD' at 'exportFormat" + enumSet + "[ION, DYNAMODB_JSON]");
+        expectError(incrementalExport("IncrementalMissing", "inc", null), "TableNotFoundException",
+                "Table not found: " + TABLE_ARN_PREFIX + "IncrementalMissing");
+
+        String tooLong = "a".repeat(949);
+        expectError(incrementalExport(TABLE_NAME, tooLong, null), "ValidationException",
+                "Invalid Request: Incremental Export Specification expected when export type is set as Incremental Export");
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "%s", "ExportType": "FULL_EXPORT",
+             "IncrementalExportSpecification": {"ExportFromTime": 1}}
+            """.formatted(TABLE_ARN, BUCKET_NAME, tooLong)), "ValidationException",
+                "Invalid Request: When Export Type is Full Export , Incremental Export Specification should not be provided");
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "%s", "IncrementalExportSpecification": {"ExportFromTime": 1}}
+            """.formatted(TABLE_ARN, BUCKET_NAME, tooLong)), "ValidationException",
+                "Invalid Request: Export Type expected to be Incremental Export when incremental export specification is provided");
+        expectError(incrementalExport(TABLE_NAME, tooLong, "{\"ExportToTime\": 1}"), "ValidationException",
+                "Invalid Request: ExportFromTime must be provided in IncrementalExportSpecification");
+        expectError(incrementalExport(TABLE_NAME, tooLong, "{\"ExportFromTime\": 1}"), "ValidationException",
+                "Invalid Request: S3 Prefix is too long");
+        expectError(incrementalExport(TABLE_NAME, "inc", "{\"ExportFromTime\": 1000000000.5, \"ExportToTime\": 1}"),
+                "InvalidExportTimeException",
+                "Incremental export period from time cannot be less than the table creation time : 2001-09-09T01:46:40.500Z");
+        long now = System.currentTimeMillis() / 1000;
+        expectError(incrementalExport(TABLE_NAME, "inc", "{\"ExportFromTime\": %d, \"ExportToTime\": %d}"
+                .formatted(now, now + 3600)), "InvalidExportTimeException",
+                "Incremental export period to time cannot be greater than the current time : "
+                + Instant.ofEpochSecond(now + 3600));
+        expectError(incrementalExport(TABLE_NAME, "inc", "{\"ExportFromTime\": %d}".formatted(now + 60)),
+                "InvalidExportTimeException",
+                "Incremental export period from time should not be greater or equal to incremental export period to time");
     }
 
     @Test
@@ -397,6 +424,13 @@ class DynamoDbExportIntegrationTest {
     }
 
     // --- Helpers ---
+
+    private static ValidatableResponse incrementalExport(String table, String prefix, String specification) {
+        return ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "%s", "ExportType": "INCREMENTAL_EXPORT"%s}
+            """.formatted(TABLE_ARN_PREFIX + table, BUCKET_NAME, prefix,
+                specification != null ? ", \"IncrementalExportSpecification\": " + specification : ""));
+    }
 
     private static ValidatableResponse exportWithPrefix(String table, String prefix) {
         return given()

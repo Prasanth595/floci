@@ -207,7 +207,7 @@ class DynamoDbExportTest {
                         .exportType(ExportType.INCREMENTAL_EXPORT)
                         .build()))
                 .isInstanceOf(software.amazon.awssdk.services.dynamodb.model.DynamoDbException.class)
-                .hasMessageContaining("not supported");
+                .hasMessageContaining("Incremental Export Specification expected when export type is set as Incremental Export");
     }
 
     @Test
@@ -280,6 +280,24 @@ class DynamoDbExportTest {
         assertThat(files.data().split("\n")).hasSize(4)
                 .allSatisfy(line -> assertThat(line).startsWith("$ion_1_0 {Item:{").endsWith("}}"))
                 .anySatisfy(line -> assertThat(line).contains("pk:\"user-3\"", "sk:\"order-003\"", "total:15d1"));
+    }
+
+    @Test
+    @Order(11)
+    void exportTableToPointInTime_incrementalUnder15Minutes_throwsInvalidExportTimeException() {
+        Instant created = ddb.describeTable(r -> r.tableName(TABLE_NAME)).table().creationDateTime();
+
+        assertThatThrownBy(() -> ddb.exportTableToPointInTime(ExportTableToPointInTimeRequest.builder()
+                .tableArn(tableArn)
+                .s3Bucket(BUCKET_NAME)
+                .exportType(ExportType.INCREMENTAL_EXPORT)
+                .incrementalExportSpecification(IncrementalExportSpecification.builder()
+                        .exportFromTime(created.truncatedTo(ChronoUnit.SECONDS))
+                        .exportViewType(ExportViewType.NEW_IMAGE)
+                        .build())
+                .build()))
+                .isInstanceOf(InvalidExportTimeException.class)
+                .hasMessageContaining("Difference between export period from time and export period to time is less than 15 minutes");
     }
 
     /** The manifests and the data of an export that wrote one data file. */

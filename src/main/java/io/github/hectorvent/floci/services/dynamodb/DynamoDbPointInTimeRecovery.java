@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,6 +28,9 @@ import java.util.concurrent.ConcurrentHashMap;
 final class DynamoDbPointInTimeRecovery {
 
     record RestoreWindow(Instant earliest, Instant latest) {}
+
+    /** {@code oldItem} or {@code newItem} is null when the item did not exist then. */
+    record ItemChange(JsonNode oldItem, JsonNode newItem, Instant lastWrite) {}
 
     /** The changes of one table, oldest first. */
     private static final class Changes {
@@ -137,6 +141,41 @@ final class DynamoDbPointInTimeRecovery {
             }
         }
         return new ArrayList<>(items.values());
+    }
+
+    /**
+     * Each item written from {@code from} until before {@code to}, in the order of its first write
+     * there, with its values before and after those writes.
+     */
+    List<ItemChange> changesBetween(String accountId, String storageKey, Map<String, JsonNode> liveItems,
+                                    Instant from, Instant to) {
+        Map<String, JsonNode> live = new HashMap<>(liveItems);
+        Map<String, JsonNode> before = new LinkedHashMap<>();
+        Map<String, Instant> lastWrites = new HashMap<>();
+        Map<String, JsonNode> after = new HashMap<>();
+        Changes changes = changesByTable.get(key(accountId, storageKey));
+        if (changes != null) {
+            synchronized (changes) {
+                for (PointInTimeChange change : changes.list) {
+                    String itemKey = change.getItemKey();
+                    if (change.getTime().isBefore(from)) {
+                        continue;
+                    }
+                    if (change.getTime().isBefore(to)) {
+                        if (!before.containsKey(itemKey)) {
+                            before.put(itemKey, change.getOldItem());
+                        }
+                        lastWrites.put(itemKey, change.getTime());
+                    } else if (before.containsKey(itemKey) && !after.containsKey(itemKey)) {
+                        after.put(itemKey, change.getOldItem());
+                    }
+                }
+            }
+        }
+        List<ItemChange> result = new ArrayList<>();
+        before.forEach((itemKey, oldItem) -> result.add(new ItemChange(oldItem,
+                after.containsKey(itemKey) ? after.get(itemKey) : live.get(itemKey), lastWrites.get(itemKey))));
+        return result;
     }
 
     private void put(String accountId, String storageKey, PointInTimeChange change) {

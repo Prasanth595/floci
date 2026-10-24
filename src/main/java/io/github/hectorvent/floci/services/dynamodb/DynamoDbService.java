@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.IncrementalExportSpecification;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
@@ -4921,23 +4922,41 @@ public class DynamoDbService {
     // --- Export Operations ---
 
     private static final List<String> EXPORT_FORMATS = List.of("ION", "DYNAMODB_JSON");
+    private static final List<String> EXPORT_TYPES = List.of("FULL_EXPORT", "INCREMENTAL_EXPORT");
+    private static final List<String> EXPORT_VIEW_TYPES = List.of("NEW_AND_OLD_IMAGES", "NEW_IMAGE");
+    private static final List<String> S3_SSE_ALGORITHMS = List.of("AES256", "KMS");
+    private static final Duration MIN_INCREMENTAL_EXPORT_PERIOD = Duration.ofMinutes(15);
+
+    /** The IncrementalExportSpecification of a request. A member it leaves out is null. */
+    public record IncrementalExportRequest(Instant from, Instant to, String viewType) {}
 
     /** As on AWS, an ExportTime after LatestRestorableDateTime is accepted up to now. */
-    public ExportDescription exportTable(Map<String, Object> request, Instant exportTime, String region) {
+    public ExportDescription exportTable(Map<String, Object> request, Instant exportTime,
+                                         IncrementalExportRequest incremental, String region) {
         String tableArn = (String) request.get("TableArn");
         String s3Bucket = (String) request.get("S3Bucket");
         String s3Prefix = request.containsKey("S3Prefix") ? (String) request.get("S3Prefix") : null;
         String exportFormat = request.get("ExportFormat") != null ? (String) request.get("ExportFormat") : "DYNAMODB_JSON";
-        String exportType = request.containsKey("ExportType") ? (String) request.get("ExportType") : "FULL_EXPORT";
+        String exportType = (String) request.get("ExportType");
         String clientToken = request.containsKey("ClientToken") ? (String) request.get("ClientToken") : null;
         String s3SseAlgorithm = request.containsKey("S3SseAlgorithm") ? (String) request.get("S3SseAlgorithm") : null;
         String s3BucketOwner = request.containsKey("S3BucketOwner") ? (String) request.get("S3BucketOwner") : null;
 
         List<String> violations = new ArrayList<>();
+        if (s3SseAlgorithm != null && !S3_SSE_ALGORITHMS.contains(s3SseAlgorithm)) {
+            violations.add(SmithyValidationErrors.notInEnum(s3SseAlgorithm, "s3SseAlgorithm", S3_SSE_ALGORITHMS));
+        }
         String prefixLengthViolation = s3Prefix == null ? null
                 : SmithyValidationErrors.lengthOutOfRange("s3Prefix", s3Prefix, 0, 1024);
         if (prefixLengthViolation != null) {
             violations.add(prefixLengthViolation);
+        }
+        if (exportType != null && !EXPORT_TYPES.contains(exportType)) {
+            violations.add(SmithyValidationErrors.notInEnum(exportType, "exportType", EXPORT_TYPES));
+        }
+        if (incremental != null && incremental.viewType() != null && !EXPORT_VIEW_TYPES.contains(incremental.viewType())) {
+            violations.add(SmithyValidationErrors.notInEnum(incremental.viewType(),
+                    "incrementalExportSpecification.exportViewType", EXPORT_VIEW_TYPES));
         }
         if (!EXPORT_FORMATS.contains(exportFormat)) {
             violations.add(SmithyValidationErrors.notInEnum(exportFormat, "exportFormat", EXPORT_FORMATS));
@@ -4951,10 +4970,6 @@ public class DynamoDbService {
             throw new AwsException("ValidationException", "Invalid Request: "
                     + SmithyValidationErrors.message(List.of(prefixLengthViolation)), 400);
         }
-        if ("INCREMENTAL_EXPORT".equals(exportType)) {
-            throw new AwsException("ValidationException",
-                    "ExportType INCREMENTAL_EXPORT is not supported", 400);
-        }
 
         DynamoDbTableNames.ResolvedTableRef ref = DynamoDbTableNames.resolveWithRegion(tableArn, region);
         String tableName = ref.name();
@@ -4962,24 +4977,49 @@ public class DynamoDbService {
         String storageKey = regionKey(tableRegion, tableName);
 
         TableDefinition table = requireBackupSource(storageKey, tableArn);
+        boolean incrementalExport = "INCREMENTAL_EXPORT".equals(exportType);
+        if (incrementalExport && incremental == null) {
+            throw invalidExportRequest("Incremental Export Specification expected when export type is set as Incremental Export");
+        }
+        if (!incrementalExport && incremental != null) {
+            throw invalidExportRequest(exportType == null
+                    ? "Export Type expected to be Incremental Export when incremental export specification is provided"
+                    : "When Export Type is Full Export , Incremental Export Specification should not be provided");
+        }
+        if (incrementalExport && incremental.from() == null) {
+            throw invalidExportRequest("ExportFromTime must be provided in IncrementalExportSpecification");
+        }
         if (s3Prefix != null && 948 < s3Prefix.getBytes(StandardCharsets.UTF_8).length) {
             throw new AwsException("ValidationException", "Invalid Request: S3 Prefix is too long", 400);
         }
-        Instant startTime = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        Instant now = clock.instant();
         // AWS cannot enable point-in-time recovery until seconds after the creation, so its
         // EarliestRestorableDateTime is never in the creation second.
-        if (exportTime != null && (exportTime.isBefore(table.getCreationDateTime().truncatedTo(ChronoUnit.SECONDS))
-                || startTime.isBefore(exportTime))) {
-            throw new AwsException("InvalidExportTimeException", "Export Time is invalid", 400);
+        Instant creationSecond = table.getCreationDateTime().truncatedTo(ChronoUnit.SECONDS);
+        Instant startTime;
+        Instant exportFromTime = null;
+        Instant exportToTime = null;
+        if (incrementalExport) {
+            startTime = now.truncatedTo(ChronoUnit.SECONDS);
+            exportFromTime = incremental.from();
+            exportToTime = incremental.to() != null ? incremental.to() : startTime;
+            checkIncrementalExportPeriod(exportFromTime, exportToTime, creationSecond, now);
+        } else {
+            startTime = now.truncatedTo(ChronoUnit.MILLIS);
+            if (exportTime != null && (exportTime.isBefore(creationSecond) || startTime.isBefore(exportTime))) {
+                throw new AwsException("InvalidExportTimeException", "Export Time is invalid", 400);
+            }
         }
         if (!table.isPointInTimeRecoveryEnabled()) {
             throw new AwsException("PointInTimeRecoveryUnavailableException",
                     "Point in time recovery is not enabled for table '" + table.getTableName() + "'", 400);
         }
-        if (exportTime != null
-                && exportTime.isBefore(pointInTimeRecovery.window(withPointInTimeStart(storageKey, table)).earliest())) {
-            throw new AwsException("InvalidExportTimeException",
-                    "Point in Time Recovery is not available for specified export time", 400);
+        Instant readFrom = incrementalExport ? exportFromTime : exportTime;
+        if (readFrom != null
+                && readFrom.isBefore(pointInTimeRecovery.window(withPointInTimeStart(storageKey, table)).earliest())) {
+            throw new AwsException("InvalidExportTimeException", incrementalExport
+                    ? "Export period from time cannot be earlier than the Point in Time Recovery window"
+                    : "Point in Time Recovery is not available for specified export time", 400);
         }
         Instant time = exportTime != null ? exportTime : startTime;
 
@@ -4994,8 +5034,13 @@ public class DynamoDbService {
         desc.setS3Bucket(s3Bucket);
         desc.setS3Prefix(s3Prefix);
         desc.setExportFormat(exportFormat);
-        desc.setExportType((String) request.get("ExportType"));
-        desc.setExportTime(epochSeconds(time));
+        desc.setExportType(exportType);
+        if (incrementalExport) {
+            desc.setIncrementalExportSpecification(new IncrementalExportSpecification(epochSeconds(exportFromTime),
+                    epochSeconds(exportToTime), incremental.viewType() != null ? incremental.viewType() : "NEW_AND_OLD_IMAGES"));
+        } else {
+            desc.setExportTime(epochSeconds(time));
+        }
         desc.setStartTime(epochSeconds(startTime));
         desc.setClientToken(clientToken);
         desc.setS3SseAlgorithm(s3SseAlgorithm != null ? s3SseAlgorithm : "AES256");
@@ -5006,8 +5051,12 @@ public class DynamoDbService {
         }
 
         ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(scopedItemsKey(storageKey));
-        List<JsonNode> snapshot = pointInTimeRecovery.itemsAt(regionResolver.getAccountId(), storageKey,
-                tableItems != null ? tableItems : Map.of(), time);
+        Map<String, JsonNode> liveItems = tableItems != null ? tableItems : Map.of();
+        List<JsonNode> snapshot = incrementalExport
+                ? DynamoDbExportRecords.records(pointInTimeRecovery.changesBetween(regionResolver.getAccountId(),
+                        storageKey, liveItems, exportFromTime, exportToTime), table,
+                        "NEW_IMAGE".equals(incremental.viewType()))
+                : pointInTimeRecovery.itemsAt(regionResolver.getAccountId(), storageKey, liveItems, time);
 
         // The worker gets its own copy so the object serialized into this response never
         // changes underneath the handler, and the request account so its writes land there.
@@ -5018,14 +5067,16 @@ public class DynamoDbService {
         return desc;
     }
 
+    /** AWS puts an incremental export's data files in a data folder that all its exports share. */
     private void runExport(ExportDescription desc, List<JsonNode> snapshot, String exportArn) {
         try {
             String s3Bucket = desc.getS3Bucket();
             String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
             String prefix = desc.getS3Prefix();
             // AWS adds no slash after a prefix that ends with one.
-            String exportDir = (prefix == null ? "" : prefix.endsWith("/") ? prefix : prefix + "/")
-                    + "AWSDynamoDB/" + exportId + "/";
+            String exportRoot = (prefix == null ? "" : prefix.endsWith("/") ? prefix : prefix + "/") + "AWSDynamoDB/";
+            String exportDir = exportRoot + exportId + "/";
+            boolean incremental = desc.getIncrementalExportSpecification() != null;
 
             try {
                 writeExportFile(s3Bucket, exportDir + "_started", new byte[0]);
@@ -5044,8 +5095,9 @@ public class DynamoDbService {
             }
 
             boolean ion = "ION".equals(desc.getExportFormat());
-            byte[] gzipData = buildGzipExportData(snapshot, ion);
-            String dataKey = exportDir + "data/" + exportFileName() + (ion ? ".ion.gz" : ".json.gz");
+            byte[] gzipData = buildGzipExportData(snapshot, ion, incremental);
+            String dataKey = (incremental ? exportRoot : exportDir) + "data/" + exportFileName()
+                    + (ion ? ".ion.gz" : ".json.gz");
             ObjectNode dataFile = objectMapper.createObjectNode();
             dataFile.put("itemCount", snapshot.size());
             dataFile.put("md5Checksum", Base64.getEncoder().encodeToString(Digests.md5(gzipData)));
@@ -5056,7 +5108,8 @@ public class DynamoDbService {
 
             desc.setEndTime(epochSeconds(clock.instant()));
             desc.setItemCount((long) snapshot.size());
-            desc.setBilledSizeBytes((long) gzipData.length);
+            // AWS bills an incremental export for at least 10 MB.
+            desc.setBilledSizeBytes(incremental ? Math.max(10_000_000L, gzipData.length) : gzipData.length);
             String manifestSummaryKey = exportDir + "manifest-summary.json";
             writeExportManifest(s3Bucket, manifestSummaryKey, manifestSummary(desc, manifestFilesKey));
 
@@ -5079,12 +5132,15 @@ public class DynamoDbService {
         }
     }
 
-    private byte[] buildGzipExportData(List<JsonNode> items, boolean ion) throws IOException {
+    private byte[] buildGzipExportData(List<JsonNode> items, boolean ion, boolean incremental) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (GZIPOutputStream gzip = new GZIPOutputStream(baos)) {
             for (JsonNode item : items) {
                 if (ion) {
-                    gzip.write(DynamoDbIonText.exportLine(item).getBytes(StandardCharsets.UTF_8));
+                    String line = incremental ? DynamoDbIonText.recordLine(item) : DynamoDbIonText.exportLine(item);
+                    gzip.write(line.getBytes(StandardCharsets.UTF_8));
+                } else if (incremental) {
+                    gzip.write(objectMapper.writeValueAsBytes(item));
                 } else {
                     ObjectNode line = objectMapper.createObjectNode();
                     line.set("Item", item);
@@ -5134,14 +5190,20 @@ public class DynamoDbService {
     }
 
     private String manifestSummary(ExportDescription desc, String manifestFilesKey) throws JsonProcessingException {
+        IncrementalExportSpecification incremental = desc.getIncrementalExportSpecification();
         ObjectNode root = objectMapper.createObjectNode();
-        root.put("version", "2020-06-30");
+        root.put("version", incremental != null ? "2023-08-01" : "2020-06-30");
         root.put("exportArn", desc.getExportArn());
         root.put("startTime", MANIFEST_TIME.format(instantOf(desc.getStartTime())));
         root.put("endTime", MANIFEST_TIME.format(instantOf(desc.getEndTime())));
         root.put("tableArn", desc.getTableArn());
         root.put("tableId", desc.getTableId());
-        root.put("exportTime", MANIFEST_TIME.format(instantOf(desc.getExportTime())));
+        if (incremental != null) {
+            root.put("exportFromTime", MANIFEST_TIME.format(instantOf(incremental.getExportFromTime())));
+            root.put("exportToTime", MANIFEST_TIME.format(instantOf(incremental.getExportToTime())));
+        } else {
+            root.put("exportTime", MANIFEST_TIME.format(instantOf(desc.getExportTime())));
+        }
         root.put("s3Bucket", desc.getS3Bucket());
         root.put("s3Prefix", desc.getS3Prefix());
         root.put("s3SseAlgorithm", desc.getS3SseAlgorithm());
@@ -5150,7 +5212,35 @@ public class DynamoDbService {
         root.put("billedSizeBytes", desc.getBilledSizeBytes());
         root.put("itemCount", desc.getItemCount());
         root.put("outputFormat", desc.getExportFormat());
+        if (incremental != null) {
+            root.put("outputView", incremental.getExportViewType());
+            root.put("exportType", desc.getExportType());
+        }
         return objectMapper.writeValueAsString(root);
+    }
+
+    private static void checkIncrementalExportPeriod(Instant from, Instant to, Instant creationSecond, Instant now) {
+        if (from.isBefore(creationSecond)) {
+            throw new AwsException("InvalidExportTimeException",
+                    "Incremental export period from time cannot be less than the table creation time : " + from, 400);
+        }
+        if (to.isAfter(now)) {
+            throw new AwsException("InvalidExportTimeException",
+                    "Incremental export period to time cannot be greater than the current time : " + to, 400);
+        }
+        if (!from.isBefore(to)) {
+            throw new AwsException("InvalidExportTimeException",
+                    "Incremental export period from time should not be greater or equal to incremental export period to time",
+                    400);
+        }
+        if (Duration.between(from, to).compareTo(MIN_INCREMENTAL_EXPORT_PERIOD) < 0) {
+            throw new AwsException("InvalidExportTimeException",
+                    "Difference between export period from time and export period to time is less than 15 minutes", 400);
+        }
+    }
+
+    private static AwsException invalidExportRequest(String message) {
+        return new AwsException("ValidationException", "Invalid Request: " + message, 400);
     }
 
     public ExportDescription describeExport(String exportArn) {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.math.BigDecimal;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
@@ -19,6 +20,7 @@ final class DynamoDbIonText {
     /** Ion reads these as symbol ids, so they are quoted like the keywords. */
     private static final Pattern SYMBOL_ID = Pattern.compile("\\$[0-9]+");
     private static final Set<String> KEYWORDS = Set.of("null", "true", "false", "nan");
+    private static final List<String> RECORD_PARTS = List.of("Keys", "Metadata", "OldImage", "NewImage");
 
     private DynamoDbIonText() {}
 
@@ -27,6 +29,20 @@ final class DynamoDbIonText {
         StringBuilder out = new StringBuilder("$ion_1_0 {Item:");
         appendStruct(out, item);
         return out.append('}').toString();
+    }
+
+    /** One line of an incremental export, without its newline. AWS puts Keys before Metadata here. */
+    static String recordLine(JsonNode record) {
+        StringBuilder out = new StringBuilder("$ion_1_0 {Record:{");
+        String separator = "";
+        for (String part : RECORD_PARTS) {
+            if (record.has(part)) {
+                out.append(separator).append(part).append(':');
+                separator = ",";
+                appendStruct(out, record.get(part));
+            }
+        }
+        return out.append("}}").toString();
     }
 
     private static void appendStruct(StringBuilder out, JsonNode attributes) {

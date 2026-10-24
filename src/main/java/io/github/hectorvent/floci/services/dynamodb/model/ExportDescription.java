@@ -39,6 +39,9 @@ public class ExportDescription {
     @JsonProperty("ExportTime")
     private BigDecimal exportTime;
 
+    @JsonProperty("IncrementalExportSpecification")
+    private IncrementalExportSpecification incrementalExportSpecification;
+
     @JsonProperty("StartTime")
     private BigDecimal startTime;
 
@@ -98,6 +101,11 @@ public class ExportDescription {
 
     public BigDecimal getExportTime() { return exportTime; }
     public void setExportTime(BigDecimal exportTime) { this.exportTime = exportTime; }
+
+    public IncrementalExportSpecification getIncrementalExportSpecification() { return incrementalExportSpecification; }
+    public void setIncrementalExportSpecification(IncrementalExportSpecification incrementalExportSpecification) {
+        this.incrementalExportSpecification = incrementalExportSpecification;
+    }
 
     public BigDecimal getStartTime() { return startTime; }
     public void setStartTime(BigDecimal startTime) { this.startTime = startTime; }

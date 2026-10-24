@@ -3405,8 +3405,13 @@ public class NativeDynamoDbJsonHandler {
         request.fields().forEachRemaining(e -> params.put(e.getKey(), e.getValue().isTextual()
                 ? e.getValue().asText() : e.getValue()));
 
+        JsonNode spec = request.path("IncrementalExportSpecification");
+        DynamoDbService.IncrementalExportRequest incremental = spec.isObject()
+                ? new DynamoDbService.IncrementalExportRequest(timestampOrNull(spec, "ExportFromTime"),
+                        timestampOrNull(spec, "ExportToTime"), spec.path("ExportViewType").textValue())
+                : null;
         io.github.hectorvent.floci.services.dynamodb.model.ExportDescription desc =
-                dynamoDbService.exportTable(params, timestampOrNull(request, "ExportTime"), region);
+                dynamoDbService.exportTable(params, timestampOrNull(request, "ExportTime"), incremental, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("ExportDescription", objectMapper.valueToTree(desc));
