@@ -644,7 +644,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                 timeouts.keepAliveTimeout());
     }
 
-    private static HttpClientContext context(OriginTimeouts timeouts) {
+    static HttpClientContext context(OriginTimeouts timeouts) {
         HttpClientContext context = HttpClientContext.create();
         context.setRequestConfig(RequestConfig.custom()
                 .setConnectTimeout(Timeout.of(timeouts.connectTimeout()))

@@ -807,6 +807,13 @@ class CloudFrontServiceTest {
         }), Map.of()));
         assertDoesNotThrow(() -> service.createDistribution(distributionWithCustomOrigin(origin ->
                 origin.setResponseCompletionTimeout(0)), Map.of()));
+
+        // No OriginReadTimeout means the 30 s default, which a shorter completion timeout breaks.
+        AwsException belowDefault = assertAws("InvalidArgument",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin ->
+                        origin.setResponseCompletionTimeout(10)), Map.of()));
+        assertEquals("The parameter ResponseCompletionTimeout must be greater than or equal to"
+                + " OriginReadTimeout.", belowDefault.getMessage());
     }
 
     @Test

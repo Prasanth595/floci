@@ -660,9 +660,13 @@ class CloudFrontOriginHttpClientTest {
     void theKeepAliveStrategyReturnsTheOriginsKeepAlive() {
         CloudFrontOriginHttpClient.KeepAliveStrategy strategy =
                 new CloudFrontOriginHttpClient.KeepAliveStrategy();
-        HttpClientContext context = HttpClientContext.create();
-        context.setAttribute(CloudFrontOriginHttpClient.KEEP_ALIVE_TIMEOUT_ATTRIBUTE,
-                Duration.ofSeconds(2));
+        // The context the client sends, so the test fails if it stops carrying the keep-alive.
+        CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                new CloudFrontOriginHttpClient.OriginTimeouts(
+                        Duration.ofSeconds(1), Duration.ofSeconds(30), 1,
+                        CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
+                        Duration.ofSeconds(2));
+        HttpClientContext context = CloudFrontOriginHttpClient.context(timeouts);
 
         assertEquals(TimeValue.ofSeconds(2),
                 strategy.getKeepAliveDuration(new BasicHttpResponse(200), context));
