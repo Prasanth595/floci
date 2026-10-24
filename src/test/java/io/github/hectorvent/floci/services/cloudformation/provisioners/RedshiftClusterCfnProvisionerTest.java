@@ -122,8 +122,7 @@ class RedshiftClusterCfnProvisionerTest {
 
         assertNotNull(r.getPhysicalId());
         verify(service).createClusterParameterGroup(eq(r.getPhysicalId()), eq("redshift-1.0"), eq("d"));
-        String expectedArn = "arn:aws:redshift:us-east-1:000000000000:parametergroup:" + r.getPhysicalId();
-        verify(service).createTags(eq(expectedArn), eq(Map.of("env", "test")));
+        verify(service).createTags(r.getPhysicalId(), Map.of("env", "test"));
     }
 
     @Test
@@ -320,6 +319,29 @@ class RedshiftClusterCfnProvisionerTest {
     }
 
     @Test
+    void snapshotPrivateAttributesUseHiddenKeys() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
+                .thenReturn(availableCluster("restored"));
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+
+        provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","SnapshotIdentifier":"backup","NodeType":"ra3.large",
+                 "MasterUsername":"admin","MasterUserPassword":"Template123","DBName":"dev"}"""), ctx(null));
+
+        assertEquals("restored", resource.getAttributes().get("__FlociRedshiftClusterIdentifier"));
+        assertEquals("backup", resource.getAttributes().get("__FlociRedshiftSnapshotIdentifier"));
+        assertEquals("admin", resource.getAttributes().get("__FlociRedshiftRestoreMasterUsername"));
+        assertEquals("dev", resource.getAttributes().get("__FlociRedshiftDBName"));
+        assertNotNull(resource.getAttributes().get("__FlociRedshiftMasterUserPasswordHash"));
+        assertFalse(resource.getAttributes().containsValue("Template123"));
+        assertTrue(resource.getAttributes().keySet().stream().noneMatch(key -> key.startsWith("Floci::")));
+    }
+
+    @Test
     void snapshotCreateRestoresWithoutMasterPasswordAndSetsReferences() {
         RedshiftService service = mock(RedshiftService.class);
         when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
@@ -337,7 +359,7 @@ class RedshiftClusterCfnProvisionerTest {
         assertEquals("host-restored", resource.getAttributes().get("Endpoint.Address"));
         assertEquals("5439", resource.getAttributes().get("Endpoint.Port"));
         assertTrue(resource.getAttributes().get("ClusterNamespaceArn").contains(":namespace:"));
-        verify(service).createTags("arn:aws:redshift:us-east-1:000000000000:cluster:restored", Map.of("env", "restore"));
+        verify(service).createTags("restored", Map.of("env", "restore"));
         verify(service, never()).createCluster(any(), any(), any(), any(), any(), anyList());
     }
 
@@ -386,6 +408,8 @@ class RedshiftClusterCfnProvisionerTest {
         verify(service).restoreFromClusterSnapshot(replacement, "new-backup", "ra3.large", null, false, null, "us-east-1");
         assertTrue(provisioner.rollbackUpdate(resource));
         assertEquals("restored", resource.getPhysicalId());
+        assertEquals("backup", resource.getAttributes().get("__FlociRedshiftSnapshotIdentifier"));
+        assertFalse(resource.getAttributes().containsKey("__FlociRedshiftPriorAttributes"));
         verify(service).deleteCluster(replacement);
         when(service.modifyCluster(eq("restored"), eq("ra3.large"), isNull(), isNull(), isNull(), anyList()))
                 .thenReturn(availableCluster("restored"));
@@ -504,7 +528,7 @@ class RedshiftClusterCfnProvisionerTest {
         resource.setResourceType("AWS::Redshift::Cluster");
         resource.setLogicalId("Warehouse");
         resource.setPhysicalId("restored");
-        resource.getAttributes().put("Floci::SnapshotIdentifier", "backup");
+        resource.getAttributes().put("__FlociRedshiftSnapshotIdentifier", "backup");
 
         provisioner.provision(resource, json("""
                 {"ClusterIdentifier":"restored","NodeType":"ra3.large","MasterUsername":"admin",
@@ -512,7 +536,7 @@ class RedshiftClusterCfnProvisionerTest {
 
         assertNotEquals("restored", resource.getPhysicalId());
         assertEquals("restored", provisioner.updateCleanupPhysicalId(resource));
-        assertFalse(resource.getAttributes().containsKey("Floci::SnapshotIdentifier"));
+        assertFalse(resource.getAttributes().containsKey("__FlociRedshiftSnapshotIdentifier"));
     }
 
     @Test
@@ -521,7 +545,7 @@ class RedshiftClusterCfnProvisionerTest {
         when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
                 .thenReturn(availableCluster("restored"));
         doThrow(new AwsException("InternalFailure", "tag storage failed", 500))
-                .when(service).createTags("arn:aws:redshift:us-east-1:000000000000:cluster:restored", Map.of("env", "restore"));
+                .when(service).createTags("restored", Map.of("env", "restore"));
         RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
         StackResource resource = new StackResource();
         resource.setResourceType("AWS::Redshift::Cluster");
@@ -644,7 +668,7 @@ class RedshiftClusterCfnProvisionerTest {
             {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"admin",
              "MasterUserPassword":"Secret123","Tags":[{"Key":"env","Value":"dev"}]}"""), ctx(null));
 
-        verify(service).createTags("arn:aws:redshift:us-east-1:000000000000:cluster:my-cluster", Map.of("env", "dev"));
+        verify(service).createTags("my-cluster", Map.of("env", "dev"));
     }
 
     @Test
@@ -837,7 +861,7 @@ class RedshiftClusterCfnProvisionerTest {
         r.setResourceType("AWS::Redshift::Cluster");
         r.setLogicalId("W");
         r.setPhysicalId("my-cluster");
-        r.getAttributes().put("Floci::DBName", "dev");
+        r.getAttributes().put("__FlociRedshiftDBName", "dev");
 
         p.provision(r, json("""
             {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"admin",
@@ -846,147 +870,7 @@ class RedshiftClusterCfnProvisionerTest {
         assertNotEquals("my-cluster", r.getPhysicalId());
         assertEquals("my-cluster", p.updateCleanupPhysicalId(r));
         assertTrue(p.hasReplacementUpdate(r));
-        assertEquals("analytics", r.getAttributes().get("Floci::DBName"));
-    }
-
-    @Test
-    void updateReconcilesClusterTagsByDeletingRemovedTags() {
-        RedshiftService service = mock(RedshiftService.class);
-        String arn = "arn:aws:redshift:us-east-1:000000000000:cluster:my-cluster";
-        when(service.modifyCluster(eq("my-cluster"), any(), any(), any(), any(), anyList()))
-                .thenReturn(availableCluster("my-cluster"));
-        when(service.listTagsForResource(arn)).thenReturn(Map.of("env", "prod", "tier", "backend"));
-        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
-
-        StackResource r = new StackResource();
-        r.setResourceType("AWS::Redshift::Cluster");
-        r.setLogicalId("W");
-        p.provision(r, json("""
-            {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"admin",
-             "MasterUserPassword":"Secret123","Tags":[{"Key":"env","Value":"prod"}]}"""), ctx("my-cluster"));
-
-        verify(service).deleteTags(eq(arn), eq(List.of("tier")));
-        verify(service).createTags(eq(arn), eq(Map.of("env", "prod")));
-    }
-
-    @Test
-    void updateRemovesAllTagsWhenTagsPropertyIsOmitted() {
-        RedshiftService service = mock(RedshiftService.class);
-        String arn = "arn:aws:redshift:us-east-1:000000000000:cluster:my-cluster";
-        when(service.modifyCluster(eq("my-cluster"), any(), any(), any(), any(), anyList()))
-                .thenReturn(availableCluster("my-cluster"));
-        when(service.listTagsForResource(arn)).thenReturn(Map.of("env", "prod"));
-        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
-
-        StackResource r = new StackResource();
-        r.setResourceType("AWS::Redshift::Cluster");
-        r.setLogicalId("W");
-        p.provision(r, json("""
-            {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"admin",
-             "MasterUserPassword":"Secret123"}"""), ctx("my-cluster"));
-
-        verify(service).deleteTags(eq(arn), eq(List.of("env")));
-        verify(service, never()).createTags(eq(arn), any());
-    }
-
-    @Test
-    void updateEnablesManagedMasterPasswordOnExistingCluster() {
-        RedshiftService service = mock(RedshiftService.class);
-        when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
-                .thenReturn(availableCluster("restored"));
-        when(service.modifyCluster(eq("restored"), any(), any(), isNull(), any(), anyList()))
-                .thenReturn(availableCluster("restored"));
-        Cluster managed = availableCluster("restored");
-        managed.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:new-sec");
-        when(service.enableManagedMasterPassword(eq("restored"), eq("alias/my-key"), eq("us-east-1")))
-                .thenReturn(managed);
-        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
-
-        StackResource r = new StackResource();
-        r.setResourceType("AWS::Redshift::Cluster");
-        r.setLogicalId("W");
-        // Initial restore without managed password
-        p.provision(r, json("""
-            {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup"}"""), ctx(null));
-
-        // Update enabling ManageMasterPassword
-        p.provision(r, json("""
-            {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup",
-             "ManageMasterPassword":true,"MasterPasswordSecretKmsKeyId":"alias/my-key"}"""), ctx("restored"));
-
-        verify(service).enableManagedMasterPassword("restored", "alias/my-key", "us-east-1");
-        assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:new-sec",
-                r.getAttributes().get("MasterPasswordSecretArn"));
-        verify(service).restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1");
-    }
-
-    @Test
-    void updateDisablesManagedMasterPasswordOnExistingCluster() {
-        RedshiftService service = mock(RedshiftService.class);
-        Cluster initialManaged = availableCluster("restored");
-        initialManaged.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:old-sec");
-        when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, true, null, "us-east-1"))
-                .thenReturn(initialManaged);
-        Cluster existing = availableCluster("restored");
-        existing.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:old-sec");
-        when(service.describeClusters("restored")).thenReturn(List.of(existing));
-        Cluster unmanaged = availableCluster("restored");
-        when(service.disableManagedMasterPassword(eq("restored"), eq("us-east-1"))).thenReturn(unmanaged);
-        when(service.modifyCluster(eq("restored"), any(), any(), eq("NewManual1"), any(), anyList()))
-                .thenReturn(unmanaged);
-        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
-
-        StackResource r = new StackResource();
-        r.setResourceType("AWS::Redshift::Cluster");
-        r.setLogicalId("W");
-        // Initial restore with managed password
-        p.provision(r, json("""
-            {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup",
-             "ManageMasterPassword":true}"""), ctx(null));
-
-        // Update disabling ManageMasterPassword
-        p.provision(r, json("""
-            {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup",
-             "ManageMasterPassword":false,"MasterUserPassword":"NewManual1"}"""), ctx("restored"));
-
-        verify(service).disableManagedMasterPassword("restored", "us-east-1");
-        verify(service).modifyCluster(eq("restored"), any(), any(), eq("NewManual1"), any(), anyList());
-        assertFalse(r.getAttributes().containsKey("MasterPasswordSecretArn"));
-    }
-
-    @Test
-    void updateManagedSecretKmsKeyOnExistingCluster() {
-        RedshiftService service = mock(RedshiftService.class);
-        Cluster initialManaged = availableCluster("restored");
-        initialManaged.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:s1");
-        initialManaged.setMasterPasswordSecretKmsKeyId("alias/old-key");
-        when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, true, "alias/old-key", "us-east-1"))
-                .thenReturn(initialManaged);
-        when(service.modifyCluster(eq("restored"), any(), any(), isNull(), any(), anyList()))
-                .thenReturn(initialManaged);
-        Cluster updated = availableCluster("restored");
-        updated.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:s1");
-        updated.setMasterPasswordSecretKmsKeyId("alias/new-key");
-        when(service.updateManagedMasterSecretKmsKey("restored", "alias/new-key", "us-east-1"))
-                .thenReturn(updated);
-        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
-
-        StackResource r = new StackResource();
-        r.setResourceType("AWS::Redshift::Cluster");
-        r.setLogicalId("W");
-        // Initial restore with old KMS key
-        p.provision(r, json("""
-            {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup",
-             "ManageMasterPassword":true,"MasterPasswordSecretKmsKeyId":"alias/old-key"}"""), ctx(null));
-
-        // Update with new KMS key
-        p.provision(r, json("""
-            {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup",
-             "ManageMasterPassword":true,"MasterPasswordSecretKmsKeyId":"alias/new-key"}"""), ctx("restored"));
-
-        verify(service).updateManagedMasterSecretKmsKey("restored", "alias/new-key", "us-east-1");
-        verify(service, never()).enableManagedMasterPassword(any(), any(), any());
-        verify(service, never()).disableManagedMasterPassword(any(), any());
+        assertEquals("analytics", r.getAttributes().get("__FlociRedshiftDBName"));
     }
 
     @Test

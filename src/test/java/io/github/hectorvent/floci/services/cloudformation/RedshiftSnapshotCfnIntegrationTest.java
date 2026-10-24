@@ -80,7 +80,7 @@ class RedshiftSnapshotCfnIntegrationTest {
             try {
                 client.createClusterSnapshot(request -> request.clusterIdentifier(source).snapshotIdentifier(snapshot));
                 client.deleteCluster(request -> request.clusterIdentifier(source).skipFinalClusterSnapshot(true));
-                createOrUpdateStack(stack, "CreateStack", template(target, snapshot, "initial"));
+                createOrUpdateStack(stack, "CreateStack", template(target, snapshot, "ra3.large"));
                 assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, AUTH).status());
 
                 Cluster cluster = client.describeClusters(request -> request.clusterIdentifier(target)).clusters().getFirst();
@@ -95,7 +95,7 @@ class RedshiftSnapshotCfnIntegrationTest {
                 assertEquals(DUMP, restoredDump.get());
                 assertEquals("admin", cluster.masterUsername());
 
-                createOrUpdateStack(stack, "UpdateStack", template(target, snapshot, "updated"));
+                createOrUpdateStack(stack, "UpdateStack", template(target, snapshot, "ra3.xlplus"));
                 assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, AUTH).status());
                 assertEquals(cluster.endpoint(), client.describeClusters(request -> request.clusterIdentifier(target))
                         .clusters().getFirst().endpoint());
@@ -134,16 +134,16 @@ class RedshiftSnapshotCfnIntegrationTest {
                 .post("/").then().statusCode(200);
     }
 
-    private static String template(String identifier, String snapshot, String tag) {
+    private static String template(String identifier, String snapshot, String nodeType) {
         return """
                 {"Resources":{"Warehouse":{"Type":"AWS::Redshift::Cluster","Properties":{
-                  "ClusterIdentifier":"%s","NodeType":"ra3.large","DBName":"dev","ClusterType":"single-node",
-                  "MasterUsername":"admin","SnapshotIdentifier":"%s","Tags":[{"Key":"revision","Value":"%s"}]}}},
+                  "ClusterIdentifier":"%s","NodeType":"%s","DBName":"dev","ClusterType":"single-node",
+                  "MasterUsername":"admin","SnapshotIdentifier":"%s"}}},
                  "Outputs":{
                    "Ref":{"Value":{"Ref":"Warehouse"}},
                    "Address":{"Value":{"Fn::GetAtt":["Warehouse","Endpoint.Address"]}},
                    "Port":{"Value":{"Fn::GetAtt":["Warehouse","Endpoint.Port"]}},
                    "Namespace":{"Value":{"Fn::GetAtt":["Warehouse","ClusterNamespaceArn"]}}}}
-                """.formatted(identifier, snapshot, tag);
+                """.formatted(identifier, nodeType, snapshot);
     }
 }

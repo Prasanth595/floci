@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
@@ -30,6 +33,11 @@ import java.util.UUID;
 public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(RedshiftClusterCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String PRIOR_ATTRIBUTES = "__FlociRedshiftPriorAttributes";
+    private static final List<String> PRIVATE_ATTRIBUTES = List.of(
+            "__FlociRedshiftClusterIdentifier", "__FlociRedshiftSnapshotIdentifier",
+            "__FlociRedshiftRestoreMasterUsername", "__FlociRedshiftMasterUserPasswordHash", "__FlociRedshiftDBName");
 
     private static final String CLUSTER = "AWS::Redshift::Cluster";
     private static final String PARAMETER_GROUP = "AWS::Redshift::ClusterParameterGroup";
@@ -56,6 +64,15 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             case CLUSTER -> {
                 Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
                 provisionCluster(r, props, ctx, attributesBefore);
+                if (ctx.isUpdate() && !ctx.priorPhysicalId().equals(r.getPhysicalId())) {
+                    ObjectNode priorAttributes = MAPPER.createObjectNode();
+                    for (String key : PRIVATE_ATTRIBUTES) {
+                        if (attributesBefore.containsKey(key)) {
+                            priorAttributes.put(key, attributesBefore.get(key));
+                        }
+                    }
+                    r.getAttributes().put(PRIOR_ATTRIBUTES, priorAttributes.toString());
+                }
                 ReplacementCleanup.record(r, ctx, attributesBefore);
             }
             case PARAMETER_GROUP -> {
@@ -82,17 +99,34 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(PRIOR_ATTRIBUTES);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(PRIOR_ATTRIBUTES);
         ReplacementCleanup.clear(resource);
     }
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return ReplacementCleanup.rollback(resource, this::delete);
+        boolean replaced = ReplacementCleanup.rollback(resource, this::delete);
+        String priorAttributes = resource.getAttributes().remove(PRIOR_ATTRIBUTES);
+        if (priorAttributes != null) {
+            try {
+                JsonNode prior = MAPPER.readTree(priorAttributes);
+                for (String key : PRIVATE_ATTRIBUTES) {
+                    resource.getAttributes().remove(key);
+                    if (prior.has(key)) {
+                        resource.getAttributes().put(key, prior.get(key).asText());
+                    }
+                }
+            } catch (JsonProcessingException e) {
+                throw new IllegalStateException("Cannot restore Redshift private attributes", e);
+            }
+        }
+        return replaced;
     }
 
     private void provisionCluster(StackResource r, JsonNode props, ProvisionContext ctx,
@@ -118,20 +152,20 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         List<String> securityGroups = ctx.resolveStringList(props, "VpcSecurityGroupIds");
 
         String dbName = ctx.resolveOptional(props, "DBName");
-        String priorDbName = attributesBefore.get("Floci::DBName");
+        String priorDbName = attributesBefore.get("__FlociRedshiftDBName");
         boolean dbNameChanged = ctx.isUpdate() && dbName != null && priorDbName != null && !dbName.equals(priorDbName);
 
         String explicitId = ctx.resolveOptional(props, "ClusterIdentifier");
         Cluster prior = ctx.isUpdate() ? findExistingCluster(ctx.priorPhysicalId()) : null;
         boolean snapshotChanged = ctx.isUpdate()
-                && !Objects.equals(snapshotIdentifier, attributesBefore.get("Floci::SnapshotIdentifier"));
+                && !Objects.equals(snapshotIdentifier, attributesBefore.get("__FlociRedshiftSnapshotIdentifier"));
         boolean masterUsernameChanged = snapshotIdentifier == null
                 ? prior != null && masterUsername != null && !masterUsername.equals(prior.getMasterUsername())
-                : ctx.isUpdate() && !Objects.equals(masterUsername, attributesBefore.get("Floci::RestoreMasterUsername"));
+                : ctx.isUpdate() && !Objects.equals(masterUsername, attributesBefore.get("__FlociRedshiftRestoreMasterUsername"));
         boolean createOnlyChanged = dbNameChanged || snapshotChanged || masterUsernameChanged
                 || prior != null && subnetGroup != null && !Objects.equals(subnetGroup, prior.getClusterSubnetGroupName());
         boolean sameTemplateIdentifier = explicitId == null || explicitId.equals(ctx.priorPhysicalId())
-                || explicitId.equals(attributesBefore.get("Floci::ClusterIdentifier"));
+                || explicitId.equals(attributesBefore.get("__FlociRedshiftClusterIdentifier"));
 
         String id;
         if (createOnlyChanged && sameTemplateIdentifier) {
@@ -152,20 +186,11 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         // a derived id that differs from the prior physical id is a replacement handled via ReplacementCleanup.
         Cluster cluster;
         if (ctx.reusesPriorEntity(id)) {
-            Cluster existing = prior != null ? prior : findExistingCluster(id);
-            boolean currentlyManaged = (existing != null && existing.getMasterPasswordSecretArn() != null)
-                    || attributesBefore.containsKey("MasterPasswordSecretArn");
-            String kmsKeyId = ctx.resolveOptional(props, "MasterPasswordSecretKmsKeyId");
-
-            if (!manageMasterPassword && currentlyManaged) {
-                redshiftService.disableManagedMasterPassword(id, ctx.region());
-            }
-
             String passwordToApply = null;
             if (!manageMasterPassword && masterUserPassword != null) {
                 String passwordHash = Digests.sha256Hex(masterUserPassword);
                 boolean passwordExplicitlyChanged = !Objects.equals(passwordHash,
-                        attributesBefore.get("Floci::MasterUserPasswordHash"));
+                        attributesBefore.get("__FlociRedshiftMasterUserPasswordHash"));
                 if (passwordExplicitlyChanged) {
                     passwordToApply = masterUserPassword;
                 }
@@ -174,17 +199,6 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             cluster = redshiftService.modifyCluster(id, nodeType, numberOfNodes(props, ctx),
                     passwordToApply, ctx.resolveOptional(props, "ClusterParameterGroupName"),
                     securityGroups);
-
-            if (manageMasterPassword && !currentlyManaged) {
-                cluster = redshiftService.enableManagedMasterPassword(id, kmsKeyId, ctx.region());
-            } else if (manageMasterPassword) {
-                String priorKmsKey = cluster.getMasterPasswordSecretKmsKeyId() != null
-                        ? cluster.getMasterPasswordSecretKmsKeyId()
-                        : (existing != null ? existing.getMasterPasswordSecretKmsKeyId() : null);
-                if (!Objects.equals(kmsKeyId, priorKmsKey)) {
-                    cluster = redshiftService.updateManagedMasterSecretKmsKey(id, kmsKeyId, ctx.region());
-                }
-            }
         } else if (snapshotIdentifier != null) {
             cluster = redshiftService.restoreFromClusterSnapshot(id, snapshotIdentifier, nodeType, subnetGroup,
                     manageMasterPassword, ctx.resolveOptional(props, "MasterPasswordSecretKmsKeyId"), ctx.region());
@@ -194,12 +208,7 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
                     cluster = redshiftService.modifyCluster(id, nodeType, numberOfNodes(props, ctx),
                             null, parameterGroup, securityGroups);
                 } catch (RuntimeException failure) {
-                    try {
-                        redshiftService.deleteCluster(id);
-                    } catch (RuntimeException cleanupFailure) {
-                        failure.addSuppressed(cleanupFailure);
-                        LOG.warnv(cleanupFailure, "Failed to clean up restored cluster {0}", id);
-                    }
+                    cleanupRestoredCluster(id, failure);
                     throw failure;
                 }
             }
@@ -212,45 +221,37 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
                     subnetGroup, securityGroups);
         }
 
-        String arn = AwsArnUtils.Arn.of("redshift", ctx.region(), ctx.accountId(), "cluster:" + id).toString();
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
-        if (ctx.isUpdate() && ctx.reusesPriorEntity(id)) {
-            reconcileTags(arn, tags);
-        } else if (!tags.isEmpty()) {
+        if (!tags.isEmpty()) {
             try {
-                redshiftService.createTags(arn, tags);
+                redshiftService.createTags(id, tags);
             } catch (RuntimeException failure) {
                 if (snapshotIdentifier != null && !ctx.reusesPriorEntity(id)) {
-                    try {
-                        redshiftService.deleteCluster(id);
-                    } catch (RuntimeException cleanupFailure) {
-                        failure.addSuppressed(cleanupFailure);
-                        LOG.warnv(cleanupFailure, "Failed to clean up restored cluster {0}", id);
-                    }
+                    cleanupRestoredCluster(id, failure);
                 }
                 throw failure;
             }
         }
 
         r.setPhysicalId(id);
-        r.getAttributes().remove("Floci::ClusterIdentifier");
+        r.getAttributes().remove("__FlociRedshiftClusterIdentifier");
         if (explicitId != null) {
-            r.getAttributes().put("Floci::ClusterIdentifier", explicitId);
+            r.getAttributes().put("__FlociRedshiftClusterIdentifier", explicitId);
         }
-        r.getAttributes().remove("Floci::SnapshotIdentifier");
-        r.getAttributes().remove("Floci::RestoreMasterUsername");
+        r.getAttributes().remove("__FlociRedshiftSnapshotIdentifier");
+        r.getAttributes().remove("__FlociRedshiftRestoreMasterUsername");
         if (snapshotIdentifier != null) {
-            r.getAttributes().put("Floci::SnapshotIdentifier", snapshotIdentifier);
+            r.getAttributes().put("__FlociRedshiftSnapshotIdentifier", snapshotIdentifier);
             if (masterUsername != null) {
-                r.getAttributes().put("Floci::RestoreMasterUsername", masterUsername);
+                r.getAttributes().put("__FlociRedshiftRestoreMasterUsername", masterUsername);
             }
         }
-        r.getAttributes().remove("Floci::MasterUserPasswordHash");
+        r.getAttributes().remove("__FlociRedshiftMasterUserPasswordHash");
         if (!manageMasterPassword && masterUserPassword != null) {
-            r.getAttributes().put("Floci::MasterUserPasswordHash", Digests.sha256Hex(masterUserPassword));
+            r.getAttributes().put("__FlociRedshiftMasterUserPasswordHash", Digests.sha256Hex(masterUserPassword));
         }
         if (dbName != null && !dbName.isBlank()) {
-            r.getAttributes().put("Floci::DBName", dbName);
+            r.getAttributes().put("__FlociRedshiftDBName", dbName);
         }
         if (cluster.getEndpoint() != null) {
             r.getAttributes().put("Endpoint.Address", cluster.getEndpoint().getAddress());
@@ -262,6 +263,15 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             r.getAttributes().remove("MasterPasswordSecretArn");
         }
         r.getAttributes().put("ClusterNamespaceArn", namespaceArn(ctx, id));
+    }
+
+    private void cleanupRestoredCluster(String id, RuntimeException failure) {
+        try {
+            redshiftService.deleteCluster(id);
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+            LOG.warnv(cleanupFailure, "Failed to clean up restored cluster {0}", id);
+        }
     }
 
     private Integer numberOfNodes(JsonNode props, ProvisionContext ctx) {
@@ -319,29 +329,12 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             redshiftService.modifyClusterParameterGroup(id, parameters);
         }
 
-        String arn = AwsArnUtils.Arn.of("redshift", ctx.region(), ctx.accountId(), "parametergroup:" + id).toString();
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
-        if (ctx.isUpdate() && ctx.reusesPriorEntity(id)) {
-            reconcileTags(arn, tags);
-        } else if (!tags.isEmpty()) {
-            redshiftService.createTags(arn, tags);
+        if (!tags.isEmpty()) {
+            redshiftService.createTags(id, tags);
         }
 
         r.setPhysicalId(id);
-    }
-
-    private void reconcileTags(String arn, Map<String, String> desired) {
-        Map<String, String> current = redshiftService.listTagsForResource(arn);
-        if (desired.equals(current)) {
-            return;
-        }
-        List<String> stale = ProvisionContext.staleTagKeys(current, desired);
-        if (!stale.isEmpty()) {
-            redshiftService.deleteTags(arn, stale);
-        }
-        if (!desired.isEmpty()) {
-            redshiftService.createTags(arn, desired);
-        }
     }
 
     private ClusterParameterGroup findExistingParameterGroup(String parameterGroupName) {

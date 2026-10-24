@@ -48,7 +48,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -336,9 +335,7 @@ public class RedshiftService {
             String identifier, String nodeType, String username, String clusterSubnetGroupName,
             List<String> vpcSecurityGroupIds, List<String> iamRoleArns,
             String kmsKeyId, String region, String defaultIamRoleArn) {
-        if (secretsManagerService == null) {
-            throw new AwsException("InternalFailure", "Secrets Manager is unavailable", 500);
-        }
+        requireSecretsManager();
         String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
         Cluster cluster = createCluster(identifier, nodeType, username, password,
                 clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
@@ -350,71 +347,17 @@ public class RedshiftService {
         }
     }
 
-    public Cluster enableManagedMasterPassword(String clusterIdentifier, String kmsKeyId, String region) {
+    private void requireSecretsManager() {
         if (secretsManagerService == null) {
             throw new AwsException("InternalFailure", "Secrets Manager is unavailable", 500);
         }
-        return withResourceLock("cluster", clusterIdentifier, () -> {
-            Cluster cluster = requireCluster(clusterIdentifier);
-            if (cluster.getMasterPasswordSecretArn() != null) {
-                return cluster;
-            }
-            String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
-            Cluster updated = modifyCluster(clusterIdentifier, null, null, password, null, List.of());
-            return createManagedMasterSecret(updated, kmsKeyId, region);
-        });
     }
 
-    public Cluster disableManagedMasterPassword(String clusterIdentifier, String region) {
-        if (secretsManagerService == null) {
-            throw new AwsException("InternalFailure", "Secrets Manager is unavailable", 500);
-        }
-        return withResourceLock("cluster", clusterIdentifier, () -> {
-            Cluster cluster = requireCluster(clusterIdentifier);
-            if (cluster.getMasterPasswordSecretArn() == null) {
-                return cluster;
-            }
-            String secretArn = cluster.getMasterPasswordSecretArn();
-            try {
-                secretsManagerService.deleteSecret(secretArn, null, true, region);
-            } catch (AwsException e) {
-                if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
-                    LOG.warnv(e, "Failed to remove managed master secret for cluster {0}", clusterIdentifier);
-                }
-            }
-            cluster.setMasterPasswordSecretArn(null);
-            cluster.setMasterPasswordSecretKmsKeyId(null);
-            mutate(() -> {
-                clusters.put(clusterIdentifier, cluster);
-                clusters.flush();
-                return null;
-            });
-            return cluster;
-        });
-    }
-
-    public Cluster updateManagedMasterSecretKmsKey(String clusterIdentifier, String kmsKeyId, String region) {
-        if (secretsManagerService == null) {
-            throw new AwsException("InternalFailure", "Secrets Manager is unavailable", 500);
-        }
-        return withResourceLock("cluster", clusterIdentifier, () -> {
-            Cluster cluster = requireCluster(clusterIdentifier);
-            if (cluster.getMasterPasswordSecretArn() == null) {
-                throw new AwsException("InvalidParameterValue",
-                        "Cluster " + clusterIdentifier + " has no managed master secret", 400);
-            }
-            if (Objects.equals(kmsKeyId, cluster.getMasterPasswordSecretKmsKeyId())) {
-                return cluster;
-            }
-            secretsManagerService.updateSecret(cluster.getMasterPasswordSecretArn(), null,
-                    kmsKeyId != null ? kmsKeyId : "", region);
-            cluster.setMasterPasswordSecretKmsKeyId(kmsKeyId);
-            mutate(() -> {
-                clusters.put(clusterIdentifier, cluster);
-                clusters.flush();
-                return null;
-            });
-            return cluster;
+    private void storeCluster(Cluster cluster) {
+        mutate(() -> {
+            clusters.put(cluster.getClusterIdentifier(), cluster);
+            clusters.flush();
+            return null;
         });
     }
 
@@ -427,11 +370,7 @@ public class RedshiftService {
                 kmsKeyId, List.of(), "redshift", region);
         cluster.setMasterPasswordSecretArn(secret.getArn());
         cluster.setMasterPasswordSecretKmsKeyId(kmsKeyId);
-        mutate(() -> {
-            clusters.put(identifier, cluster);
-            clusters.flush();
-            return null;
-        });
+        storeCluster(cluster);
         return cluster;
     }
 
@@ -1272,14 +1211,14 @@ public class RedshiftService {
 
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
         return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
-                () -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType)));
+                () -> mutate(() -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType))));
     }
 
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType,
                                              String clusterSubnetGroupName, boolean manageMasterPassword,
                                              String kmsKeyId, String region) {
-        if (manageMasterPassword && secretsManagerService == null) {
-            throw new AwsException("InternalFailure", "Secrets Manager is unavailable", 500);
+        if (manageMasterPassword) {
+            requireSecretsManager();
         }
         return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
                 () -> {
@@ -1291,11 +1230,7 @@ public class RedshiftService {
                             modifyCluster(clusterIdentifier, null, null, password, null, List.of());
                             return createManagedMasterSecret(cluster, kmsKeyId, region);
                         }
-                        mutate(() -> {
-                            clusters.put(clusterIdentifier, cluster);
-                            clusters.flush();
-                            return null;
-                        });
+                        storeCluster(cluster);
                         return cluster;
                     } catch (RuntimeException failure) {
                         try {
@@ -1307,6 +1242,26 @@ public class RedshiftService {
                         throw failure;
                     }
                 }));
+    }
+
+    private void rollbackSnapshotRestore(Cluster cluster, int proxyPort) {
+        String identifier = cluster.getClusterIdentifier();
+        boolean proxyStopped = stopProxyAndReleasePortSafely(identifier, proxyPort);
+        try {
+            containerManager.stop(clusters.accountId(), identifier);
+        } catch (Exception cleanupFailure) {
+            LOG.warnv(cleanupFailure, "Failed to stop container during rollback of cluster {0}", identifier);
+        }
+        mutate(() -> {
+            if (proxyStopped) {
+                clusters.delete(identifier);
+            } else {
+                cluster.setClusterStatus("failed");
+                clusters.put(identifier, cluster);
+            }
+            clusters.flush();
+            return null;
+        });
     }
 
     private Cluster restoreSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
@@ -1348,11 +1303,7 @@ public class RedshiftService {
         cluster.setMasterPassword(password);
         cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
         cluster.setClusterStatus("creating");
-        mutate(() -> {
-            clusters.put(clusterIdentifier, cluster);
-            clusters.flush();
-            return null;
-        });
+        storeCluster(cluster);
 
         // Hoisted out of the try so a failure after allocateProxyPort() still returns the port.
         int proxyPort = -1;
@@ -1376,40 +1327,14 @@ public class RedshiftService {
 
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
-            boolean proxyStopped = stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
-            try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
-            mutate(() -> {
-                if (proxyStopped) {
-                    clusters.delete(clusterIdentifier);
-                } else {
-                    cluster.setClusterStatus("failed");
-                    clusters.put(clusterIdentifier, cluster);
-                }
-                clusters.flush();
-                return null;
-            });
+            rollbackSnapshotRestore(cluster, proxyPort);
             throw e;
         } catch (Exception e) {
-            boolean proxyStopped = stopProxyAndReleasePortSafely(clusterIdentifier, proxyPort);
-            try { containerManager.stop(clusters.accountId(), clusterIdentifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", clusterIdentifier); }
-            mutate(() -> {
-                if (proxyStopped) {
-                    clusters.delete(clusterIdentifier);
-                } else {
-                    cluster.setClusterStatus("failed");
-                    clusters.put(clusterIdentifier, cluster);
-                }
-                clusters.flush();
-                return null;
-            });
+            rollbackSnapshotRestore(cluster, proxyPort);
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
         }
 
-        mutate(() -> {
-            clusters.put(clusterIdentifier, cluster);
-            clusters.flush();
-            return null;
-        });
+        storeCluster(cluster);
         return cluster;
     }
 

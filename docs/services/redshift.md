@@ -268,7 +268,8 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 - `NumberOfNodes` is not stored on cluster create: every emulated cluster is backed by a single PostgreSQL container.
 - `ManageMasterPassword` creates a Redshift-owned Secrets Manager secret. The secret contains the
   managed username, password, endpoint, port, and database name. `MasterPasswordSecretKmsKeyId`
-  selects the KMS key used for the secret metadata and is validated through KMS.
+  selects the KMS key used for the secret metadata and is validated through KMS. Switching managed
+  password mode or its KMS key in place is not implemented.
 - Snapshot restoration has the same limitations as `RestoreFromClusterSnapshot`: snapshots are
   local SQL dumps, not cross-account backups or a full Redshift engine image.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
