@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -529,16 +530,28 @@ public class EventBridgeService implements ResourceProvider {
                         + "' at 'targets." + (i + 1) + ".member." + field
                         + "' failed to satisfy constraint: Member must have " + constraint);
             }
-            validateTargetArn(target.getRoleArn());
-            validateTargetArn(arn);
+            validateTargetArn(target.getRoleArn(), "iam");
+            validateTargetArn(arn, "sqs");
         }
     }
 
-    private static void validateTargetArn(String arn) {
-        if (arn != null && !AwsArnUtils.isArn(arn)) {
-            throw new AwsException("ValidationException",
-                    "Parameter " + arn + " is not valid. Reason: Provided Arn is not in correct format.", 400);
+    private static void validateTargetArn(String arn, String service) {
+        if (arn == null) {
+            return;
         }
+        if (AwsArnUtils.isArnFor(arn, service)) {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            boolean resourceValid = "iam".equals(service)
+                    ? parsed.region().isEmpty() && parsed.resource().startsWith("role/")
+                            && !parsed.resource().substring(5).isBlank() && !parsed.resource().endsWith("/")
+                    : !parsed.region().isBlank() && parsed.resource().matches("[A-Za-z0-9_-]+(?:\\.fifo)?");
+            if (AwsPartitions.find(parsed.partition()).isPresent()
+                    && parsed.accountId().matches("[0-9]{12}") && resourceValid) {
+                return;
+            }
+        }
+        throw new AwsException("ValidationException",
+                "Parameter " + arn + " is not valid. Reason: Provided Arn is not in correct format.", 400);
     }
 
     public record RemoveTargetsResult(int successfulCount, int failedCount) {}

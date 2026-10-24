@@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -119,9 +120,36 @@ class EventBridgeEcsTargetSettingsIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"aws", "aws-us-gov", "aws-cn"})
+    @CsvSource({
+            "RoleArn, arn:::::",
+            "DeadLetterConfig, arn:::::",
+            "RoleArn, arn::iam::741618800001:role/target",
+            "DeadLetterConfig, arn::sqs:us-east-1:741618800001:queue",
+            "RoleArn, arn:aws:iam:::role/target",
+            "DeadLetterConfig, arn:aws:sqs:us-east-1::queue",
+            "RoleArn, arn:aws:iam::123:role/target",
+            "DeadLetterConfig, arn:aws:sqs:us-east-1:abcdefghijkl:queue",
+            "RoleArn, arn:unknown:iam::741618800001:role/target",
+            "DeadLetterConfig, arn:unknown:sqs:us-east-1:741618800001:queue",
+            "RoleArn, arn:aws:iam::741618800001:",
+            "DeadLetterConfig, arn:aws:sqs:us-east-1:741618800001:",
+            "RoleArn, arn:aws:iam:us-east-1:741618800001:role/target",
+            "DeadLetterConfig, arn:aws:sqs::741618800001:queue",
+            "RoleArn, arn:aws:iam::741618800001:user/target",
+            "RoleArn, arn:aws:iam::741618800001:role/",
+            "RoleArn, arn:aws:sqs:us-east-1:741618800001:queue",
+            "DeadLetterConfig, arn:aws:iam::741618800001:role/target"
+    })
+    void invalidArnComponentsRejectTheWholeRequest(String field, String arn) {
+        String value = field.equals("RoleArn") ? "\"" + arn + "\"" : "{\"Arn\":\"" + arn + "\"}";
+        assertRejected("\"" + field + "\":" + value,
+                "Parameter " + arn + " is not valid. Reason: Provided Arn is not in correct format.");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aws", "aws-us-gov", "aws-cn", "aws-iso", "aws-iso-b", "aws-iso-e", "aws-iso-f", "aws-eusc"})
     void wellFormedRoleAndDeadLetterArnsRemainAccepted(String partition) {
-        String role = "arn:" + partition + ":iam::" + ACCOUNT + ":role/target";
+        String role = "arn:" + partition + ":iam::" + ACCOUNT + ":role/service-role/target";
         String queue = "arn:" + partition + ":sqs:us-east-1:" + ACCOUNT + ":dlq";
         client.putTargets(request -> request.rule(rule).targets(Target.builder().id("t1").arn(CLUSTER)
                 .roleArn(role).deadLetterConfig(config -> config.arn(queue)).build()));
