@@ -165,6 +165,18 @@ class ApiGatewayRequestShapesTest {
     }
 
     @Test
+    void mapEntriesAreReadInKeyOrder() {
+        assertRejected("{\"tags\":{\"z\":true,\"a\":5}}", NUMBER_TO_STRING);
+        assertRejected("{\"tags\":{\"a\":5,\"z\":true}}", NUMBER_TO_STRING);
+        String z = "\"/z/GET\":{\"burstLimit\":true}";
+        String a = "\"/a/GET\":{\"burstLimit\":\"s\"}";
+        assertRejected("{\"apiStages\":[{\"apiId\":\"a\",\"stage\":\"v1\",\"throttle\":{" + z + "," + a + "}}]}",
+                STRING_TO_INTEGER);
+        assertRejected("{\"apiStages\":[{\"apiId\":\"a\",\"stage\":\"v1\",\"throttle\":{" + a + "," + z + "}}]}",
+                STRING_TO_INTEGER);
+    }
+
+    @Test
     void anUnknownOperationIsAServerError() {
         AwsException error = assertThrows(AwsException.class,
                 () -> ApiGatewayRequestShapes.check("NoSuchOperation", json("{}")));

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.io.JsonStringEncoder;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -100,6 +101,7 @@ public class ApiGatewayController {
 
     private static final TypeReference<List<Map<String, String>>> PATCH_OPERATIONS =
             new TypeReference<>() { };
+    private static final TypeReference<Map<String, Object>> JSON_OBJECT = new TypeReference<>() { };
 
     /**
      * The {@code op} enum, verbatim from the model. Wider than what any one handler implements on
@@ -854,16 +856,33 @@ public class ApiGatewayController {
     @Path("/usageplans")
     public Response createUsagePlan(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
-        try {
-            JsonNode node = objectMapper.readValue(body, JsonNode.class);
-            ApiGatewayRequestShapes.check("CreateUsagePlan", node);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> request = objectMapper.treeToValue(node, Map.class);
-            UsagePlan plan = service.createUsagePlan(region, request);
-            return Response.status(201).entity(toUsagePlanNode(plan, false).toString()).type(MediaType.APPLICATION_JSON).build();
-        } catch (IOException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        JsonNode node = readCreateUsagePlanBody(body);
+        ApiGatewayRequestShapes.check("CreateUsagePlan", node);
+        Map<String, Object> request = objectMapper.convertValue(node, JSON_OBJECT);
+        UsagePlan plan = service.createUsagePlan(region, request);
+        return Response.status(201).entity(toUsagePlanNode(plan, false).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    /**
+     * A CreateUsagePlan body as API Gateway reads it, measured: a zero-byte body is a missing input,
+     * and malformed JSON, trailing content or a body that is neither a JSON object nor an array is a
+     * SerializationException without a message. An array is left to the shape check.
+     */
+    private JsonNode readCreateUsagePlanBody(String body) {
+        if (body == null || body.isEmpty()) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value null at "
+                    + "'createUsagePlanInput' failed to satisfy constraint: Member must not be null", 400);
         }
+        JsonNode node;
+        try {
+            node = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(body);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        if (node == null || !node.isContainerNode()) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        return node;
     }
 
     @GET

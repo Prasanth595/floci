@@ -20,6 +20,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class UsagePlanLimitsTest {
@@ -86,6 +87,17 @@ class UsagePlanLimitsTest {
                 UsagePlanLimits.fromRequest(request("quota", Map.of("limit", 3000000000L, "period", "DAY"))).quota());
         assertEquals(new Throttle(0, 2.5),
                 UsagePlanLimits.fromRequest(request("throttle", Map.of("rateLimit", 2.5))).throttle());
+    }
+
+    // CreateUsagePlan's input model: the service lists this with a missing name in one ValidationException.
+    @Test
+    void aPeriodOutsideTheEnumIsAnInputModelViolation() {
+        assertEquals("Value 'YEAR' at 'createUsagePlanInput.quota.period' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: [MONTH, WEEK, DAY]",
+                UsagePlanLimits.periodViolation(request("quota", Map.of("limit", 1, "period", "YEAR"))));
+        assertNull(UsagePlanLimits.periodViolation(request("quota", Map.of("limit", 1, "period", "DAY"))));
+        assertNull(UsagePlanLimits.periodViolation(request("quota", Map.of("limit", 1))));
+        assertNull(UsagePlanLimits.periodViolation(request("name", "p")));
     }
 
     // The storage backends persist plans with a plain ObjectMapper, so this is the shape on disk.

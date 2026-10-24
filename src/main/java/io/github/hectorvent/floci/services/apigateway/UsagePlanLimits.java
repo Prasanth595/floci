@@ -38,11 +38,10 @@ public final class UsagePlanLimits {
     public static Limits fromRequest(Map<String, Object> request) {
         Map<?, ?> quotaSettings = request.get("quota") instanceof Map<?, ?> settings ? settings : null;
         Object period = quotaSettings == null ? null : quotaSettings.get("period");
-        if (period != null && !PERIODS.contains(String.valueOf(period))) {
+        String periodViolation = periodViolation(request);
+        if (periodViolation != null) {
             // CreateUsagePlan's input model refuses an unknown period before any of API Gateway's own checks.
-            throw new AwsException("ValidationException", "1 validation error detected: Value '" + period
-                    + "' at 'createUsagePlanInput.quota.period' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [MONTH, WEEK, DAY]", 400);
+            throw new AwsException("ValidationException", "1 validation error detected: " + periodViolation, 400);
         }
         Throttle throttle = request.get("throttle") instanceof Map<?, ?> settings ? throttle(settings) : null;
         Quota quota = quotaSettings == null
@@ -73,6 +72,19 @@ public final class UsagePlanLimits {
             throw new AwsException(BAD_REQUEST, FINE_GRAIN_WITHOUT_PLAN_THROTTLE, 400);
         }
         return new Limits(stages, throttle, quota);
+    }
+
+    /**
+     * CreateUsagePlan's input-model violation for a quota period outside the enum, without the
+     * {@code N validation error(s) detected:} prefix, or null when the period is absent or valid.
+     */
+    static String periodViolation(Map<String, Object> request) {
+        Object period = request.get("quota") instanceof Map<?, ?> settings ? settings.get("period") : null;
+        if (period == null || PERIODS.contains(String.valueOf(period))) {
+            return null;
+        }
+        return "Value '" + period + "' at 'createUsagePlanInput.quota.period' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [MONTH, WEEK, DAY]";
     }
 
     /** A field API Gateway leaves out reads 0. */

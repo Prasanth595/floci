@@ -1498,6 +1498,23 @@ public class ApiGatewayService implements ResourceProvider {
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
+        // CreateUsagePlan's input model reports every violation in one message, the period's before the name's.
+        List<String> violations = new ArrayList<>();
+        String periodViolation = UsagePlanLimits.periodViolation(request);
+        if (periodViolation != null) {
+            violations.add(periodViolation);
+        }
+        if (request.get("name") == null) {
+            violations.add("Value null at 'createUsagePlanInput.name' failed to satisfy constraint: "
+                    + "Member must not be null");
+        }
+        if (!violations.isEmpty()) {
+            throw new AwsException("ValidationException", violations.size() + " validation error"
+                    + (violations.size() == 1 ? "" : "s") + " detected: " + String.join("; ", violations), 400);
+        }
+        if (String.valueOf(request.get("name")).isEmpty()) {
+            throw new AwsException("BadRequestException", "Usage Plan name must be specified", 400);
+        }
         UsagePlan.Limits limits = UsagePlanLimits.fromRequest(request);
         Map<String, String> tags = new HashMap<>();
         if (request.get("tags") instanceof Map<?, ?> rawTags) {

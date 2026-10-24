@@ -140,6 +140,19 @@ class RequestShapeCheckTest {
         assertRefused(nested, sorted, "blob");
     }
 
+    @Test
+    void sortedMembersReadAMapsEntriesInKeyOrderAndAListInItsOwnOrder() {
+        RequestShapeCheck.Messages sorted = new RequestShapeCheck.Messages("Refused", "object", "list",
+                ByPosition.same("structure"), ByPosition.same("list"), ByPosition.same("map"), "%s as %s", true,
+                "boolean text", "blob", Set.of("string", "integer"), Map.of(), Map.of(), true);
+        String map = "{\"Labels\": {\"z\": {\"Name\": 5}, \"a\": {\"Count\": \"5\"}}}";
+        assertRefused(map, "NUMBER_VALUE as String");
+        assertRefused(map, sorted, "STRING_VALUE as Integer");
+        String list = "{\"Names\": [true, 5]}";
+        assertRefused(list, "TRUE_VALUE as String");
+        assertRefused(list, sorted, "TRUE_VALUE as String");
+    }
+
     private static void assertRefused(String body, String message) {
         assertRefused(body, MESSAGES, message);
     }

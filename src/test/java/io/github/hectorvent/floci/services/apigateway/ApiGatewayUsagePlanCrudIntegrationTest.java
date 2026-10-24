@@ -12,10 +12,14 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestHTTPEndpoint(ApiGatewayController.class)
 class ApiGatewayUsagePlanCrudIntegrationTest {
+
+    private static final String NAME_NULL =
+            "Value null at 'createUsagePlanInput.name' failed to satisfy constraint: Member must not be null";
 
     @Test
     void testCreateAndRetrieveUsagePlan() {
@@ -291,5 +295,74 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("SerializationException"))
                 .body("message", equalTo("Expected null"));
+    }
+
+    @Test
+    void aZeroByteBodyIsAMissingInput() {
+        int before = planCount();
+        given().contentType(ContentType.JSON)
+                .post("/usageplans")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value null at 'createUsagePlanInput' "
+                        + "failed to satisfy constraint: Member must not be null"));
+        assertEquals(before, planCount());
+    }
+
+    // Measured on API Gateway: a SerializationException with no message.
+    @Test
+    void aBodyThatIsNotAJsonObjectOrArrayIsASerializationErrorWithoutAMessage() {
+        for (String body : new String[] {"   ", "{", "{\"name\":\"trailing-junk\"} x", "\"x\"", "5", "null"}) {
+            assertCreateRefused(body, "SerializationException", null);
+        }
+    }
+
+    @Test
+    void aTopLevelArrayIsAListWhereNoneIsExpected() {
+        assertCreateRefused("[]", "SerializationException", "Start of list found where not expected");
+        assertCreateRefused("[{}]", "SerializationException", "Start of list found where not expected");
+    }
+
+    @Test
+    void aMissingOrNullNameIsAValidationException() {
+        for (String body : new String[] {"{}", "{\"description\":\"d\"}", "{\"name\":null}"}) {
+            assertCreateRefused(body, "ValidationException", "1 validation error detected: " + NAME_NULL);
+        }
+    }
+
+    @Test
+    void theInputModelListsAnInvalidPeriodBeforeAMissingName() {
+        assertCreateRefused("{\"quota\":{\"limit\":1,\"period\":\"YEAR\"}}", "ValidationException",
+                "2 validation errors detected: Value 'YEAR' at 'createUsagePlanInput.quota.period' failed to satisfy "
+                        + "constraint: Member must satisfy enum value set: [MONTH, WEEK, DAY]; " + NAME_NULL);
+    }
+
+    // The empty name is API Gateway's own check: after the input model, before the limits.
+    @Test
+    void anEmptyNameIsABadRequestAfterTheInputModelAndBeforeTheLimits() {
+        assertCreateRefused("{\"name\":\"\"}", "BadRequestException", "Usage Plan name must be specified");
+        assertCreateRefused("{\"name\":\"\",\"quota\":{\"period\":\"DAY\"}}", "BadRequestException",
+                "Usage Plan name must be specified");
+        assertCreateRefused("{\"name\":\"\",\"quota\":{\"limit\":1,\"period\":\"YEAR\"}}", "ValidationException",
+                "1 validation error detected: Value 'YEAR' at 'createUsagePlanInput.quota.period' failed to satisfy "
+                        + "constraint: Member must satisfy enum value set: [MONTH, WEEK, DAY]");
+    }
+
+    private static int planCount() {
+        return given().get("/usageplans").then().statusCode(200).extract().path("item.size()");
+    }
+
+    /** Posts {@code body}, expects a 400 of {@code type} with {@code message}, and that no plan was stored. */
+    private static void assertCreateRefused(String body, String type, String message) {
+        int before = planCount();
+        given().contentType(ContentType.JSON)
+                .body(body)
+                .post("/usageplans")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo(type))
+                .body("message", equalTo(message));
+        assertEquals(before, planCount(), body);
     }
 }
