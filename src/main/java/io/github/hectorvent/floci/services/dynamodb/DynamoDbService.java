@@ -5079,9 +5079,18 @@ public class DynamoDbService {
     /** AWS uploads every export file in one part, so each ETag ends in "-1". */
     private String writeExportFile(String bucket, String key, byte[] data) {
         String uploadId = s3Service.initiateMultipartUpload(bucket, key, "application/octet-stream").getUploadId();
-        s3Service.uploadPart(bucket, key, uploadId, 1, data);
-        String etag = s3Service.completeMultipartUpload(bucket, key, uploadId, List.of(1), null, null).getETag();
-        return etag.substring(1, etag.length() - 1);
+        try {
+            s3Service.uploadPart(bucket, key, uploadId, 1, data);
+            String etag = s3Service.completeMultipartUpload(bucket, key, uploadId, List.of(1), null, null).getETag();
+            return etag.substring(1, etag.length() - 1);
+        } catch (RuntimeException e) {
+            try {
+                s3Service.abortMultipartUpload(bucket, key, uploadId);
+            } catch (RuntimeException abortFailure) {
+                LOG.warnv(abortFailure, "Could not abort the export upload of {0}/{1}", bucket, key);
+            }
+            throw e;
+        }
     }
 
     /** AWS writes the base64 MD5 of each manifest next to it. */

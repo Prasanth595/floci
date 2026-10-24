@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
 import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
@@ -51,10 +52,13 @@ import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.endsWith;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -4504,6 +4508,24 @@ class DynamoDbServiceTest {
 
         assertEquals("TableNotFoundException", e.getErrorCode());
         assertEquals("Table not found: " + tableArn, e.getMessage());
+    }
+
+    @Test
+    void exportAbortsTheUploadOfAFileItCannotWrite() {
+        S3Service s3 = mock(S3Service.class);
+        MultipartUpload upload = new MultipartUpload("bucket", "_started", "application/octet-stream");
+        when(s3.initiateMultipartUpload(eq("bucket"), anyString(), eq("application/octet-stream"))).thenReturn(upload);
+        when(s3.uploadPart(eq("bucket"), anyString(), eq(upload.getUploadId()), eq(1), any(byte[].class)))
+                .thenThrow(new AwsException("InternalError", "We encountered an internal error. Please try again.", 500));
+        DynamoDbService svc = serviceWithS3(s3, new InMemoryStorage<>());
+        svc.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        svc.updateContinuousBackups("Users", true, null, "us-east-1");
+
+        svc.exportTable(Map.of("TableArn", "arn:aws:dynamodb:us-east-1:000000000000:table/Users", "S3Bucket", "bucket"),
+                null, "us-east-1");
+
+        verify(s3, timeout(5000)).abortMultipartUpload(eq("bucket"), endsWith("/_started"), eq(upload.getUploadId()));
     }
 
     @Test
