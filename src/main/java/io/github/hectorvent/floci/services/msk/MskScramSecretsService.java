@@ -34,9 +34,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
@@ -52,10 +56,16 @@ public class MskScramSecretsService {
     private final SecretsManagerService secretsManagerService;
     private final KmsService kmsService;
     private final ObjectMapper objectMapper;
+
     private final ScheduledExecutorService reconciler = Executors.newSingleThreadScheduledExecutor();
+    private final ThreadPoolExecutor reconciliationWorkers = new ThreadPoolExecutor(
+        4, 4, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(128));
+    private final Set<String> pendingReconciliations = ConcurrentHashMap.newKeySet();
     private final Map<String, Object> clusterLocks = new ConcurrentHashMap<>();
-    
-    private final Map<ReconciliationKey, ReconciliationFailure> reconciliationFailures = new ConcurrentHashMap<>();
+
+    private final Map<String, ClusterReconciliationFailure> clusterReconciliationFailures = new ConcurrentHashMap<>();
+    private record ClusterReconciliationFailure(Class<?> type, String message) {}
+    private final Map<ReconciliationKey, ReconciliationFailure> secretReconciliationFailures = new ConcurrentHashMap<>();
     private record ReconciliationKey(String clusterArn, String secretArn) {}
     private record ReconciliationFailure(String errorCode, String message) {}
 
@@ -81,7 +91,7 @@ public class MskScramSecretsService {
         }
         reconciler.scheduleWithFixedDelay(() -> {
             try {
-                reconcileAllScramSecrets();
+                scheduleScramReconciliation();
             } catch (RuntimeException e) {
                 LOG.error("MSK SCRAM reconciliation failed; retrying on the next scheduled run", e);
             }
@@ -91,23 +101,62 @@ public class MskScramSecretsService {
     @PreDestroy
     public void shutdown() {
         reconciler.shutdown();
+        reconciliationWorkers.shutdownNow();
     }
 
     private Object clusterLock(String clusterArn) {
         return clusterLocks.computeIfAbsent(String.valueOf(clusterArn), ignored -> new Object());
     }
 
-    void reconcileAllScramSecrets() {
+    private void scheduleScramReconciliation() {
+        int deferredClusters = 0;
         for (AccountAwareStorageBackend.AccountEntry<MskScramAssociations> entry : storage.scanAllAccountEntries(key -> true)) {
             String clusterArn = entry.key();
-            synchronized (clusterLock(clusterArn)) {
-                Optional<MskCluster> clusterGet = mskService.getClusterForAccount(entry.accountId(), clusterArn);
-                if (clusterGet.isEmpty()) {
-                    storage.deleteForAccount(entry.accountId(), clusterArn);
-                    reconciliationFailures.keySet().removeIf(key -> key.clusterArn().equals(clusterArn));
-                } else {
-                    reconcileScramSecretsForCluster(clusterGet.get(), clusterArn);
+            if (!pendingReconciliations.add(clusterArn)) {
+                continue;
+            }
+            try {
+                reconciliationWorkers.execute(() -> runClusterReconciliation(entry));
+            } catch (RejectedExecutionException e) {
+                pendingReconciliations.remove(clusterArn);
+                if (!reconciliationWorkers.isShutdown()) {
+                    deferredClusters++;
                 }
+            }
+        }
+        if (deferredClusters > 0) {
+            LOG.warnv("MSK SCRAM reconciliation workers are full; retrying {0} clusters on the next scheduled run",
+                deferredClusters);
+        }
+    }
+
+    private void runClusterReconciliation(AccountAwareStorageBackend.AccountEntry<MskScramAssociations> entry) {
+        String clusterArn = entry.key();
+        try {
+            reconcileCluster(clusterArn, entry.accountId());
+            clusterReconciliationFailures.remove(clusterArn);
+        } catch (RuntimeException e) {
+            ClusterReconciliationFailure failure = new ClusterReconciliationFailure(e.getClass(), e.getMessage());
+            if (!failure.equals(clusterReconciliationFailures.put(clusterArn, failure))) {
+                LOG.errorv(e, "MSK SCRAM reconciliation failed for cluster {0}; retrying on the next scheduled run",
+                    clusterArn);
+            } else {
+                LOG.debugv(e, "MSK SCRAM reconciliation failed for cluster {0}; retrying on the next scheduled run",
+                    clusterArn);
+            }
+        } finally {
+            pendingReconciliations.remove(clusterArn);
+        }
+    }
+
+    void reconcileCluster(String clusterArn, String accountId) {
+        synchronized (clusterLock(clusterArn)) {
+            Optional<MskCluster> clusterGet = mskService.getClusterForAccount(accountId, clusterArn);
+            if (clusterGet.isEmpty()) {
+                storage.deleteForAccount(accountId, clusterArn);
+                secretReconciliationFailures.keySet().removeIf(key -> key.clusterArn().equals(clusterArn));
+            } else {
+                reconcileScramSecretsForCluster(clusterGet.get(), clusterArn);
             }
         }
     }
@@ -121,10 +170,10 @@ public class MskScramSecretsService {
             ReconciliationKey reconciliationKey = new ReconciliationKey(clusterArn, secretArn);
             try {
                 reconcileScramSecret(secretArn, clusterAssociations, cluster);
-                reconciliationFailures.remove(reconciliationKey);
+                secretReconciliationFailures.remove(reconciliationKey);
             } catch (AwsException e) {
                 ReconciliationFailure failure = new ReconciliationFailure(e.getErrorCode(), e.getMessage());
-                if (!failure.equals(reconciliationFailures.put(reconciliationKey, failure))) {
+                if (!failure.equals(secretReconciliationFailures.put(reconciliationKey, failure))) {
                     LOG.warnv("Could not reconcile MSK SCRAM secret {0} for cluster {1}: {2}",
                         secretArn, clusterArn, e.getErrorCode());
                 } else {
@@ -355,7 +404,7 @@ public class MskScramSecretsService {
         deleteScramUser(cluster, state, association);
         state.getAssociations().remove(secretArn);
         putAssociations(cluster.getClusterArn(), state);
-        reconciliationFailures.remove(new ReconciliationKey(cluster.getClusterArn(), secretArn));
+        secretReconciliationFailures.remove(new ReconciliationKey(cluster.getClusterArn(), secretArn));
     }
 
     private void deleteScramUser(MskCluster cluster, MskScramAssociations state, ScramSecretAssociation association) {

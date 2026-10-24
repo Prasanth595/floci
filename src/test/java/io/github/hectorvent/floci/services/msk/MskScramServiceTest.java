@@ -175,6 +175,80 @@ class MskScramServiceTest {
     }
 
     @Test
+    void scheduledReconciliationKeepsOtherClustersSyncingWhileOneBrokerIsBlocked() throws Exception {
+        when(config.services().msk().mock()).thenReturn(true);
+        MskCluster healthyCluster = clusterService.createCluster("healthy-scram");
+        when(config.services().msk().mock()).thenReturn(false);
+        String healthySecret = SECRET + "-healthy";
+        associate(SECRET, version("alice", "original"));
+        setSecretValue(healthySecret, version("bob", "original"));
+        assertTrue(service.batchAssociateScramSecret(healthyCluster.getClusterArn(), List.of(healthySecret)).isEmpty());
+
+        CountDownLatch operationForFirstClusterStarted = new CountDownLatch(1);
+        CountDownLatch operationForSecondClusterDone = new CountDownLatch(1);
+        CountDownLatch operationForFirstClusterDone = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            operationForFirstClusterStarted.countDown();
+            try {
+                assertTrue(operationForSecondClusterDone.await(30, TimeUnit.SECONDS));
+            } finally {
+                operationForFirstClusterDone.countDown();
+            }
+            return null;
+        }).when(redpanda).createUser(cluster, "alice", "rotated");
+        setSecretValue(SECRET, version("alice", "rotated"));
+        when(config.services().msk().scramReconciliationIntervalMs()).thenReturn(5L);
+
+        try {
+            service.init();
+            assertTrue(operationForFirstClusterStarted.await(5, TimeUnit.SECONDS));
+
+            // More rotations than workers expose duplicate blocked jobs exhausting the pool.
+            for (int rotation = 1; rotation <= 6; rotation++) {
+                String password = "healthy-rotation-" + rotation;
+                setSecretValue(healthySecret, version("bob", password));
+                await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> verify(redpanda).createUser(healthyCluster, "bob", password));
+            }
+
+            verify(redpanda, times(1)).createUser(cluster, "alice", "rotated");
+        } finally {
+            operationForSecondClusterDone.countDown();
+            try {
+                assertTrue(operationForFirstClusterDone.await(5, TimeUnit.SECONDS));
+            } finally {
+                service.shutdown();
+            }
+        }
+    }
+
+    @Test
+    void scheduledReconciliationLogsRepeatedFailuresAndRecovers() {
+        associate(SECRET, version("alice", "original"));
+        setSecretValue(SECRET, version("alice", "rotated"));
+        doThrow(new IllegalStateException("Broker unavailable"))
+            .doThrow(new IllegalStateException("Broker unavailable"))
+            .doThrow(new IllegalArgumentException("Invalid broker"))
+            .doNothing()
+            .when(redpanda)
+            .createUser(cluster, "alice", "rotated");
+        when(config.services().msk().scramReconciliationIntervalMs()).thenReturn(5L);
+
+        try {
+            List<LogRecord> logs = LogCapture.capture(MskScramSecretsService.class, () -> {
+                service.init();
+                await()
+                    .atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> verify(redpanda, times(4)).createUser(cluster, "alice", "rotated"));
+            });
+            assertEquals(List.of("ERROR", "DEBUG", "ERROR"), logLevels(logs));
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
     void scheduledReconciliationAppliesRotationsUsingConfiguredInterval() {
         associate(SECRET, version("alice", "original"));
         when(config.services().msk().scramReconciliationIntervalMs()).thenReturn(5L);
@@ -280,7 +354,8 @@ class MskScramServiceTest {
         String deletedCluster = cluster.getClusterArn().replace(ACCOUNT, otherAccount);
         associations.putForAccount(otherAccount, deletedCluster, new MskScramAssociations());
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
+        service.reconcileCluster(deletedCluster, otherAccount);
 
         assertTrue(associations.getForAccount(ACCOUNT, cluster.getClusterArn()).isPresent());
         assertTrue(associations.getForAccount(otherAccount, deletedCluster).isEmpty());
@@ -293,7 +368,7 @@ class MskScramServiceTest {
         AwsException failure = new AwsException("InternalServerErrorException", "Lookup failed.", 500);
         doThrow(failure).when(clusterService).getClusterForAccount(ACCOUNT, cluster.getClusterArn());
 
-        assertEquals(failure, assertThrows(AwsException.class, () -> service.reconcileAllScramSecrets()));
+        assertEquals(failure, assertThrows(AwsException.class, () -> service.reconcileCluster(cluster.getClusterArn(), ACCOUNT)));
         assertTrue(associations.getForAccount(ACCOUNT, cluster.getClusterArn()).isPresent());
     }
 
@@ -748,7 +823,7 @@ class MskScramServiceTest {
         clearInvocations(redpanda);
         setSecretValue(SECRET, version("charlie", "changed-during-cleanup"));
         doNothing().when(redpanda).deleteUser(cluster, "alice");
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         assertTrue(state().getAssociations().isEmpty());
         verify(redpanda).deleteUser(cluster, "alice");
         verify(redpanda, never()).createUser(any(), anyString(), anyString());
@@ -793,12 +868,12 @@ class MskScramServiceTest {
         // Reconciliation applies each new password version once and skips already applied versions.
         associate(SECRET, version("alice", "old-password"));
         clearInvocations(redpanda);
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         verifyNoInteractions(redpanda);
 
         SecretVersion changed = version("alice", "new-password");
         setSecretValue(SECRET, changed);
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         verify(redpanda, times(1)).createUser(cluster, "alice", "new-password");
         assertEquals(changed.getVersionId(), association(SECRET).getAppliedVersionId());
     }
@@ -811,7 +886,7 @@ class MskScramServiceTest {
         SecretVersion changed = version("alice", "new-password");
         setSecretValue(SECRET, changed);
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         verify(associations, times(1)).putForAccount(eq(ACCOUNT), eq(cluster.getClusterArn()), any());
         assertEquals(changed.getVersionId(), association(SECRET).getAppliedVersionId());
@@ -822,7 +897,7 @@ class MskScramServiceTest {
         // Username rotation removes the old broker user and makes later cleanup target the new one.
         associate(SECRET, version("alice", "password"));
         setSecretValue(SECRET, version("bob", "new-password"));
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertEquals("bob", association(SECRET).getUsername());
         verify(redpanda).deleteUser(cluster, "alice");
@@ -862,7 +937,7 @@ class MskScramServiceTest {
         invalid.setSecretString("{}");
         setSecretValue(SECRET, invalid);
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertEquals("alice", association(SECRET).getUsername());
         assertEquals(original.getVersionId(), association(SECRET).getAppliedVersionId());
@@ -875,22 +950,22 @@ class MskScramServiceTest {
         setSecretReadError("AccessDeniedException", "Denied.");
 
         List<LogRecord> logs = LogCapture.capture(MskScramSecretsService.class, () -> {
-            service.reconcileAllScramSecrets();
-            service.reconcileAllScramSecrets();
+            service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
+            service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
             setSecretReadError("AccessDeniedException", "Different denial.");
-            service.reconcileAllScramSecrets();
+            service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
             setSecretReadError("InvalidRequestException", "Invalid request.");
-            service.reconcileAllScramSecrets();
+            service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         });
         assertEquals(List.of("WARN", "DEBUG", "WARN", "WARN"), logLevels(logs));
 
         setSecretValue(SECRET, version("alice", "recovered"));
-        logs = LogCapture.capture(MskScramSecretsService.class, service::reconcileAllScramSecrets);
+        logs = LogCapture.capture(MskScramSecretsService.class, () -> service.reconcileCluster(cluster.getClusterArn(), ACCOUNT));
         assertTrue(logs.isEmpty());
         verify(redpanda).createUser(cluster, "alice", "recovered");
 
         setSecretReadError("InvalidRequestException", "Invalid request.");
-        logs = LogCapture.capture(MskScramSecretsService.class, service::reconcileAllScramSecrets);
+        logs = LogCapture.capture(MskScramSecretsService.class, () -> service.reconcileCluster(cluster.getClusterArn(), ACCOUNT));
         assertEquals(List.of("WARN"), logLevels(logs));
     }
 
@@ -905,14 +980,14 @@ class MskScramServiceTest {
         associate(SECRET, original);
         clearInvocations(redpanda);
         setSecretReadError("InvalidRequestException", "The requested operation is not valid for this secret.");
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         SecretVersion invalid = new SecretVersion();
         invalid.setVersionId("invalid");
         invalid.setSecretString("{}");
         setSecretValue(SECRET, invalid);
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         setSecretReadError("AccessDeniedException", "Denied.");
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertEquals(original.getVersionId(), association(SECRET).getAppliedVersionId());
         verifyNoInteractions(redpanda);
@@ -928,7 +1003,7 @@ class MskScramServiceTest {
             .describeSecret(SECRET, "us-east-1");
         clearInvocations(redpanda);
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertFalse(association(SECRET).isCredentialsRevoked());
         assertEquals(original.getVersionId(), association(SECRET).getAppliedVersionId());
@@ -944,7 +1019,7 @@ class MskScramServiceTest {
         secret.setVersions(Map.of());
         doReturn(secret).when(secrets).describeSecret(SECRET, "us-east-1");
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertNotNull(association(SECRET));
         assertFalse(association(SECRET).isCredentialsRevoked());
@@ -961,7 +1036,7 @@ class MskScramServiceTest {
             .when(redpanda)
             .createUser(cluster, "alice", "new-password");
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertNotNull(association(SECRET));
         assertTrue(state().getAssociations().containsKey(SECRET));
@@ -978,10 +1053,10 @@ class MskScramServiceTest {
         doThrow(new AwsException("ServiceUnavailableException", "Broker unavailable.", 503))
             .when(redpanda)
             .createUser(cluster, "alice", "new-password");
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         assertEquals(original.getVersionId(), association(SECRET).getAppliedVersionId());
         doNothing().when(redpanda).createUser(cluster, "alice", "new-password");
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         assertEquals(changed.getVersionId(), association(SECRET).getAppliedVersionId());
     }
 
@@ -1002,7 +1077,7 @@ class MskScramServiceTest {
         associations.putForAccount(account, arn, foreignAssociations);
         setSecretValue(secretArn, version("foreign", "password"));
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(arn, account);
 
         verify(secrets).describeSecret(secretArn, region);
         verify(redpanda).createUser(foreign, "foreign", "password");
@@ -1034,13 +1109,13 @@ class MskScramServiceTest {
             .when(redpanda)
             .deleteUser(cluster, "alice");
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertFalse(association(SECRET).isCredentialsRevoked());
         assertEquals(original.getVersionId(), association(SECRET).getAppliedVersionId());
         verify(associations, never()).putForAccount(anyString(), anyString(), any());
         doNothing().when(redpanda).deleteUser(cluster, "alice");
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertTrue(association(SECRET).isCredentialsRevoked());
         assertNull(association(SECRET).getAppliedVersionId());
@@ -1053,7 +1128,7 @@ class MskScramServiceTest {
             .putForAccount(eq(ACCOUNT), eq(cluster.getClusterArn()), any());
         clearInvocations(redpanda, associations);
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         verifyNoInteractions(redpanda);
         verify(associations, never()).putForAccount(anyString(), anyString(), any());
@@ -1070,7 +1145,7 @@ class MskScramServiceTest {
         scheduleDeletion(SECRET);
         clearInvocations(redpanda, secrets, associations);
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertTrue(association(SECRET).isCredentialsRevoked());
         assertEquals(
@@ -1083,7 +1158,7 @@ class MskScramServiceTest {
             .putForAccount(eq(ACCOUNT), eq(cluster.getClusterArn()), any());
 
         setSecretValue(SECRET, original);
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertFalse(association(SECRET).isCredentialsRevoked());
         assertEquals(original.getVersionId(), association(SECRET).getAppliedVersionId());
@@ -1100,7 +1175,7 @@ class MskScramServiceTest {
         SecretVersion original = version("alice", "password");
         associate(SECRET, original);
         scheduleDeletion(SECRET);
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         MskScramAssociations restored =
             mapper.readValue(mapper.writeValueAsString(state()), MskScramAssociations.class);
         associations.putForAccount(ACCOUNT, cluster.getClusterArn(), restored);
@@ -1109,7 +1184,7 @@ class MskScramServiceTest {
                 storageFactory, config, clusterService, redpanda, secrets, kms, mapper);
         clearInvocations(redpanda, associations);
 
-        restarted.reconcileAllScramSecrets();
+        restarted.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertTrue(association(SECRET).isCredentialsRevoked());
         assertEquals(
@@ -1119,7 +1194,7 @@ class MskScramServiceTest {
         verify(associations, never()).putForAccount(anyString(), anyString(), any());
 
         setSecretValue(SECRET, original);
-        restarted.reconcileAllScramSecrets();
+        restarted.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertFalse(association(SECRET).isCredentialsRevoked());
         assertEquals(original.getVersionId(), association(SECRET).getAppliedVersionId());
@@ -1134,7 +1209,7 @@ class MskScramServiceTest {
         doThrow(new AwsException("ServiceUnavailableException", "Broker unavailable.", 503))
             .when(redpanda)
             .deleteUser(cluster, "alice");
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         MskScramAssociations restored =
             mapper.readValue(mapper.writeValueAsString(state()), MskScramAssociations.class);
         associations.putForAccount(ACCOUNT, cluster.getClusterArn(), restored);
@@ -1144,7 +1219,7 @@ class MskScramServiceTest {
         doNothing().when(redpanda).deleteUser(cluster, "alice");
         clearInvocations(redpanda);
 
-        restarted.reconcileAllScramSecrets();
+        restarted.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertTrue(association(SECRET).isCredentialsRevoked());
         verify(redpanda, times(1)).deleteUser(cluster, "alice");
@@ -1156,18 +1231,18 @@ class MskScramServiceTest {
         SecretVersion original = version("alice", "password");
         associate(SECRET, original);
         scheduleDeletion(SECRET);
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         setSecretValue(SECRET, original);
         doThrow(new AwsException("ServiceUnavailableException", "Broker unavailable.", 503))
             .when(redpanda)
             .createUser(cluster, "alice", "password");
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertTrue(association(SECRET).isCredentialsRevoked());
         assertNull(association(SECRET).getAppliedVersionId());
         doNothing().when(redpanda).createUser(cluster, "alice", "password");
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         assertFalse(association(SECRET).isCredentialsRevoked());
         assertEquals(original.getVersionId(), association(SECRET).getAppliedVersionId());
     }
@@ -1182,10 +1257,10 @@ class MskScramServiceTest {
             .when(secrets)
             .describeSecret(SECRET, "us-east-1");
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertFalse(association(SECRET).isCredentialsRevoked());
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertTrue(association(SECRET).isCredentialsRevoked());
         assertEquals(
@@ -1263,7 +1338,7 @@ class MskScramServiceTest {
         assertFalse(association(second).isDisassociating());
         assertNull(association(second).getAppliedVersionId());
         assertNull(association(second).getAppliedContainerId());
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         verify(redpanda, times(1)).createUser(cluster, "alice", "surviving-password");
         assertEquals(surviving.getVersionId(), association(second).getAppliedVersionId());
@@ -1298,7 +1373,7 @@ class MskScramServiceTest {
         clearInvocations(redpanda);
 
         setSecretValue(SECRET, version("bob", "new-password"));
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertEquals(other.getVersionId(), association(unrelated).getAppliedVersionId());
         assertEquals(cluster.getContainerId(), association(unrelated).getAppliedContainerId());
@@ -1313,13 +1388,13 @@ class MskScramServiceTest {
         associate(SECRET, version("alice", "password"));
         associate(second, version("alice", "shared-password"));
         setSecretValue(second, version("bob", "renamed-password"));
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         clearInvocations(redpanda);
 
         assertTrue(
             service.batchDisassociateScramSecret(cluster.getClusterArn(), List.of(SECRET))
                 .isEmpty());
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertEquals(
             List.of(second),
@@ -1370,7 +1445,7 @@ class MskScramServiceTest {
         scheduleDeletion(SECRET);
         clearInvocations(redpanda);
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertTrue(association(SECRET).isCredentialsRevoked());
         assertEquals(surviving.getVersionId(), association(second).getAppliedVersionId());
@@ -1384,7 +1459,7 @@ class MskScramServiceTest {
         assertTrue(
             service.batchDisassociateScramSecret(cluster.getClusterArn(), List.of(SECRET))
                 .isEmpty());
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertEquals(surviving.getVersionId(), association(second).getAppliedVersionId());
         assertEquals(
@@ -1406,7 +1481,7 @@ class MskScramServiceTest {
             .deleteUser(cluster, "alice");
         clearInvocations(associations);
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertFalse(association(SECRET).isCredentialsRevoked());
         assertEquals(surviving.getVersionId(), association(second).getAppliedVersionId());
@@ -1421,12 +1496,12 @@ class MskScramServiceTest {
         associate(SECRET, version("alice", "password"));
         associate(second, surviving);
         scheduleDeletion(SECRET);
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         clearInvocations(redpanda);
         doReturn(new Secret()).when(secrets).describeSecret(SECRET, "us-east-1");
         setSecretValue(SECRET, version("bob", "restored-password"));
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertFalse(association(SECRET).isCredentialsRevoked());
         assertEquals("bob", association(SECRET).getUsername());
@@ -1453,7 +1528,7 @@ class MskScramServiceTest {
             restarted.listScramSecrets(cluster.getClusterArn(), null, null).items());
         assertEquals("alice", restored.getAssociations().get(SECRET).getUsername());
         clearInvocations(redpanda);
-        restarted.reconcileAllScramSecrets();
+        restarted.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         verifyNoInteractions(redpanda);
     }
 
@@ -1464,10 +1539,10 @@ class MskScramServiceTest {
         clearInvocations(redpanda);
         cluster.setContainerId("broker-2");
         cluster.setState(ClusterState.CREATING);
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         verifyNoInteractions(redpanda);
         cluster.setState(ClusterState.ACTIVE);
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         verify(redpanda).createUser(cluster, "alice", "password");
         assertEquals("broker-2", association(SECRET).getAppliedContainerId());
     }
@@ -1484,7 +1559,7 @@ class MskScramServiceTest {
         associate(SECRET, version("alice", "password"));
         clearInvocations(redpanda, secrets);
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(arn, account);
 
         assertTrue(associations.getForAccount(account, arn).isEmpty());
         assertNotNull(association(SECRET));
@@ -1497,7 +1572,7 @@ class MskScramServiceTest {
         when(config.services().msk().mock()).thenReturn(true);
         associate(SECRET, version("alice", "password"));
         setSecretValue(SECRET, version("bob", "password"));
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
         assertEquals("bob", association(SECRET).getUsername());
         service.batchDisassociateScramSecret(cluster.getClusterArn(), List.of(SECRET));
         verifyNoInteractions(redpanda);
@@ -1519,7 +1594,7 @@ class MskScramServiceTest {
         associations.putForAccount(ACCOUNT, serverlessArn, staleAssociations);
         clearInvocations(secrets, redpanda);
 
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(serverlessArn, ACCOUNT);
 
         verifyNoInteractions(secrets, redpanda);
     }
@@ -1534,7 +1609,7 @@ class MskScramServiceTest {
 
         assertThrows(
             AwsException.class, () -> clusterService.deleteCluster(cluster.getClusterArn()));
-        service.reconcileAllScramSecrets();
+        service.reconcileCluster(cluster.getClusterArn(), ACCOUNT);
 
         assertNotNull(association(SECRET));
         assertTrue(clusters.get(cluster.getClusterArn()).isPresent());
