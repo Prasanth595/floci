@@ -33,7 +33,10 @@
 filters combine with AND. Filtering also applies to public AMI parameters and
 respects `Path`, `Recursive`, and region selection. Unknown or missing keys and keys
 not allowed for this action are rejected with `InvalidFilterKey`.
-`Label` filters accept only `Equals`, but label matching and pagination are not currently modeled.
+`Label` filters accept only `Equals`, but label matching is not currently modeled.
+`GetParametersByPath` pages with `MaxResults` (1 to 10) and `NextToken`, and `GetParameterHistory`
+with `MaxResults` (1 to 50), the way `DescribeParameters` does. A token the store did not issue,
+including one minted for another path, name or region, is answered `InvalidNextToken`.
 
 ### Run Command
 

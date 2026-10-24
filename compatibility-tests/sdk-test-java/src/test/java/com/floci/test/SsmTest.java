@@ -40,6 +40,7 @@ import software.amazon.awssdk.services.ssm.model.SsmException;
 import software.amazon.awssdk.services.ssm.model.UnlabelParameterVersionRequest;
 import software.amazon.awssdk.services.ssm.model.UnlabelParameterVersionResponse;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -394,6 +395,85 @@ class SsmTest {
                         assertThat(tag.key()).isEqualTo("env");
                         assertThat(tag.value()).isEqualTo("dev");
                     });
+        } finally {
+            ssm.deleteParameter(DeleteParameterRequest.builder().name(name).build());
+        }
+    }
+
+    @Test
+    @Order(18)
+    void getParametersByPathPagesWithMaxResultsAndNextToken() {
+        String path = "/sdk-test/pagination/" + System.nanoTime();
+        for (int i = 1; i <= 3; i++) {
+            ssm.putParameter(PutParameterRequest.builder()
+                    .name(path + "/p" + i)
+                    .value("v" + i)
+                    .type(ParameterType.STRING)
+                    .build());
+        }
+        try {
+            List<String> names = new ArrayList<>();
+            String token = null;
+            do {
+                GetParametersByPathResponse page = ssm.getParametersByPath(
+                        GetParametersByPathRequest.builder()
+                                .path(path)
+                                .maxResults(2)
+                                .nextToken(token)
+                                .build());
+                page.parameters().forEach(parameter -> names.add(parameter.name()));
+                token = page.nextToken();
+            } while (token != null);
+
+            assertThat(names).containsExactly(path + "/p1", path + "/p2", path + "/p3");
+
+            GetParametersByPathResponse firstPage = ssm.getParametersByPath(
+                    GetParametersByPathRequest.builder()
+                            .path(path)
+                            .maxResults(1)
+                            .build());
+            assertThat(firstPage.parameters()).hasSize(1);
+            assertThat(firstPage.nextToken()).isNotBlank();
+        } finally {
+            for (int i = 1; i <= 3; i++) {
+                ssm.deleteParameter(DeleteParameterRequest.builder().name(path + "/p" + i).build());
+            }
+        }
+    }
+
+    @Test
+    @Order(19)
+    void getParameterHistoryPagesWithMaxResultsAndNextToken() {
+        String name = "/sdk-test/history/" + System.nanoTime();
+        for (int version = 1; version <= 2; version++) {
+            ssm.putParameter(PutParameterRequest.builder()
+                    .name(name)
+                    .value("v" + version)
+                    .type(ParameterType.STRING)
+                    .overwrite(true)
+                    .build());
+        }
+        try {
+            GetParameterHistoryResponse firstPage = ssm.getParameterHistory(
+                    GetParameterHistoryRequest.builder()
+                            .name(name)
+                            .maxResults(1)
+                            .build());
+            assertThat(firstPage.parameters())
+                    .singleElement()
+                    .satisfies(parameter -> assertThat(parameter.version()).isEqualTo(1L));
+            assertThat(firstPage.nextToken()).isNotBlank();
+
+            GetParameterHistoryResponse secondPage = ssm.getParameterHistory(
+                    GetParameterHistoryRequest.builder()
+                            .name(name)
+                            .maxResults(1)
+                            .nextToken(firstPage.nextToken())
+                            .build());
+            assertThat(secondPage.parameters())
+                    .singleElement()
+                    .satisfies(parameter -> assertThat(parameter.version()).isEqualTo(2L));
+            assertThat(secondPage.nextToken()).isNull();
         } finally {
             ssm.deleteParameter(DeleteParameterRequest.builder().name(name).build());
         }

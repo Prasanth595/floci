@@ -232,14 +232,23 @@ public class SsmJsonHandler {
         String path = request.path("Path").asText();
         boolean recursive = request.path("Recursive").asBoolean(false);
 
-        List<Parameter> params = ssmService.getParametersByPath(path, recursive, parameterFilters(request), region);
+        Integer maxResults = maxResults(request);
+        requireMaxResultsInRange(maxResults, GET_PARAMETERS_BY_PATH_MAX_RESULTS);
+        PaginatedResult<Parameter> page = Pagination.paginate(
+                ssmService.getParametersByPath(path, recursive, parameterFilters(request), region),
+                Parameter::getName, maxResults != null ? maxResults : GET_PARAMETERS_BY_PATH_MAX_RESULTS,
+                nextToken(request), "GetParametersByPath:" + region + ":" + path,
+                token -> invalidNextToken());
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        for (Parameter p : params) {
+        for (Parameter p : page.items()) {
             parametersArray.add(parameterToNode(p));
         }
         response.set("Parameters", parametersArray);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -274,11 +283,21 @@ public class SsmJsonHandler {
 
     private Response handleGetParameterHistory(JsonNode request, String region) {
         String name = request.path("Name").asText();
-        List<ParameterHistory> history = ssmService.getParameterHistory(name, region);
+
+        Integer maxResults = maxResults(request);
+        requireMaxResultsInRange(maxResults, GET_PARAMETER_HISTORY_MAX_RESULTS);
+        // The versions of one name, so the cursor is the version. Zero-padded, the pages follow
+        // the versions' numeric order.
+        PaginatedResult<ParameterHistory> page = Pagination.paginate(
+                ssmService.getParameterHistory(name, region),
+                history -> String.format("%020d", history.getVersion()),
+                maxResults != null ? maxResults : GET_PARAMETER_HISTORY_MAX_RESULTS,
+                nextToken(request), "GetParameterHistory:" + region + ":" + name,
+                token -> invalidNextToken());
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode historyArray = objectMapper.createArrayNode();
-        for (ParameterHistory h : history) {
+        for (ParameterHistory h : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", h.getName());
             node.put("Version", h.getVersion());
@@ -296,10 +315,46 @@ public class SsmJsonHandler {
             historyArray.add(node);
         }
         response.set("Parameters", historyArray);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
     private static final int DESCRIBE_PARAMETERS_MAX_RESULTS = 50;
+    private static final int GET_PARAMETERS_BY_PATH_MAX_RESULTS = 10;
+    private static final int GET_PARAMETER_HISTORY_MAX_RESULTS = 50;
+
+    /** {@code MaxResults} of the readers that page, absent unless the request sends it. */
+    private static Integer maxResults(JsonNode request) {
+        return request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
+    }
+
+    /**
+     * {@code MaxResults} outside the operation's declared range, the way the Smithy model reports
+     * it: AWS publishes 1 to 10 for {@code GetParametersByPath} and 1 to 50 for the other two.
+     */
+    private static void requireMaxResultsInRange(Integer maxResults, int max) {
+        if (maxResults != null && (maxResults < 1 || maxResults > max)) {
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + maxResults + "' at 'maxResults' failed to "
+                            + "satisfy constraint: Member must have value between 1 and " + max);
+        }
+    }
+
+    /** {@code NextToken} of the readers that page, absent unless the request sends one. */
+    private static String nextToken(JsonNode request) {
+        String token = request.path("NextToken").asText(null);
+        if (token != null && token.isEmpty()) {
+            throw invalidNextToken();
+        }
+        return token;
+    }
+
+    /** The error SSM answers a token it did not issue. */
+    private static AwsException invalidNextToken() {
+        return new AwsException("InvalidNextToken", "The specified token isn't valid.", 400);
+    }
 
     private Response handleDescribeParameters(JsonNode request, String region) {
         List<ParameterStringFilter> filters = parameterFilters(request);
@@ -312,13 +367,8 @@ public class SsmJsonHandler {
             filters.add(new ParameterStringFilter(key, "Equals", textValues(f.path("Values"))));
         }
 
-        Integer maxResults = request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
-        if (maxResults != null && (maxResults < 1 || maxResults > DESCRIBE_PARAMETERS_MAX_RESULTS)) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + maxResults + "' at 'maxResults' failed to "
-                            + "satisfy constraint: Member must have value between 1 and "
-                            + DESCRIBE_PARAMETERS_MAX_RESULTS);
-        }
+        Integer maxResults = maxResults(request);
+        requireMaxResultsInRange(maxResults, DESCRIBE_PARAMETERS_MAX_RESULTS);
         PaginatedResult<Parameter> page = Pagination.paginate(
                 ssmService.describeParameters(filters, region), Parameter::getName,
                 maxResults, request.path("NextToken").asText(null),

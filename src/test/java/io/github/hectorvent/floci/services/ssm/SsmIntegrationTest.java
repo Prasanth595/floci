@@ -1659,6 +1659,108 @@ class SsmIntegrationTest {
     }
 
     @Test
+    void getParametersByPathPagesWithMaxResultsAndNextToken() {
+        String suffix = Long.toString(System.nanoTime());
+        putFilterFixture("/ppg/" + suffix + "/alpha", "String", "");
+        putFilterFixture("/ppg/" + suffix + "/beta", "String", "");
+        putFilterFixture("/ppg/" + suffix + "/gamma", "String", "");
+
+        String token = given()
+            .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Path\": \"/ppg/" + suffix + "\", \"MaxResults\": 2 }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Name", contains("/ppg/" + suffix + "/alpha", "/ppg/" + suffix + "/beta"))
+            .body("NextToken", notNullValue())
+            .extract().path("NextToken");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Path\": \"/ppg/" + suffix + "\", \"MaxResults\": 2, \"NextToken\": \"" + token + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Name", contains("/ppg/" + suffix + "/gamma"))
+            .body("$", not(hasKey("NextToken")));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Path\": \"/ppg/" + suffix + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Name", hasSize(3))
+            .body("$", not(hasKey("NextToken")));
+
+        getParametersByPathError("{ \"Path\": \"/ppg/" + suffix + "\", \"MaxResults\": 11 }", "ValidationException");
+        getParametersByPathError("{ \"Path\": \"/ppg/" + suffix + "\", \"MaxResults\": 0 }", "ValidationException");
+        getParametersByPathError("{ \"Path\": \"/ppg/" + suffix + "\", \"NextToken\": \"not-a-token\" }",
+                "InvalidNextToken");
+    }
+
+    @Test
+    void getParameterHistoryPagesWithMaxResultsAndNextToken() {
+        String name = "/php/" + System.nanoTime();
+        for (int version = 1; version <= 3; version++) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM.PutParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + name + "\", \"Value\": \"v" + version
+                        + "\", \"Type\": \"String\", \"Overwrite\": true }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+
+        String token = given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameterHistory")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\", \"MaxResults\": 2 }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Version", contains(1, 2))
+            .body("NextToken", notNullValue())
+            .extract().path("NextToken");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameterHistory")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\", \"MaxResults\": 2, \"NextToken\": \"" + token + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Version", contains(3))
+            .body("$", not(hasKey("NextToken")));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameterHistory")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameters.Version", contains(1, 2, 3))
+            .body("$", not(hasKey("NextToken")));
+
+        getParameterHistoryError("{ \"Name\": \"" + name + "\", \"MaxResults\": 51 }", "ValidationException");
+        getParameterHistoryError("{ \"Name\": \"" + name + "\", \"MaxResults\": 0 }", "ValidationException");
+        getParameterHistoryError("{ \"Name\": \"" + name + "\", \"NextToken\": \"not-a-token\" }",
+                "InvalidNextToken");
+    }
+
+    @Test
     void parameterArn_hasParameterSlashAndAddressesTagOperations() {
         String suffix = Long.toString(System.nanoTime());
         String plain = "arn-plain-" + suffix;
@@ -2469,6 +2571,30 @@ class SsmIntegrationTest {
     private void describeParametersError(String body, String errorType) {
         given()
             .header("X-Amz-Target", "AmazonSSM.DescribeParameters")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo(errorType));
+    }
+
+    private void getParametersByPathError(String body, String errorType) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo(errorType));
+    }
+
+    private void getParameterHistoryError(String body, String errorType) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameterHistory")
             .contentType(SSM_CONTENT_TYPE)
             .body(body)
         .when()
