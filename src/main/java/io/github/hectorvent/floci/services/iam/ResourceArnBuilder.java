@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
@@ -11,6 +12,7 @@ import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.eks.EksService;
+import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
@@ -71,17 +73,28 @@ public class ResourceArnBuilder {
     private final Instance<LambdaMicrovmsService> microvmsService;
     /** Looked up lazily for the same reason, to read the ARN an EKS cluster or what it holds is stored under. */
     private final Instance<EksService> eksService;
+    /** Looked up lazily for the same reason, to resolve a key named by an id, an alias or an ARN to its stored ARN. */
+    private final Instance<KmsService> kmsService;
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
                               Instance<SecretsManagerService> secretsManagerService,
                               Instance<LambdaMicrovmsService> microvmsService,
-                              Instance<EksService> eksService) {
+                              Instance<EksService> eksService,
+                              Instance<KmsService> kmsService) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
         this.secretsManagerService = secretsManagerService;
         this.microvmsService = microvmsService;
         this.eksService = eksService;
+        this.kmsService = kmsService;
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              Instance<SecretsManagerService> secretsManagerService,
+                              Instance<LambdaMicrovmsService> microvmsService,
+                              Instance<EksService> eksService) {
+        this(objectMapper, iamService, secretsManagerService, microvmsService, eksService, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -147,7 +160,6 @@ public class ResourceArnBuilder {
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
-            case "kms"            -> List.of(buildKmsArn(path, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
@@ -1590,10 +1602,198 @@ public class ResourceArnBuilder {
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────
-    private String buildKmsArn(String path, String region, String accountId) {
-        String keyId = extractSegmentAfter(path, "keys");
-        if (keyId == null) return AwsArnUtils.Arn.of("kms", region, accountId, "key/*").toString();
-        return AwsArnUtils.Arn.of("kms", region, accountId, "key/" + keyId).toString();
+
+    /**
+     * The resources a KMS request is evaluated against, as the KMS permissions reference gives
+     * them (Developer Guide, "AWS KMS permissions"). A key-scoped operation, which is every
+     * crypto operation and every key-management one Floci dispatches, is evaluated against the
+     * key its {@code KeyId} names, resolving an alias name or an alias ARN to the key it points
+     * at exactly as the handler resolves it. {@code Decrypt} names its key in an optional
+     * {@code KeyId}; without one the key is the one that encrypted the {@code CiphertextBlob},
+     * read out of the blob the same way the handler reads it.
+     *
+     * <p>{@code CreateKey}, {@code GenerateRandom}, {@code ListKeys}, {@code ListAliases} and
+     * {@code ListRetirableGrants} apply to no particular resource, so they stay at {@code *},
+     * the element the reference itself requires a policy to name for them. The alias operations
+     * name their resources the way the alias permissions page gives them: {@code CreateAlias}
+     * the alias and the key, {@code UpdateAlias} the alias, the key it points at and the key it
+     * will point at, and {@code DeleteAlias} the alias and the key it points at.
+     *
+     * <p>{@code ReEncrypt} is a stopgap here: AWS authorizes it as {@code kms:ReEncryptFrom} on
+     * the source key and {@code kms:ReEncryptTo} on the destination, while this evaluates the
+     * single {@code kms:ReEncrypt} action against both keys, so a policy naming either action
+     * AWS publishes still binds to nothing.
+     *
+     * <p>A request nothing resolves names every key the account holds, which the permissive
+     * {@code key/*} pattern a policy may scope to still matches; the operation then fails in the
+     * handler with its own {@code NotFoundException}.
+     */
+    public List<String> buildKmsResources(String action, ContainerRequestContext ctx,
+                                           String region, String accountId, String partition) {
+        JsonNode body = readJsonBody(ctx);
+        if (body == null) {
+            body = MissingNode.getInstance();
+        }
+        return switch (action) {
+            case "kms:CreateKey", "kms:GenerateRandom", "kms:ListKeys", "kms:ListAliases",
+                    "kms:ListRetirableGrants" -> List.of("*");
+            case "kms:CreateAlias" -> createAliasTargets(body, region, accountId, partition);
+            case "kms:UpdateAlias" -> updateAliasTargets(body, region, accountId, partition);
+            case "kms:DeleteAlias" -> deleteAliasTargets(body, region, accountId, partition);
+            case "kms:Decrypt" -> List.of(decryptTarget(body, region, accountId, partition));
+            case "kms:ReEncrypt" -> reEncryptTargets(body, region, accountId, partition);
+            default -> List.of(keyTarget(body, "KeyId", region, accountId, partition));
+        };
+    }
+
+    /** The key a request names in {@code member}, or every key the account holds when it names none. */
+    private String keyTarget(JsonNode body, String member, String region, String accountId,
+                             String partition) {
+        String keyId = body.path(member).asText(null);
+        return keyId == null || keyId.isBlank()
+                ? keyWildcard(region, accountId, partition)
+                : keyArn(keyId, region, accountId, partition);
+    }
+
+    /**
+     * The key ARN a request's identifier names: the stored key's own ARN when the account holds
+     * it, in the partition it was created in; a key ARN the account holds nothing of as given,
+     * which is the caller's own naming of the key the operation will refuse; and a bare key id
+     * minted in the request's partition, the partition the create mints in. An alias that
+     * resolves to nothing names every key, since the operation then fails before a policy
+     * matters.
+     */
+    private String keyArn(String keyIdOrAliasOrArn, String region, String accountId, String partition) {
+        if (kmsService != null) {
+            Optional<String> stored = kmsService.get().findKeyArn(keyIdOrAliasOrArn, region);
+            if (stored.isPresent()) {
+                return stored.get();
+            }
+        }
+        if (AwsArnUtils.isArnFor(keyIdOrAliasOrArn, "kms")) {
+            return keyIdOrAliasOrArn;
+        }
+        if (keyIdOrAliasOrArn.startsWith("alias/") || keyIdOrAliasOrArn.contains(":alias/")) {
+            return keyWildcard(region, accountId, partition);
+        }
+        return new AwsArnUtils.Arn(partition, "kms", region, accountId,
+                "key/" + keyIdOrAliasOrArn).toString();
+    }
+
+    /**
+     * The key a {@code Decrypt} names: the optional {@code KeyId} when the request carries one,
+     * and otherwise the key that encrypted the {@code CiphertextBlob}, which is the key the
+     * service decrypts with and answers.
+     */
+    private String decryptTarget(JsonNode body, String region, String accountId, String partition) {
+        String keyId = body.path("KeyId").asText(null);
+        if (keyId != null && !keyId.isBlank()) {
+            return keyArn(keyId, region, accountId, partition);
+        }
+        JsonNode ciphertext = body.path("CiphertextBlob");
+        if (kmsService != null && !ciphertext.isMissingNode() && !ciphertext.isNull()) {
+            byte[] blob;
+            try {
+                blob = ciphertext.binaryValue();
+            } catch (IOException e) {
+                return keyWildcard(region, accountId, partition);
+            }
+            String keyArn = kmsService.get().decryptToKeyArn(blob, region);
+            if (keyArn != null) {
+                return keyArn;
+            }
+        }
+        return keyWildcard(region, accountId, partition);
+    }
+
+    /**
+     * Both keys a {@code ReEncrypt} acts on, the source the ciphertext or its optional
+     * {@code SourceKeyId} names and the destination its {@code DestinationKeyId} names. The
+     * filter authorizes a request once per resource, so the caller has to be allowed on both.
+     */
+    private List<String> reEncryptTargets(JsonNode body, String region, String accountId,
+                                          String partition) {
+        Set<String> keys = new LinkedHashSet<>();
+        String sourceKeyId = body.path("SourceKeyId").asText(null);
+        if (sourceKeyId == null || sourceKeyId.isBlank()) {
+            keys.add(decryptTarget(body, region, accountId, partition));
+        } else {
+            keys.add(keyArn(sourceKeyId, region, accountId, partition));
+        }
+        keys.add(keyTarget(body, "DestinationKeyId", region, accountId, partition));
+        return new ArrayList<>(keys);
+    }
+
+    /**
+     * The alias and the key a {@code CreateAlias} names, as the alias permissions page requires
+     * the caller to hold {@code kms:CreateAlias} on both.
+     */
+    private List<String> createAliasTargets(JsonNode body, String region, String accountId,
+                                            String partition) {
+        Set<String> resources = new LinkedHashSet<>();
+        String aliasArn = aliasArn(body.path("AliasName").asText(null), region, accountId, partition);
+        if (aliasArn != null) {
+            resources.add(aliasArn);
+        }
+        resources.add(keyTarget(body, "TargetKeyId", region, accountId, partition));
+        return new ArrayList<>(resources);
+    }
+
+    /**
+     * The three resources an {@code UpdateAlias} acts on, as the alias permissions page lists
+     * them: the alias, the key it points at and the key it will point at.
+     */
+    private List<String> updateAliasTargets(JsonNode body, String region, String accountId,
+                                            String partition) {
+        Set<String> resources = new LinkedHashSet<>();
+        addAliasAndItsKey(resources, body, region, accountId, partition);
+        resources.add(keyTarget(body, "TargetKeyId", region, accountId, partition));
+        return new ArrayList<>(resources);
+    }
+
+    /**
+     * The alias and the key it points at, the two resources a {@code DeleteAlias} acts on. A
+     * request naming no alias AWS would accept the name of names nothing to authorize against
+     * but the wildcard, and the handler refuses it.
+     */
+    private List<String> deleteAliasTargets(JsonNode body, String region, String accountId,
+                                            String partition) {
+        Set<String> resources = new LinkedHashSet<>();
+        addAliasAndItsKey(resources, body, region, accountId, partition);
+        return resources.isEmpty() ? List.of("*") : new ArrayList<>(resources);
+    }
+
+    /**
+     * The alias the request's {@code AliasName} names, and the key that alias points at when it
+     * resolves to one. Nothing is added for a name that is missing or that AWS would refuse.
+     */
+    private void addAliasAndItsKey(Set<String> resources, JsonNode body, String region,
+                                   String accountId, String partition) {
+        String aliasName = body.path("AliasName").asText(null);
+        String aliasArn = aliasArn(aliasName, region, accountId, partition);
+        if (aliasArn == null) {
+            return;
+        }
+        resources.add(aliasArn);
+        if (kmsService != null) {
+            String keyArn = kmsService.get().findKeyArn(aliasName, region).orElse(null);
+            if (keyArn != null) {
+                resources.add(keyArn);
+            }
+        }
+    }
+
+    /** The alias's ARN, or null when the request names no alias AWS would accept the name of. */
+    private static String aliasArn(String aliasName, String region, String accountId, String partition) {
+        if (aliasName == null || !aliasName.startsWith("alias/")) {
+            return null;
+        }
+        return new AwsArnUtils.Arn(partition, "kms", region, accountId, aliasName).toString();
+    }
+
+    /** Every key the account holds in the region, the pattern a permissive policy still matches. */
+    private static String keyWildcard(String region, String accountId, String partition) {
+        return new AwsArnUtils.Arn(partition, "kms", region, accountId, "key/*").toString();
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

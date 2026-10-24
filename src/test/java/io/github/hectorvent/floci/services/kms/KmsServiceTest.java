@@ -68,6 +68,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -128,6 +129,29 @@ class KmsServiceTest {
         assertTrue(key.getArn().contains("key/"));
         assertEquals("my test key", key.getDescription());
         assertEquals("Enabled", key.getKeyState());
+    }
+
+    /**
+     * The enforcement filter resolves the key a request names through this lookup rather than
+     * through {@code describeKey}, which throws: an operation naming no key the account holds
+     * answers its own {@code NotFoundException}, so the check must not refuse the request first.
+     */
+    @Test
+    void findKeyArnResolvesEverySpellingWithoutRefusing() {
+        KmsKey created = kmsService.createKey("described", REGION);
+        assertEquals(Optional.of(created.getArn()), kmsService.findKeyArn(created.getKeyId(), REGION));
+        assertEquals(Optional.of(created.getArn()), kmsService.findKeyArn(created.getArn(), REGION));
+
+        kmsService.createAlias("alias/app", created.getKeyId(), REGION);
+        assertEquals(Optional.of(created.getArn()), kmsService.findKeyArn("alias/app", REGION));
+        assertEquals(Optional.of(created.getArn()),
+                kmsService.findKeyArn("arn:aws:kms:us-east-1:000000000000:alias/app", REGION));
+
+        assertEquals(Optional.empty(), kmsService.findKeyArn("1234abcd-12ab-34cd-56ef-1234567890ab", REGION));
+        assertEquals(Optional.empty(), kmsService.findKeyArn("alias/missing", REGION));
+        assertEquals(Optional.empty(), kmsService.findKeyArn(created.getArn(), "eu-west-1"));
+        assertEquals(Optional.empty(), kmsService.findKeyArn(null, REGION));
+        assertEquals(Optional.empty(), kmsService.findKeyArn("   ", REGION));
     }
 
     @Test

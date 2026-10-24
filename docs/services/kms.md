@@ -228,6 +228,12 @@ there.
 
 Grant lifecycle operations (`CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RevokeGrant`, `RetireGrant`) are supported. However, grant lifecycle support **does not** imply grant-based authorization enforcement on cryptographic operations (`Encrypt`, `Decrypt`, `Sign`, `Verify`, `GenerateDataKey`, etc.). Grants are stored and queryable but are not evaluated during crypto operations.
 
+## IAM Enforcement
+
+With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, an operation that names a key is evaluated against that key's ARN, as on AWS. A `KeyId` given as a key id, an alias name, an alias ARN or a key ARN resolves to the key it names, so a policy scoped to one key ARN allows that key and no other, and a `Deny` scoped to one fires for that key. A `Decrypt` that names no `KeyId` is evaluated against the key that encrypted its `CiphertextBlob`.
+
+`CreateAlias`, `UpdateAlias` and `DeleteAlias` are evaluated against the alias ARN and the key it points at, `UpdateAlias` also against the key it will point at, the two resource types the Service Authorization Reference lists for them. `ReEncrypt` is evaluated against both keys it acts on, under the single `kms:ReEncrypt` action; AWS authorizes the two halves separately as `kms:ReEncryptFrom` and `kms:ReEncryptTo`, which Floci does not split yet. `CreateKey`, `GenerateRandom`, `ListKeys`, `ListAliases` and `ListRetirableGrants` name no key resource and are evaluated against `*`, the resource a policy must name for them on AWS too.
+
 ## Configuration
 
 | Variable | Default | Description |
