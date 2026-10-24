@@ -127,7 +127,8 @@ public class CodePipelineService {
     // on sibling actions. Retries check this set so they never overlap a runner that has not finished.
     final Set<String> activeRuns = ConcurrentHashMap.newKeySet();
     private final long sourcePollIntervalMs;
-    private final long workerPollIntervalMs;
+    // Package-private so tests can assert the resolved interval instead of timing worker sleeps.
+    final long workerPollIntervalMs;
     // Test hooks, set only through the package-private constructor: a shortened wait, and a probe
     // for the gap before the override timeout cleanup.
     private final long runFinishWaitNanos;

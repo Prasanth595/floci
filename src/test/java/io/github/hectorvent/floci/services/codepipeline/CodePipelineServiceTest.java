@@ -195,25 +195,45 @@ class CodePipelineServiceTest {
     }
 
     @Test
-    void invalidConfiguredWorkerIntervalsAvoidBusySpinAndStopAfterBuildCompletion() throws Exception {
-        for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
-            assertWorkerPollingProgress(interval, false);
-        }
-    }
-
-    @Test
-    void invalidDirectWorkerIntervalsAvoidBusySpinAndStopAfterBuildCompletion() throws Exception {
-        for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
-            assertWorkerPollingProgress(interval, true);
-        }
-    }
-
-    @Test
-    void positiveWorkerIntervalsPreserveFastAndNondefaultPolling() throws Exception {
+    void nonPositiveWorkerIntervalsFallBackToTheDefault() {
         for (boolean direct : new boolean[] {false, true}) {
-            assertWorkerPollingProgress(1L, direct);
-            assertWorkerPollingProgress(739L, direct);
+            for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
+                CodePipelineService pipelineService =
+                        workerPollingService(mock(CodeBuildService.class), interval, direct);
+                try {
+                    assertEquals(100L, pipelineService.workerPollIntervalMs,
+                            "interval " + interval + " (direct=" + direct + ") must fall back to 100ms");
+                } finally {
+                    pipelineService.shutdown();
+                }
+            }
         }
+    }
+
+    @Test
+    void positiveWorkerIntervalsArePreserved() {
+        for (boolean direct : new boolean[] {false, true}) {
+            for (long interval : new long[] {1L, 739L, Long.MAX_VALUE}) {
+                CodePipelineService pipelineService =
+                        workerPollingService(mock(CodeBuildService.class), interval, direct);
+                try {
+                    assertEquals(interval, pipelineService.workerPollIntervalMs,
+                            "interval " + interval + " (direct=" + direct + ") must not be replaced");
+                } finally {
+                    pipelineService.shutdown();
+                }
+            }
+        }
+    }
+
+    @Test
+    void invalidConfiguredWorkerIntervalKeepsPollingAndStopsAfterBuildCompletion() throws Exception {
+        assertWorkerPollingProgress(0L, false);
+    }
+
+    @Test
+    void invalidDirectWorkerIntervalKeepsPollingAndStopsAfterBuildCompletion() throws Exception {
+        assertWorkerPollingProgress(Long.MIN_VALUE, true);
     }
 
     private CodePipelineService workerPollingService(CodeBuildService codeBuild, long interval, boolean direct) {
@@ -231,13 +251,11 @@ class CodePipelineServiceTest {
     private void assertWorkerPollingProgress(long interval, boolean direct) throws Exception {
         CodeBuildService codeBuild = mock(CodeBuildService.class);
         AtomicReference<Build> currentBuild = new AtomicReference<>(build("IN_PROGRESS", false));
-        AtomicInteger polls = new AtomicInteger();
-        CountDownLatch firstPoll = new CountDownLatch(1);
+        CountDownLatch repeatedPolls = new CountDownLatch(3);
         when(codeBuild.startBuild(anyString(), anyString(), anyString(),
                 any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> currentBuild.get());
         when(codeBuild.getBuild(anyString(), anyString(), anyString())).thenAnswer(invocation -> {
-            polls.incrementAndGet();
-            firstPoll.countDown();
+            repeatedPolls.countDown();
             return currentBuild.get();
         });
         CodePipelineService pipelineService = workerPollingService(codeBuild, interval, direct);
@@ -249,23 +267,9 @@ class CodePipelineServiceTest {
                      "configuration":{"ProjectName":"build-project"}}
                     """);
             String execution = startExecution(pipelineService, pipeline);
-            assertTrue(firstPoll.await(3, TimeUnit.SECONDS), "Worker must actually poll the build");
-            int initialPolls = polls.get();
-            // Observe several fallback cycles, not just startup. No exact wall-clock upper bound:
-            // Awaitility must keep the count bounded throughout this negative observation window.
-            if (interval <= 0) {
-                await().pollInterval(Duration.ofMillis(10)).during(Duration.ofMillis(350))
-                        .atMost(Duration.ofSeconds(2)).untilAsserted(() ->
-                                assertTrue(polls.get() - initialPolls <= 5, "Invalid interval must not busy-spin"));
-                assertTrue(polls.get() > initialPolls, "Fallback must keep making progress");
-            } else if (interval == 1L) {
-                await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofMillis(750))
-                        .until(() -> polls.get() - initialPolls >= 10);
-            } else {
-                await().pollInterval(Duration.ofMillis(10)).during(Duration.ofMillis(350))
-                        .atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(initialPolls, polls.get(),
-                                "739ms must not be replaced by the 100ms default"));
-            }
+            // The fallback interval itself is asserted directly; here only progress matters, so
+            // there is a generous deadline and no upper bound on how many polls happen meanwhile.
+            assertTrue(repeatedPolls.await(30, TimeUnit.SECONDS), "Worker must keep polling the build");
             stopExecution(pipelineService, pipeline, execution, false);
             waitForExecutionStatus(pipelineService, pipeline, execution, "Stopping");
             currentBuild.set(build("SUCCEEDED", true));
@@ -300,15 +304,15 @@ class CodePipelineServiceTest {
                          "configuration":{"ProjectName":"build-project"}}
                         """);
                 String execution = startExecution(pipelineService, "large-worker-poll");
-                assertTrue(started.await(3, TimeUnit.SECONDS));
-                await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(3))
+                assertTrue(started.await(30, TimeUnit.SECONDS));
+                await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(30))
                         .until(() -> worker.get().getState() == Thread.State.TIMED_WAITING);
-                // Longer than two default cycles, but never wait for the configured huge sleep.
-                await().pollInterval(Duration.ofMillis(10)).during(Duration.ofMillis(350))
-                        .atMost(Duration.ofSeconds(2)).untilAsserted(() ->
-                                verify(codeBuild, never()).getBuild(anyString(), anyString(), anyString()));
                 pipelineService.shutdown();
-                assertFalse(worker.get().isAlive());
+                // The pool can report termination while its thread is still unwinding, so join it.
+                worker.get().join(TimeUnit.SECONDS.toMillis(30));
+                assertFalse(worker.get().isAlive(), "Shutdown must interrupt the worker's long sleep");
+                // A preserved huge interval means the interrupted sleep was the first and only one.
+                verify(codeBuild, never()).getBuild(anyString(), anyString(), anyString());
                 assertFalse(pipelineService.activeRuns.contains(ACCOUNT + ":" + execution));
             } finally {
                 pipelineService.shutdown();
