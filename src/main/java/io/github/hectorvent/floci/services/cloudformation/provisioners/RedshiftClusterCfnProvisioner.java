@@ -100,7 +100,16 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         String nodeType = ctx.resolveOptional(props, "NodeType");
         String masterUsername = ctx.resolveOptional(props, "MasterUsername");
         String masterUserPassword = ctx.resolveOptional(props, "MasterUserPassword");
-        if (!manageMasterPassword && (masterUserPassword == null || masterUserPassword.isBlank())) {
+        String snapshotIdentifier = ctx.resolveOptional(props, "SnapshotIdentifier");
+        if (snapshotIdentifier != null && snapshotIdentifier.isBlank()) {
+            throw new AwsException("ValidationException", "SnapshotIdentifier must not be blank", 400);
+        }
+        if (snapshotIdentifier != null && manageMasterPassword && masterUserPassword != null) {
+            throw new AwsException("ValidationException",
+                    "MasterUserPassword cannot be used with ManageMasterPassword", 400);
+        }
+        if (snapshotIdentifier == null && !manageMasterPassword
+                && (masterUserPassword == null || masterUserPassword.isBlank())) {
             throw new AwsException("ValidationException",
                     "MasterUserPassword is required unless ManageMasterPassword is set", 400);
         }
@@ -113,18 +122,25 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
         String explicitId = ctx.resolveOptional(props, "ClusterIdentifier");
         Cluster prior = ctx.isUpdate() ? findExistingCluster(ctx.priorPhysicalId()) : null;
-        boolean createOnlyChanged = dbNameChanged || (prior != null && (
-                (masterUsername != null && !masterUsername.equals(prior.getMasterUsername()))
-                || (subnetGroup != null && !Objects.equals(subnetGroup, prior.getClusterSubnetGroupName()))
-        ));
+        boolean snapshotChanged = ctx.isUpdate()
+                && !Objects.equals(snapshotIdentifier, attributesBefore.get("Floci::SnapshotIdentifier"));
+        boolean masterUsernameChanged = snapshotIdentifier == null
+                ? prior != null && masterUsername != null && !masterUsername.equals(prior.getMasterUsername())
+                : ctx.isUpdate() && !Objects.equals(masterUsername, attributesBefore.get("Floci::RestoreMasterUsername"));
+        boolean createOnlyChanged = dbNameChanged || snapshotChanged || masterUsernameChanged
+                || prior != null && subnetGroup != null && !Objects.equals(subnetGroup, prior.getClusterSubnetGroupName());
+        boolean sameTemplateIdentifier = explicitId == null || explicitId.equals(ctx.priorPhysicalId())
+                || explicitId.equals(attributesBefore.get("Floci::ClusterIdentifier"));
 
         String id;
-        if (createOnlyChanged && (explicitId == null || explicitId.equals(ctx.priorPhysicalId()))) {
+        if (createOnlyChanged && sameTemplateIdentifier) {
             if (explicitId != null && !explicitId.isBlank()) {
                 id = replacementId(explicitId, IDENTIFIER_MAX_LENGTH, true);
             } else {
                 id = ctx.generatePhysicalName(r.getLogicalId(), IDENTIFIER_MAX_LENGTH, true);
             }
+        } else if (ctx.isUpdate() && sameTemplateIdentifier) {
+            id = ctx.priorPhysicalId();
         } else {
             id = ctx.stablePhysicalName(explicitId, r.getLogicalId(), IDENTIFIER_MAX_LENGTH, true);
         }
@@ -138,6 +154,24 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             cluster = redshiftService.modifyCluster(id, nodeType, numberOfNodes(props, ctx),
                     masterUserPassword, ctx.resolveOptional(props, "ClusterParameterGroupName"),
                     securityGroups);
+        } else if (snapshotIdentifier != null) {
+            cluster = redshiftService.restoreFromClusterSnapshot(id, snapshotIdentifier, nodeType, subnetGroup,
+                    manageMasterPassword, ctx.resolveOptional(props, "MasterPasswordSecretKmsKeyId"), ctx.region());
+            String parameterGroup = ctx.resolveOptional(props, "ClusterParameterGroupName");
+            if (parameterGroup != null || !securityGroups.isEmpty()) {
+                try {
+                    cluster = redshiftService.modifyCluster(id, nodeType, numberOfNodes(props, ctx),
+                            null, parameterGroup, securityGroups);
+                } catch (RuntimeException failure) {
+                    try {
+                        redshiftService.deleteCluster(id);
+                    } catch (RuntimeException cleanupFailure) {
+                        failure.addSuppressed(cleanupFailure);
+                        LOG.warnv(cleanupFailure, "Failed to clean up restored cluster {0}", id);
+                    }
+                    throw failure;
+                }
+            }
         } else if (manageMasterPassword) {
             String kmsKeyId = props.path("MasterPasswordSecretKmsKeyId").asText(null);
             cluster = redshiftService.createClusterWithManagedMasterPassword(id, nodeType, masterUsername,
@@ -149,10 +183,35 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         if (!tags.isEmpty()) {
-            redshiftService.createTags(id, tags);
+            try {
+                String arn = AwsArnUtils.Arn.of("redshift", ctx.region(), ctx.accountId(), "cluster:" + id).toString();
+                redshiftService.createTags(arn, tags);
+            } catch (RuntimeException failure) {
+                if (snapshotIdentifier != null && !ctx.reusesPriorEntity(id)) {
+                    try {
+                        redshiftService.deleteCluster(id);
+                    } catch (RuntimeException cleanupFailure) {
+                        failure.addSuppressed(cleanupFailure);
+                        LOG.warnv(cleanupFailure, "Failed to clean up restored cluster {0}", id);
+                    }
+                }
+                throw failure;
+            }
         }
 
         r.setPhysicalId(id);
+        r.getAttributes().remove("Floci::ClusterIdentifier");
+        if (explicitId != null) {
+            r.getAttributes().put("Floci::ClusterIdentifier", explicitId);
+        }
+        r.getAttributes().remove("Floci::SnapshotIdentifier");
+        r.getAttributes().remove("Floci::RestoreMasterUsername");
+        if (snapshotIdentifier != null) {
+            r.getAttributes().put("Floci::SnapshotIdentifier", snapshotIdentifier);
+            if (masterUsername != null) {
+                r.getAttributes().put("Floci::RestoreMasterUsername", masterUsername);
+            }
+        }
         if (dbName != null && !dbName.isBlank()) {
             r.getAttributes().put("Floci::DBName", dbName);
         }
@@ -162,6 +221,8 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         }
         if (cluster.getMasterPasswordSecretArn() != null) {
             r.getAttributes().put("MasterPasswordSecretArn", cluster.getMasterPasswordSecretArn());
+        } else {
+            r.getAttributes().remove("MasterPasswordSecretArn");
         }
         r.getAttributes().put("ClusterNamespaceArn", namespaceArn(ctx, id));
     }
@@ -186,7 +247,8 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         if (ctx.resolveOptional(props, "Port") != null) {
             LOG.warnv("Cluster {0}: Port ignored, Floci assigns the host proxy port", id);
         }
-        if (!ctx.isUpdate() && ctx.resolveOptional(props, "ClusterParameterGroupName") != null) {
+        if (!ctx.isUpdate() && ctx.resolveOptional(props, "SnapshotIdentifier") == null
+                && ctx.resolveOptional(props, "ClusterParameterGroupName") != null) {
             LOG.warnv("Cluster {0}: ClusterParameterGroupName is only applied on update", id);
         }
     }

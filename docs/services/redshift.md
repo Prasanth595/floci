@@ -234,6 +234,31 @@ For `AWS::Redshift::Cluster`:
 
 Replacement occurs if `ClusterIdentifier`, `DBName`, `MasterUsername`, or `ClusterSubnetGroupName` changes. Other properties (such as `NodeType`, `MasterUserPassword`, `ClusterParameterGroupName`, and `VpcSecurityGroupIds`) update in place.
 
+`SnapshotIdentifier` restores the snapshot's SQL dump into the new cluster rather than creating
+an empty database. The snapshot must exist in the current account. The restored cluster inherits
+the snapshot's admin username and password, so `MasterUserPassword` can be omitted. The template's
+`MasterUsername` and `MasterUserPassword` do not override snapshot credentials during creation;
+a later in-place update can change the password. `ManageMasterPassword` instead generates a new
+password and stores it in a Redshift-owned Secrets Manager secret.
+
+Changing, adding, or removing `SnapshotIdentifier` replaces the cluster. Updates that keep the
+same snapshot modify the existing cluster without replaying the dump, preserving rows written
+since restoration. A failed replacing update restores the original physical id and attributes
+through the existing replacement rollback mechanism. `Ref`, `Endpoint.Address`, `Endpoint.Port`,
+and `ClusterNamespaceArn` identify the restored cluster.
+
+```yaml
+Warehouse:
+  Type: AWS::Redshift::Cluster
+  Properties:
+    ClusterIdentifier: restored-warehouse
+    NodeType: ra3.large
+    ClusterType: single-node
+    DBName: dev
+    MasterUsername: admin
+    SnapshotIdentifier: warehouse-backup
+```
+
 For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyClusterParameterGroup` on both create and update. `Description` and `ParameterGroupFamily` are replacement properties, matching AWS: changing either creates a new parameter group instead of reusing the prior one.
 
 ### Gaps and Limitations
@@ -244,7 +269,8 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 - `ManageMasterPassword` creates a Redshift-owned Secrets Manager secret. The secret contains the
   managed username, password, endpoint, port, and database name. `MasterPasswordSecretKmsKeyId`
   selects the KMS key used for the secret metadata and is validated through KMS.
-- `SnapshotIdentifier` is ignored: a fresh cluster is created instead of restoring from a snapshot.
+- Snapshot restoration has the same limitations as `RestoreFromClusterSnapshot`: snapshots are
+  local SQL dumps, not cross-account backups or a full Redshift engine image.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
 
 ## Configuration

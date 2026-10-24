@@ -341,17 +341,21 @@ public class RedshiftService {
         String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
         Cluster cluster = createCluster(identifier, nodeType, username, password,
                 clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
-        String secretName = "redshift/" + identifier;
-        String secretString = managedMasterSecret(cluster, password);
-        Secret secret;
         try {
-            secret = secretsManagerService.createSecret(secretName, secretString, null,
-                            "Managed master user secret for Redshift cluster " + identifier,
-                            kmsKeyId, List.of(), "redshift", region);
+            return createManagedMasterSecret(cluster, kmsKeyId, region);
         } catch (RuntimeException e) {
             rollbackManagedMasterPasswordCluster(cluster);
             throw e;
         }
+    }
+
+    private Cluster createManagedMasterSecret(Cluster cluster, String kmsKeyId, String region) {
+        String identifier = cluster.getClusterIdentifier();
+        String secretName = "redshift/" + identifier;
+        String secretString = managedMasterSecret(cluster, cluster.getMasterPassword());
+        Secret secret = secretsManagerService.createSecret(secretName, secretString, null,
+                "Managed master user secret for Redshift cluster " + identifier,
+                kmsKeyId, List.of(), "redshift", region);
         cluster.setMasterPasswordSecretArn(secret.getArn());
         cluster.setMasterPasswordSecretKmsKeyId(kmsKeyId);
         clusters.put(identifier, cluster);
@@ -1197,6 +1201,37 @@ public class RedshiftService {
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
         return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
                 () -> mutate(() -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType))));
+    }
+
+    public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType,
+                                             String clusterSubnetGroupName, boolean manageMasterPassword,
+                                             String kmsKeyId, String region) {
+        if (manageMasterPassword && secretsManagerService == null) {
+            throw new AwsException("InternalFailure", "Secrets Manager is unavailable", 500);
+        }
+        return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
+                () -> mutate(() -> {
+                    Cluster cluster = restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType);
+                    try {
+                        cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
+                        if (manageMasterPassword) {
+                            String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
+                            modifyCluster(clusterIdentifier, null, null, password, null, List.of());
+                            return createManagedMasterSecret(cluster, kmsKeyId, region);
+                        }
+                        clusters.put(clusterIdentifier, cluster);
+                        clusters.flush();
+                        return cluster;
+                    } catch (RuntimeException failure) {
+                        try {
+                            deleteCluster(clusterIdentifier);
+                        } catch (RuntimeException cleanupFailure) {
+                            failure.addSuppressed(cleanupFailure);
+                            LOG.warnv(cleanupFailure, "Failed to clean up restored cluster {0}", clusterIdentifier);
+                        }
+                        throw failure;
+                    }
+                })));
     }
 
     private Cluster restoreSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {

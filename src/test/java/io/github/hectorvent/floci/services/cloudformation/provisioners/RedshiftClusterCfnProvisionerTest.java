@@ -319,6 +319,238 @@ class RedshiftClusterCfnProvisionerTest {
     }
 
     @Test
+    void snapshotCreateRestoresWithoutMasterPasswordAndSetsReferences() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
+                .thenReturn(availableCluster("restored"));
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+
+        provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup",
+                 "Tags":[{"Key":"env","Value":"restore"}]}"""), ctx(null));
+
+        assertEquals("restored", resource.getPhysicalId());
+        assertEquals("host-restored", resource.getAttributes().get("Endpoint.Address"));
+        assertEquals("5439", resource.getAttributes().get("Endpoint.Port"));
+        assertTrue(resource.getAttributes().get("ClusterNamespaceArn").contains(":namespace:"));
+        verify(service).createTags("arn:aws:redshift:us-east-1:000000000000:cluster:restored", Map.of("env", "restore"));
+        verify(service, never()).createCluster(any(), any(), any(), any(), any(), anyList());
+    }
+
+    @Test
+    void unchangedSnapshotUpdatesWithoutRestoringAgain() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
+                .thenReturn(availableCluster("restored"));
+        when(service.modifyCluster(eq("restored"), eq("ra3.large"), isNull(), isNull(), isNull(), anyList()))
+                .thenReturn(availableCluster("restored"));
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+        JsonNode props = json("""
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup"}""");
+        provisioner.provision(resource, props, ctx(null));
+        provisioner.provision(resource, props, ctx("restored"));
+
+        verify(service).restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1");
+        assertEquals("restored", resource.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(resource));
+    }
+
+    @Test
+    void changedSnapshotReplacesAndRollbackRestoresPriorSnapshot() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.restoreFromClusterSnapshot(anyString(), anyString(), eq("ra3.large"), isNull(), eq(false), isNull(), eq("us-east-1")))
+                .thenAnswer(invocation -> availableCluster(invocation.getArgument(0)));
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+        JsonNode original = json("""
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup"}""");
+        provisioner.provision(resource, original, ctx(null));
+        resource.getAttributes().put("MasterPasswordSecretArn", "old-managed-secret");
+        provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"new-backup"}"""),
+                ctx("restored"));
+
+        String replacement = resource.getPhysicalId();
+        assertNotEquals("restored", replacement);
+        assertFalse(resource.getAttributes().containsKey("MasterPasswordSecretArn"));
+        assertEquals("restored", provisioner.updateCleanupPhysicalId(resource));
+        verify(service).restoreFromClusterSnapshot(replacement, "new-backup", "ra3.large", null, false, null, "us-east-1");
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals("restored", resource.getPhysicalId());
+        verify(service).deleteCluster(replacement);
+        when(service.modifyCluster(eq("restored"), eq("ra3.large"), isNull(), isNull(), isNull(), anyList()))
+                .thenReturn(availableCluster("restored"));
+        provisioner.provision(resource, original, ctx("restored"));
+        assertEquals("restored", resource.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(resource));
+    }
+
+    @Test
+    void missingSnapshotPropagatesWithoutAssigningPhysicalId() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.restoreFromClusterSnapshot("restored", "missing", "ra3.large", null, false, null, "us-east-1"))
+                .thenThrow(new AwsException("ClusterSnapshotNotFound", "Snapshot missing not found", 404));
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+
+        AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"missing"}"""), ctx(null)));
+
+        assertEquals("ClusterSnapshotNotFound", error.getErrorCode());
+        assertNull(resource.getPhysicalId());
+    }
+
+    @Test
+    void snapshotCreateForwardsManagedPasswordAndSubnetSettings() {
+        RedshiftService service = mock(RedshiftService.class);
+        Cluster restored = availableCluster("restored");
+        restored.setMasterPasswordSecretArn("secret-arn");
+        when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", "restore-subnets",
+                true, "alias/restore", "us-east-1")).thenReturn(restored);
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+
+        provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","SnapshotIdentifier":"backup","NodeType":"ra3.large",
+                 "ClusterSubnetGroupName":"restore-subnets","ManageMasterPassword":true,
+                 "MasterPasswordSecretKmsKeyId":"alias/restore"}"""), ctx(null));
+
+        assertEquals("restored", resource.getPhysicalId());
+        assertEquals("secret-arn", resource.getAttributes().get("MasterPasswordSecretArn"));
+    }
+
+    @Test
+    void snapshotCreateCleansUpWhenConfigurationFails() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
+                .thenReturn(availableCluster("restored"));
+        when(service.modifyCluster(eq("restored"), eq("ra3.large"), isNull(), isNull(), eq("params"), anyList()))
+                .thenThrow(new AwsException("InternalFailure", "storage failed", 500));
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","SnapshotIdentifier":"backup","NodeType":"ra3.large",
+                 "ClusterParameterGroupName":"params"}"""), ctx(null)));
+
+        verify(service).deleteCluster("restored");
+        assertNull(resource.getPhysicalId());
+    }
+
+    @Test
+    void blankSnapshotIsRejectedBeforeCreatingACluster() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+
+        AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(resource,
+                json("{\"SnapshotIdentifier\":\" \"}"), ctx(null)));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void unchangedTemplateAfterSnapshotReplacementKeepsTheReplacement() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.restoreFromClusterSnapshot(anyString(), anyString(), anyString(), isNull(),
+                eq(false), isNull(), eq("us-east-1")))
+                .thenAnswer(invocation -> availableCluster(invocation.getArgument(0)));
+        when(service.modifyCluster(anyString(), eq("ra3.large"), isNull(), isNull(), isNull(), anyList()))
+                .thenAnswer(invocation -> availableCluster(invocation.getArgument(0)));
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+        provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup"}"""), ctx(null));
+        JsonNode changed = json("""
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"new-backup"}""");
+        provisioner.provision(resource, changed, ctx("restored"));
+        String replacement = resource.getPhysicalId();
+        provisioner.completeUpdate(resource);
+        provisioner.clearUpdate(resource);
+
+        provisioner.provision(resource, changed, ctx(replacement));
+
+        assertEquals(replacement, resource.getPhysicalId());
+        verify(service).modifyCluster(eq(replacement), eq("ra3.large"), isNull(), isNull(), isNull(), anyList());
+    }
+
+    @Test
+    void removingSnapshotReplacesWithFreshCluster() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.createCluster(anyString(), eq("ra3.large"), eq("admin"), eq("Secret123"), isNull(), anyList()))
+                .thenAnswer(invocation -> availableCluster(invocation.getArgument(0)));
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+        resource.setPhysicalId("restored");
+        resource.getAttributes().put("Floci::SnapshotIdentifier", "backup");
+
+        provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","MasterUsername":"admin",
+                 "MasterUserPassword":"Secret123"}"""), ctx("restored"));
+
+        assertNotEquals("restored", resource.getPhysicalId());
+        assertEquals("restored", provisioner.updateCleanupPhysicalId(resource));
+        assertFalse(resource.getAttributes().containsKey("Floci::SnapshotIdentifier"));
+    }
+
+    @Test
+    void snapshotCreateCleansUpWhenTaggingFails() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.restoreFromClusterSnapshot("restored", "backup", "ra3.large", null, false, null, "us-east-1"))
+                .thenReturn(availableCluster("restored"));
+        doThrow(new AwsException("InternalFailure", "tag storage failed", 500))
+                .when(service).createTags("arn:aws:redshift:us-east-1:000000000000:cluster:restored", Map.of("env", "restore"));
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","SnapshotIdentifier":"backup","NodeType":"ra3.large",
+                 "Tags":[{"Key":"env","Value":"restore"}]}"""), ctx(null)));
+
+        verify(service).deleteCluster("restored");
+        assertNull(resource.getPhysicalId());
+    }
+
+    @Test
+    void managedSnapshotCreateRejectsAnExplicitPassword() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftClusterCfnProvisioner provisioner = new RedshiftClusterCfnProvisioner(service);
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Redshift::Cluster");
+        resource.setLogicalId("Warehouse");
+
+        AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(resource, json("""
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup",
+                 "ManageMasterPassword":true,"MasterUserPassword":"Secret123"}"""), ctx(null)));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        verifyNoInteractions(service);
+    }
+
+    @Test
     void provisionCreatesClusterAndSetsRefAndEndpointAttributes() {
         RedshiftService service = mock(RedshiftService.class);
         when(service.createCluster(eq("my-cluster"), eq("ra3.large"), eq("admin"), eq("Secret123"),
@@ -411,7 +643,7 @@ class RedshiftClusterCfnProvisionerTest {
             {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"admin",
              "MasterUserPassword":"Secret123","Tags":[{"Key":"env","Value":"dev"}]}"""), ctx(null));
 
-        verify(service).createTags("my-cluster", Map.of("env", "dev"));
+        verify(service).createTags("arn:aws:redshift:us-east-1:000000000000:cluster:my-cluster", Map.of("env", "dev"));
     }
 
     @Test

@@ -1568,6 +1568,67 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void snapshotRestoreCanManagePasswordAndStoreSubnetGroup() throws Exception {
+        useStatefulClusterStorage();
+        Snapshot snapshot = new Snapshot("managed-backup", "deleted-source", "available", 5439, "admin");
+        snapshot.setMasterPassword("Original123");
+        snapshot.setSqlDump(dumpPath("managed-backup"));
+        when(snapshotBackend.get("managed-backup")).thenReturn(Optional.of(snapshot));
+        when(cm.start("111111111111", "restored-managed", "admin", "Original123"))
+                .thenReturn(new RedshiftContainerHandle("restored", "restored-managed", "localhost", 5432));
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:restored-managed");
+        when(secretsManagerService.createSecret(eq("redshift/restored-managed"), anyString(), isNull(),
+                anyString(), eq("alias/restore-key"), anyList(), eq("redshift"), eq("us-east-1"))).thenReturn(secret);
+
+        Cluster cluster = service.restoreFromClusterSnapshot("restored-managed", "managed-backup", "ra3.large",
+                "restore-subnets", true, "alias/restore-key", "us-east-1");
+
+        assertEquals("restore-subnets", cluster.getClusterSubnetGroupName());
+        assertEquals(secret.getArn(), cluster.getMasterPasswordSecretArn());
+        assertFalse("Original123".equals(cluster.getMasterPassword()));
+        ArgumentCaptor<String> secretValue = ArgumentCaptor.forClass(String.class);
+        verify(secretsManagerService).createSecret(eq("redshift/restored-managed"), secretValue.capture(), isNull(),
+                anyString(), eq("alias/restore-key"), anyList(), eq("redshift"), eq("us-east-1"));
+        assertEquals(cluster.getMasterPassword(), new ObjectMapper().readTree(secretValue.getValue()).path("password").asText());
+        verify(cm).alterUserPassword("111111111111", "restored-managed", "admin", cluster.getMasterPassword());
+    }
+
+    @Test
+    void managedSnapshotRestoreCleansUpWhenSecretCreationFails() {
+        useStatefulClusterStorage();
+        Snapshot snapshot = new Snapshot("managed-backup", "deleted-source", "available", 5439, "admin");
+        snapshot.setMasterPassword("Original123");
+        when(snapshotBackend.get("managed-backup")).thenReturn(Optional.of(snapshot));
+        when(cm.start("111111111111", "restored-managed", "admin", "Original123"))
+                .thenReturn(new RedshiftContainerHandle("restored", "restored-managed", "localhost", 5432));
+        when(secretsManagerService.createSecret(eq("redshift/restored-managed"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1")))
+                .thenThrow(new AwsException("InternalFailure", "secret storage failed", 500));
+
+        assertThrows(AwsException.class, () -> service.restoreFromClusterSnapshot("restored-managed", "managed-backup",
+                "ra3.large", null, true, null, "us-east-1"));
+
+        verify(cm).stop("111111111111", "restored-managed");
+        assertTrue(service.describeClusters(null).isEmpty());
+        assertTrue(service.getSnapshot("managed-backup").isPresent());
+    }
+
+    private void useStatefulClusterStorage() {
+        Map<String, Cluster> stored = new HashMap<>();
+        when(clusterBackend.get(anyString())).thenAnswer(invocation -> Optional.ofNullable(stored.get(invocation.getArgument(0))));
+        when(clusterBackend.scan(any())).thenAnswer(invocation -> new ArrayList<>(stored.values()));
+        doAnswer(invocation -> {
+            stored.put(invocation.getArgument(0), invocation.getArgument(1));
+            return null;
+        }).when(clusterBackend).put(anyString(), any(Cluster.class));
+        doAnswer(invocation -> {
+            stored.remove(invocation.getArgument(0));
+            return null;
+        }).when(clusterBackend).delete(anyString());
+    }
+
+    @Test
     void restoreFromClusterSnapshot() {
         Cluster sourceCluster = new Cluster();
         sourceCluster.setClusterIdentifier("source-cluster");
