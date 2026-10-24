@@ -107,19 +107,27 @@ public class RedshiftDataService implements Resettable {
     @Override
     public void clear() {
         executor.clear(() -> {
-            sessions.clear();
             RuntimeException failure = null;
+            try {
+                sessions.clear();
+            } catch (RuntimeException sessionFailure) {
+                failure = sessionFailure;
+            }
             try {
                 store.clear();
             } catch (RuntimeException storageFailure) {
-                failure = storageFailure;
+                if (failure == null) {
+                    failure = storageFailure;
+                } else if (failure != storageFailure) {
+                    failure.addSuppressed(storageFailure);
+                }
             }
             try {
                 idempotency.clear();
             } catch (RuntimeException receiptFailure) {
                 if (failure == null) {
                     failure = receiptFailure;
-                } else {
+                } else if (failure != receiptFailure) {
                     failure.addSuppressed(receiptFailure);
                 }
             }
@@ -143,13 +151,15 @@ public class RedshiftDataService implements Resettable {
         String token = RedshiftDataIdempotencyStore.clientToken(request);
         int waitSeconds = waitSeconds(request);
         RedshiftDataSessions.validate(request);
-        RedshiftDataSessions.Scope owner = sessionScope(region, principal);
+        boolean retained = request.has("SessionId") || request.path("SessionKeepAliveSeconds").asInt() > 0;
+        RedshiftDataSessions.Scope owner = retained ? sessionScope(region, principal)
+                : new RedshiftDataSessions.Scope(store.accountId(), region, null);
         if (token != null && request.has("SessionId")) {
             RedshiftDataIdempotencyStore.Scope retryScope = new RedshiftDataIdempotencyStore.Scope(
                     owner.accountId(), region, batch ? "BatchExecuteStatement" : "ExecuteStatement", token);
             Admission replay = executor.admitting(() -> {
                 RedshiftDataIdempotencyStore.Receipt receipt = idempotency.find(retryScope);
-                return receipt == null ? null : replay(receipt, retryScope, owner);
+                return receipt == null ? null : replay(receipt, retryScope, owner, principal);
             });
             if (replay != null) {
                 return awaitAdmission(replay, waitSeconds);
@@ -186,9 +196,12 @@ public class RedshiftDataService implements Resettable {
     }
 
     private Admission replay(RedshiftDataIdempotencyStore.Receipt receipt, RedshiftDataIdempotencyStore.Scope scope,
-                             RedshiftDataSessions.Scope owner) {
-        if (receipt.sessionOwner != null && !Objects.equals(receipt.sessionOwner, owner.caller())) {
-            throw new AwsException("ResourceNotFoundException", "Session was not found", 400);
+                             RedshiftDataSessions.Scope owner, String principal) {
+        if (receipt.sessionOwner != null) {
+            String caller = owner.caller() == null ? sessionScope(scope.region(), principal).caller() : owner.caller();
+            if (!Objects.equals(receipt.sessionOwner, caller)) {
+                throw new AwsException("ResourceNotFoundException", "Session was not found", 400);
+            }
         }
         String id = receipt.response.path("Id").asText();
         RedshiftDataStatementStore.StoredStatement current = store.getForAccount(scope.accountId(), id);
@@ -215,7 +228,7 @@ public class RedshiftDataService implements Resettable {
             if (receipt == null) {
                 return submit(pending, principal, scope);
             }
-            return replay(receipt, scope, pending.owner());
+            return replay(receipt, scope, pending.owner(), principal);
         } finally {
             scoped.lock.unlock();
             admissionLocks.compute(scope, (key, existing) -> --scoped.users == 0 ? null : scoped);
@@ -408,8 +421,12 @@ public class RedshiftDataService implements Resettable {
                     connection.rollback();
                     connection.setAutoCommit(true);
                 }
-            } catch (SQLException failure) {
-                session.discard();
+            } catch (SQLException | RuntimeException failure) {
+                try {
+                    session.discard();
+                } catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
                 throw failure;
             }
         }
@@ -455,6 +472,11 @@ public class RedshiftDataService implements Resettable {
                     session.failTransaction();
                 } else if (!connection.getAutoCommit()) {
                     connection.rollback();
+                }
+                throw failure;
+            } catch (RuntimeException failure) {
+                if (session != null && session.inTransaction()) {
+                    session.failTransaction();
                 }
                 throw failure;
             }

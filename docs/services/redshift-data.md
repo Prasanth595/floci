@@ -87,6 +87,11 @@ with an existing receipt can still replay its original response after the connec
 after restart, subject to the normal receipt lifetime and caller ownership. `ListSessions` is
 not implemented.
 
+Unexpected synchronous connection-cleanup failures are reported to the affected operation.
+Reset still attempts to close the remaining sessions and clear statement and receipt state before
+reporting cleanup errors. Background expiration failures are logged without stopping later sweeps.
+An already-closed connection (`SQLSTATE 08003`) is a benign cleanup outcome.
+
 ```python
 created = data.execute_statement(
     WorkgroupName="analytics", Database="dev", SessionKeepAliveSeconds=60,

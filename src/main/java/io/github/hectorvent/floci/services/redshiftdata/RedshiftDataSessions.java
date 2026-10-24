@@ -50,7 +50,7 @@ class RedshiftDataSessions implements AutoCloseable {
             thread.setDaemon(true);
             return thread;
         });
-        sweeper.scheduleAtFixedRate(this::sweep, 1, 1, TimeUnit.SECONDS);
+        sweeper.scheduleAtFixedRate(this::sweepSafely, 1, 1, TimeUnit.SECONDS);
     }
 
     static void validate(JsonNode request) {
@@ -95,7 +95,7 @@ class RedshiftDataSessions implements AutoCloseable {
         Session session;
         boolean created = id == null;
         if (created) {
-            sweep();
+            sweepSafely();
             synchronized (this) {
                 if (closed) {
                     throw validation("Data API sessions are shutting down");
@@ -125,14 +125,31 @@ class RedshiftDataSessions implements AutoCloseable {
     }
 
     void sweep() {
+        RuntimeException failure = null;
         for (Session session : sessions.values()) {
             boolean expire;
             synchronized (session) {
                 expire = expired(session);
             }
             if (expire) {
-                retire(session);
+                try {
+                    retire(session);
+                } catch (RuntimeException cleanupFailure) {
+                    failure = accumulate(failure, cleanupFailure);
+                }
             }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private void sweepSafely() {
+        try {
+            sweep();
+        } catch (RuntimeException failure) {
+            // Maintenance has no request to report to; keep future sweeps running and report the failure.
+            LOG.errorv(failure, "Failed to clean up expired Redshift Data API sessions");
         }
     }
 
@@ -147,44 +164,91 @@ class RedshiftDataSessions implements AutoCloseable {
     }
 
     private void retire(Session session, boolean cancel) {
-        Connection connection;
-        RedshiftDataExecution execution;
+        Retirement retirement;
         synchronized (session) {
-            if (session.closed) {
-                return;
-            }
-            session.closed = true;
-            connection = session.connection;
-            execution = cancel ? session.execution : null;
-            sessions.remove(session.id, session);
+            retirement = retireLocked(session, cancel);
+        }
+        cleanUp(retirement);
+    }
+
+    private Retirement retireLocked(Session session, boolean cancel) {
+        if (session.closed) {
+            return null;
+        }
+        session.closed = true;
+        sessions.remove(session.id, session);
+        Retirement retirement = new Retirement(session.id, session.connection, cancel ? session.execution : null);
+        session.active = null;
+        session.execution = null;
+        session.connection = null;
+        return retirement;
+    }
+
+    private record Retirement(String id, Connection connection, RedshiftDataExecution execution) { }
+
+    private static void cleanUp(Retirement retirement) {
+        if (retirement == null) {
+            return;
         }
         Runnable cleanup = () -> {
-            if (execution != null) {
-                execution.cancel();
+            try {
+                if (retirement.execution() != null) {
+                    retirement.execution().cancel();
+                }
+            } finally {
+                closeConnection(retirement.connection(), retirement.id());
             }
-            closeConnection(connection);
         };
-        if (execution == null) {
+        if (retirement.execution() == null) {
             cleanup.run();
         } else {
-            Thread.startVirtualThread(cleanup);
+            Thread.startVirtualThread(() -> {
+                try {
+                    cleanup.run();
+                } catch (RuntimeException failure) {
+                    // Expiration/reset cancellation finishes asynchronously after the session is unavailable.
+                    LOG.errorv(failure, "Failed to clean up Redshift Data API session {0}", retirement.id());
+                }
+            });
         }
     }
 
-    private static void closeConnection(Connection connection) {
+    private static void closeConnection(Connection connection, String id) {
         if (connection != null) {
             try {
                 connection.close();
             } catch (SQLException | RuntimeException failure) {
-                LOG.warnv(failure, "Unable to close a Redshift Data API session connection");
+                if (failure instanceof SQLException sql && "08003".equals(sql.getSQLState())) {
+                    LOG.debugv("Redshift Data API session {0} connection was already closed", id);
+                } else {
+                    throw new IllegalStateException("Unable to close Redshift Data API session " + id + ": " + failure.getMessage(), failure);
+                }
             }
         }
     }
 
     synchronized void clear() {
+        RuntimeException failure = null;
         for (Session session : sessions.values()) {
-            retire(session);
+            try {
+                retire(session);
+            } catch (RuntimeException cleanupFailure) {
+                failure = accumulate(failure, cleanupFailure);
+            }
         }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private static RuntimeException accumulate(RuntimeException first, RuntimeException next) {
+        if (first == null) {
+            return next;
+        }
+        if (first != next) {
+            first.addSuppressed(next);
+        }
+        return first;
     }
 
     @Override
@@ -289,7 +353,7 @@ class RedshiftDataSessions implements AutoCloseable {
                     return opened;
                 }
             }
-            closeConnection(opened);
+            closeConnection(opened, session.id);
             throw new SQLException("Session has expired", "08003");
         }
 
@@ -328,22 +392,24 @@ class RedshiftDataSessions implements AutoCloseable {
             if (!released.compareAndSet(false, true)) {
                 return;
             }
-            boolean remove;
+            Retirement retirement = null;
             synchronized (session) {
                 if (session.active != this) {
                     return;
                 }
-                session.active = null;
-                session.execution = null;
-                if (completed) {
-                    session.keepAlive = seconds;
-                    session.idleUntil = clock.instant().plusSeconds(seconds);
+                boolean remove = !completed && created || completed && (seconds == 0 || session.connection == null);
+                if (remove) {
+                    retirement = retireLocked(session, false);
+                } else {
+                    session.active = null;
+                    session.execution = null;
+                    if (completed) {
+                        session.keepAlive = seconds;
+                        session.idleUntil = clock.instant().plusSeconds(seconds);
+                    }
                 }
-                remove = !completed && created || completed && (seconds == 0 || session.connection == null);
             }
-            if (remove) {
-                retire(session);
-            }
+            cleanUp(retirement);
         }
     }
 

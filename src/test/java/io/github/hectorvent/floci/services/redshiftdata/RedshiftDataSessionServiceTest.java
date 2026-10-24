@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.services.iam.IamService;
 import org.h2.Driver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -11,6 +14,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -18,6 +22,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -331,6 +336,134 @@ class RedshiftDataSessionServiceTest {
     }
 
     @Test
+    void uncheckedFailureAfterSqlExecutionAbortsTheExplicitTransaction() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            Connection connection = spy(DriverManager.getConnection(fixture.url));
+            when(fixture.factory.open(any())).thenReturn(connection);
+            String session = fixture.service.executeStatement(fixture.request("CREATE TABLE changes(id integer)")
+                    .put("SessionKeepAliveSeconds", 60), "us-east-1").path("SessionId").asText();
+            PreparedStatement insert = spy(connection.prepareStatement("INSERT INTO changes VALUES (1)"));
+            doAnswer(invocation -> {
+                invocation.callRealMethod();
+                throw new IllegalStateException("result conversion failed");
+            }).when(insert).execute();
+            doReturn(insert).when(connection).prepareStatement("INSERT INTO changes VALUES (1)");
+            fixture.service.executeStatement(fixture.reuse(session, "BEGIN"), "us-east-1");
+            String failed = fixture.service.executeStatement(fixture.reuse(session, "INSERT INTO changes VALUES (1)"), "us-east-1")
+                    .path("Id").asText();
+            ObjectNode described = fixture.service.describeStatement(fixture.mapper.createObjectNode().put("Id", failed));
+            assertEquals("FAILED", described.path("Status").asText());
+            assertTrue(described.path("Error").asText().contains("result conversion failed"), described.toString());
+            String committed = fixture.service.executeStatement(fixture.reuse(session, "COMMIT"), "us-east-1").path("Id").asText();
+            assertEquals("FINISHED", fixture.service.describeStatement(fixture.mapper.createObjectNode().put("Id", committed))
+                    .path("Status").asText());
+            assertEquals(0, fixture.count("changes"));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void malformedSessionIdentifiersFailBeforeTargetLookup(boolean batch) throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            for (String raw : new String[]{"\"malformed\"", "7", "true", "null", "[]", "{}"}) {
+                ObjectNode request = fixture.request("SELECT 1");
+                JsonNode invalid = fixture.mapper.readTree(raw);
+                request.set("SessionId", invalid);
+                if (batch) {
+                    request.remove("Sql");
+                    request.putArray("Sqls").add("SELECT 1");
+                }
+                AwsException error = assertThrows(AwsException.class, () -> {
+                    if (batch) {
+                        fixture.service.batchExecuteStatement(request, "us-east-1");
+                    } else {
+                        fixture.service.executeStatement(request, "us-east-1");
+                    }
+                });
+                assertEquals("ValidationException", error.getErrorCode());
+            }
+            verifyNoInteractions(fixture.factory, fixture.resolver);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void ordinaryRequestsDoNotResolveSessionCaller(boolean batch) throws Exception {
+        RequestContext context = new RequestContext();
+        context.setAccessKeyId("caller-key");
+        IamService iam = mock(IamService.class);
+        when(iam.resolveCallerArn("caller-key")).thenReturn(Optional.of("caller-arn"));
+        try (Fixture fixture = new Fixture(context, iam)) {
+            for (boolean token : new boolean[]{false, true}) {
+                ObjectNode request = fixture.request("SELECT 1").put("SessionKeepAliveSeconds", 0);
+                if (token) {
+                    request.put("ClientToken", "ordinary");
+                }
+                if (batch) {
+                    request.remove("Sql");
+                    request.putArray("Sqls").add("SELECT 1");
+                    fixture.service.batchExecuteStatement(request, "us-east-1");
+                } else {
+                    fixture.service.executeStatement(request, "us-east-1");
+                }
+            }
+            verifyNoInteractions(iam);
+        }
+    }
+
+    @Test
+    void cleanupFailureIsReportedWithoutSkippingResetOfStatementAndReceiptState() throws Exception {
+        try (Fixture fixture = new Fixture(); Connection connection = spy(DriverManager.getConnection(fixture.url))) {
+            when(fixture.factory.open(any())).thenReturn(connection);
+            ObjectNode request = fixture.request("SELECT 1").put("ClientToken", "cleanup-reset").put("SessionKeepAliveSeconds", 60);
+            String id = fixture.service.executeStatement(request, "us-east-1").path("Id").asText();
+            doThrow(new IllegalStateException("unexpected close failure")).doCallRealMethod().when(connection).close();
+
+            assertThrows(IllegalStateException.class, fixture.service::clear);
+
+            assertNull(fixture.statements.getForAccount("000000000000", id));
+            assertNull(fixture.receipts.find(new RedshiftDataIdempotencyStore.Scope("000000000000", "us-east-1",
+                    "ExecuteStatement", "cleanup-reset")));
+        }
+    }
+
+    @Test
+    void terminatingSessionReportsUnexpectedConnectionCleanupFailure() throws Exception {
+        try (Fixture fixture = new Fixture(); Connection connection = spy(DriverManager.getConnection(fixture.url))) {
+            when(fixture.factory.open(any())).thenReturn(connection);
+            String session = fixture.service.executeStatement(fixture.request("SELECT 1")
+                    .put("SessionKeepAliveSeconds", 60), "us-east-1").path("SessionId").asText();
+            doThrow(new IllegalStateException("unexpected close failure")).doCallRealMethod().when(connection).close();
+            String id = fixture.service.executeStatement(fixture.reuse(session, "SELECT 2")
+                    .put("SessionKeepAliveSeconds", 0), "us-east-1").path("Id").asText();
+            ObjectNode described = fixture.service.describeStatement(fixture.mapper.createObjectNode().put("Id", id));
+            assertEquals("FAILED", described.path("Status").asText());
+            assertTrue(described.path("Error").asText().contains("unexpected close failure"), described.toString());
+        }
+    }
+
+    @Test
+    void replayWithoutSessionFieldsStillChecksRetainedReceiptOwnership() throws Exception {
+        RequestContext context = new RequestContext();
+        context.setAccessKeyId("owner");
+        IamService iam = mock(IamService.class);
+        when(iam.resolveCallerArn("owner")).thenReturn(Optional.of("owner-principal"));
+        when(iam.resolveCallerArn("other")).thenReturn(Optional.of("other-principal"));
+        try (Fixture fixture = new Fixture(context, iam)) {
+            ObjectNode request = fixture.request("SELECT 1").put("ClientToken", "retained-replay")
+                    .put("SessionKeepAliveSeconds", 60);
+            String id = fixture.service.executeStatement(request, "us-east-1").path("Id").asText();
+            request.remove("SessionKeepAliveSeconds");
+            context.setAccessKeyId("other");
+            AwsException denied = assertThrows(AwsException.class, () -> fixture.service.executeStatement(request, "us-east-1"));
+            assertEquals("ResourceNotFoundException", denied.getErrorCode());
+            context.setAccessKeyId("owner");
+            assertEquals(id, fixture.service.executeStatement(request, "us-east-1").path("Id").asText());
+            verify(fixture.factory).open(any());
+        }
+    }
+
+    @Test
     void malformedKeepAliveValuesAreRejectedBeforeOpeningAConnection() throws Exception {
         try (Fixture fixture = new Fixture()) {
             for (int seconds : new int[]{-1, 86401}) {
@@ -358,6 +491,10 @@ class RedshiftDataSessionServiceTest {
         private final String url = "jdbc:h2:mem:" + UUID.randomUUID();
 
         private Fixture() throws Exception {
+            this(null, null);
+        }
+
+        private Fixture(RequestContext context, IamService iam) throws Exception {
             Driver.load();
             when(resolver.resolve(any(), any())).thenAnswer(invocation -> {
                 ObjectNode request = invocation.getArgument(0);
@@ -370,7 +507,7 @@ class RedshiftDataSessionServiceTest {
             });
             when(factory.open(any())).thenAnswer(invocation -> DriverManager.getConnection(url));
             service = new RedshiftDataService(resolver, factory, statements, mapper, null, executor, null,
-                    null, null, receipts);
+                    context, iam, receipts);
         }
 
         private ObjectNode request(String sql) {

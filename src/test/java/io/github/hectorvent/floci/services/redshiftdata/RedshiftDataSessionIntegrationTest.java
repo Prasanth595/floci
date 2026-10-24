@@ -26,10 +26,8 @@ import software.amazon.awssdk.services.redshiftdata.model.ValidationException;
 
 import java.net.URI;
 import java.sql.DriverManager;
-import java.time.Duration;
 import java.util.UUID;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -76,7 +74,7 @@ class RedshiftDataSessionIntegrationTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void sdkReusesSessionForSingleAndBatchStatements(boolean serverless) throws Exception {
-        ExecuteStatementRequest.Builder request = ExecuteStatementRequest.builder().database("dev")
+        ExecuteStatementRequest.Builder request = ExecuteStatementRequest.builder().waitTimeSeconds(30).database("dev")
                 .sessionKeepAliveSeconds(60).sql("CREATE LOCAL TEMPORARY TABLE staging(id integer)");
         if (serverless) {
             request.workgroupName("analytics");
@@ -86,10 +84,10 @@ class RedshiftDataSessionIntegrationTest {
         ExecuteStatementResponse created = data.executeStatement(request.build());
         assertNotNull(created.sessionId());
         finished(created.id());
-        String batch = data.batchExecuteStatement(r -> r.sessionId(created.sessionId())
+        String batch = data.batchExecuteStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId())
                 .sqls("INSERT INTO staging VALUES (41)", "INSERT INTO staging VALUES (42)")).id();
         finished(batch);
-        ExecuteStatementResponse query = data.executeStatement(r -> r.sessionId(created.sessionId()).sql("SELECT id FROM staging ORDER BY id"));
+        ExecuteStatementResponse query = data.executeStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId()).sql("SELECT id FROM staging ORDER BY id"));
         DescribeStatementResponse described = finished(query.id());
 
         assertEquals(created.sessionId(), described.sessionId());
@@ -103,28 +101,28 @@ class RedshiftDataSessionIntegrationTest {
 
     @Test
     void sdkSessionIsIsolatedByCallerAccountAndRegion() {
-        ExecuteStatementResponse created = data.executeStatement(r -> r.clusterIdentifier("warehouse").dbUser("admin")
+        ExecuteStatementResponse created = data.executeStatement(r -> r.waitTimeSeconds(30).clusterIdentifier("warehouse").dbUser("admin")
                 .database("dev").sessionKeepAliveSeconds(60).sql("SELECT 1"));
         finished(created.id());
         for (String key : new String[]{"another-caller", "111111111111"}) {
             try (RedshiftDataClient other = client(key, Region.US_EAST_1)) {
-                assertThrows(ResourceNotFoundException.class, () -> other.executeStatement(r -> r.sessionId(created.sessionId()).sql("SELECT 2")));
+                assertThrows(ResourceNotFoundException.class, () -> other.executeStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId()).sql("SELECT 2")));
             }
         }
         try (RedshiftDataClient otherRegion = client("test", Region.US_WEST_2)) {
-            assertThrows(ResourceNotFoundException.class, () -> otherRegion.executeStatement(r -> r.sessionId(created.sessionId()).sql("SELECT 2")));
+            assertThrows(ResourceNotFoundException.class, () -> otherRegion.executeStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId()).sql("SELECT 2")));
         }
-        finished(data.executeStatement(r -> r.sessionId(created.sessionId()).sql("SELECT 3")).id());
+        finished(data.executeStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId()).sql("SELECT 3")).id());
     }
 
     @Test
     void sdkValidatesKeepAliveAndReplaysAClosedSessionReceipt() {
-        assertThrows(ValidationException.class, () -> data.executeStatement(r -> r.clusterIdentifier("warehouse")
+        assertThrows(ValidationException.class, () -> data.executeStatement(r -> r.waitTimeSeconds(30).clusterIdentifier("warehouse")
                 .dbUser("admin").database("dev").sessionKeepAliveSeconds(86401).sql("SELECT 1")));
-        ExecuteStatementResponse created = data.executeStatement(r -> r.clusterIdentifier("warehouse").dbUser("admin")
+        ExecuteStatementResponse created = data.executeStatement(r -> r.waitTimeSeconds(30).clusterIdentifier("warehouse").dbUser("admin")
                 .database("dev").sessionKeepAliveSeconds(60).sql("SELECT 1"));
         finished(created.id());
-        ExecuteStatementRequest last = ExecuteStatementRequest.builder().sessionId(created.sessionId()).sessionKeepAliveSeconds(0)
+        ExecuteStatementRequest last = ExecuteStatementRequest.builder().waitTimeSeconds(30).sessionId(created.sessionId()).sessionKeepAliveSeconds(0)
                 .clientToken(UUID.randomUUID().toString()).sql("SELECT 2").build();
         ExecuteStatementResponse closed = data.executeStatement(last);
         finished(closed.id());
@@ -133,7 +131,7 @@ class RedshiftDataSessionIntegrationTest {
         try (RedshiftDataClient other = client("another-caller", Region.US_EAST_1)) {
             assertThrows(ResourceNotFoundException.class, () -> other.executeStatement(last));
         }
-        assertThrows(ResourceNotFoundException.class, () -> data.executeStatement(r -> r.sessionId(created.sessionId()).sql("SELECT 3")));
+        assertThrows(ResourceNotFoundException.class, () -> data.executeStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId()).sql("SELECT 3")));
     }
 
     private RedshiftDataClient client(String key, Region region) {
@@ -142,10 +140,8 @@ class RedshiftDataSessionIntegrationTest {
     }
 
     private DescribeStatementResponse finished(String id) {
-        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
-            DescribeStatementResponse statement = data.describeStatement(r -> r.id(id));
-            assertEquals(StatusString.FINISHED, statement.status(), statement.error());
-        });
-        return data.describeStatement(r -> r.id(id));
+        DescribeStatementResponse statement = data.describeStatement(r -> r.id(id));
+        assertEquals(StatusString.FINISHED, statement.status(), statement.error());
+        return statement;
     }
 }
