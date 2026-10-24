@@ -133,9 +133,11 @@ The secrets must contain JSON such as `{"username":"alice","password":"pw"}`.
 `unprocessedScramSecrets`; reassociation and removal of an unassociated ARN return
 `InvalidSecretArn`.
 
-Floci reconciles associated SCRAM secrets every five seconds by default, measured as
-a delay after each completed sweep. Set `FLOCI_SERVICES_MSK_SCRAM_RECONCILIATION_INTERVAL_MS`
-to change this delay in milliseconds. This is Floci's timing, not an AWS synchronization guarantee.
+Floci schedules SCRAM reconciliation jobs every five seconds by default, measured as
+a delay after each scheduling sweep. Sweeps do not wait for broker operations to finish,
+and clusters with queued or running jobs are skipped. Set
+`FLOCI_SERVICES_MSK_SCRAM_RECONCILIATION_INTERVAL_MS` to change this delay in milliseconds.
+This is Floci's timing, not an AWS synchronization guarantee.
 
 When an associated secret is scheduled for deletion or permanently deleted, reconciliation
 revokes its broker user but retains the association in `ListScramSecrets`. Restoring a secret
