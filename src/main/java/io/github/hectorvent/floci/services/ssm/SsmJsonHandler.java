@@ -325,9 +325,20 @@ public class SsmJsonHandler {
     private static final int GET_PARAMETERS_BY_PATH_MAX_RESULTS = 10;
     private static final int GET_PARAMETER_HISTORY_MAX_RESULTS = 50;
 
-    /** {@code MaxResults} of the readers that page, absent unless the request sends it. */
+    /**
+     * {@code MaxResults} of the readers that page, absent unless the request sends it. A value
+     * that is not a number is the serialization error every other integer member already
+     * reports, not a coerced page size.
+     */
     private static Integer maxResults(JsonNode request) {
-        return request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
+        JsonNode node = request.path("MaxResults");
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isNumber() || Double.isNaN(node.doubleValue())) {
+            throw serializationException(node, "an Integer");
+        }
+        return node.intValue();
     }
 
     /**
@@ -351,7 +362,7 @@ public class SsmJsonHandler {
         return token;
     }
 
-    /** The error SSM answers a token it did not issue. */
+    /** The error SSM answers a token outside this operation's scope or one it cannot decode. */
     private static AwsException invalidNextToken() {
         return new AwsException("InvalidNextToken", "The specified token isn't valid.", 400);
     }

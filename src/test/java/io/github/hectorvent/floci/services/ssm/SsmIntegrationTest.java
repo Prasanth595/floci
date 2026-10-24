@@ -1656,6 +1656,7 @@ class SsmIntegrationTest {
                 { "ParameterFilters": [{ "Key": "Path", "Values": ["dpf"] }] }
                 """, "InvalidFilterValue");
         describeParametersError("{ \"MaxResults\": 51 }", "ValidationException");
+        describeParametersError("{ \"MaxResults\": \"2\" }", "SerializationException");
     }
 
     @Test
@@ -1701,8 +1702,13 @@ class SsmIntegrationTest {
 
         getParametersByPathError("{ \"Path\": \"/ppg/" + suffix + "\", \"MaxResults\": 11 }", "ValidationException");
         getParametersByPathError("{ \"Path\": \"/ppg/" + suffix + "\", \"MaxResults\": 0 }", "ValidationException");
+        getParametersByPathError("{ \"Path\": \"/ppg/" + suffix + "\", \"MaxResults\": \"2\" }",
+                "SerializationException");
+        getParametersByPathError("{ \"Path\": \"/ppg/" + suffix + "\", \"MaxResults\": {} }",
+                "SerializationException");
         getParametersByPathError("{ \"Path\": \"/ppg/" + suffix + "\", \"NextToken\": \"not-a-token\" }",
                 "InvalidNextToken");
+        getParametersByPathError("{ \"Path\": \"/ppg/" + suffix + "\", \"NextToken\": {} }", "InvalidNextToken");
     }
 
     @Test
@@ -1756,8 +1762,13 @@ class SsmIntegrationTest {
 
         getParameterHistoryError("{ \"Name\": \"" + name + "\", \"MaxResults\": 51 }", "ValidationException");
         getParameterHistoryError("{ \"Name\": \"" + name + "\", \"MaxResults\": 0 }", "ValidationException");
+        getParameterHistoryError("{ \"Name\": \"" + name + "\", \"MaxResults\": \"2\" }",
+                "SerializationException");
+        getParameterHistoryError("{ \"Name\": \"" + name + "\", \"MaxResults\": [] }",
+                "SerializationException");
         getParameterHistoryError("{ \"Name\": \"" + name + "\", \"NextToken\": \"not-a-token\" }",
                 "InvalidNextToken");
+        getParameterHistoryError("{ \"Name\": \"" + name + "\", \"NextToken\": [] }", "InvalidNextToken");
     }
 
     @Test
