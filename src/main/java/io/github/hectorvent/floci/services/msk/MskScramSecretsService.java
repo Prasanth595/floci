@@ -75,13 +75,17 @@ public class MskScramSecretsService {
 
     @PostConstruct
     public void init() {
+        long intervalMs = config.services().msk().scramReconciliationIntervalMs();
+        if (intervalMs <= 0) {
+            throw new IllegalArgumentException("floci.services.msk.scram-reconciliation-interval-ms must be greater than zero.");
+        }
         reconciler.scheduleWithFixedDelay(() -> {
             try {
                 reconcileAllScramSecrets();
             } catch (RuntimeException e) {
                 LOG.error("MSK SCRAM reconciliation failed; retrying on the next scheduled run", e);
             }
-        }, 5, 5, TimeUnit.SECONDS);
+        }, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
     }
 
     @PreDestroy

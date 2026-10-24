@@ -30,6 +30,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
@@ -43,6 +44,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.LogRecord;
 import java.util.stream.Stream;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -155,6 +157,39 @@ class MskScramServiceTest {
                 operationInSecondClusterDone.countDown();
             }
             associationInFirstCluster.get(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0, -1})
+    void reconciliationRejectsNonPositiveInterval(long intervalMs) {
+        when(config.services().msk().scramReconciliationIntervalMs()).thenReturn(intervalMs);
+
+        try {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, service::init);
+            assertEquals("floci.services.msk.scram-reconciliation-interval-ms must be greater than zero.",
+                error.getMessage());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void scheduledReconciliationAppliesRotationsUsingConfiguredInterval() {
+        associate(SECRET, version("alice", "original"));
+        when(config.services().msk().scramReconciliationIntervalMs()).thenReturn(5L);
+        setSecretValue(SECRET, version("alice", "rotated"));
+
+        try {
+            service.init();
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                verify(redpanda).createUser(cluster, "alice", "rotated"));
+
+            setSecretValue(SECRET, version("alice", "rotated-again"));
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                verify(redpanda).createUser(cluster, "alice", "rotated-again"));
+        } finally {
+            service.shutdown();
         }
     }
 
