@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.autoscaling;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.CapacityReservationSpecification;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.autoscaling.model.ScalingActivity;
@@ -262,6 +263,36 @@ class AutoScalingReconcilerTest {
         assertEquals(Map.of("aws:autoscaling:groupName", "app-asg", "shared", "group-value", "template-only", "kept"),
                 tags.getValue().stream().collect(Collectors.toMap(Tag::getKey, Tag::getValue)));
         assertEquals("spoofed-group", asg.getTags().get("aws:autoscaling:groupName"));
+    }
+
+    @Test
+    void capacityFallbackRetryStillTagsTheGroupName() {
+        AutoScalingService asgService = scalingService();
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+        AutoScalingGroup asg = launchTemplateAsg();
+        CapacityReservationSpecification capacity = new CapacityReservationSpecification();
+        capacity.setCapacityReservationPreference("capacity-reservations-first");
+        asg.setCapacityReservationSpecification(capacity);
+        stubLaunchTemplate(ec2Service, "ami-version-1", "t3.micro");
+        when(asgService.saveAutoScalingGroupIfPresent(asg)).thenReturn(true);
+        when(ec2Service.runInstances(any(), any(), any(), any(Integer.class), any(Integer.class), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(Integer.class), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), eq(false), isNull(), any()))
+                .thenThrow(new AwsException("InsufficientInstanceCapacity", "no reserved capacity", 400))
+                .thenReturn(reservation(ec2Instance("i-fallback", InstanceState.pending())));
+
+        reconciler.reconcile(asg);
+
+        ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.captor();
+        verify(ec2Service, times(2)).runInstances(any(), any(), any(), any(Integer.class), any(Integer.class), any(),
+                any(), any(), any(), tags.capture(), any(), any(), any(), any(), any(Integer.class), any(), any(), any(),
+                any(), anyBoolean(), any(), any(), any(), eq(false), isNull(), any());
+        for (List<Tag> launchTags : tags.getAllValues()) {
+            assertEquals(Map.of("aws:autoscaling:groupName", "app-asg"),
+                    launchTags.stream().collect(Collectors.toMap(Tag::getKey, Tag::getValue)));
+        }
+        assertEquals("i-fallback", asg.getInstances().getFirst().getInstanceId());
     }
 
     @Test

@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -30,6 +31,15 @@ import java.util.function.Predicate;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CloudWatchLogsServiceTest {
+
+    @Test
+    void filterLogEventsReportsMissingGroupBeforeInvalidFilterPattern() {
+        AwsException error = assertThrows(AwsException.class, () -> service.filterLogEvents(
+                "/missing", List.of(), null, null, "[", 10, null, REGION));
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals("The specified log group does not exist.", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
 
     private static final String REGION = "us-east-1";
     private static final String KEY_ARN =
@@ -76,6 +86,60 @@ class CloudWatchLogsServiceTest {
             service.untagLogGroup(historical, List.of("team"), REGION);
             assertEquals(Map.of(), service.listTagsLogGroup(historical, REGION));
         }
+    }
+
+    // ──────────────────────────── Missing resources ────────────────────────────
+
+    @Test
+    void missingLogGroupIsReportedWithTheAwsText() {
+        String group = "/missing";
+        Map<String, Executable> calls = new LinkedHashMap<>();
+        calls.put("DeleteLogGroup", () -> service.deleteLogGroup(group, REGION));
+        calls.put("PutLogGroupDeletionProtection", () -> service.putLogGroupDeletionProtection(group, true, REGION));
+        calls.put("PutRetentionPolicy", () -> service.putRetentionPolicy(group, 1, REGION));
+        calls.put("DeleteRetentionPolicy", () -> service.deleteRetentionPolicy(group, REGION));
+        calls.put("TagLogGroup", () -> service.tagLogGroup(group, Map.of("a", "b"), REGION));
+        calls.put("UntagLogGroup", () -> service.untagLogGroup(group, List.of("a"), REGION));
+        calls.put("ListTagsLogGroup", () -> service.listTagsLogGroup(group, REGION));
+        calls.put("AssociateKmsKey", () -> service.associateKmsKey(group, KEY_ARN, REGION));
+        calls.put("DisassociateKmsKey", () -> service.disassociateKmsKey(group, REGION));
+        calls.put("CreateLogStream", () -> service.createLogStream(group, "s", REGION));
+        calls.put("DescribeLogStreams", () -> service.describeLogStreams(group, null, REGION));
+        calls.put("PutLogEvents", () -> service.putLogEvents(group, "s", List.of(Map.of("timestamp", 1L, "message", "x")), REGION));
+        calls.put("StartQuery", () -> service.startQuery(List.of(group), 0, 1, "fields @message", null, REGION));
+        calls.put("PutSubscriptionFilter", () -> service.putSubscriptionFilter(
+                group, "f", "", "arn:aws:lambda:us-east-1:000000000000:function:f", null, REGION));
+        calls.put("DescribeSubscriptionFilters", () -> service.describeSubscriptionFilters(group, null, null, 0, REGION));
+        calls.put("DeleteSubscriptionFilter", () -> service.deleteSubscriptionFilter(group, "f", REGION));
+
+        assertAll(calls.entrySet().stream().map(call -> () ->
+                assertResourceNotFound(call.getKey(), "The specified log group does not exist.", call.getValue())));
+    }
+
+    @Test
+    void missingLogStreamIsReportedWithTheAwsText() {
+        service.createLogGroup("/app", null, null, REGION);
+
+        assertAll(
+                () -> assertResourceNotFound("PutLogEvents", "The specified log stream does not exist.",
+                        () -> service.putLogEvents("/app", "s", List.of(Map.of("timestamp", 1L, "message", "x")), REGION)),
+                () -> assertResourceNotFound("DeleteLogStream", "The specified log stream does not exist.",
+                        () -> service.deleteLogStream("/app", "s", REGION)));
+    }
+
+    @Test
+    void missingSubscriptionFilterIsReportedWithTheAwsText() {
+        service.createLogGroup("/app", null, null, REGION);
+
+        assertResourceNotFound("DeleteSubscriptionFilter", "The specified subscription filter does not exist.",
+                () -> service.deleteSubscriptionFilter("/app", "f", REGION));
+    }
+
+    private static void assertResourceNotFound(String action, String message, Executable call) {
+        AwsException error = assertThrows(AwsException.class, call, action);
+        assertEquals("ResourceNotFoundException", error.getErrorCode(), action);
+        assertEquals(message, error.getMessage(), action);
+        assertEquals(400, error.getHttpStatus(), action);
     }
 
     // ──────────────────────────── Log Groups ────────────────────────────
@@ -1224,6 +1288,86 @@ class CloudWatchLogsServiceTest {
                 "/app/logs", "stream-1", base + 5000, null, 100, true, null, REGION);
         assertEquals(1, result.events().size());
         assertEquals("new", result.events().getFirst().getMessage());
+    }
+
+    @Test
+    void filterLogEventsAllowsExistingEmptyGroup() {
+        service.createLogGroup("/app/empty", null, null, REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/empty", null, null, null, null, 100, null, REGION);
+
+        assertTrue(result.events().isEmpty());
+        assertNull(result.nextToken());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void filterLogEventsRejectsMissingOrDeletedGroup(boolean deleted) {
+        service.createLogGroup("/app/retained", null, null, REGION);
+        service.createLogStream("/app/retained", "stream", REGION);
+        service.putLogEvents("/app/retained", "stream",
+                List.of(Map.of("timestamp", 1L, "message", "retained")), REGION);
+        if (deleted) {
+            service.createLogGroup("/app/missing", null, null, REGION);
+            service.createLogStream("/app/missing", "stream", REGION);
+            service.putLogEvents("/app/missing", "stream",
+                    List.of(Map.of("timestamp", 2L, "message", "deleted")), REGION);
+            service.deleteLogGroup("/app/missing", REGION);
+        }
+
+        AwsException error = assertThrows(AwsException.class, () -> service.filterLogEvents(
+                "/app/missing", null, null, null, null, 100, null, REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(List.of("/app/retained"), service.describeLogGroups(null, REGION).stream()
+                .map(LogGroup::getLogGroupName).toList());
+        assertEquals(List.of("retained"), service.filterLogEvents(
+                "/app/retained", null, null, null, null, 100, null, REGION).events().stream()
+                .map(event -> event.event().getMessage()).toList());
+    }
+
+    @Test
+    void filterLogEventsRequiresGroupInRequestedRegion() {
+        service.createLogGroup("/app/scoped", null, null, REGION);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.filterLogEvents(
+                "/app/scoped", null, null, null, null, 100, null, "eu-west-1"));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeLogGroups(null, "eu-west-1").isEmpty());
+        assertEquals(1, service.describeLogGroups(null, REGION).size());
+        assertTrue(service.filterLogEvents(
+                "/app/scoped", null, null, null, null, 100, null, REGION).events().isEmpty());
+    }
+
+    @Test
+    void filterLogEventsRequiresGroupInCurrentAccount() {
+        String accountA = "111111111111";
+        String accountB = "222222222222";
+        InMemoryStorage<String, LogGroup> rawGroups = new InMemoryStorage<>();
+        CloudWatchLogsService scoped = new CloudWatchLogsService(
+                new AccountAwareStorageBackend<>(rawGroups, null, accountB),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
+                10_000, new RegionResolver(REGION, accountB));
+        scoped.createLogGroupForAccount(accountA, "/app/scoped", null, null, REGION);
+        Set<String> before = Set.copyOf(rawGroups.keys());
+
+        AwsException error = assertThrows(AwsException.class, () -> scoped.filterLogEvents(
+                "/app/scoped", null, null, null, null, 100, null, REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(before, Set.copyOf(rawGroups.keys()));
+        assertTrue(scoped.describeLogGroups(null, REGION).isEmpty());
+        scoped.createLogGroup("/app/scoped", null, null, REGION);
+        assertTrue(scoped.filterLogEvents(
+                "/app/scoped", null, null, null, null, 100, null, REGION).events().isEmpty());
     }
 
     @Test
