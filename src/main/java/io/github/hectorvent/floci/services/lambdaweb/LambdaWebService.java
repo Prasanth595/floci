@@ -337,12 +337,12 @@ public class LambdaWebService implements Resettable {
 
     /**
      * Stores a new function under its lock, refusing a name the account already has in any region.
-     * Creates of one name in every region share a lock, so two regions cannot both take it.
+     * Creates of one name in every region of the account share a lock, so two regions cannot both take it.
      */
     private WebFunction storeNewFunction(String region, String functionName, Map<String, String> tags,
                                          Consumer<WebFunction> populate) {
         String accountId = regionResolver.getAccountId();
-        synchronized (locks.computeIfAbsent(functionName, k -> new Object())) {
+        synchronized (locks.computeIfAbsent(accountId + "/" + functionName, k -> new Object())) {
             synchronized (lockFor(region, functionName)) {
                 if (functions.get(key(region, functionName)).isPresent()) {
                     throw new AwsException("ConflictException",
