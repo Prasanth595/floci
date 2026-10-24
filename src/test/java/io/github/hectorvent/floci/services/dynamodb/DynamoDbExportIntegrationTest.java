@@ -359,7 +359,45 @@ class DynamoDbExportIntegrationTest {
                 "InvalidExportTimeException", "Export Time is invalid");
     }
 
+    @Test
+    void s3PrefixIsCheckedAsAwsChecksIt() throws Exception {
+        String atLeast3 = "' at 's3Prefix' failed to satisfy constraint: Member must have length greater than or equal to 3";
+        expectError(exportWithPrefix("ExportPrefixMissing", ""), "ValidationException",
+                "Invalid Request: 1 validation error detected: Value '" + atLeast3);
+        expectError(exportWithPrefix("ExportPrefixMissing", "éé"), "ValidationException",
+                "Invalid Request: 1 validation error detected: Value 'éé" + atLeast3);
+        String over1024 = "a".repeat(1025);
+        expectError(exportWithPrefix(TABLE_NAME, over1024), "ValidationException", "1 validation error detected: Value '"
+                + over1024 + "' at 's3Prefix' failed to satisfy constraint: Member must have length less than or equal to 1024");
+        expectError(exportWithPrefix("ExportPrefixMissing", "a".repeat(949)), "TableNotFoundException",
+                "Table not found: " + TABLE_ARN_PREFIX + "ExportPrefixMissing");
+        expectError(exportWithPrefix(TABLE_NAME, "é".repeat(475)), "ValidationException",
+                "Invalid Request: S3 Prefix is too long");
+        expectError(exportWithPrefix(TABLE_NAME, "a".repeat(949)), "ValidationException",
+                "Invalid Request: S3 Prefix is too long");
+
+        String longest = exportWithPrefix(TABLE_NAME, "a".repeat(948)).statusCode(200)
+            .extract().path("ExportDescription.ExportArn");
+        assertEquals("COMPLETED", pollUntilCompleted(longest, 10_000));
+        String slashed = exportWithPrefix(TABLE_NAME, "ends-with/").statusCode(200)
+            .body("ExportDescription.S3Prefix", equalTo("ends-with/"))
+            .extract().path("ExportDescription.ExportArn");
+        assertEquals("COMPLETED", pollUntilCompleted(slashed, 10_000));
+        assertEquals(3, exportedItems(slashed, "ends-with").size());
+    }
+
     // --- Helpers ---
+
+    private static ValidatableResponse exportWithPrefix(String table, String prefix) {
+        return given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExportTableToPointInTime")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "%s"}
+                """.formatted(TABLE_ARN_PREFIX + table, BUCKET_NAME, prefix).getBytes(StandardCharsets.UTF_8))
+            .when().post("/")
+            .then();
+    }
 
     /** Returns a time between the writes before and after the call, in epoch seconds with milliseconds. */
     private static BigDecimal pause() {

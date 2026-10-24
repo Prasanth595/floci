@@ -4906,6 +4906,18 @@ public class DynamoDbService {
         String s3SseAlgorithm = request.containsKey("S3SseAlgorithm") ? (String) request.get("S3SseAlgorithm") : null;
         String s3BucketOwner = request.containsKey("S3BucketOwner") ? (String) request.get("S3BucketOwner") : null;
 
+        if (s3Prefix != null) {
+            int length = s3Prefix.codePointCount(0, s3Prefix.length());
+            if (1024 < length) {
+                throw SmithyValidationErrors.validationException("Value '" + s3Prefix
+                        + "' at 's3Prefix' failed to satisfy constraint: Member must have length less than or equal to 1024");
+            }
+            if (length < 3) {
+                throw new AwsException("ValidationException", "Invalid Request: " + SmithyValidationErrors.message(
+                        List.of("Value '" + s3Prefix + "' at 's3Prefix' failed to satisfy constraint: "
+                                + "Member must have length greater than or equal to 3")), 400);
+            }
+        }
         if ("INCREMENTAL_EXPORT".equals(exportType)) {
             throw new AwsException("ValidationException",
                     "ExportType INCREMENTAL_EXPORT is not supported", 400);
@@ -4921,6 +4933,9 @@ public class DynamoDbService {
         String storageKey = regionKey(tableRegion, tableName);
 
         TableDefinition table = requireBackupSource(storageKey, tableArn);
+        if (s3Prefix != null && 948 < s3Prefix.getBytes(StandardCharsets.UTF_8).length) {
+            throw new AwsException("ValidationException", "Invalid Request: S3 Prefix is too long", 400);
+        }
         Instant startTime = clock.instant().truncatedTo(ChronoUnit.MILLIS);
         // AWS cannot enable point-in-time recovery until seconds after the creation, so its
         // EarliestRestorableDateTime is never in the creation second.
@@ -4980,7 +4995,9 @@ public class DynamoDbService {
         try {
             String s3Bucket = desc.getS3Bucket();
             String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
-            String exportDir = (desc.getS3Prefix() != null ? desc.getS3Prefix() + "/" : "")
+            String prefix = desc.getS3Prefix();
+            // AWS adds no slash after a prefix that ends with one.
+            String exportDir = (prefix == null ? "" : prefix.endsWith("/") ? prefix : prefix + "/")
                     + "AWSDynamoDB/" + exportId + "/";
 
             try {
