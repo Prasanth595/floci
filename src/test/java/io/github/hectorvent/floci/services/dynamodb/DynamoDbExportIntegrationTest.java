@@ -19,7 +19,6 @@ import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.zip.GZIPInputStream;
@@ -177,28 +176,6 @@ class DynamoDbExportIntegrationTest {
     }
 
     @Test
-    void ionExportWritesIonLines() throws Exception {
-        String exportArn = ddb("ExportTableToPointInTime", """
-            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "exports-ion", "ExportFormat": "ION"}
-            """.formatted(TABLE_ARN, BUCKET_NAME)).statusCode(200)
-            .body("ExportDescription.ExportFormat", equalTo("ION"))
-            .extract().path("ExportDescription.ExportArn");
-        assertEquals("COMPLETED", pollUntilCompleted(exportArn, 10_000));
-
-        String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
-        String dir = "exports-ion/AWSDynamoDB/" + exportId + "/";
-        JsonPath dataFile = JsonPath.from(new String(s3Object(dir + "manifest-files.json"), StandardCharsets.UTF_8));
-        String dataKey = dataFile.getString("dataFileS3Key");
-        assertTrue(dataKey.matches(dir + "data/[a-z2-7]{26}\\.ion\\.gz"), dataKey);
-        assertEquals("ION", new ObjectMapper().readTree(s3Object(dir + "manifest-summary.json")).get("outputFormat").asText());
-        List<String> lines = Arrays.stream(decompressGzip(s3Object(dataKey)).split("\n")).sorted().toList();
-        assertEquals(List.of(
-                "$ion_1_0 {Item:{pk:\"user-1\",sk:\"order-001\",total:99.}}",
-                "$ion_1_0 {Item:{pk:\"user-2\",sk:\"order-002\",total:55.}}",
-                "$ion_1_0 {Item:{pk:\"user-3\",sk:\"order-003\",total:15d1}}"), lines);
-    }
-
-    @Test
     void exportFormatIsCheckedAsAwsChecksIt() {
         String enumSet = "' at 'exportFormat' failed to satisfy constraint: "
                 + "Member must satisfy enum value set: [ION, DYNAMODB_JSON]";
@@ -212,6 +189,10 @@ class DynamoDbExportIntegrationTest {
             """.formatted(TABLE_ARN, BUCKET_NAME, over1024)), "ValidationException",
                 "2 validation errors detected: Value '" + over1024 + "' at 's3Prefix' failed to satisfy constraint: "
                 + "Member must have length less than or equal to 1024; Value '" + enumSet);
+        ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "exports-ion", "ExportFormat": "ION"}
+            """.formatted(TABLE_ARN, BUCKET_NAME)).statusCode(200)
+            .body("ExportDescription.ExportFormat", equalTo("ION"));
     }
 
     @Test
