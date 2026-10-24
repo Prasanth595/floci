@@ -409,7 +409,7 @@ Deviations from AWS:
 
 ## Export to S3
 
-Export table data to an S3 bucket as gzip-compressed NDJSON (DynamoDB JSON format). As on AWS, the table needs point-in-time recovery:
+Export table data to an S3 bucket as gzip-compressed lines of DynamoDB JSON (`DYNAMODB_JSON`, the default) or Amazon Ion text (`ION`). As on AWS, the table needs point-in-time recovery:
 
 ```bash
 # Create a bucket to receive the export
@@ -440,7 +440,7 @@ aws dynamodb list-exports \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
-The export writes `_started`, `manifest-summary.json`, `manifest-files.json` and an `.md5` file for each manifest to `s3://<bucket>/<prefix>/AWSDynamoDB/<exportId>/`, and the items to a `.json.gz` file in its `data/` folder, the layout AWS uses. AWS writes one data file per partition. Floci writes one. As on AWS, every file is a multipart upload of one part, so its ETag ends in `-1`. As on AWS, an `S3Prefix` shorter than 3 characters or longer than 948 UTF-8 bytes is refused, and no slash is added after a prefix that ends with one.
+The export writes `_started`, `manifest-summary.json`, `manifest-files.json` and an `.md5` file for each manifest to `s3://<bucket>/<prefix>/AWSDynamoDB/<exportId>/`, and the items to a `.json.gz` or `.ion.gz` file in its `data/` folder, the layout AWS uses. AWS writes one data file per partition. Floci writes one. An Ion line is `$ion_1_0 {Item:{...}}`, with sets annotated as `$dynamodb_SS`, `$dynamodb_NS` and `$dynamodb_BS`, and numbers as Ion decimals. As on AWS, every file is a multipart upload of one part, so its ETag ends in `-1`. As on AWS, an `S3Prefix` shorter than 3 characters or longer than 948 UTF-8 bytes is refused, and no slash is added after a prefix that ends with one.
 
 The export holds the items as they were at `ExportTime`, or at the request time when `ExportTime` is not set. As on AWS, `ExportTime` must not be before `EarliestRestorableDateTime` or the table creation, and must not be in the future. A time after `LatestRestorableDateTime` is accepted.
 

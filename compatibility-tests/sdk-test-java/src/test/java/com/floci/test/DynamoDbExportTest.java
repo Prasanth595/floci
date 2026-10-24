@@ -277,6 +277,36 @@ class DynamoDbExportTest {
                 .hasMessageContaining("Export Time is invalid");
     }
 
+    @Test
+    @Order(10)
+    void exportTableToPointInTime_ionFormat_writesIonLines() throws Exception {
+        ExportDescription desc = ddb.exportTableToPointInTime(ExportTableToPointInTimeRequest.builder()
+                .tableArn(tableArn)
+                .s3Bucket(BUCKET_NAME)
+                .s3Prefix("exports-ion")
+                .exportFormat(ExportFormat.ION)
+                .build()).exportDescription();
+        assertThat(desc.exportFormat()).isEqualTo(ExportFormat.ION);
+
+        try (DynamoDbWaiter waiter = DynamoDbWaiter.builder().client(ddb).build()) {
+            waiter.waitUntilExportCompleted(r -> r.exportArn(desc.exportArn()));
+        }
+        String exportDir = "exports-ion/AWSDynamoDB/" + desc.exportArn().substring(desc.exportArn().lastIndexOf('/') + 1);
+        JsonNode summary = new ObjectMapper().readTree(s3.getObjectAsBytes(GetObjectRequest.builder()
+                .bucket(BUCKET_NAME).key(exportDir + "/manifest-summary.json").build()).asByteArray());
+        assertThat(summary.get("outputFormat").asText()).isEqualTo("ION");
+        JsonNode dataFileEntry = new ObjectMapper().readTree(s3.getObjectAsBytes(GetObjectRequest.builder()
+                .bucket(BUCKET_NAME).key(exportDir + "/manifest-files.json").build()).asByteArray());
+        String dataKey = dataFileEntry.get("dataFileS3Key").asText();
+        assertThat(dataKey).endsWith(".ion.gz");
+
+        String ion = decompressGzip(s3.getObjectAsBytes(
+                GetObjectRequest.builder().bucket(BUCKET_NAME).key(dataKey).build()).asByteArray());
+        assertThat(ion.split("\n")).hasSize(4)
+                .allSatisfy(line -> assertThat(line).startsWith("$ion_1_0 {Item:{").endsWith("}}"))
+                .anySatisfy(line -> assertThat(line).contains("pk:\"user-3\"", "sk:\"order-003\"", "total:15d1"));
+    }
+
     private String decompressGzip(byte[] data) throws Exception {
         try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(data));
              BufferedReader reader = new BufferedReader(new InputStreamReader(gzip, StandardCharsets.UTF_8))) {
