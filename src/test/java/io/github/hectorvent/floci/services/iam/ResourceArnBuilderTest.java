@@ -1237,6 +1237,24 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function", arn);
     }
 
+    /** CreateFunction is checked on the function its body names, in the caller's account and Region. */
+    @Test
+    void lambdaCreateFunctionIsCheckedOnTheFunctionItsBodyNames() {
+        when(uriInfo.getPath()).thenReturn("/2015-03-31/functions");
+        when(ctx.getMethod()).thenReturn("POST");
+        setJsonBody("{\"FunctionName\":\"my-function\",\"Runtime\":\"nodejs20.x\"}");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"FunctionName\":\"arn:aws:lambda:us-east-1:111122223333:function:my-function\"}");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"Runtime\":\"nodejs20.x\"}");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(ctx.getMethod()).thenReturn("GET");
+        setJsonBody("{\"FunctionName\":\"my-function\"}");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
     @Test
     void lambdaFunctionArnKeepsTheAccountItNames() {
         when(uriInfo.getPath()).thenReturn(

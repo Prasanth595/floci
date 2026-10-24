@@ -1704,6 +1704,61 @@ when the caller may not pass the role.
   REST services whose routes no rule maps yet, and API Gateway, which is authorized by HTTP method,
   are not read either.
 
+A request that tags the resource it creates also needs the service's tagging action. The SNS API
+reference has "To be able to tag a topic on creation, you must have the sns:CreateTopic and
+sns:TagResource permissions.", and the EC2 user guide "If tags are specified in the resource-creating
+action, Amazon performs additional authorization on the ec2:CreateTags action to verify if users have
+permissions to create tags." Every operation the Service Reference lists with an action that only
+tags and adds tags (`TagResource`, `CreateTags`, `AddTags`, `AddTagsToResource`, SQS's `TagQueue`,
+IAM's `TagRole`, STS's `TagSession` and the like), in the services Floci serves over the JSON and
+Query protocols and Smithy RPC v2 CBOR and in the REST services whose routes are authorized as
+operations, is checked from a second table generated the same way,
+`src/main/resources/aws/iam-tag-on-create.json`.
+When the request carries tags, the tagging action is checked for each resource's tags apart, with
+each tag as `aws:RequestTag/<key>` and their keys as `aws:TagKeys`, so a policy that allows tagging
+only with some tags or keys holds at creation too. A tag specification's tags are checked on the
+resource of the type it names, its name not known yet, as AWS checks them on the resource being
+tagged: an instance's on `arn:aws:ec2:<Region>:<account>:instance/*`, from the ARN the Service
+Reference gives the type. Other tags are checked on the resources the operation itself is checked
+on: Lambda's `CreateFunction` is checked on the function its body names, in the caller's account and
+Region, as the Service Reference gives it the `function` resource, so a function's tags are checked
+there too. Where the tagging action takes
+its namespace's `CreateAction` key, as `ec2:CreateTags`, `ecs:TagResource`, CloudFormation's
+`TagResource` and Elastic Load Balancing's `AddTags` do, the key is the operation's name:
+`ec2:CreateAction` is `RunInstances` for an instance launched with tags. The operation's own action
+is checked with the same `aws:RequestTag/<key>` and `aws:TagKeys`, once for each resource's tags,
+wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 542 of the operations read, so
+"allow `sqs:CreateQueue` only with `aws:RequestTag/team`" and "deny it when `aws:RequestTag/team` is
+null" hold as on AWS; keys a service's own condition keys already give, as EC2's `RunInstances`
+does, are kept. It is checked once for each reading of the tags and refused if any is denied: the
+sets its handler reads, those under any other spelling (below), and none where its handler reads
+none, so a deny on a tag holds whichever reading a handler applies, and a create that requires a tag
+gets it only where its handler applies it. A request that carries no tags needs only its own action.
+As with passed roles, an operation Floci does not serve is in the table too.
+- The tags are read from a top-level request member named `Tags`, `TagList`, `TagSpecifications` or
+  the like that holds a tag list or map, as the Floci handler that applies them reads it, so the check
+  sees the tags the resource gets. A JSON or CBOR body's member is read under its own name, and an
+  alarm's in CloudWatch's `PutMetricAlarm` and `PutCompositeAlarm` under `tags` too; a CodeDeploy
+  tag's key and value as `Key` and `Value`, or `key` and `value`, as its handler takes either, each as
+  text whatever it holds (a key `123` is the tag `123`). Query form
+  parameters are read under the spelling the SDK sends, from 1 to the first number with no key, and
+  under the further spellings the RDS, DocumentDB, Neptune, ElastiCache and Redshift handlers read.
+  EC2's are read from every tag specification, under `TagSpecification` or `TagSpecifications`, as EC2
+  applies either, to the first that names no resource type. SQS's are read from `Tag.N.Key` and
+  `Tag.N.Value` over the Query protocol. The tagging action is also checked for tags under any other
+  spelling a handler might read, a member or a tag's key and value in any case, every element of a
+  tag list and an object's structures, a form's list under any spelling and every number, so none a
+  handler applies goes unchecked. CodeDeploy's handler iterates its tags member whatever it holds,
+  so an object's structures are its tags too.
+- CloudWatch Logs `CreateLogGroup`, which takes either of two tagging actions, is checked as described
+  under CloudWatch Logs groups below.
+- Not read: an operation whose request carries no tags, which the Service Reference lists with a
+  tagging action all the same (RDS `DeleteDBInstance` and DynamoDB `UpdateTable`, among others), and
+  EC2's `RequestSpotFleet`, whose tags are deeper in its configuration. A session's tags also need
+  `sts:TagSession` in the role's trust policy, which is not checked, and service-specific request tag
+  keys such as `rds:req-tag/<key>` are not set. S3 checks `s3:PutObjectTagging` for an object it
+  creates with tags itself, and the REST services whose routes no rule maps yet are not read.
+
 A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
 path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that
 operation, which is usually the operation's own name. An RPC v2 call is checked as the service and
@@ -2028,7 +2083,8 @@ floci populates:
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and
-  `s3:PutBucketTagging` (the `<Tagging>` body).
+  `s3:PutBucketTagging` (the `<Tagging>` body), and for every create in the tag-on-create table
+  whose action takes it, as described under the tag-on-create check above.
 - `aws:ResourceTag/<key>`: the target resource's current tags, for `ec2:CreateTags`,
   `ec2:DeleteTags`, `ec2:TerminateInstances` and `ec2:DescribeInstances` (the first
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucket` and the
@@ -2103,7 +2159,8 @@ floci populates:
   cannot match: an absent key has no equal or like value. That absence is the enforcement rather
   than a gap in it.
 - `aws:TagKeys`: the case-sensitive requested tag keys for EC2 `RunInstances` and
-  `CreateTags`, and S3 `PutBucketTagging`. `ForAllValues:StringEquals` can restrict the
+  `CreateTags`, S3 `PutBucketTagging`, and every create in the tag-on-create table whose action
+  takes it. `ForAllValues:StringEquals` can restrict the
   complete requested set without a `Null` guard; no tags still means absent context.
 - `dynamodb:LeadingKeys`, `dynamodb:Attributes`, `dynamodb:Select`: from the DynamoDB request
   body, for `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchGetItem` and
