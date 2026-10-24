@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.lambdaweb;
 
 import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
-import io.github.hectorvent.floci.core.common.port.PortAllocator;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -32,8 +31,9 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * The Lambda metadata endpoint that {@code AWS_LAMBDA_METADATA_API} names, which answers the zone
- * id to a request with the environment's {@code AWS_LAMBDA_METADATA_TOKEN}. One server on a runtime
- * API port serves every environment, and the token tells them apart. AWS serves it with Go's
+ * id to a request with the environment's {@code AWS_LAMBDA_METADATA_TOKEN}. One server serves every
+ * environment, and the token tells them apart. Its port is one the system picks, so it takes none
+ * of the Runtime API range, whose width is the Lambda concurrency. AWS serves it with Go's
  * {@code ServeMux}, so paths, redirects and the 404 follow that.
  */
 @ApplicationScoped
@@ -52,7 +52,6 @@ public class LambdaWebMetadataServer {
     private static final Logger LOG = Logger.getLogger(LambdaWebMetadataServer.class);
 
     private final Vertx vertx;
-    private final PortAllocator portAllocator;
     private final ContainerReachableEndpoint reachableEndpoint;
     private final Map<String, String> zones = new ConcurrentHashMap<>();
     /** Guarded by this. */
@@ -60,10 +59,8 @@ public class LambdaWebMetadataServer {
     private int port;
 
     @Inject
-    public LambdaWebMetadataServer(Vertx vertx, PortAllocator portAllocator,
-                                   ContainerReachableEndpoint reachableEndpoint) {
+    public LambdaWebMetadataServer(Vertx vertx, ContainerReachableEndpoint reachableEndpoint) {
         this.vertx = vertx;
-        this.portAllocator = portAllocator;
         this.reachableEndpoint = reachableEndpoint;
     }
 
@@ -89,28 +86,26 @@ public class LambdaWebMetadataServer {
     }
 
     private void start() {
-        int allocated = portAllocator.allocate();
         HttpServer created = vertx.createHttpServer(new HttpServerOptions().setHttp2ClearTextEnabled(false))
                 .requestHandler(this::handle);
         try {
-            created.listen(allocated, "0.0.0.0").toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+            created.listen(0, "0.0.0.0").toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
         } catch (Exception e) {
-            portAllocator.release(allocated);
+            created.close();
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            throw new IllegalStateException("Could not start the Lambda Web metadata server on port " + allocated, e);
+            throw new IllegalStateException("Could not start the Lambda Web metadata server", e);
         }
         server = created;
-        port = allocated;
-        LOG.infov("Lambda Web metadata server started on port {0}", String.valueOf(allocated));
+        port = created.actualPort();
+        LOG.infov("Lambda Web metadata server started on port {0}", String.valueOf(port));
     }
 
     @PreDestroy
     synchronized void stop() {
         if (server != null) {
             server.close();
-            portAllocator.release(port);
             server = null;
         }
     }

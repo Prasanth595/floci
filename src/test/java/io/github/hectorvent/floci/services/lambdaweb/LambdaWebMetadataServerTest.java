@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
-import io.github.hectorvent.floci.core.common.port.PortAllocator;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,7 +8,6 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -35,17 +33,14 @@ class LambdaWebMetadataServerTest {
     private String token;
 
     @BeforeEach
-    void start() throws IOException {
-        try (ServerSocket free = new ServerSocket(0)) {
-            port = free.getLocalPort();
-        }
-        PortAllocator ports = mock(PortAllocator.class);
-        when(ports.allocate()).thenReturn(port);
+    void start() {
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
         when(endpoint.baseUrl()).thenReturn("http://floci.test:4566");
-        server = new LambdaWebMetadataServer(vertx, ports, endpoint);
+        server = new LambdaWebMetadataServer(vertx, endpoint);
         token = server.register("us-east-1");
-        assertEquals("floci.test:" + port, server.address());
+        String address = server.address();
+        assertTrue(address.matches("floci\\.test:\\d+"), address);
+        port = Integer.parseInt(address.substring(address.indexOf(':') + 1));
     }
 
     @AfterEach
