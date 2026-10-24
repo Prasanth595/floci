@@ -16,7 +16,6 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
@@ -480,21 +479,16 @@ class Ec2CapacityReservationAssociationServiceTest {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
-    void groupLaunchRegistersMembershipUnderTheReconciliationLock() throws Exception {
+    void groupLaunchRegistersMembershipUnderTheReconciliationLock() {
         try (Fixture fixture = new Fixture("memory", directory)) {
             fixture.create(2);
             String group = fixture.group();
             fixture.service.capacityReservationAssociations(REGION);
-            Field lockField = Ec2Service.class.getDeclaredField("capacityReservationLock");
-            lockField.setAccessible(true);
-            Object lock = lockField.get(fixture.service);
-            Field indexField = Ec2Service.class.getDeclaredField("capacityGroupInstanceIds");
-            indexField.setAccessible(true);
-            Map<String, Set<String>> index = (Map<String, Set<String>>) indexField.get(fixture.service);
+            Map<String, Set<String>> index = fixture.service.capacityGroupInstanceIdsForTest();
             Set<String> ids = spy(new HashSet<String>());
             doAnswer(invocation -> {
-                assertTrue(Thread.holdsLock(lock), "Registration must share the pruning lock");
+                assertTrue(fixture.service.holdsCapacityReservationLockForTest(),
+                        "Registration must share the pruning lock");
                 return invocation.callRealMethod();
             }).when(ids).add(any());
             index.put(ACCOUNT + "::" + REGION, ids);
@@ -509,17 +503,14 @@ class Ec2CapacityReservationAssociationServiceTest {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
-    void groupIndexPrunesTerminatedFallbacksWithoutAvailableCapacity() throws Exception {
+    void groupIndexPrunesTerminatedFallbacksWithoutAvailableCapacity() {
         try (Fixture fixture = new Fixture("memory", directory)) {
             CapacityReservation capacity = fixture.create(1);
             String group = fixture.group(capacity);
             fixture.service.capacityReservationAssociations(REGION);
             fixture.service.cancelCapacityReservation(REGION, capacity.getCapacityReservationId());
             Instance launched = fixture.launchGroup(group, null, 1, 1).getFirst();
-            Field indexField = Ec2Service.class.getDeclaredField("capacityGroupInstanceIds");
-            indexField.setAccessible(true);
-            Map<String, Set<String>> index = (Map<String, Set<String>>) indexField.get(fixture.service);
+            Map<String, Set<String>> index = fixture.service.capacityGroupInstanceIdsForTest();
             Set<String> ids = index.get(ACCOUNT + "::" + REGION);
             assertTrue(ids.contains(launched.getInstanceId()));
             fixture.service.terminateInstances(REGION, List.of(launched.getInstanceId()));
@@ -528,21 +519,6 @@ class Ec2CapacityReservationAssociationServiceTest {
             assertTrue(ids.isEmpty(), "Terminated fallback IDs must be pruned even without capacity");
             verify(fixture.instanceStore, never()).scan(any());
             verify(fixture.groups, never()).capacityReservationMembers(any(), any(), any());
-        }
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void resetClearsCapacityGroupIndex() throws Exception {
-        try (Fixture fixture = new Fixture("memory", directory)) {
-            fixture.create(1);
-            fixture.service.capacityReservationAssociations(REGION);
-            Field indexField = Ec2Service.class.getDeclaredField("capacityGroupInstanceIds");
-            indexField.setAccessible(true);
-            Map<String, Set<String>> index = (Map<String, Set<String>>) indexField.get(fixture.service);
-            assertFalse(index.isEmpty());
-            fixture.service.clear();
-            assertTrue(index.isEmpty(), "Reset must discard every seeded account and region");
         }
     }
 

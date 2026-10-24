@@ -419,6 +419,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         this.testClusterNodeInstanceProvider = provider;
     }
 
+    Map<String, Set<String>> capacityGroupInstanceIdsForTest() {
+        return capacityGroupInstanceIds;
+    }
+
+    boolean holdsCapacityReservationLockForTest() {
+        return Thread.holdsLock(capacityReservationLock);
+    }
+
     void putInstanceForTest(Instance instance) {
         instances.put(key(instance.getRegion(), instance.getInstanceId()), instance);
     }
