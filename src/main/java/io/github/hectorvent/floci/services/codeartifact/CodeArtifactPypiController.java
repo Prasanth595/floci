@@ -238,6 +238,13 @@ public class CodeArtifactPypiController {
             // order matters.
             long fenceSnapshot = service.currentContainerBackedPackageFence(handle.region(), domain, handle.owner(),
                     repository, "pypi", null, packageName);
+            // Narrower than fenceSnapshot above, for the readme capture below specifically: raised
+            // by Greptile's review, a DeletePackageVersions for this exact version landing while
+            // this upload is in flight must invalidate just this version's own readme capture,
+            // which the package-wide fenceSnapshot alone would not catch.
+            long readmeFenceSnapshot = version == null || version.isBlank() ? 0L
+                    : service.currentContainerBackedVersionFence(handle.region(), domain, handle.owner(),
+                            repository, "pypi", null, packageName, version);
             Response response = forwardUpload(handle.baseUrl(), contentType, content);
             boolean uploadSucceeded = response.getStatus() == 200 || response.getStatus() == 201;
             if (uploadSucceeded) {
@@ -264,7 +271,7 @@ public class CodeArtifactPypiController {
             // version coordinate to record the readme against.
             if (uploadSucceeded && version != null && !version.isBlank()) {
                 service.recordPublishedPackageVersionReadme(handle.region(), domain, handle.owner(), repository,
-                        "pypi", null, packageName, version, form.fields().get("description"), fenceSnapshot);
+                        "pypi", null, packageName, version, form.fields().get("description"), readmeFenceSnapshot);
             }
             return response;
         }

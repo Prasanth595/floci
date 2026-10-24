@@ -51,6 +51,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
@@ -332,8 +333,8 @@ class CodeArtifactServiceTest {
     /** Same snapshot-then-report shape as {@link #recordBytes}, for readme capture instead. */
     private void recordReadme(String domain, String repository, String format, String namespace, String packageName,
             String version, String readme) {
-        long fence = service.currentContainerBackedPackageFence(REGION, domain, null, repository, format, namespace,
-                packageName);
+        long fence = service.currentContainerBackedVersionFence(REGION, domain, null, repository, format, namespace,
+                packageName, version);
         service.recordPublishedPackageVersionReadme(REGION, domain, null, repository, format, namespace, packageName,
                 version, readme, fence);
     }
@@ -4136,6 +4137,412 @@ class CodeArtifactServiceTest {
         AwsException e = assertThrows(AwsException.class, () -> service.disposePackageVersions(REGION, "dom", null,
                 "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null, "NotAStatus"));
         assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    // --------------------------------------------- DeletePackageVersions
+
+    @Test
+    void deletePackageVersionsRemovesTheGenericRecordAndAssetsAndAllowsFreeRepublish() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "v1".getBytes(StandardCharsets.UTF_8);
+        CodeArtifactService.PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false",
+                content);
+        String revisionBeforeDelete = published.packageVersion().getRevision();
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null);
+
+        assertEquals("Deleted", result.successfulVersions().get("1.0.0").status());
+        assertEquals(revisionBeforeDelete, result.successfulVersions().get("1.0.0").revision());
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+
+        // Unlike Archived/Disposed, a deleted coordinate can be freely republished.
+        byte[] newContent = "v2".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(newContent), "false", newContent);
+        CodeArtifactPackageVersion republished = service.describePackageVersion(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg", "1.0.0");
+        assertEquals("Published", republished.getStatus());
+    }
+
+    @Test
+    void deletePackageVersionsFailsNotFoundForAVersionThatWasNeverPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null);
+
+        assertEquals("NOT_FOUND", result.failedVersions().get("1.0.0").errorCode());
+        assertTrue(result.successfulVersions().isEmpty());
+    }
+
+    @Test
+    void deletePackageVersionsSkipsEveryOtherwiseEligibleVersionWhenOneFails() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "v1".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0", "2.0.0"), null);
+
+        assertEquals("SKIPPED", result.failedVersions().get("1.0.0").errorCode());
+        assertEquals("NOT_FOUND", result.failedVersions().get("2.0.0").errorCode());
+        assertTrue(result.successfulVersions().isEmpty());
+        CodeArtifactPackageVersion stillThere = service.describePackageVersion(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg", "1.0.0");
+        assertEquals("Published", stillThere.getStatus());
+    }
+
+    @Test
+    void deletePackageVersionsFailsMismatchedStatus() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "v1".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), "Archived");
+
+        assertEquals("MISMATCHED_STATUS", result.failedVersions().get("1.0.0").errorCode());
+    }
+
+    /**
+     * The User Guide's one documented exception to Disposed's own immutability: "the only action
+     * that can be taken on a package version that has been disposed is for it to be deleted."
+     * Deliberately does not reuse {@code checkStatusTransitionAllowed}'s Disposed-blocks-further
+     * -change rule, which would otherwise wrongly reject exactly this case.
+     */
+    @Test
+    void deletePackageVersionsSucceedsOnAnAlreadyDisposedGenericVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "v1".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        service.disposePackageVersions(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"),
+                null, null);
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null);
+
+        assertEquals("Deleted", result.successfulVersions().get("1.0.0").status());
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    @Test
+    void deletePackageVersionsRejectsAnInvalidExpectedStatus() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deletePackageVersions(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), "NotAStatus"));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void deletePackageVersionsRequiresAtLeastOneVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deletePackageVersions(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", List.of(), null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void deletePackageVersionsDeletesEveryRealMavenAssetClearsTheOverrideAndReducesDomainBytes() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        recordBytes("dom", "repo", "maven", "com.example", "a", 100L);
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(new byte[40]));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", List.of("1.0"), null);
+
+        assertEquals("Deleted", result.successfulVersions().get("1.0").status());
+        verify(reposiliteClient).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"));
+        verify(reposiliteClient).recordVersionDisposed(eq(repoId), eq("com.example"), eq("a"), eq("1.0"));
+        assertEquals(60L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+        // The sidecar no longer lists it and the override is gone too, so it reads as never having
+        // existed, unlike disposePackageVersions' own tombstone.
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of());
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", "1.0"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    /**
+     * Raised by Greptile's review of the npm fix above: gating the call to {@link
+     * #deleteContainerBackedVersionAssets} on a non-empty asset list broke the case where every
+     * real asset is already gone but that method's own trailing {@code recordVersionDisposed}
+     * call, Maven's {@code maven-metadata.xml}/checksum cleanup, is what actually failed. A retry
+     * whose fresh listing now reads empty (the real file is gone) must still finish that metadata
+     * update rather than skip it just because there is nothing left to delete.
+     */
+    @Test
+    void deletePackageVersionsRetriesMavenMetadataCleanupEvenWhenNoRealAssetIsLeftToDelete() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        doThrow(new IllegalStateException("metadata rewrite failed"))
+                .when(reposiliteClient).recordVersionDisposed(eq(repoId), eq("com.example"), eq("a"), eq("1.0"));
+
+        assertThrows(IllegalStateException.class, () -> service.deletePackageVersions(REGION, "dom", null, "repo",
+                "maven", "com.example", "a", List.of("1.0"), null));
+
+        // The real jar is already gone (its own delete call succeeded before the metadata update
+        // threw), so a fresh listing now reads empty, but the sidecar's own listPackageVersions
+        // still names the version since the metadata rewrite that would drop it never finished.
+        when(reposiliteClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of());
+        doNothing().when(reposiliteClient).recordVersionDisposed(eq(repoId), eq("com.example"), eq("a"), eq("1.0"));
+
+        CodeArtifactService.PackageVersionStatusChangeResult retry = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", List.of("1.0"), null);
+
+        assertEquals("Deleted", retry.successfulVersions().get("1.0").status());
+        // The real asset delete never needed a second attempt, but the metadata cleanup does:
+        // once from the failed first attempt, once from the retry that actually finishes it.
+        verify(reposiliteClient, times(1)).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"));
+        verify(reposiliteClient, times(2)).recordVersionDisposed(eq(repoId), eq("com.example"), eq("a"), eq("1.0"));
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of());
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", "1.0"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    /**
+     * The container-backed counterpart to {@link #deletePackageVersionsSucceedsOnAnAlreadyDisposedGenericVersion}:
+     * a Disposed version's real sidecar content is already gone, so this must clear the override
+     * without ever calling back into the sidecar for assets that no longer exist.
+     */
+    @Test
+    void deletePackageVersionsSucceedsOnAnAlreadyDisposedMavenVersionWithoutTouchingTheSidecarAssets() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "a", List.of("1.0"),
+                null, null);
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of());
+        clearInvocations(reposiliteClient);
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", List.of("1.0"), null);
+
+        assertEquals("Deleted", result.successfulVersions().get("1.0").status());
+        verify(reposiliteClient, never()).deletePackageVersionAsset(any(), any(), any(), any(), any(), eq("1.0"),
+                any());
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", "1.0"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    /**
+     * Raised by Greptile's review: this used to reach the branch below at all only when the
+     * sidecar still listed the version with real content. Verdaccio's own real npm unpublish
+     * (packument update before the tarball delete, confirmed live, see {@code
+     * VerdaccioSidecarClient#deletePackageVersionAsset}'s own javadoc) already leaves a fresh
+     * listing empty once a prior dispose attempt's packument update landed, even though its own
+     * tarball delete then failed. That used to fall straight through to clearing the override,
+     * silently reporting {@code Deleted} with the real tarball still on disk. {@code
+     * DeletePackageVersions} is documented as the one thing still allowed on an already Disposed
+     * version, so it must finish the job by reading the override's own {@code pendingAssetNames}
+     * instead, exactly like {@link #disposePackageVersionsRetriesAnNpmTarballDeleteEvenAfterTheSidecarsOwnListingGoesEmpty}'s
+     * own retry does for a second dispose.
+     */
+    @Test
+    void deletePackageVersionsFinishesAPreviouslyPartiallyFailedNpmDisposeInsteadOfOrphaningTheTarball() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000))));
+        when(verdaccioClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of("my-pkg-1.0.0.tgz"));
+        doThrow(new IllegalStateException("sidecar unreachable"))
+                .when(verdaccioClient).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                        eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"));
+
+        assertThrows(IllegalStateException.class, () -> service.disposePackageVersions(REGION, "dom", null, "repo",
+                "npm", null, "my-pkg", List.of("1.0.0"), null, null));
+
+        // Simulates exactly what Greptile's review describes: Verdaccio's own packument update
+        // already landed, so a fresh listing now reads empty even though the tarball itself
+        // never actually got deleted.
+        when(verdaccioClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of());
+        when(verdaccioClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of());
+        doNothing().when(verdaccioClient).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "npm", null, "my-pkg", List.of("1.0.0"), null);
+
+        assertEquals("Deleted", result.successfulVersions().get("1.0.0").status());
+        // Twice in total across both attempts: the first (from the failed dispose) threw, the
+        // delete's own retry call is the one that actually finished removing the tarball.
+        verify(verdaccioClient, times(2)).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"));
+        AwsException gone = assertThrows(AwsException.class, () -> service.describePackageVersion(REGION, "dom",
+                null, "repo", "npm", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    /**
+     * The delete counterpart to {@link
+     * #updatePackageVersionsStatusMatchesAnEquivalentNuGetVersionSpellingAgainstAnExistingOverride}.
+     * Raised by Greptile's review: {@code DeletePackageVersions} compared the raw requested
+     * version against both BaGetter's own listing and the override index without normalizing
+     * either side first, unlike every other container-backed lookup, so an equivalent spelling
+     * (AWS's own worked example, {@code 1.00} and {@code 1.0.0}) found neither the real sidecar
+     * content nor an override for the version it actually names, turning one such entry in a
+     * batch into a {@code SKIPPED} failure for every other, otherwise valid, version too.
+     */
+    @Test
+    void deletePackageVersionsMatchesAnEquivalentNuGetVersionSpellingAgainstRealSidecarContent() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        when(bagetterClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0",
+                        Instant.ofEpochSecond(1000))));
+        when(bagetterClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.00"))).thenReturn(List.of("my-pkg.1.00.nupkg"));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "nuget", null, "my-pkg", List.of("1.00"), null);
+
+        assertEquals("Deleted", result.successfulVersions().get("1.00").status());
+        verify(bagetterClient).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.00"), eq("my-pkg.1.00.nupkg"));
+    }
+
+    @Test
+    void deletePackageVersionsFailsNotFoundForAContainerBackedVersionThatWasNeverPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of());
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", List.of("1.0"), null);
+
+        assertEquals("NOT_FOUND", result.failedVersions().get("1.0").errorCode());
+    }
+
+    /**
+     * Greptile's review: unlike nuget, which answers {@code GetPackageVersionReadme} live against
+     * the sidecar, npm's readme is captured separately at publish time into this service's own
+     * store and never consulted again by anything else, so deleting the version must clear it
+     * there too or the readme keeps answering for a version that no longer exists.
+     */
+    @Test
+    void deletePackageVersionsClearsTheCapturedNpmReadmeSoGetPackageVersionReadmeStops404ing() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "# Real Readme");
+        when(verdaccioClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000))));
+        when(verdaccioClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of("my-pkg-1.0.0.tgz"));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "npm", null, "my-pkg", List.of("1.0.0"), null);
+
+        assertEquals("Deleted", result.successfulVersions().get("1.0.0").status());
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom",
+                null, "repo", "npm", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /** Same captured-readme cleanup as npm's own, confirmed separately since pypi captures readmes independently. */
+    @Test
+    void deletePackageVersionsClearsTheCapturedPypiReadmeSoGetPackageVersionReadmeStops404ing() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("pypi");
+        recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "A pypi description");
+        when(pypiserverClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000))));
+        when(pypiserverClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of("my_pkg-1.0.0.tar.gz"));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
+                null, "repo", "pypi", null, "my-pkg", List.of("1.0.0"), null);
+
+        assertEquals("Deleted", result.successfulVersions().get("1.0.0").status());
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom",
+                null, "repo", "pypi", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * Greptile's review of the readme-clearing fix above: a delayed npm publish callback for this
+     * exact version, its own fence snapshot taken before {@code DeletePackageVersions} ran, must
+     * not resurrect the readme that delete just removed once the callback finally completes.
+     */
+    @Test
+    void deletePackageVersionsInvalidatesAStaleInFlightNpmReadmeCaptureForThatSameVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        // Simulates the proxy's own snapshot, taken right before issuing the real publish write,
+        // long before Verdaccio's delayed response ever lets the callback below run.
+        long staleFenceSnapshot = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "npm",
+                null, "my-pkg", "1.0.0");
+        when(verdaccioClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000))));
+        when(verdaccioClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of("my-pkg-1.0.0.tgz"));
+
+        service.deletePackageVersions(REGION, "dom", null, "repo", "npm", null, "my-pkg", List.of("1.0.0"), null);
+        // The delayed callback finally runs, well after the delete above, using the snapshot it
+        // took before either of them.
+        service.recordPublishedPackageVersionReadme(REGION, "dom", null, "repo", "npm", null, "my-pkg", "1.0.0",
+                "resurrected text", staleFenceSnapshot);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom",
+                null, "repo", "npm", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 
     /**
