@@ -20,7 +20,6 @@ public final class UsagePlanLimits {
 
     private static final List<String> PERIODS = List.of("DAY", "WEEK", "MONTH");
     private static final String BAD_REQUEST = "BadRequestException";
-    private static final String SERIALIZATION = "SerializationException";
     private static final String THROTTLE_INVALID =
             "Usage Plan throttle rate limit and burst limit must be numeric and greater than zero";
     private static final String FINE_GRAIN_WITHOUT_PLAN_THROTTLE =
@@ -32,11 +31,11 @@ public final class UsagePlanLimits {
     }
 
     /**
-     * The stages, throttle and quota of a {@code CreateUsagePlan} request. Numbers may be JSON numbers
-     * or numeric strings.
+     * The stages, throttle and quota of a {@code CreateUsagePlan} request whose JSON types
+     * {@link ApiGatewayRequestShapes} has checked. A JSON number is read as API Gateway reads it, and
+     * text, which only CloudFormation's template values send, is parsed as written.
      */
     public static Limits fromRequest(Map<String, Object> request) {
-        requireJsonTypes(request);
         Map<?, ?> quotaSettings = request.get("quota") instanceof Map<?, ?> settings ? settings : null;
         Object period = quotaSettings == null ? null : quotaSettings.get("period");
         if (period != null && !PERIODS.contains(String.valueOf(period))) {
@@ -74,84 +73,6 @@ public final class UsagePlanLimits {
             throw new AwsException(BAD_REQUEST, FINE_GRAIN_WITHOUT_PLAN_THROTTLE, 400);
         }
         return new Limits(stages, throttle, quota);
-    }
-
-    /**
-     * API Gateway reads the whole body into its model before it checks anything, so a member of the
-     * wrong JSON type is refused first, wherever it is. JSON null reads as absent.
-     */
-    private static void requireJsonTypes(Map<String, Object> request) {
-        text(request.get("name"));
-        text(request.get("description"));
-        numbers(structure(request.get("throttle")), "burstLimit", "rateLimit");
-        Map<?, ?> quota = structure(request.get("quota"));
-        numbers(quota, "limit", "offset");
-        if (quota != null) {
-            text(quota.get("period"));
-        }
-        Object stages = request.get("apiStages");
-        if (stages == null) {
-            return;
-        }
-        if (!(stages instanceof List<?> entries)) {
-            throw new AwsException(SERIALIZATION, "Expected list or null", 400);
-        }
-        for (Object entry : entries) {
-            Map<?, ?> stage = structure(entry);
-            if (stage == null) {
-                continue;
-            }
-            text(stage.get("apiId"));
-            text(stage.get("stage"));
-            Map<?, ?> methods = structure(stage.get("throttle"));
-            if (methods != null) {
-                for (Object limits : methods.values()) {
-                    numbers(structure(limits), "burstLimit", "rateLimit");
-                }
-            }
-        }
-    }
-
-    /** A member the model reads as text: a list, a map, a number or a boolean is API Gateway's SerializationException. */
-    private static void text(Object value) {
-        container(value);
-        if (value instanceof Number || value instanceof Boolean) {
-            // API Gateway names the class its parser read; a JSON number reads as TruncatingBigNumber there.
-            String type = value instanceof Boolean ? "java.lang.Boolean" : "com.amazon.coral.value.json.numbers.TruncatingBigNumber";
-            throw new AwsException(SERIALIZATION, "class " + type + " can not be converted to an String", 400);
-        }
-    }
-
-    /** The members of {@code settings} the model reads as numbers: a list or a map is a SerializationException. */
-    private static void numbers(Map<?, ?> settings, String... members) {
-        if (settings == null) {
-            return;
-        }
-        for (String member : members) {
-            container(settings.get(member));
-        }
-    }
-
-    /** A list or a map where the model expects a scalar. */
-    private static void container(Object value) {
-        if (value instanceof List<?>) {
-            throw new AwsException(SERIALIZATION, "Start of list found where not expected", 400);
-        }
-        if (value instanceof Map<?, ?>) {
-            throw new AwsException(SERIALIZATION, "Start of structure or map found where not expected.", 400);
-        }
-    }
-
-    /** {@code value} where the model expects a structure: null or a map, else API Gateway's SerializationException. */
-    private static Map<?, ?> structure(Object value) {
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof Map<?, ?> map) {
-            return map;
-        }
-        throw new AwsException(SERIALIZATION,
-                value instanceof List<?> ? "Start of list found where not expected" : "Expected null", 400);
     }
 
     /** A field API Gateway leaves out reads 0. */
@@ -263,8 +184,15 @@ public final class UsagePlanLimits {
                 "API Stage is already defined for Usage Plan: " + apiId + ":" + stage, 409);
     }
 
-    /** {@code value} as an int, or null when it is not a whole number in int range. */
+    /**
+     * {@code value} as an int, or null when it is not one. A number is truncated toward zero and
+     * clamped to the int range, as API Gateway reads a JSON number; text must be a whole number in
+     * int range.
+     */
     private static Integer intValue(Object value) {
+        if (value instanceof Number number) {
+            return (int) number.doubleValue();
+        }
         try {
             return Integer.valueOf(String.valueOf(value).trim());
         } catch (NumberFormatException expected) {
@@ -276,7 +204,9 @@ public final class UsagePlanLimits {
     /** {@code value} as a finite double, or null when it is not one. */
     private static Double doubleValue(Object value) {
         try {
-            double parsed = Double.parseDouble(String.valueOf(value).trim());
+            double parsed = value instanceof Number number
+                    ? number.doubleValue()
+                    : Double.parseDouble(String.valueOf(value).trim());
             return Double.isFinite(parsed) ? parsed : null;
         } catch (NumberFormatException expected) {
             // The caller reports a non-number with API Gateway's message for the field.

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.io.JsonStringEncoder;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -854,8 +855,10 @@ public class ApiGatewayController {
     public Response createUsagePlan(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
+            JsonNode node = objectMapper.readValue(body, JsonNode.class);
+            ApiGatewayRequestShapes.check("CreateUsagePlan", node);
             @SuppressWarnings("unchecked")
-            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            Map<String, Object> request = objectMapper.treeToValue(node, Map.class);
             UsagePlan plan = service.createUsagePlan(region, request);
             return Response.status(201).entity(toUsagePlanNode(plan, false).toString()).type(MediaType.APPLICATION_JSON).build();
         } catch (IOException e) {

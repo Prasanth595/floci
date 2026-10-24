@@ -73,6 +73,21 @@ class UsagePlanLimitsTest {
                 new ApiStage("a", "v2")), limits.apiStages());
     }
 
+    // Measured on API Gateway: a JSON number for an int member is truncated toward zero and clamped.
+    @Test
+    void aJsonNumberIsTruncatedTowardZeroAndClampedToTheIntRange() {
+        assertEquals(new Quota(1, 0, "DAY"),
+                UsagePlanLimits.fromRequest(request("quota", Map.of("limit", 1.5, "period", "DAY"))).quota());
+        assertEquals(new Throttle(1, 0.0),
+                UsagePlanLimits.fromRequest(request("throttle", Map.of("burstLimit", 1.5))).throttle());
+        assertEquals(new Quota(100, 0, "DAY"),
+                UsagePlanLimits.fromRequest(request("quota", Map.of("limit", 100.0, "period", "DAY"))).quota());
+        assertEquals(new Quota(Integer.MAX_VALUE, 0, "DAY"),
+                UsagePlanLimits.fromRequest(request("quota", Map.of("limit", 3000000000L, "period", "DAY"))).quota());
+        assertEquals(new Throttle(0, 2.5),
+                UsagePlanLimits.fromRequest(request("throttle", Map.of("rateLimit", 2.5))).throttle());
+    }
+
     // The storage backends persist plans with a plain ObjectMapper, so this is the shape on disk.
     @Test
     void aPlanSurvivesTheStorageJsonRoundTripAndOlderPlansStillLoad() throws Exception {
@@ -122,7 +137,8 @@ class UsagePlanLimitsTest {
                         400, "Usage Plan quota offset must be between 0 and 27 inclusive in the MONTH period"),
                 Arguments.of(Map.of("throttle", Map.of("burstLimit", -1, "rateLimit", 1)), "BadRequestException", 400,
                         throttle),
-                Arguments.of(Map.of("throttle", Map.of("burstLimit", 1.5)), "BadRequestException", 400, throttle),
+                // Text is parsed as written, so a fraction is refused; a JSON number would be truncated.
+                Arguments.of(Map.of("throttle", Map.of("burstLimit", "1.5")), "BadRequestException", 400, throttle),
                 Arguments.of(Map.of("throttle", Map.of("rateLimit", "abc")), "BadRequestException", 400, throttle),
                 Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", "a", "stage", "v1",
                                 "throttle", Map.of("/pets/GET", Map.of("burstLimit", 1))))), "BadRequestException", 400,
@@ -164,50 +180,6 @@ class UsagePlanLimitsTest {
                 UsagePlanLimits.fromRequest(stageThrottle("//GET")).apiStages().get(0).throttle());
         assertEquals(Map.of("/pets/GET/extra", new Throttle(5, 2.0)),
                 UsagePlanLimits.fromRequest(stageThrottle("/pets/GET/extra")).apiStages().get(0).throttle());
-    }
-
-    static Stream<Arguments> wrongJsonTypes() {
-        String list = "Start of list found where not expected";
-        String notStructure = "Expected null";
-        String structureFound = "Start of structure or map found where not expected.";
-        Map<String, Object> planThrottle = Map.of("burstLimit", 1, "rateLimit", 1);
-        return Stream.of(
-                Arguments.of(Map.of("quota", "invalid"), notStructure),
-                Arguments.of(Map.of("throttle", List.of()), list),
-                Arguments.of(Map.of("apiStages", "x"), "Expected list or null"),
-                Arguments.of(Map.of("apiStages", List.of("x")), notStructure),
-                Arguments.of(Map.of("throttle", planThrottle, "apiStages", List.of(Map.of("apiId", "a", "stage", "v1",
-                        "throttle", Map.of("/pets/GET", 5)))), notStructure),
-                Arguments.of(Map.of("quota", List.of()), list),
-                Arguments.of(Map.of("throttle", 5), notStructure),
-                Arguments.of(Map.of("apiStages", Map.of()), "Expected list or null"),
-                Arguments.of(Map.of("apiStages", List.of(List.of())), list),
-                Arguments.of(Map.of("throttle", planThrottle, "apiStages", List.of(Map.of("apiId", "a", "stage", "v1",
-                        "throttle", List.of()))), list),
-                Arguments.of(Map.of("throttle", planThrottle, "apiStages", List.of(Map.of("apiId", "a", "stage", "v1",
-                        "throttle", Map.of("/pets/GET", List.of())))), list),
-                // The body is read whole before anything in it is checked, so a wrong type outranks a bad quota.
-                Arguments.of(Map.of("quota", Map.of("limit", 1), "throttle", List.of()), list),
-                // Scalar members, measured on API Gateway: text takes no list, map, number or boolean,
-                // and a number takes no list or map.
-                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", List.of(), "stage", "v1"))), list),
-                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", Map.of(), "stage", "v1"))), structureFound),
-                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", "a", "stage", List.of("v1")))), list),
-                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", "a", "stage", Map.of("a", 1)))),
-                        structureFound),
-                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", 5, "stage", "v1"))),
-                        "class com.amazon.coral.value.json.numbers.TruncatingBigNumber can not be converted to an String"),
-                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", "a", "stage", true))),
-                        "class java.lang.Boolean can not be converted to an String"),
-                Arguments.of(Map.of("throttle", Map.of("burstLimit", List.of())), list),
-                Arguments.of(Map.of("quota", Map.of("period", Map.of())), structureFound),
-                Arguments.of(Map.of("name", List.of()), list));
-    }
-
-    @ParameterizedTest
-    @MethodSource("wrongJsonTypes")
-    void createRefusesAWrongJsonTypeAsASerializationError(Map<String, Object> request, String message) {
-        assertRefused(() -> UsagePlanLimits.fromRequest(request), "SerializationException", 400, message);
     }
 
     @Test

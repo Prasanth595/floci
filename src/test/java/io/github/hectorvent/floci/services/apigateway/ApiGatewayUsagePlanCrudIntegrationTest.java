@@ -246,4 +246,50 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .statusCode(200)
                 .body("item.findAll { it.name == 'structured-stage' }", hasSize(0));
     }
+
+    @Test
+    void aNumericStringForAnIntegerIsASerializationErrorAndStoresNoPlan() {
+        given().contentType(ContentType.JSON)
+                .body("{\"name\":\"string-limit\",\"quota\":{\"limit\":\"100\",\"period\":\"DAY\"}}")
+                .post("/usageplans")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("class java.lang.String can not be converted to an Integer"));
+
+        given().get("/usageplans")
+                .then()
+                .statusCode(200)
+                .body("item.findAll { it.name == 'string-limit' }", hasSize(0));
+    }
+
+    @Test
+    void aFractionalQuotaLimitIsStoredTruncated() {
+        String usagePlanId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"fractional-limit\",\"quota\":{\"limit\":1.5,\"period\":\"DAY\"}}")
+                .post("/usageplans")
+                .then()
+                .statusCode(201)
+                .body("quota.limit", equalTo(1))
+                .extract()
+                .path("id");
+
+        given().get("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(200)
+                .body("quota.limit", equalTo(1));
+    }
+
+    // In body order the list throttle comes first; API Gateway reads quota before throttle by name.
+    @Test
+    void theFirstWrongJsonTypeInMemberNameOrderIsReported() {
+        given().contentType(ContentType.JSON)
+                .body("{\"name\":\"name-order\",\"throttle\":[],\"quota\":\"x\"}")
+                .post("/usageplans")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("Expected null"));
+    }
 }
