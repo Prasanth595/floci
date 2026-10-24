@@ -440,7 +440,7 @@ aws dynamodb list-exports \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
-The export writes to `s3://<bucket>/<prefix>/AWSDynamoDB/<exportId>/data/` as one or more `.json.gz` files, along with `manifest-summary.json` and `manifest-files.json`, the same layout as real AWS DynamoDB exports.
+The export writes `_started`, `manifest-summary.json`, `manifest-files.json` and an `.md5` file for each manifest to `s3://<bucket>/<prefix>/AWSDynamoDB/<exportId>/`, and the items to a `.json.gz` file in its `data/` folder, the layout AWS uses. AWS writes one data file per partition. Floci writes one. As on AWS, every file is a multipart upload of one part, so its ETag ends in `-1`.
 
 The export holds the items as they were at `ExportTime`, or at the request time when `ExportTime` is not set. As on AWS, `ExportTime` must not be before `EarliestRestorableDateTime` or the table creation, and must not be in the future. A time after `LatestRestorableDateTime` is accepted.
 

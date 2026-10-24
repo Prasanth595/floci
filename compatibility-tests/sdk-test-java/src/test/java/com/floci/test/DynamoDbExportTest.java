@@ -1,5 +1,7 @@
 package com.floci.test;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -117,7 +119,7 @@ class DynamoDbExportTest {
         assertThat(desc.tableArn()).isEqualTo(tableArn);
         assertThat(desc.s3Bucket()).isEqualTo(BUCKET_NAME);
         assertThat(desc.exportFormat()).isEqualTo(ExportFormat.DYNAMODB_JSON);
-        assertThat(desc.exportType()).isEqualTo(ExportType.FULL_EXPORT);
+        assertThat(desc.exportType()).isNull();
 
         exportArn = desc.exportArn();
     }
@@ -184,15 +186,19 @@ class DynamoDbExportTest {
         // Verify manifest-summary.json exists
         ResponseBytes<GetObjectResponse> manifestSummary = s3.getObjectAsBytes(
                 GetObjectRequest.builder().bucket(BUCKET_NAME).key(manifestSummaryKey).build());
-        assertThat(manifestSummary.asByteArray().length).isGreaterThan(0);
+        assertThat(new ObjectMapper().readTree(manifestSummary.asByteArray()).get("outputFormat").asText())
+                .isEqualTo("DYNAMODB_JSON");
 
         String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
         String manifestFilesKey = "exports/AWSDynamoDB/" + exportId + "/manifest-files.json";
 
         ResponseBytes<GetObjectResponse> manifestFiles = s3.getObjectAsBytes(
                 GetObjectRequest.builder().bucket(BUCKET_NAME).key(manifestFilesKey).build());
-        String dataKey = new String(manifestFiles.asByteArray(), StandardCharsets.UTF_8).trim();
+        JsonNode dataFileEntry = new ObjectMapper().readTree(manifestFiles.asByteArray());
+        String dataKey = dataFileEntry.get("dataFileS3Key").asText();
         assertThat(dataKey).endsWith(".json.gz");
+        HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder().bucket(BUCKET_NAME).key(dataKey).build());
+        assertThat(head.eTag()).isEqualTo("\"" + dataFileEntry.get("etag").asText() + "\"").endsWith("-1\"");
 
         // Download and decompress the data file
         ResponseBytes<GetObjectResponse> dataFile = s3.getObjectAsBytes(
