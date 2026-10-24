@@ -1647,7 +1647,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void createNetworkAclEntry(String region, String networkAclId, int ruleNumber, String protocol,
-                                      String ruleAction, boolean egress, String cidrBlock, Integer from, Integer to,
+                                      String ruleAction, boolean egress, String cidrBlock, String ipv6CidrBlock,
+                                      Integer icmpType, Integer icmpCode, Integer from, Integer to,
                                       boolean replace) {
         synchronized (lockFor(key(region, networkAclId))) {
             NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
@@ -1660,12 +1661,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             List<NetworkAclEntry> next = new ArrayList<>(acl.getEntries());
             next.removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
             NetworkAclEntry entry = naclEntry(ruleNumber, protocol, ruleAction, egress, cidrBlock);
+            entry.setIpv6CidrBlock(ipv6CidrBlock);
+            // The model documents an ICMP type and code as having no effect on any other protocol,
+            // so only ICMP and ICMPv6 entries keep one for DescribeNetworkAcls to return.
+            if (isIcmpProtocol(protocol)) {
+                entry.setIcmpType(icmpType);
+                entry.setIcmpCode(icmpCode);
+            }
             entry.setPortRangeFrom(from);
             entry.setPortRangeTo(to);
             next.add(entry);
             acl.setEntries(next);
             networkAcls.put(key(region, networkAclId), acl);
         }
+    }
+
+    private static boolean isIcmpProtocol(String protocol) {
+        return protocol != null && switch (protocol.toLowerCase(Locale.ROOT)) {
+            case "1", "58", "icmp", "icmpv6" -> true;
+            default -> false;
+        };
     }
 
     public void deleteNetworkAclEntry(String region, String networkAclId, int ruleNumber, boolean egress) {

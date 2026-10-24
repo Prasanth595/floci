@@ -122,7 +122,7 @@ class Ec2NetworkAclCfnProvisionerTest {
         provisioner.provision(r, props, new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack"));
 
         verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 150, "6", "deny", true,
-                "0.0.0.0/0", 22, 22, true);
+                "0.0.0.0/0", null, null, null, 22, 22, true);
         assertEquals("acl-abc|150|egress", r.getPhysicalId());
     }
 
@@ -134,8 +134,41 @@ class Ec2NetworkAclCfnProvisionerTest {
         provisioner.provision(r, props, ctx());
 
         verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 100, "-1", null, false,
-                null, null, null, true);
+                null, null, null, null, null, null, true);
         assertEquals("acl-abc|100|ingress", r.getPhysicalId());
+    }
+
+    @Test
+    void aclEntryPassesIpv6CidrBlockThrough() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("RuleNumber", 101)
+                .put("Protocol", "-1")
+                .put("RuleAction", "allow")
+                .put("Ipv6CidrBlock", "::/0");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 101, "-1", "allow", false,
+                null, "::/0", null, null, null, null, true);
+    }
+
+    @Test
+    void aclEntryPassesIcmpTypeAndCodeThrough() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("RuleNumber", 110)
+                .put("Protocol", "1")
+                .put("RuleAction", "allow")
+                .put("CidrBlock", "0.0.0.0/0");
+        props.set("Icmp", mapper.createObjectNode().put("Type", 8).put("Code", -1));
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 110, "1", "allow", false,
+                "0.0.0.0/0", null, 8, -1, null, null, true);
     }
 
     /**

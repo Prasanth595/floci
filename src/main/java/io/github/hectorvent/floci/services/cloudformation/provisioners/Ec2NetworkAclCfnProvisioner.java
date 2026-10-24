@@ -100,12 +100,18 @@ public class Ec2NetworkAclCfnProvisioner implements CfnResourceProvisioner {
         String toValue = ctx.resolveOptional(portRange, "To");
         Integer from = fromValue != null ? Integer.valueOf(fromValue) : null;
         Integer to = toValue != null ? Integer.valueOf(toValue) : null;
+        JsonNode icmp = props != null && props.hasNonNull("Icmp") ? props.get("Icmp") : null;
+        String icmpTypeValue = ctx.resolveOptional(icmp, "Type");
+        String icmpCodeValue = ctx.resolveOptional(icmp, "Code");
         String protocol = ctx.resolveOptional(props, "Protocol");
         ec2Service.createNetworkAclEntry(ctx.region(), aclId, ruleNumber,
                 protocol != null ? protocol : "-1",
                 ctx.resolveOptional(props, "RuleAction"),
                 egress,
                 ctx.resolveOptional(props, "CidrBlock"),
+                ctx.resolveOptional(props, "Ipv6CidrBlock"),
+                icmpTypeValue != null ? Integer.valueOf(icmpTypeValue) : null,
+                icmpCodeValue != null ? Integer.valueOf(icmpCodeValue) : null,
                 // RuleNumber, Egress and NetworkAclId are the createOnly key, so re-provisioning
                 // the same key is an update. replace=false would raise NetworkAclEntryAlreadyExists
                 // on every stack update.
