@@ -30,6 +30,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchivedEvent;
 import io.github.hectorvent.floci.services.eventbridge.model.Connection;
 import io.github.hectorvent.floci.services.eventbridge.model.ConnectionState;
+import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
@@ -461,6 +462,12 @@ public class EventBridgeService implements ResourceProvider {
                         "Rule not found: " + ruleName, 400));
         List<Target> existing = new ArrayList<>(targetStore.get(key).orElse(new ArrayList<>()));
         for (Target newTarget : newTargets) {
+            EcsParameters ecs = newTarget.getEcsParameters();
+            if (ecs != null) {
+                ecs.setTaskCount(ecs.getTaskCount() == null ? 1 : ecs.getTaskCount());
+                ecs.setEnableECSManagedTags(ecs.getEnableECSManagedTags() == null ? false : ecs.getEnableECSManagedTags());
+                ecs.setEnableExecuteCommand(ecs.getEnableExecuteCommand() == null ? false : ecs.getEnableExecuteCommand());
+            }
             if (newTarget.getRoleArn() == null && isCrossAccountEventBus(newTarget.getArn(), rule)) {
                 existing.stream()
                         .filter(t -> t.getId().equals(newTarget.getId()) && newTarget.getArn().equals(t.getArn()))
@@ -490,10 +497,15 @@ public class EventBridgeService implements ResourceProvider {
             Integer attempts = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumRetryAttempts() : null;
             Integer age = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumEventAgeInSeconds() : null;
             String arn = target.getDeadLetterConfig() != null ? target.getDeadLetterConfig().arn() : null;
+            Integer taskCount = target.getEcsParameters() != null ? target.getEcsParameters().getTaskCount() : null;
             String field = null;
             Object value = null;
             String constraint = null;
-            if (attempts != null && (attempts < 0 || attempts > 185)) {
+            if (taskCount != null && taskCount < 1) {
+                field = "ecsParameters.taskCount";
+                value = taskCount;
+                constraint = "value greater than or equal to 1";
+            } else if (attempts != null && (attempts < 0 || attempts > 185)) {
                 field = "retryPolicy.maximumRetryAttempts";
                 value = attempts;
                 constraint = attempts < 0 ? "value greater than or equal to 0" : "value less than or equal to 185";
@@ -517,6 +529,15 @@ public class EventBridgeService implements ResourceProvider {
                         + "' at 'targets." + (i + 1) + ".member." + field
                         + "' failed to satisfy constraint: Member must have " + constraint);
             }
+            validateTargetArn(target.getRoleArn());
+            validateTargetArn(arn);
+        }
+    }
+
+    private static void validateTargetArn(String arn) {
+        if (arn != null && !AwsArnUtils.isArn(arn)) {
+            throw new AwsException("ValidationException",
+                    "Parameter " + arn + " is not valid. Reason: Provided Arn is not in correct format.", 400);
         }
     }
 

@@ -95,6 +95,13 @@ aws events put-events \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
+## Target Settings
+
+`PutTargets` defaults omitted ECS `TaskCount` to `1`, and `EnableECSManagedTags` and
+`EnableExecuteCommand` to `false`. Explicit values are preserved. A task count below
+one or a malformed target `RoleArn` or `DeadLetterConfig.Arn` returns a
+`ValidationException` before any targets in the request are stored.
+
 ## Default Event Bus
 
 EventBridge includes a default event bus (`default`) that accepts events from AWS services. Custom buses are for your own application events.
