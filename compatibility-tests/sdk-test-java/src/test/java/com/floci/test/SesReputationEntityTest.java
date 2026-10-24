@@ -10,6 +10,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.ListReputationEntitiesResponse;
+import software.amazon.awssdk.services.sesv2.model.NotFoundException;
 import software.amazon.awssdk.services.sesv2.model.RecommendationImpact;
 import software.amazon.awssdk.services.sesv2.model.ReputationEntity;
 import software.amazon.awssdk.services.sesv2.model.ReputationEntityFilterKey;
@@ -54,8 +55,8 @@ class SesReputationEntityTest {
         for (String name : List.of(TENANT, OTHER_TENANT)) {
             try {
                 sesV2.deleteTenant(r -> r.tenantName(name));
-            } catch (Exception ignored) {
-                // Already deleted, or never created.
+            } catch (NotFoundException expected) {
+                // Already removed by the delete test; anything else (auth, connectivity) must surface.
             }
         }
     }
