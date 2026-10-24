@@ -55,7 +55,7 @@ public final class DynamoDbTableNames {
     private static ResolvedTableRef resolveInternal(String input) {
         if (input == null) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'tableName' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("tableName"));
         }
         if (input.isEmpty()) {
             throw SmithyValidationErrors.validationException(

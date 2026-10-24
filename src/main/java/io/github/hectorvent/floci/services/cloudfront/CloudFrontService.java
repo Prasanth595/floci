@@ -1339,8 +1339,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     private static String nullViolation(String member) {
-        return "Value null at 'originAccessControlConfig." + member
-                + "' failed to satisfy constraint: Member must not be null";
+        return SmithyValidationErrors.notNull("originAccessControlConfig." + member);
     }
 
     /** The kinds of Lambda origin CloudFront tells apart. */

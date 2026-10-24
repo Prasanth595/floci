@@ -477,8 +477,7 @@ public class SsmJsonHandler {
         String permissionType = request.path("PermissionType").asText();
         if (permissionType == null || permissionType.isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'permissionType' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("permissionType"));
         }
         if (!"Share".equals(permissionType)) {
             throw new AwsException("InvalidPermissionType",
@@ -602,8 +601,7 @@ public class SsmJsonHandler {
         JsonNode contentNode = request.path("Content");
         if (!contentNode.isTextual() || contentNode.asText().isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'content' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("content"));
         }
         return contentNode.asText();
     }
@@ -769,7 +767,7 @@ public class SsmJsonHandler {
         JsonNode nameNode = request.path("Name");
         if (!nameNode.isTextual() || nameNode.asText().isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'name' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("name"));
         }
         String name = nameNode.asText();
 
@@ -802,7 +800,7 @@ public class SsmJsonHandler {
         String associationId = request.hasNonNull("AssociationId") ? request.path("AssociationId").asText() : null;
         if (associationId == null || associationId.isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'associationId' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("associationId"));
         }
 
         String associationName = request.hasNonNull("AssociationName") ? request.path("AssociationName").asText() : null;
@@ -1101,12 +1099,12 @@ public class SsmJsonHandler {
 
         List<String> violations = new ArrayList<>();
         if (name == null) {
-            violations.add("Value null at 'name' failed to satisfy constraint: Member must not be null");
+            violations.add(SmithyValidationErrors.notNull("name"));
         } else if (name.isEmpty()) {
             violations.add("Value '' at 'name' failed to satisfy constraint: Member must have length greater than or equal to 1");
         }
         if (parameterVersion == null) {
-            violations.add("Value null at 'parameterVersion' failed to satisfy constraint: Member must not be null");
+            violations.add(SmithyValidationErrors.notNull("parameterVersion"));
         }
         String labelViolation = SsmService.labelListViolation(labels);
         if (labelViolation != null) {
@@ -1199,8 +1197,7 @@ public class SsmJsonHandler {
         String settingId = request.path("SettingId").asText();
         if (settingId == null || settingId.isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'settingId' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("settingId"));
         }
         return settingId;
     }
@@ -1218,8 +1215,7 @@ public class SsmJsonHandler {
         String settingValue = valueNode.asText();
         if (!valueNode.isTextual() || settingValue.isEmpty()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'settingValue' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("settingValue"));
         }
         if (settingValue.length() > MAX_SETTING_VALUE_LENGTH) {
             throw SmithyValidationErrors.validationException(

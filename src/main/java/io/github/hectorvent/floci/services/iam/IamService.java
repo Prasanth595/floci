@@ -2858,8 +2858,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static void validatePassword(String password, String member) {
         if (password == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at '" + member
-                            + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(member));
         }
         if (!LOGIN_PROFILE_PASSWORD_PATTERN.matcher(password).matches()) {
             throw SmithyValidationErrors.validationError(
@@ -2932,8 +2931,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at 'properties' failed to "
-                            + "satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("properties"));
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {

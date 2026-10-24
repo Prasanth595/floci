@@ -1452,7 +1452,7 @@ public class IamQueryHandler {
         String description = params.getFirst("Description");
         if (description == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at 'description' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("description"));
         }
         IamRole role = iamService.updateRoleDescription(getParam(params, "RoleName"), description);
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
@@ -3587,9 +3587,7 @@ public class IamQueryHandler {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at '"
-                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
-                            + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(Character.toLowerCase(name.charAt(0)) + name.substring(1)));
         }
         return value;
     }

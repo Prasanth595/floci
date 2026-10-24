@@ -2002,8 +2002,7 @@ public class KmsService implements ResourceProvider {
     private static void validateEnumMember(String member, String value, List<String> allowed) {
         if (value == null) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at '" + member + "' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(member));
         }
         if (!allowed.contains(value)) {
             throw SmithyValidationErrors.validationException(

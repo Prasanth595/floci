@@ -802,8 +802,7 @@ public class DynamoDbService {
     private static void requireVectorIndexMember(Object value, String memberPath) {
         if (value == null) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at '" + memberPath
-                    + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(memberPath));
         }
     }
 

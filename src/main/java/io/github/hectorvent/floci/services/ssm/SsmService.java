@@ -950,7 +950,7 @@ public class SsmService implements ResourceProvider {
      */
     static String labelListViolation(List<String> labels) {
         if (labels == null) {
-            return "Value null at 'labels' failed to satisfy constraint: Member must not be null";
+            return SmithyValidationErrors.notNull("labels");
         }
         String prefix = "Value '" + labels + "' at 'labels' failed to satisfy constraint: ";
         if (labels.isEmpty()) {

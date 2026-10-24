@@ -107,8 +107,7 @@ public class AutoScalingService implements PassedRoleLookup {
             "GroupAndWarmPoolDesiredCapacity", "GroupAndWarmPoolTotalCapacity");
     public static final String METRICS_GRANULARITY = "1Minute";
     static final String MISSING_GRANULARITY_MESSAGE =
-            "1 validation error detected: Value null at 'granularity' failed to satisfy constraint: "
-                    + "Member must not be null";
+            SmithyValidationErrors.message(List.of(SmithyValidationErrors.notNull("granularity")));
     public static final String INVALID_GRANULARITY_MESSAGE =
             "Granularity must be 1Minute. 1Minute is the only valid value.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
@@ -1200,8 +1199,7 @@ public class AutoScalingService implements PassedRoleLookup {
     private static void validateLifecycleHookName(String hookName) {
         if (hookName == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at 'lifecycleHookName' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNull("lifecycleHookName"));
         }
         if (hookName.length() > 255) {
             throw SmithyValidationErrors.validationError(

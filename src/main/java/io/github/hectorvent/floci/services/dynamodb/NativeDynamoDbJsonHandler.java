@@ -317,9 +317,10 @@ public class NativeDynamoDbJsonHandler {
     // projection type check. A null NonKeyAttributes counts as not specified.
     private static String requireIndexName(JsonNode node, String memberPath) {
         JsonNode indexNameNode = node.path("IndexName");
-        String constraint = " at '" + memberPath + ".indexName' failed to satisfy constraint: ";
+        String path = memberPath + ".indexName";
+        String constraint = " at '" + path + "' failed to satisfy constraint: ";
         if (indexNameNode.isMissingNode() || indexNameNode.isNull()) {
-            throwValidationErrors(List.of("Value null" + constraint + "Member must not be null"));
+            throwValidationErrors(List.of(SmithyValidationErrors.notNull(path)));
         }
         String indexName = indexNameNode.asText();
         String value = "Value '" + indexName + "'" + constraint;
@@ -353,9 +354,7 @@ public class NativeDynamoDbJsonHandler {
         JsonNode vectorAttribute = node.path("VectorAttribute");
         if (vectorAttribute.isObject() && !vectorAttribute.hasNonNull("AttributeName")) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at '" + memberPath
-                    + ".vectorAttribute.attributeName' failed to satisfy constraint: "
-                    + "Member must not be null");
+                    SmithyValidationErrors.notNull(memberPath + ".vectorAttribute.attributeName"));
         }
         List<SearchSchemaElement> searchSchema = new ArrayList<>();
         JsonNode searchSchemaArray = node.path("SearchSchema");
@@ -1887,8 +1886,7 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbTableNames.resolveWithRegion(tableName, region);
         JsonNode spec = request.path("PointInTimeRecoverySpecification");
         if (spec.isMissingNode() || spec.isNull()) {
-            throwValidationErrors(List.of("Value null at 'pointInTimeRecoverySpecification' failed to satisfy "
-                    + "constraint: Member must not be null"));
+            throwValidationErrors(List.of(SmithyValidationErrors.notNull("pointInTimeRecoverySpecification")));
         }
         List<String> violations = new ArrayList<>();
         JsonNode period = spec.path("RecoveryPeriodInDays");
@@ -1902,8 +1900,8 @@ public class NativeDynamoDbJsonHandler {
         }
         JsonNode enabled = spec.path("PointInTimeRecoveryEnabled");
         if (enabled.isMissingNode() || enabled.isNull()) {
-            violations.add("Value null at 'pointInTimeRecoverySpecification.pointInTimeRecoveryEnabled' failed to "
-                    + "satisfy constraint: Member must not be null");
+            violations.add(
+                    SmithyValidationErrors.notNull("pointInTimeRecoverySpecification.pointInTimeRecoveryEnabled"));
         }
         throwValidationErrors(violations);
         Integer recoveryPeriodInDays = period.isNumber() ? period.asInt() : null;
@@ -1926,7 +1924,7 @@ public class NativeDynamoDbJsonHandler {
         JsonNode backupNameNode = request.path("BackupName");
         if (backupNameNode.isMissingNode() || backupNameNode.isNull()) {
             throwValidationErrors(List.of(
-                    "Value null at 'backupName' failed to satisfy constraint: Member must not be null"));
+                    SmithyValidationErrors.notNull("backupName")));
         }
         String backupName = backupNameNode.asText();
         throwValidationErrors(nameViolations(backupName, "backupName"));
@@ -2199,10 +2197,10 @@ public class NativeDynamoDbJsonHandler {
         }
         for (String member : List.of("WriteCapacityUnits", "ReadCapacityUnits")) {
             JsonNode value = throughput.path(member);
-            String constraint = " at '" + memberPath + "." + Character.toLowerCase(member.charAt(0))
-                    + member.substring(1) + "' failed to satisfy constraint: ";
+            String path = memberPath + "." + Character.toLowerCase(member.charAt(0)) + member.substring(1);
+            String constraint = " at '" + path + "' failed to satisfy constraint: ";
             if (value.isMissingNode() || value.isNull()) {
-                violations.add("Value null" + constraint + "Member must not be null");
+                violations.add(SmithyValidationErrors.notNull(path));
             } else if (value.asLong() < 1) {
                 violations.add("Value '" + value.asText() + "'" + constraint
                         + "Member must have value greater than or equal to 1");
@@ -2215,7 +2213,7 @@ public class NativeDynamoDbJsonHandler {
     private static List<String> restoreIndexNameViolations(JsonNode indexName, String memberPath) {
         String constraint = " at '" + memberPath + "' failed to satisfy constraint: ";
         if (indexName.isMissingNode() || indexName.isNull()) {
-            return List.of("Value null" + constraint + "Member must not be null");
+            return List.of(SmithyValidationErrors.notNull(memberPath));
         }
         String value = "Value '" + indexName.asText() + "'" + constraint;
         List<String> violations = new ArrayList<>();
@@ -2668,8 +2666,7 @@ public class NativeDynamoDbJsonHandler {
         }
         if (!request.hasNonNull("Policy")) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'policy' failed to satisfy constraint: "
-                    + "Member must not be null");
+                    SmithyValidationErrors.notNull("policy"));
         }
         String policy = request.path("Policy").asText();
         String expectedRevisionId = request.has("ExpectedRevisionId")

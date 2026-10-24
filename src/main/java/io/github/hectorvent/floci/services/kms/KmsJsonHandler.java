@@ -752,8 +752,7 @@ public class KmsJsonHandler {
         String name = Character.toLowerCase(member.charAt(0)) + member.substring(1);
         JsonNode value = request.path(member);
         if (value.isMissingNode() || value.isNull()) {
-            throw SmithyValidationErrors.validationException("Value null at '" + name
-                    + "' failed to satisfy constraint: Member must not be null");
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull(name));
         }
         String keyId = value.asText();
         String pattern = "Value '" + keyId + "' at '" + name

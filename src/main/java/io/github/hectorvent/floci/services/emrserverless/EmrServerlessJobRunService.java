@@ -444,10 +444,10 @@ public class EmrServerlessJobRunService {
     private static void validate(StartJobRunRequest request) {
         List<String> violations = new ArrayList<>();
         if (request.getClientToken() == null) {
-            violations.add(notNull("clientToken"));
+            violations.add(SmithyValidationErrors.notNull("clientToken"));
         }
         if (request.getExecutionRoleArn() == null) {
-            violations.add(notNull("executionRoleArn"));
+            violations.add(SmithyValidationErrors.notNull("executionRoleArn"));
         } else if (!ROLE_ARN.matcher(request.getExecutionRoleArn()).matches()) {
             violations.add("Value at 'executionRoleArn' failed to satisfy constraint: "
                     + "Member must satisfy regular expression pattern: " + ROLE_ARN_PATTERN);
@@ -464,10 +464,10 @@ public class EmrServerlessJobRunService {
         }
         JobDriver driver = request.getJobDriver();
         if (driver != null && driver.getSparkSubmit() != null && driver.getSparkSubmit().getEntryPoint() == null) {
-            violations.add(notNull("jobDriver.sparkSubmit.entryPoint"));
+            violations.add(SmithyValidationErrors.notNull("jobDriver.sparkSubmit.entryPoint"));
         }
         if (driver != null && driver.getHive() != null && driver.getHive().getQuery() == null) {
-            violations.add(notNull("jobDriver.hive.query"));
+            violations.add(SmithyValidationErrors.notNull("jobDriver.hive.query"));
         }
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
@@ -480,9 +480,6 @@ public class EmrServerlessJobRunService {
         }
     }
 
-    private static String notNull(String member) {
-        return "Value null at '" + member + "' failed to satisfy constraint: Member must not be null";
-    }
 
     /**
      * From Amazon EMR release 7.11.0 a BATCH run's timeout is 1 to 10080 minutes; an earlier release, or
