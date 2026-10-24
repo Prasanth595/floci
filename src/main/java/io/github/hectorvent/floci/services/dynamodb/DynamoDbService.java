@@ -79,6 +79,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -117,6 +118,7 @@ public class DynamoDbService {
     private final StorageBackend<String, TableBackup> backupStore;
     private final DynamoDbPointInTimeRecovery pointInTimeRecovery;
     private final Clock clock;
+    private final Executor exportExecutor;
     // Items stored per table: storageKey -> Map<itemKey, item>
     // itemKey is "pk" or "pk#sk" depending on table schema
     private final ConcurrentHashMap<String, ConcurrentSkipListMap<String, JsonNode>> itemsByTable = new ConcurrentHashMap<>();
@@ -289,6 +291,27 @@ public class DynamoDbService {
                     int vectorIndexBackfillSeconds,
                     int latestRestorableLagSeconds,
                     Clock clock) {
+        this(tableStore, itemStore, exportStore, importStore, backupStore, pointInTimeStore, regionResolver,
+             streamService, kinesisForwarder, s3Service, objectMapper, vectorIndexAllocationSeconds,
+             vectorIndexBackfillSeconds, latestRestorableLagSeconds, clock, command -> Thread.ofVirtual().start(command));
+    }
+
+    DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
+                    StorageBackend<String, Map<String, JsonNode>> itemStore,
+                    StorageBackend<String, ExportDescription> exportStore,
+                    StorageBackend<String, ImportTableDescription> importStore,
+                    StorageBackend<String, TableBackup> backupStore,
+                    StorageBackend<String, PointInTimeChange> pointInTimeStore,
+                    RegionResolver regionResolver,
+                    DynamoDbStreamService streamService,
+                    KinesisStreamingForwarder kinesisForwarder,
+                    S3Service s3Service,
+                    ObjectMapper objectMapper,
+                    int vectorIndexAllocationSeconds,
+                    int vectorIndexBackfillSeconds,
+                    int latestRestorableLagSeconds,
+                    Clock clock,
+                    Executor exportExecutor) {
         this.tableStore = tableStore;
         this.itemStore = itemStore;
         this.exportStore = exportStore;
@@ -297,6 +320,7 @@ public class DynamoDbService {
         this.pointInTimeRecovery = new DynamoDbPointInTimeRecovery(pointInTimeStore, regionResolver.getAccountId(),
                 Duration.ofSeconds(latestRestorableLagSeconds), clock);
         this.clock = clock;
+        this.exportExecutor = exportExecutor;
         this.regionResolver = regionResolver;
         this.streamService = streamService;
         this.kinesisForwarder = kinesisForwarder;
@@ -4984,7 +5008,7 @@ public class DynamoDbService {
         // changes underneath the handler, and the request account so its writes land there.
         var accountId = regionResolver.getAccountId();
         var worker = objectMapper.convertValue(desc, ExportDescription.class);
-        Thread.ofVirtual().start(() -> RequestScopes.runAs(accountId, () -> runExport(worker, snapshot, exportArn)));
+        exportExecutor.execute(() -> RequestScopes.runAs(accountId, () -> runExport(worker, snapshot, exportArn)));
 
         return desc;
     }
