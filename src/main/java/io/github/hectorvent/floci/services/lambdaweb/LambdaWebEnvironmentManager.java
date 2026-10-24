@@ -550,6 +550,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         if (!executionRole.assumableFor(region, fn.functionArn, revision.serviceConfig.executionRoleArn)) {
             throw new StartFailure(LambdaWebErrorPages.CANNOT_ASSUME_ROLE);
         }
+        // Before the session and the token, which a failed start must not leave behind.
+        String metadataApi = metadata.address();
         String accountId = environment.accountId;
         String image = ecrRegistryManager.rewriteImageUri(imageResolver.resolve(revision.buildConfig.runtime));
         String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
@@ -568,7 +570,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         String metadataToken = metadata.register(region);
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(name)
-                .withEnv(environment(accountId, region, revision, userEnv, roleCredentials, metadataToken))
+                .withEnv(environment(accountId, region, revision, userEnv, roleCredentials, metadataApi,
+                        metadataToken))
                 .withEntrypoint(List.of("/var/lang/bin/node"))
                 .withCmd(cmd)
                 .withWorkingDir(TASK_DIR)
@@ -693,7 +696,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
 
     private List<String> environment(String accountId, String region, WebFunctionRevision revision,
                                      Map<String, String> userEnv, Optional<SessionCreds> roleCredentials,
-                                     String metadataToken) {
+                                     String metadataApi, String metadataToken) {
         List<String> env = new ArrayList<>();
         env.add("AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:" + APP_PORT);
         env.add("AWS_LAMBDA_INITIALIZATION_TYPE=native-http");
@@ -701,7 +704,6 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + MEMORY_MB);
         env.add("AWS_LAMBDA_LOG_LEVEL=" + revision.serviceConfig.applicationLogLevel);
         // AWS names the metadata server as the runtime API too, and it answers the runtime paths with 404.
-        String metadataApi = metadata.address();
         env.add("AWS_LAMBDA_METADATA_API=" + metadataApi);
         env.add("AWS_LAMBDA_METADATA_TOKEN=" + metadataToken);
         env.add("AWS_LAMBDA_RUNTIME_API=" + metadataApi);
