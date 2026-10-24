@@ -1,9 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
@@ -33,11 +30,11 @@ import java.util.UUID;
 public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(RedshiftClusterCfnProvisioner.class);
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String PRIOR_ATTRIBUTES = "__FlociRedshiftPriorAttributes";
-    private static final List<String> PRIVATE_ATTRIBUTES = List.of(
-            "__FlociRedshiftClusterIdentifier", "__FlociRedshiftSnapshotIdentifier",
-            "__FlociRedshiftRestoreMasterUsername", "__FlociRedshiftMasterUserPasswordHash", "__FlociRedshiftDBName");
+    private static final String CLUSTER_IDENTIFIER_ATTR = CfnRollback.USES_ATTR_PREFIX + "RedshiftClusterIdentifier";
+    private static final String SNAPSHOT_IDENTIFIER_ATTR = CfnRollback.USES_ATTR_PREFIX + "RedshiftSnapshotIdentifier";
+    private static final String RESTORE_MASTER_USERNAME_ATTR = CfnRollback.USES_ATTR_PREFIX + "RedshiftRestoreMasterUsername";
+    private static final String MASTER_USER_PASSWORD_HASH_ATTR = CfnRollback.USES_ATTR_PREFIX + "RedshiftMasterUserPasswordHash";
+    private static final String DB_NAME_ATTR = CfnRollback.USES_ATTR_PREFIX + "RedshiftDBName";
 
     private static final String CLUSTER = "AWS::Redshift::Cluster";
     private static final String PARAMETER_GROUP = "AWS::Redshift::ClusterParameterGroup";
@@ -64,15 +61,6 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             case CLUSTER -> {
                 Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
                 provisionCluster(r, props, ctx, attributesBefore);
-                if (ctx.isUpdate() && !ctx.priorPhysicalId().equals(r.getPhysicalId())) {
-                    ObjectNode priorAttributes = MAPPER.createObjectNode();
-                    for (String key : PRIVATE_ATTRIBUTES) {
-                        if (attributesBefore.containsKey(key)) {
-                            priorAttributes.put(key, attributesBefore.get(key));
-                        }
-                    }
-                    r.getAttributes().put(PRIOR_ATTRIBUTES, priorAttributes.toString());
-                }
                 ReplacementCleanup.record(r, ctx, attributesBefore);
             }
             case PARAMETER_GROUP -> {
@@ -99,34 +87,17 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
-        resource.getAttributes().remove(PRIOR_ATTRIBUTES);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
-        resource.getAttributes().remove(PRIOR_ATTRIBUTES);
         ReplacementCleanup.clear(resource);
     }
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        boolean replaced = ReplacementCleanup.rollback(resource, this::delete);
-        String priorAttributes = resource.getAttributes().remove(PRIOR_ATTRIBUTES);
-        if (priorAttributes != null) {
-            try {
-                JsonNode prior = MAPPER.readTree(priorAttributes);
-                for (String key : PRIVATE_ATTRIBUTES) {
-                    resource.getAttributes().remove(key);
-                    if (prior.has(key)) {
-                        resource.getAttributes().put(key, prior.get(key).asText());
-                    }
-                }
-            } catch (JsonProcessingException e) {
-                throw new IllegalStateException("Cannot restore Redshift private attributes", e);
-            }
-        }
-        return replaced;
+        return ReplacementCleanup.rollback(resource, this::delete);
     }
 
     private void provisionCluster(StackResource r, JsonNode props, ProvisionContext ctx,
@@ -152,20 +123,20 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         List<String> securityGroups = ctx.resolveStringList(props, "VpcSecurityGroupIds");
 
         String dbName = ctx.resolveOptional(props, "DBName");
-        String priorDbName = attributesBefore.get("__FlociRedshiftDBName");
+        String priorDbName = attributesBefore.getOrDefault(DB_NAME_ATTR, attributesBefore.get("Floci::DBName"));
         boolean dbNameChanged = ctx.isUpdate() && dbName != null && priorDbName != null && !dbName.equals(priorDbName);
 
         String explicitId = ctx.resolveOptional(props, "ClusterIdentifier");
         Cluster prior = ctx.isUpdate() ? findExistingCluster(ctx.priorPhysicalId()) : null;
         boolean snapshotChanged = ctx.isUpdate()
-                && !Objects.equals(snapshotIdentifier, attributesBefore.get("__FlociRedshiftSnapshotIdentifier"));
+                && !Objects.equals(snapshotIdentifier, attributesBefore.get(SNAPSHOT_IDENTIFIER_ATTR));
         boolean masterUsernameChanged = snapshotIdentifier == null
                 ? prior != null && masterUsername != null && !masterUsername.equals(prior.getMasterUsername())
-                : ctx.isUpdate() && !Objects.equals(masterUsername, attributesBefore.get("__FlociRedshiftRestoreMasterUsername"));
+                : ctx.isUpdate() && !Objects.equals(masterUsername, attributesBefore.get(RESTORE_MASTER_USERNAME_ATTR));
         boolean createOnlyChanged = dbNameChanged || snapshotChanged || masterUsernameChanged
                 || prior != null && subnetGroup != null && !Objects.equals(subnetGroup, prior.getClusterSubnetGroupName());
         boolean sameTemplateIdentifier = explicitId == null || explicitId.equals(ctx.priorPhysicalId())
-                || explicitId.equals(attributesBefore.get("__FlociRedshiftClusterIdentifier"));
+                || explicitId.equals(attributesBefore.get(CLUSTER_IDENTIFIER_ATTR));
 
         String id;
         if (createOnlyChanged && sameTemplateIdentifier) {
@@ -190,7 +161,7 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             if (!manageMasterPassword && masterUserPassword != null) {
                 String passwordHash = Digests.sha256Hex(masterUserPassword);
                 boolean passwordExplicitlyChanged = !Objects.equals(passwordHash,
-                        attributesBefore.get("__FlociRedshiftMasterUserPasswordHash"));
+                        attributesBefore.get(MASTER_USER_PASSWORD_HASH_ATTR));
                 if (passwordExplicitlyChanged) {
                     passwordToApply = masterUserPassword;
                 }
@@ -234,24 +205,24 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         }
 
         r.setPhysicalId(id);
-        r.getAttributes().remove("__FlociRedshiftClusterIdentifier");
+        r.getAttributes().remove(CLUSTER_IDENTIFIER_ATTR);
         if (explicitId != null) {
-            r.getAttributes().put("__FlociRedshiftClusterIdentifier", explicitId);
+            r.getAttributes().put(CLUSTER_IDENTIFIER_ATTR, explicitId);
         }
-        r.getAttributes().remove("__FlociRedshiftSnapshotIdentifier");
-        r.getAttributes().remove("__FlociRedshiftRestoreMasterUsername");
+        r.getAttributes().remove(SNAPSHOT_IDENTIFIER_ATTR);
+        r.getAttributes().remove(RESTORE_MASTER_USERNAME_ATTR);
         if (snapshotIdentifier != null) {
-            r.getAttributes().put("__FlociRedshiftSnapshotIdentifier", snapshotIdentifier);
+            r.getAttributes().put(SNAPSHOT_IDENTIFIER_ATTR, snapshotIdentifier);
             if (masterUsername != null) {
-                r.getAttributes().put("__FlociRedshiftRestoreMasterUsername", masterUsername);
+                r.getAttributes().put(RESTORE_MASTER_USERNAME_ATTR, masterUsername);
             }
         }
-        r.getAttributes().remove("__FlociRedshiftMasterUserPasswordHash");
+        r.getAttributes().remove(MASTER_USER_PASSWORD_HASH_ATTR);
         if (!manageMasterPassword && masterUserPassword != null) {
-            r.getAttributes().put("__FlociRedshiftMasterUserPasswordHash", Digests.sha256Hex(masterUserPassword));
+            r.getAttributes().put(MASTER_USER_PASSWORD_HASH_ATTR, Digests.sha256Hex(masterUserPassword));
         }
         if (dbName != null && !dbName.isBlank()) {
-            r.getAttributes().put("__FlociRedshiftDBName", dbName);
+            r.getAttributes().put(DB_NAME_ATTR, dbName);
         }
         if (cluster.getEndpoint() != null) {
             r.getAttributes().put("Endpoint.Address", cluster.getEndpoint().getAddress());

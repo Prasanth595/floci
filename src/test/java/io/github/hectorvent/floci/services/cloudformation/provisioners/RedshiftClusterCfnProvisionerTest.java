@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -332,11 +334,11 @@ class RedshiftClusterCfnProvisionerTest {
                 {"ClusterIdentifier":"restored","SnapshotIdentifier":"backup","NodeType":"ra3.large",
                  "MasterUsername":"admin","MasterUserPassword":"Template123","DBName":"dev"}"""), ctx(null));
 
-        assertEquals("restored", resource.getAttributes().get("__FlociRedshiftClusterIdentifier"));
-        assertEquals("backup", resource.getAttributes().get("__FlociRedshiftSnapshotIdentifier"));
-        assertEquals("admin", resource.getAttributes().get("__FlociRedshiftRestoreMasterUsername"));
-        assertEquals("dev", resource.getAttributes().get("__FlociRedshiftDBName"));
-        assertNotNull(resource.getAttributes().get("__FlociRedshiftMasterUserPasswordHash"));
+        assertEquals("restored", resource.getAttributes().get("__FlociUsesRedshiftClusterIdentifier"));
+        assertEquals("backup", resource.getAttributes().get("__FlociUsesRedshiftSnapshotIdentifier"));
+        assertEquals("admin", resource.getAttributes().get("__FlociUsesRedshiftRestoreMasterUsername"));
+        assertEquals("dev", resource.getAttributes().get("__FlociUsesRedshiftDBName"));
+        assertNotNull(resource.getAttributes().get("__FlociUsesRedshiftMasterUserPasswordHash"));
         assertFalse(resource.getAttributes().containsValue("Template123"));
         assertTrue(resource.getAttributes().keySet().stream().noneMatch(key -> key.startsWith("Floci::")));
     }
@@ -394,11 +396,14 @@ class RedshiftClusterCfnProvisionerTest {
         resource.setResourceType("AWS::Redshift::Cluster");
         resource.setLogicalId("Warehouse");
         JsonNode original = json("""
-                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup"}""");
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"backup",
+                 "MasterUsername":"admin","MasterUserPassword":"Original123","DBName":"dev"}""");
         provisioner.provision(resource, original, ctx(null));
         resource.getAttributes().put("MasterPasswordSecretArn", "old-managed-secret");
+        String originalPasswordHash = resource.getAttributes().get("__FlociUsesRedshiftMasterUserPasswordHash");
         provisioner.provision(resource, json("""
-                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"new-backup"}"""),
+                {"ClusterIdentifier":"restored","NodeType":"ra3.large","SnapshotIdentifier":"new-backup",
+                 "MasterUsername":"other","MasterUserPassword":"Replacement123","DBName":"analytics"}"""),
                 ctx("restored"));
 
         String replacement = resource.getPhysicalId();
@@ -408,7 +413,10 @@ class RedshiftClusterCfnProvisionerTest {
         verify(service).restoreFromClusterSnapshot(replacement, "new-backup", "ra3.large", null, false, null, "us-east-1");
         assertTrue(provisioner.rollbackUpdate(resource));
         assertEquals("restored", resource.getPhysicalId());
-        assertEquals("backup", resource.getAttributes().get("__FlociRedshiftSnapshotIdentifier"));
+        assertEquals("backup", resource.getAttributes().get("__FlociUsesRedshiftSnapshotIdentifier"));
+        assertEquals("admin", resource.getAttributes().get("__FlociUsesRedshiftRestoreMasterUsername"));
+        assertEquals("dev", resource.getAttributes().get("__FlociUsesRedshiftDBName"));
+        assertEquals(originalPasswordHash, resource.getAttributes().get("__FlociUsesRedshiftMasterUserPasswordHash"));
         assertFalse(resource.getAttributes().containsKey("__FlociRedshiftPriorAttributes"));
         verify(service).deleteCluster(replacement);
         when(service.modifyCluster(eq("restored"), eq("ra3.large"), isNull(), isNull(), isNull(), anyList()))
@@ -528,7 +536,7 @@ class RedshiftClusterCfnProvisionerTest {
         resource.setResourceType("AWS::Redshift::Cluster");
         resource.setLogicalId("Warehouse");
         resource.setPhysicalId("restored");
-        resource.getAttributes().put("__FlociRedshiftSnapshotIdentifier", "backup");
+        resource.getAttributes().put("__FlociUsesRedshiftSnapshotIdentifier", "backup");
 
         provisioner.provision(resource, json("""
                 {"ClusterIdentifier":"restored","NodeType":"ra3.large","MasterUsername":"admin",
@@ -536,7 +544,7 @@ class RedshiftClusterCfnProvisionerTest {
 
         assertNotEquals("restored", resource.getPhysicalId());
         assertEquals("restored", provisioner.updateCleanupPhysicalId(resource));
-        assertFalse(resource.getAttributes().containsKey("__FlociRedshiftSnapshotIdentifier"));
+        assertFalse(resource.getAttributes().containsKey("__FlociUsesRedshiftSnapshotIdentifier"));
     }
 
     @Test
@@ -847,21 +855,25 @@ class RedshiftClusterCfnProvisionerTest {
         assertTrue(p.hasReplacementUpdate(r));
     }
 
-    @Test
-    void changingDBNameTriggersReplacement() {
+    @ParameterizedTest
+    @ValueSource(strings = {"__FlociUsesRedshiftDBName", "Floci::DBName"})
+    void changingDBNameTriggersReplacement(String dbNameKey) {
         RedshiftService service = mock(RedshiftService.class);
         Cluster existing = availableCluster("my-cluster");
         existing.setMasterUsername("admin");
         when(service.describeClusters("my-cluster")).thenReturn(List.of(existing));
         when(service.createCluster(anyString(), anyString(), anyString(), anyString(), any(), anyList()))
                 .thenAnswer(inv -> availableCluster(inv.getArgument(0)));
+        when(service.modifyCluster(eq("my-cluster"), any(), any(), any(), any(), anyList()))
+                .thenReturn(availableCluster("my-cluster"));
         RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
 
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::Cluster");
         r.setLogicalId("W");
         r.setPhysicalId("my-cluster");
-        r.getAttributes().put("__FlociRedshiftDBName", "dev");
+        r.getAttributes().put("Floci::DBName", "analytics");
+        r.getAttributes().put(dbNameKey, "dev");
 
         p.provision(r, json("""
             {"ClusterIdentifier":"my-cluster","NodeType":"ra3.large","MasterUsername":"admin",
@@ -870,7 +882,7 @@ class RedshiftClusterCfnProvisionerTest {
         assertNotEquals("my-cluster", r.getPhysicalId());
         assertEquals("my-cluster", p.updateCleanupPhysicalId(r));
         assertTrue(p.hasReplacementUpdate(r));
-        assertEquals("analytics", r.getAttributes().get("__FlociRedshiftDBName"));
+        assertEquals("analytics", r.getAttributes().get("__FlociUsesRedshiftDBName"));
     }
 
     @Test
