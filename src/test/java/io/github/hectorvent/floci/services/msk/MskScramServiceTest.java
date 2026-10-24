@@ -98,6 +98,7 @@ class MskScramServiceTest {
         when(storageFactory.<MskConfiguration>create(eq("msk"), eq("msk-configurations.json"), any()))
             .thenReturn(AccountAwareStorageBackend.inMemory(ACCOUNT));
         config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().msk().enabled()).thenReturn(true);
         when(config.services().msk().mock()).thenReturn(true);
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getRegion()).thenReturn("us-east-1");
@@ -160,13 +161,27 @@ class MskScramServiceTest {
         }
     }
 
+    @Test
+    void startupSkipsReconciliationWhenMskIsDisabled() {
+        when(config.services().msk().enabled()).thenReturn(false);
+
+        try {
+            service.onStart(null);
+
+            verify(config.services().msk(), never()).scramReconciliationIntervalMs();
+            verifyNoInteractions(redpanda);
+        } finally {
+            service.shutdown();
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(longs = {0, -1})
     void reconciliationRejectsNonPositiveInterval(long intervalMs) {
         when(config.services().msk().scramReconciliationIntervalMs()).thenReturn(intervalMs);
 
         try {
-            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, service::init);
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> service.onStart(null));
             assertEquals("floci.services.msk.scram-reconciliation-interval-ms must be greater than zero.",
                 error.getMessage());
         } finally {
@@ -200,7 +215,7 @@ class MskScramServiceTest {
         when(config.services().msk().scramReconciliationIntervalMs()).thenReturn(5L);
 
         try {
-            service.init();
+            service.onStart(null);
             assertTrue(operationForFirstClusterStarted.await(5, TimeUnit.SECONDS));
 
             // More rotations than workers expose duplicate blocked jobs exhausting the pool.
@@ -237,7 +252,7 @@ class MskScramServiceTest {
 
         try {
             List<LogRecord> logs = LogCapture.capture(MskScramSecretsService.class, () -> {
-                service.init();
+                service.onStart(null);
                 await()
                     .atMost(Duration.ofSeconds(5))
                     .untilAsserted(() -> verify(redpanda, times(4)).createUser(cluster, "alice", "rotated"));
@@ -255,7 +270,7 @@ class MskScramServiceTest {
         setSecretValue(SECRET, version("alice", "rotated"));
 
         try {
-            service.init();
+            service.onStart(null);
             await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 verify(redpanda).createUser(cluster, "alice", "rotated"));
 

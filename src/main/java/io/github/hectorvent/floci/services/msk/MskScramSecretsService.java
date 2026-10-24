@@ -22,9 +22,10 @@ import io.github.hectorvent.floci.services.msk.model.ScramSecretAssociation;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
-import jakarta.annotation.PostConstruct;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -83,8 +84,10 @@ public class MskScramSecretsService {
         this.objectMapper = objectMapper;
     }
 
-    @PostConstruct
-    public void init() {
+    void onStart(@Observes StartupEvent ignored) {
+        if (!config.services().msk().enabled()) {
+            return;
+        }
         long intervalMs = config.services().msk().scramReconciliationIntervalMs();
         if (intervalMs <= 0) {
             throw new IllegalArgumentException("floci.services.msk.scram-reconciliation-interval-ms must be greater than zero.");
