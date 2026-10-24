@@ -652,18 +652,23 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
     invocation is handed to the runtime, so a slow init never shortens the handler's time and
     `getRemainingTimeInMillis()` reports the full `Timeout`.
 
-    The Init phase may last `init-timeout-seconds` (default 10, the limit AWS applies), or the
-    function's `Timeout` plus 2 seconds when that is longer. A runtime that has not asked for its
-    invocation by then is stopped, the invocation fails with `Function.TimedOut`, and Floci logs
-    a warning naming the setting. Java and other JVM runtimes on a busy CI host can need more
-    than 10 seconds; raise the budget there:
+    The Init phase may last `init-timeout-seconds` (default 10, the limit AWS applies), counted
+    from the container's start, so launching extensions and attaching logs use part of it. A
+    function whose `Timeout` plus 2 seconds is longer than what is left of the budget waits that
+    long instead. A runtime that has not asked for its invocation by then is stopped, the
+    invocation fails with `Function.TimedOut`, and Floci logs a warning naming the setting. Java
+    and other JVM runtimes on a busy CI host can need more than 10 seconds; raise the budget there:
 
     ```bash
     FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS=120
     ```
 
     Image pulls and container creation happen before the Init phase and are not counted
-    against it.
+    against it. The budget applies only until the runtime first requests an invocation: a warm
+    or provisioned container whose runtime stops asking is given its `Timeout` plus 2 seconds.
+    SQS event source mappings add the budget to the visibility timeout they receive messages
+    with, so a message is not delivered to another consumer while its cold start is still within
+    the budget.
 
 ### Runtime API host override
 

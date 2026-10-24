@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
+import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -377,15 +378,23 @@ public class LambdaExecutorService implements Resettable {
                 requestId, payload, deadlineMs, fn.getFunctionArn(),
                 new CompletableFuture<>());
         invocation.setClientContext(clientContext);
-        // A cold runtime gets the Init budget to request its first invocation; the function's
-        // Timeout restarts when the invocation is dispatched (PendingInvocation#prepareForDispatch).
-        int dispatchWaitSeconds = Math.max(initTimeoutSeconds, fn.getTimeout() + RUNTIME_DISPATCH_GRACE_SECONDS);
+        // A runtime that has never polled /next is still in its Init phase, which runs from its
+        // container's start for the Init budget. The function's Timeout restarts when the invocation
+        // is dispatched (PendingInvocation#prepareForDispatch).
+        RuntimeApiServer runtimeApiServer = handle.getRuntimeApiServer();
+        boolean initializing = !runtimeApiServer.hasRuntimePolled();
+        long dispatchWaitMs = (fn.getTimeout() + RUNTIME_DISPATCH_GRACE_SECONDS) * 1000L;
+        if (initializing) {
+            long startedAtMs = runtimeApiServer.getContainerStartedAtMs();
+            long sinceStartMs = startedAtMs > 0 ? Math.max(0, System.currentTimeMillis() - startedAtMs) : 0;
+            dispatchWaitMs = Math.max(initTimeoutSeconds * 1000L - sinceStartMs, dispatchWaitMs);
+        }
         try {
-            handle.getRuntimeApiServer().enqueue(invocation);
+            runtimeApiServer.enqueue(invocation);
 
             CompletableFuture.anyOf(
                             invocation.getDispatchedFuture(), invocation.getResultFuture())
-                    .get(dispatchWaitSeconds, TimeUnit.SECONDS);
+                    .get(dispatchWaitMs, TimeUnit.MILLISECONDS);
             InvokeResult result = invocation.getResultFuture().get();
 
             warmPool.release(handle);
@@ -398,12 +407,11 @@ public class LambdaExecutorService implements Resettable {
         } catch (Exception e) {
             Throwable cause = e instanceof ExecutionException && e.getCause() != null ? e.getCause() : e;
             if (cause instanceof TimeoutException) {
-                if (invocation.getDispatchedFuture().isDone()) {
-                    LOG.warnv("Function {0} timed out after {1}s", fn.getFunctionName(), fn.getTimeout());
+                if (initializing && !invocation.getDispatchedFuture().isDone()) {
+                    LOG.warnv("Function {0} did not finish its init within {1}s of its container starting; raise floci.services.lambda.init-timeout-seconds if its init is slow",
+                            fn.getFunctionName(), initTimeoutSeconds);
                 } else {
-                    LOG.warnv("Function {0} did not request its invocation within {1}s of its container starting;"
-                                    + " raise floci.services.lambda.init-timeout-seconds if its init is slow",
-                            fn.getFunctionName(), dispatchWaitSeconds);
+                    LOG.warnv("Function {0} timed out after {1}s", fn.getFunctionName(), fn.getTimeout());
                 }
                 warmPool.destroyHandle(handle);
                 return new InvokeResult(200, "Unhandled",
