@@ -54,6 +54,10 @@ public class MskScramSecretsService {
     private final ObjectMapper objectMapper;
     private final ScheduledExecutorService reconciler = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, Object> clusterLocks = new ConcurrentHashMap<>();
+    
+    private final Map<ReconciliationKey, ReconciliationFailure> reconciliationFailures = new ConcurrentHashMap<>();
+    private record ReconciliationKey(String clusterArn, String secretArn) {}
+    private record ReconciliationFailure(String errorCode, String message) {}
 
     @Inject
     public MskScramSecretsService(StorageFactory storageFactory, EmulatorConfig config, MskService mskService,
@@ -96,6 +100,7 @@ public class MskScramSecretsService {
                 Optional<MskCluster> clusterGet = mskService.getClusterForAccount(entry.accountId(), clusterArn);
                 if (clusterGet.isEmpty()) {
                     storage.deleteForAccount(entry.accountId(), clusterArn);
+                    reconciliationFailures.keySet().removeIf(key -> key.clusterArn().equals(clusterArn));
                 } else {
                     reconcileScramSecretsForCluster(clusterGet.get(), clusterArn);
                 }
@@ -109,11 +114,19 @@ public class MskScramSecretsService {
         }
         MskScramAssociations clusterAssociations = associationsFor(clusterArn);
         for (String secretArn : new ArrayList<>(clusterAssociations.getAssociations().keySet())) {
+            ReconciliationKey reconciliationKey = new ReconciliationKey(clusterArn, secretArn);
             try {
                 reconcileScramSecret(secretArn, clusterAssociations, cluster);
+                reconciliationFailures.remove(reconciliationKey);
             } catch (AwsException e) {
-                LOG.warnv("Could not reconcile MSK SCRAM secret {0} for cluster {1}: {2}",
-                    secretArn, clusterArn, e.getErrorCode());
+                ReconciliationFailure failure = new ReconciliationFailure(e.getErrorCode(), e.getMessage());
+                if (!failure.equals(reconciliationFailures.put(reconciliationKey, failure))) {
+                    LOG.warnv("Could not reconcile MSK SCRAM secret {0} for cluster {1}: {2}",
+                        secretArn, clusterArn, e.getErrorCode());
+                } else {
+                    LOG.debugv("Could not reconcile MSK SCRAM secret {0} for cluster {1}: {2}",
+                        secretArn, clusterArn, e.getErrorCode());
+                }
             }
         }
     }
@@ -338,6 +351,7 @@ public class MskScramSecretsService {
         deleteScramUser(cluster, state, association);
         state.getAssociations().remove(secretArn);
         putAssociations(cluster.getClusterArn(), state);
+        reconciliationFailures.remove(new ReconciliationKey(cluster.getClusterArn(), secretArn));
     }
 
     private void deleteScramUser(MskCluster cluster, MskScramAssociations state, ScramSecretAssociation association) {

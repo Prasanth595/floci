@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.msk.model.ScramSecretAssociation;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Named;
 import org.junit.jupiter.api.Test;
@@ -39,6 +40,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.LogRecord;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -830,6 +832,35 @@ class MskScramServiceTest {
         assertEquals("alice", association(SECRET).getUsername());
         assertEquals(original.getVersionId(), association(SECRET).getAppliedVersionId());
         verifyNoInteractions(redpanda);
+    }
+
+    @Test
+    void repeatedReconciliationFailuresLogAtDebugUntilErrorChangesOrRecovery() {
+        associate(SECRET, version("alice", "original"));
+        setSecretReadError("AccessDeniedException", "Denied.");
+
+        List<LogRecord> logs = LogCapture.capture(MskScramSecretsService.class, () -> {
+            service.reconcileAllScramSecrets();
+            service.reconcileAllScramSecrets();
+            setSecretReadError("AccessDeniedException", "Different denial.");
+            service.reconcileAllScramSecrets();
+            setSecretReadError("InvalidRequestException", "Invalid request.");
+            service.reconcileAllScramSecrets();
+        });
+        assertEquals(List.of("WARN", "DEBUG", "WARN", "WARN"), logLevels(logs));
+
+        setSecretValue(SECRET, version("alice", "recovered"));
+        logs = LogCapture.capture(MskScramSecretsService.class, service::reconcileAllScramSecrets);
+        assertTrue(logs.isEmpty());
+        verify(redpanda).createUser(cluster, "alice", "recovered");
+
+        setSecretReadError("InvalidRequestException", "Invalid request.");
+        logs = LogCapture.capture(MskScramSecretsService.class, service::reconcileAllScramSecrets);
+        assertEquals(List.of("WARN"), logLevels(logs));
+    }
+
+    private List<String> logLevels(List<LogRecord> logs) {
+        return logs.stream().map(logRecord -> logRecord.getLevel().getName()).toList();
     }
 
     @Test
