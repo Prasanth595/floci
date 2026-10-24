@@ -443,7 +443,7 @@ public class MskScramSecretsService {
     private SecretVersion getCurrentSecretVersion(Secret secret) {
         if (secret.getDeletedDate() != null) {
             throw new AwsException("InternalServerError",
-                "The request could not be processed because of an internal error. Try again.", 500);
+                SecretsManagerService.SCHEDULED_DELETION_ERROR_MESSAGE, 500);
         }
         if (secret.getVersions() != null) {
             for (SecretVersion version : secret.getVersions().values()) {

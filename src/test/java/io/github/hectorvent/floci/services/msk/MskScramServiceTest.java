@@ -664,7 +664,7 @@ class MskScramServiceTest {
             service.batchAssociateScramSecret(cluster.getClusterArn(), List.of(SECRET));
 
         assertEquals(List.of(Map.of("secretArn", SECRET, "errorCode", "InternalServerError",
-            "errorMessage", "The request could not be processed because of an internal error. Try again.")),
+            "errorMessage", "You can't perform this operation on the secret because it was marked for deletion.")),
             failures);
         assertNull(association(SECRET));
         verifyNoInteractions(redpanda);
