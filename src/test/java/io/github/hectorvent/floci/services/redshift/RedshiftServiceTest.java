@@ -59,6 +59,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -1612,6 +1613,73 @@ class RedshiftServiceTest {
         verify(cm).stop("111111111111", "restored-managed");
         assertTrue(service.describeClusters(null).isEmpty());
         assertTrue(service.getSnapshot("managed-backup").isPresent());
+    }
+
+    @Test
+    void enableManagedMasterPasswordCreatesSecretAndRotatesCredentials() {
+        useStatefulClusterStorage();
+        Cluster existing = new Cluster();
+        existing.setClusterIdentifier("cluster-enable");
+        existing.setMasterUsername("admin");
+        existing.setMasterPassword("OldPass1");
+        existing.setEndpoint(new Endpoint("localhost", 5439));
+        existing.setClusterStatus("available");
+        clusterBackend.put("cluster-enable", existing);
+
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:enable-sec");
+        when(secretsManagerService.createSecret(eq("redshift/cluster-enable"), anyString(), isNull(),
+                anyString(), eq("alias/key-1"), anyList(), eq("redshift"), eq("us-east-1"))).thenReturn(secret);
+
+        Cluster updated = service.enableManagedMasterPassword("cluster-enable", "alias/key-1", "us-east-1");
+
+        assertEquals(secret.getArn(), updated.getMasterPasswordSecretArn());
+        assertEquals("alias/key-1", updated.getMasterPasswordSecretKmsKeyId());
+        assertNotEquals("OldPass1", updated.getMasterPassword());
+        verify(cm).alterUserPassword("111111111111", "cluster-enable", "admin", updated.getMasterPassword());
+        verify(secretsManagerService).createSecret(eq("redshift/cluster-enable"), anyString(), isNull(),
+                anyString(), eq("alias/key-1"), anyList(), eq("redshift"), eq("us-east-1"));
+    }
+
+    @Test
+    void disableManagedMasterPasswordDeletesSecretAndClearsMetadata() {
+        useStatefulClusterStorage();
+        Cluster existing = new Cluster();
+        existing.setClusterIdentifier("cluster-disable");
+        existing.setMasterUsername("admin");
+        existing.setMasterPassword("GenPass1");
+        existing.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:dis-sec");
+        existing.setMasterPasswordSecretKmsKeyId("alias/key-1");
+        existing.setEndpoint(new Endpoint("localhost", 5439));
+        existing.setClusterStatus("available");
+        clusterBackend.put("cluster-disable", existing);
+
+        Cluster updated = service.disableManagedMasterPassword("cluster-disable", "us-east-1");
+
+        assertNull(updated.getMasterPasswordSecretArn());
+        assertNull(updated.getMasterPasswordSecretKmsKeyId());
+        verify(secretsManagerService).deleteSecret(
+                eq("arn:aws:secretsmanager:us-east-1:111111111111:secret:dis-sec"), isNull(), eq(true), eq("us-east-1"));
+    }
+
+    @Test
+    void updateManagedMasterSecretKmsKeyUpdatesEncryptionAndMetadata() {
+        useStatefulClusterStorage();
+        Cluster existing = new Cluster();
+        existing.setClusterIdentifier("cluster-kms");
+        existing.setMasterUsername("admin");
+        existing.setMasterPassword("GenPass1");
+        existing.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:kms-sec");
+        existing.setMasterPasswordSecretKmsKeyId("alias/old-key");
+        existing.setEndpoint(new Endpoint("localhost", 5439));
+        existing.setClusterStatus("available");
+        clusterBackend.put("cluster-kms", existing);
+
+        Cluster updated = service.updateManagedMasterSecretKmsKey("cluster-kms", "alias/new-key", "us-east-1");
+
+        assertEquals("alias/new-key", updated.getMasterPasswordSecretKmsKeyId());
+        verify(secretsManagerService).updateSecret(
+                eq("arn:aws:secretsmanager:us-east-1:111111111111:secret:kms-sec"), isNull(), eq("alias/new-key"), eq("us-east-1"));
     }
 
     private void useStatefulClusterStorage() {

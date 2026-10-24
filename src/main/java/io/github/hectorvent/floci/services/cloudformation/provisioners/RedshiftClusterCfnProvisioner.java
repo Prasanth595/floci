@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
@@ -151,9 +152,39 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
         // a derived id that differs from the prior physical id is a replacement handled via ReplacementCleanup.
         Cluster cluster;
         if (ctx.reusesPriorEntity(id)) {
+            Cluster existing = prior != null ? prior : findExistingCluster(id);
+            boolean currentlyManaged = (existing != null && existing.getMasterPasswordSecretArn() != null)
+                    || attributesBefore.containsKey("MasterPasswordSecretArn");
+            String kmsKeyId = ctx.resolveOptional(props, "MasterPasswordSecretKmsKeyId");
+
+            if (!manageMasterPassword && currentlyManaged) {
+                redshiftService.disableManagedMasterPassword(id, ctx.region());
+            }
+
+            String passwordToApply = null;
+            if (!manageMasterPassword && masterUserPassword != null) {
+                String passwordHash = Digests.sha256Hex(masterUserPassword);
+                boolean passwordExplicitlyChanged = !Objects.equals(passwordHash,
+                        attributesBefore.get("Floci::MasterUserPasswordHash"));
+                if (passwordExplicitlyChanged) {
+                    passwordToApply = masterUserPassword;
+                }
+            }
+
             cluster = redshiftService.modifyCluster(id, nodeType, numberOfNodes(props, ctx),
-                    masterUserPassword, ctx.resolveOptional(props, "ClusterParameterGroupName"),
+                    passwordToApply, ctx.resolveOptional(props, "ClusterParameterGroupName"),
                     securityGroups);
+
+            if (manageMasterPassword && !currentlyManaged) {
+                cluster = redshiftService.enableManagedMasterPassword(id, kmsKeyId, ctx.region());
+            } else if (manageMasterPassword) {
+                String priorKmsKey = cluster.getMasterPasswordSecretKmsKeyId() != null
+                        ? cluster.getMasterPasswordSecretKmsKeyId()
+                        : (existing != null ? existing.getMasterPasswordSecretKmsKeyId() : null);
+                if (!Objects.equals(kmsKeyId, priorKmsKey)) {
+                    cluster = redshiftService.updateManagedMasterSecretKmsKey(id, kmsKeyId, ctx.region());
+                }
+            }
         } else if (snapshotIdentifier != null) {
             cluster = redshiftService.restoreFromClusterSnapshot(id, snapshotIdentifier, nodeType, subnetGroup,
                     manageMasterPassword, ctx.resolveOptional(props, "MasterPasswordSecretKmsKeyId"), ctx.region());
@@ -181,10 +212,12 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
                     subnetGroup, securityGroups);
         }
 
+        String arn = AwsArnUtils.Arn.of("redshift", ctx.region(), ctx.accountId(), "cluster:" + id).toString();
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
-        if (!tags.isEmpty()) {
+        if (ctx.isUpdate() && ctx.reusesPriorEntity(id)) {
+            reconcileTags(arn, tags);
+        } else if (!tags.isEmpty()) {
             try {
-                String arn = AwsArnUtils.Arn.of("redshift", ctx.region(), ctx.accountId(), "cluster:" + id).toString();
                 redshiftService.createTags(arn, tags);
             } catch (RuntimeException failure) {
                 if (snapshotIdentifier != null && !ctx.reusesPriorEntity(id)) {
@@ -211,6 +244,10 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             if (masterUsername != null) {
                 r.getAttributes().put("Floci::RestoreMasterUsername", masterUsername);
             }
+        }
+        r.getAttributes().remove("Floci::MasterUserPasswordHash");
+        if (!manageMasterPassword && masterUserPassword != null) {
+            r.getAttributes().put("Floci::MasterUserPasswordHash", Digests.sha256Hex(masterUserPassword));
         }
         if (dbName != null && !dbName.isBlank()) {
             r.getAttributes().put("Floci::DBName", dbName);
@@ -282,12 +319,29 @@ public class RedshiftClusterCfnProvisioner implements CfnResourceProvisioner {
             redshiftService.modifyClusterParameterGroup(id, parameters);
         }
 
+        String arn = AwsArnUtils.Arn.of("redshift", ctx.region(), ctx.accountId(), "parametergroup:" + id).toString();
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
-        if (!tags.isEmpty()) {
-            redshiftService.createTags(id, tags);
+        if (ctx.isUpdate() && ctx.reusesPriorEntity(id)) {
+            reconcileTags(arn, tags);
+        } else if (!tags.isEmpty()) {
+            redshiftService.createTags(arn, tags);
         }
 
         r.setPhysicalId(id);
+    }
+
+    private void reconcileTags(String arn, Map<String, String> desired) {
+        Map<String, String> current = redshiftService.listTagsForResource(arn);
+        if (desired.equals(current)) {
+            return;
+        }
+        List<String> stale = ProvisionContext.staleTagKeys(current, desired);
+        if (!stale.isEmpty()) {
+            redshiftService.deleteTags(arn, stale);
+        }
+        if (!desired.isEmpty()) {
+            redshiftService.createTags(arn, desired);
+        }
     }
 
     private ClusterParameterGroup findExistingParameterGroup(String parameterGroupName) {
