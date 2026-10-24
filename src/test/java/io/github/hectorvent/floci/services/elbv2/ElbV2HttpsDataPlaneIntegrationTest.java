@@ -263,7 +263,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
         acmRequest()
                 .header("Authorization", accountAuthorization("test", "acm"))
                 .header("X-Amz-Target", "CertificateManager.DeleteCertificate")
-                .body(Map.of("CertificateArn", arn)).when().post("/").then().statusCode(409)
+                .body(Map.of("CertificateArn", arn)).when().post("/").then().statusCode(400)
                 .body("__type", equalTo("ResourceInUseException"));
     }
 
