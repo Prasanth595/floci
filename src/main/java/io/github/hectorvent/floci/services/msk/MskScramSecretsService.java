@@ -375,7 +375,8 @@ public class MskScramSecretsService {
 
     private SecretVersion getCurrentSecretVersion(Secret secret) {
         if (secret.getDeletedDate() != null) {
-            throw new AwsException("InvalidRequestException", "Secret is scheduled for deletion.", 400);
+            throw new AwsException("InternalServerError",
+                "The request could not be processed because of an internal error. Try again.", 500);
         }
         if (secret.getVersions() != null) {
             for (SecretVersion version : secret.getVersions().values()) {

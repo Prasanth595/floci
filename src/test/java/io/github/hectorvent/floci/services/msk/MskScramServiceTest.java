@@ -542,6 +542,22 @@ class MskScramServiceTest {
         assertEquals(lastAccessed, secret.getLastAccessedDate());
     }
 
+    @Test
+    void associationOfSecretScheduledForDeletionReportsInternalServerError() {
+        setSecretValue(SECRET, version("alice", "password"));
+        Secret secret = secrets.describeSecret(SECRET, "us-east-1");
+        secret.setDeletedDate(Instant.now().plusSeconds(86400));
+
+        List<Map<String, String>> failures =
+            service.batchAssociateScramSecret(cluster.getClusterArn(), List.of(SECRET));
+
+        assertEquals(List.of(Map.of("secretArn", SECRET, "errorCode", "InternalServerError",
+            "errorMessage", "The request could not be processed because of an internal error. Try again.")),
+            failures);
+        assertNull(association(SECRET));
+        verifyNoInteractions(redpanda);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"ResourceNotFoundException", "InvalidRequestException", "AccessDeniedException"})
     void secretLookupErrorsAreReportedPerSecretWithoutBlockingOtherAssociations(String errorCode) {
