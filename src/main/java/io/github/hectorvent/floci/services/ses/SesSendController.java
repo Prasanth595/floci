@@ -247,6 +247,10 @@ public class SesSendController {
             JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("SendBulkEmail", request);
             validateTrackingOverrides(request);
+            JsonNode bulkEntries = request.path("BulkEmailEntries");
+            if (bulkEntries.isMissingNode() || bulkEntries.isNull()) {
+                throw constraintViolation(null, "bulkEmailEntries", "Member must not be null");
+            }
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
             if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                 throw new AwsException("BadRequestException",
@@ -281,9 +285,9 @@ public class SesSendController {
                         "DefaultContent.Template requires TemplateName, TemplateArn, or TemplateContent.", 400);
             }
 
-            String subject;
-            String text;
-            String html;
+            String subject = null;
+            String text = null;
+            String html = null;
             // Inline template content is not a stored template resource, so it stays out of the
             // tenant gate below.
             String gateTemplateName = null;
@@ -294,7 +298,11 @@ public class SesSendController {
                 html = inline.path("Html").asText(null);
                 // Shape validation belongs before the tenant gate below, as on SendEmail.
                 SesService.requireInlineTemplateContent(subject, text, html);
-            } else {
+            }
+            // AWS counts the entries after the inline content check and before it looks the stored
+            // template up (probe-confirmed).
+            SesService.requireBulkDestinationCount(bulkEntries.size());
+            if (!hasInline) {
                 String resolvedName = hasName
                         ? templateName
                         : SesTemplateService.templateNameFromArn(templateArn);
@@ -308,12 +316,6 @@ public class SesSendController {
             List<MessageTag> defaultEmailTags = parseEmailTagsArray(request.path("DefaultEmailTags"), "DefaultEmailTags");
             List<MessageHeader> defaultHeaders =
                     parseHeadersArray(template.path("Headers"), "defaultContent.template.headers");
-
-            JsonNode bulkEntries = request.path("BulkEmailEntries");
-            if (!bulkEntries.isArray() || bulkEntries.isEmpty()) {
-                throw new AwsException("BadRequestException",
-                        "BulkEmailEntries must be a non-empty array.", 400);
-            }
 
             List<BulkEmailEntry> entries = new ArrayList<>();
             int entryIndex = 1;
