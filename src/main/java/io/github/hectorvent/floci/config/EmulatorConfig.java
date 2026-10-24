@@ -1104,6 +1104,34 @@ public interface EmulatorConfig {
         /** How long a BATCH job run stays RUNNING before it succeeds; 0 = a run succeeds as soon as it starts. */
         @WithDefault("0")
         int jobRunDurationSeconds();
+
+        /**
+         * {@code immediate} follows the job run states without running anything; {@code docker} runs
+         * each Spark job run's {@code spark-submit} in a container of the release's EMR Serverless image.
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        Optional<String> dockerNetwork();
+
+        /**
+         * The image a {@code docker} job run uses, with {@code %s} standing for the application's
+         * release label, for example "registry.internal/emr-serverless/spark/%s:20250425". If omitted,
+         * Floci uses the release's public image on Amazon ECR Public.
+         */
+        Optional<String> imageTemplate();
+
+        /**
+         * When true, Floci removes, in the {@code docker} runner mode, every EMR Serverless driver a
+         * previous run of <em>this same</em> Floci left on the daemon (matched by the
+         * {@code io.floci.owner} label) before its first job run starts. Turn it off when two Floci
+         * instances share a daemon with the same port and no resource namespace, so one does not
+         * remove the other's drivers.
+         *
+         * Env var: FLOCI_SERVICES_EMRSERVERLESS_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
     }
 
     interface Route53ResolverServiceConfig {

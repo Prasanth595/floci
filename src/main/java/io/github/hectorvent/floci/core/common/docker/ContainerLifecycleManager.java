@@ -525,6 +525,10 @@ public class ContainerLifecycleManager {
         } catch (NotFoundException e) {
             LOG.debugv("Container {0} not found (already removed)", containerId);
             stoppedOrMissing = true;
+        } catch (NotModifiedException e) {
+            // HTTP 304: the container had already exited, which is the outcome the stop wanted.
+            LOG.debugv("Container {0} had already stopped", containerId);
+            stoppedOrMissing = true;
         } catch (Exception e) {
             LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
         }
@@ -586,6 +590,9 @@ public class ContainerLifecycleManager {
             LOG.debugv("Container {0} not found (already removed)", containerId);
             closeLogStreamIfPresent(logStream);
             return;
+        } catch (NotModifiedException e) {
+            // HTTP 304: the container had already exited, which is the outcome the stop wanted.
+            LOG.debugv("Container {0} had already stopped", containerId);
         } catch (Exception e) {
             stopFailure = e;
             LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
