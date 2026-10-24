@@ -86,7 +86,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -2488,8 +2487,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             return 0;
         }
         try {
-            return Integer.parseInt(new String(Base64.getUrlDecoder().decode(nextToken),
-                    StandardCharsets.UTF_8));
+            return Integer.parseInt(Base64Url.decode(nextToken));
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
         }

@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.core.common;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.function.Function;
@@ -142,7 +140,7 @@ public final class Pagination {
             return null;
         }
         try {
-            return new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            return Base64Url.decode(token);
         } catch (IllegalArgumentException e) {
             return null;
         }

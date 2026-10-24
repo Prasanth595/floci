@@ -3662,7 +3662,7 @@ public class S3Service implements Resettable, ResourceProvider {
             return null;
         }
         try {
-            return new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            return Base64Url.decode(token);
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidArgument", "The continuation token you provided is invalid.", 400);
         }

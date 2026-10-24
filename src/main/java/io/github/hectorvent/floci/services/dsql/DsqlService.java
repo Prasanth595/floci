@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -624,7 +625,7 @@ public class DsqlService implements Resettable {
 
     private static String[] tokenPosition(String nextToken) {
         try {
-            String[] position = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8)
+            String[] position = Base64Url.decode(nextToken)
                     .split(" ", 2);
             if (position.length == 2) {
                 Instant.parse(position[0]);

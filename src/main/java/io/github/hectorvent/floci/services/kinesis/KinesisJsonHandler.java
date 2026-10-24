@@ -273,7 +273,7 @@ public class KinesisJsonHandler {
             throw invalidNextToken();
         }
         try {
-            String cursor = new String(Base64.getUrlDecoder().decode(token.cursor()), StandardCharsets.UTF_8);
+            String cursor = Base64Url.decode(token.cursor());
             if (!Base64Url.encode(cursor).equals(token.cursor())) {
                 throw invalidNextToken();
             }
@@ -824,7 +824,7 @@ public class KinesisJsonHandler {
         }
         String decoded;
         try {
-            decoded = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+            decoded = Base64Url.decode(nextToken);
         } catch (IllegalArgumentException e) {
             throw invalidNextToken();
         }

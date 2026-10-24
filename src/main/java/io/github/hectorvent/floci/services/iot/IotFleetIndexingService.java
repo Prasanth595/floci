@@ -23,7 +23,6 @@ import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -267,7 +266,7 @@ public class IotFleetIndexingService {
         }
         Matcher token;
         try {
-            token = PAGE_TOKEN.matcher(new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8));
+            token = PAGE_TOKEN.matcher(Base64Url.decode(nextToken));
         } catch (IllegalArgumentException e) {
             throw invalid("Invalid nextToken");
         }

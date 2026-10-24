@@ -5608,8 +5608,7 @@ public class CognitoService implements ResourceProvider {
             System.arraycopy(parts, usernameEnd, fields, 2, 3);
             fields[5] = hasAuthTime ? parts[end].substring(REFRESH_TOKEN_AUTH_TIME_FIELD.length()) : "";
             if (hasScopes) {
-                fields[6] = new String(Base64.getUrlDecoder().decode(
-                        parts[parts.length - 1].substring(REFRESH_TOKEN_SCOPE_FIELD.length())), StandardCharsets.UTF_8);
+                fields[6] = Base64Url.decode(parts[parts.length - 1].substring(REFRESH_TOKEN_SCOPE_FIELD.length()));
             }
             return fields;
         } catch (Exception ignored) { }
