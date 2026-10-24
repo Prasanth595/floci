@@ -16,20 +16,30 @@ import software.amazon.awssdk.services.redshiftdata.RedshiftDataClient;
 import software.amazon.awssdk.services.redshiftdata.model.BatchExecuteStatementRequest;
 import software.amazon.awssdk.services.redshiftdata.model.DescribeStatementRequest;
 import software.amazon.awssdk.services.redshiftdata.model.DescribeStatementResponse;
+import software.amazon.awssdk.services.redshiftdata.model.DescribeTableResponse;
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementRequest;
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultRequest;
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultResponse;
+import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultV2Response;
+import software.amazon.awssdk.services.redshiftdata.model.ResultFormatString;
+import software.amazon.awssdk.services.redshiftdata.model.SqlParameter;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
+import software.amazon.awssdk.services.redshiftdata.model.ValidationException;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("Redshift Data API Operations")
 class RedshiftDataOperationsTest {
@@ -124,6 +134,84 @@ class RedshiftDataOperationsTest {
         assertThat(result.records().get(0).get(1).stringValue()).isEqualTo("a");
     }
 
+    @Test
+    @DisplayName("named SQL parameters are bound through the SDK model")
+    void parameterizedStatementBindsSqlParameters() throws Exception {
+        String id = data.executeStatement(ExecuteStatementRequest.builder()
+                .clusterIdentifier(clusterId)
+                .database(DATABASE)
+                .dbUser(USERNAME)
+                .sql("SELECT CAST(:value AS INTEGER) + 1 AS result")
+                .parameters(SqlParameter.builder().name("value").value("41").build())
+                .build()).id();
+        awaitFinished(id);
+
+        GetStatementResultResponse result = data.getStatementResult(request -> request.id(id));
+        assertThat(result.records()).hasSize(1);
+        assertThat(result.records().get(0).get(0).longValue()).isEqualTo(42L);
+        assertThat(describe(id).queryParameters()).containsExactly(
+                SqlParameter.builder().name("value").value("41").build());
+    }
+
+    @Test
+    @DisplayName("batch response and child statement results round trip through the SDK")
+    void batchResultsExposeChildStatements() throws Exception {
+        String id = data.batchExecuteStatement(BatchExecuteStatementRequest.builder()
+                .clusterIdentifier(clusterId)
+                .database(DATABASE)
+                .dbUser(USERNAME)
+                .sqls("SELECT 11 AS value", "SELECT 22 AS value")
+                .build()).id();
+        awaitFinished(id);
+
+        DescribeStatementResponse batch = describe(id);
+        assertThat(batch.status()).isEqualTo(StatusString.FINISHED);
+        assertThat(batch.subStatements()).hasSize(2);
+        assertThat(batch.subStatements()).extracting("statusAsString").containsOnly("FINISHED");
+
+        GetStatementResultResponse parentResult = data.getStatementResult(request -> request.id(id));
+        assertThat(parentResult.records().get(0).get(0).longValue()).isEqualTo(22L);
+        GetStatementResultResponse firstChild = data.getStatementResult(request -> request.id(batch.subStatements().get(0).id()));
+        assertThat(firstChild.records().get(0).get(0).longValue()).isEqualTo(11L);
+    }
+
+    @Test
+    @DisplayName("result paging returns every row once through SDK next tokens")
+    void resultPagingRoundTripsSdkNextToken() throws Exception {
+        String sql = IntStream.rangeClosed(1, 1001).mapToObj(value -> "SELECT " + value + " AS value")
+                .collect(Collectors.joining(" UNION ALL "));
+        String id = run(sql);
+
+        GetStatementResultResponse firstPage = data.getStatementResult(request -> request.id(id));
+        assertThat(firstPage.records()).hasSize(1000);
+        assertThat(firstPage.nextToken()).isNotBlank();
+        GetStatementResultResponse secondPage = data.getStatementResult(request -> request.id(id)
+                .nextToken(firstPage.nextToken()));
+        assertThat(secondPage.records()).hasSize(1);
+        assertThat(secondPage.nextToken()).isNull();
+
+        Set<Long> values = new HashSet<>();
+        firstPage.records().forEach(record -> values.add(record.get(0).longValue()));
+        secondPage.records().forEach(record -> values.add(record.get(0).longValue()));
+        assertThat(values).hasSize(1001).contains(1L, 1001L);
+    }
+
+    @Test
+    @DisplayName("V2 result CSV union is unmarshalled by the SDK")
+    void resultV2SupportsCsvRecords() throws Exception {
+        String id = data.executeStatement(request -> request.clusterIdentifier(clusterId).database(DATABASE)
+                .dbUser(USERNAME).resultFormat(ResultFormatString.CSV)
+                .sql("SELECT 1 AS id, 'a' AS name UNION ALL SELECT 2, 'b'"))
+                .id();
+        awaitFinished(id);
+
+        GetStatementResultV2Response result = data.getStatementResultV2(request -> request.id(id));
+        assertThat(result.resultFormat()).isEqualTo(ResultFormatString.CSV);
+        assertThat(result.records()).hasSize(2);
+        assertThat(result.records()).extracting("csvRecords").containsExactly("1,a", "2,b");
+        assertThat(result.columnMetadata()).extracting("name").containsExactly("id", "name");
+    }
+
     /**
      * Redshift stores INTERVAL YEAR TO MONTH and INTERVAL DAY TO SECOND columns and the
      * Data API returns them as strings, checked against a real cluster on 2026-09-13. pgjdbc
@@ -184,6 +272,79 @@ class RedshiftDataOperationsTest {
         assertThat(failure("SELECT line '{1,2,3}'")).isEqualTo("ERROR: type \"line\" not yet implemented");
         assertThat(failure("SELECT '{\"a\":1}'::json")).isEqualTo("ERROR: type \"json\" does not exist");
         assertThat(failure("SELECT '{\"a\":1}'::jsonb")).isEqualTo("ERROR: type \"jsonb\" does not exist");
+    }
+
+    @Test
+    @DisplayName("metadata operations return SDK response models")
+    void metadataOperationsReturnSdkModels() throws Exception {
+        String tableName = TestFixtures.uniqueName("rsdata_meta").replace('-', '_');
+        run("CREATE TABLE public." + tableName + " (id integer, label varchar(32))");
+        try {
+            assertThat(data.listDatabases(request -> request.clusterIdentifier(clusterId)
+                    .database(DATABASE).dbUser(USERNAME)).databases()).contains(DATABASE);
+
+            assertThat(data.listSchemas(request -> request.clusterIdentifier(clusterId)
+                    .database(DATABASE).dbUser(USERNAME).schemaPattern("public")).schemas()).contains("public");
+
+            assertThat(data.listTables(request -> request.clusterIdentifier(clusterId)
+                    .database(DATABASE).dbUser(USERNAME).schemaPattern("public").tablePattern(tableName))
+                    .tables()).anySatisfy(table -> {
+                assertThat(table.name()).isEqualTo(tableName);
+                assertThat(table.schema()).isEqualTo("public");
+            });
+
+            DescribeTableResponse described = data.describeTable(request -> request.clusterIdentifier(clusterId)
+                    .database(DATABASE).dbUser(USERNAME).schema("public").table(tableName));
+            assertThat(described.tableName()).isEqualTo(tableName);
+            assertThat(described.columnList()).extracting("name").containsExactly("id", "label");
+            assertThat(described.columnList()).extracting("typeName").allMatch(typeName -> !((String) typeName).isBlank());
+        } finally {
+            run("DROP TABLE public." + tableName);
+        }
+    }
+
+    @Test
+    @DisplayName("ListStatements paginator returns matching SDK statement models")
+    void listStatementsPaginatorReturnsMatchingStatements() throws Exception {
+        String statementName = TestFixtures.uniqueName("rsdata_list");
+        for (int value = 1; value <= 3; value++) {
+            int queryValue = value;
+            String id = data.executeStatement(request -> request.clusterIdentifier(clusterId).database(DATABASE)
+                    .dbUser(USERNAME).statementName(statementName).sql("SELECT " + queryValue))
+                    .id();
+            awaitFinished(id);
+        }
+
+        List<String> statementIds = data.listStatementsPaginator(request -> request.clusterIdentifier(clusterId)
+                        .statementName(statementName).maxResults(1))
+                .statements().stream()
+                .map(statement -> statement.id())
+                .toList();
+        assertThat(statementIds).hasSize(3).doesNotHaveDuplicates();
+        assertThat(data.listStatements(request -> request.clusterIdentifier(clusterId).statementName(statementName)
+                .status(StatusString.FINISHED)).statements()).hasSize(3);
+    }
+
+    @Test
+    @DisplayName("cancellation reaches the SDK's ABORTED statement status")
+    void cancelStatementReturnsAbortedStatus() throws Exception {
+        String id = submit("SELECT pg_sleep(20)");
+        awaitStatus(id, StatusString.STARTED);
+
+        assertThat(data.cancelStatement(request -> request.id(id)).status()).isTrue();
+        assertThat(awaitStatus(id, StatusString.ABORTED).status()).isEqualTo(StatusString.ABORTED);
+    }
+
+    @Test
+    @DisplayName("SDK surfaces service validation and statement failure separately")
+    void sdkReportsStatementAndRequestErrors() throws Exception {
+        String failedId = submit("SELECT * FROM " + TestFixtures.uniqueName("missing_table").replace('-', '_'));
+        DescribeStatementResponse failed = awaitStatus(failedId, StatusString.FAILED);
+        assertThat(failed.error()).contains("does not exist");
+
+        assertThatThrownBy(() -> data.executeStatement(request -> request
+                        .clusterIdentifier(clusterId).workgroupName("unused").database(DATABASE).sql("SELECT 1")))
+                .isInstanceOf(ValidationException.class);
     }
 
     @Test
@@ -321,5 +482,21 @@ class RedshiftDataOperationsTest {
 
     private DescribeStatementResponse describe(String id) {
         return data.describeStatement(DescribeStatementRequest.builder().id(id).build());
+    }
+
+    private DescribeStatementResponse awaitStatus(String id, StatusString expected) throws InterruptedException {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(30));
+        DescribeStatementResponse statement = describe(id);
+        while (Instant.now().isBefore(deadline)) {
+            if (statement.status() == expected) {
+                return statement;
+            }
+            if (statement.status() == StatusString.FAILED || statement.status() == StatusString.ABORTED) {
+                throw new IllegalStateException("Statement " + id + " ended " + statement.status() + ": " + statement.error());
+            }
+            Thread.sleep(250);
+            statement = describe(id);
+        }
+        throw new IllegalStateException("Statement " + id + " did not reach " + expected + " in time");
     }
 }
