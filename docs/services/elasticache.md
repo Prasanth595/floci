@@ -8,15 +8,21 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 
 ## Encrypted cache connections
 
-Redis/Valkey replication groups with transit encryption enabled require TLS at the
-advertised proxy endpoint. This includes groups using an AUTH token or IAM authentication,
-and a group remains encrypted when its last user group is removed. Serverless Redis/Valkey
-endpoints also require TLS. Unencrypted caches and Memcached retain their existing transport.
+Redis/Valkey replication groups with transit encryption enabled take TLS at the advertised
+proxy endpoint. This includes groups using an AUTH token or IAM authentication, and a group
+remains encrypted when its last user group is removed. With `TransitEncryptionMode` set to
+`preferred`, the endpoint takes both TLS and unencrypted connections so clients can move to
+TLS; any other encrypted group takes TLS only. A modify that moves a `preferred` group to
+`required` closes its open unencrypted connections, as AWS does, and its TLS connections carry
+on. AWS adds new TLS endpoints while a group is `preferred`; Floci serves both kinds on the one
+endpoint. Serverless Redis/Valkey endpoints take TLS only. Unencrypted caches and Memcached
+retain their existing transport.
 
 The cache listener uses a server certificate issued by Floci's shared local CA, including
 the default Floci endpoint names, IPv4 and IPv6 loopback, `host.docker.internal`,
 the `floci.base-url` host, and the configured Floci and cluster-announce hostnames.
-The listener renews its leaf certificate before expiry while retaining the same trusted CA.
+The listener renews its leaf certificate a minute before it expires, never past the CA's own
+expiry, while retaining the same trusted CA.
 Trust `{persistent-path}/tls/floci-root-ca.crt` or the CA from `GET /_floci/ca.pem`.
 The main HTTP listener's TLS setting does not disable cache transit encryption.
 
@@ -26,9 +32,7 @@ valkey-cli --tls --cacert ./floci-root-ca.crt -h localhost -p "$CACHE_PORT" \
 ```
 
 TLS terminates in Floci's cache proxy; the Docker backend hop retains its existing
-transport. This implements required TLS. Mixed plaintext/TLS migration for
-`TransitEncryptionMode=preferred` is not implemented; encrypted endpoints require TLS.
-This does not add Memcached transit encryption or change cache-user ACL enforcement.
+transport. This does not add Memcached transit encryption or change cache-user ACL enforcement.
 
 ## Supported Management Actions
 

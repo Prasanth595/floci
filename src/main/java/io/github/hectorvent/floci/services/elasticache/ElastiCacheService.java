@@ -32,6 +32,7 @@ import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
+import io.github.hectorvent.floci.services.elasticache.model.TransitEncryption;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheAuthProxy;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import io.github.hectorvent.floci.services.kms.KmsService;
@@ -1637,8 +1638,9 @@ public class ElastiCacheService implements ResourceProvider {
                         }
 
                         @Override
-                        public boolean transitEncryptionEnabled() {
-                            return cluster.getAuthMode() != AuthMode.NO_AUTH;
+                        public TransitEncryption transitEncryption() {
+                            return cluster.getAuthMode() != AuthMode.NO_AUTH
+                                    ? TransitEncryption.REQUIRED : TransitEncryption.NONE;
                         }
                     });
         } else {
@@ -1689,8 +1691,8 @@ public class ElastiCacheService implements ResourceProvider {
             }
 
             @Override
-            public boolean transitEncryptionEnabled() {
-                return true;
+            public TransitEncryption transitEncryption() {
+                return TransitEncryption.REQUIRED;
             }
 
             @Override
@@ -1824,6 +1826,7 @@ public class ElastiCacheService implements ResourceProvider {
                 }
 
                 boolean hadUserGroups = !group.getUserGroupIds().isEmpty();
+                boolean tookUnencrypted = group.transitEncryption() != TransitEncryption.REQUIRED;
                 settings.applyTo(group);
                 group.setUserGroupIds(nextUserGroupIds);
                 group.getAssociatedUserIds().addAll(directUsersToAdd);
@@ -1839,8 +1842,19 @@ public class ElastiCacheService implements ResourceProvider {
                 }
 
                 groups.put(groupId, group);
+                if (tookUnencrypted && group.transitEncryption() == TransitEncryption.REQUIRED) {
+                    dropUnencryptedConnections(group);
+                }
                 return group;
             }
+        }
+    }
+
+    /** Required transit encryption drops every unencrypted connection, the node endpoints' included. */
+    private void dropUnencryptedConnections(ReplicationGroup group) {
+        proxyManager.dropUnencryptedConnections(group.getReplicationGroupId());
+        for (ClusterNode node : group.getClusterNodes()) {
+            proxyManager.dropUnencryptedConnections(node.getMemberClusterId());
         }
     }
 
@@ -2524,9 +2538,9 @@ public class ElastiCacheService implements ResourceProvider {
             }
 
             @Override
-            public boolean transitEncryptionEnabled() {
+            public TransitEncryption transitEncryption() {
                 return groups.getForAccount(accountId, groupId)
-                        .map(ReplicationGroup::isEncryptedInTransit).orElse(true);
+                        .map(ReplicationGroup::transitEncryption).orElse(TransitEncryption.REQUIRED);
             }
 
             @Override

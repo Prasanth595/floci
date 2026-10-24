@@ -418,6 +418,21 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void requiredTransitEncryptionDropsTheUnencryptedConnectionsPreferredTook() {
+        service.createReplicationGroup("open", "test", AuthMode.NO_AUTH, null, "us-east-1");
+
+        service.modifyReplicationGroup("open", null, null,
+                new ReplicationGroupSettings(null, null, null, null, "preferred", true));
+        verify(proxyManager, never()).dropUnencryptedConnections(anyString());
+
+        service.modifyReplicationGroup("open", null, null,
+                new ReplicationGroupSettings(null, null, null, null, "required"));
+        service.modifyReplicationGroup("open", null, null, ReplicationGroupSettings.unchanged());
+
+        verify(proxyManager, times(1)).dropUnencryptedConnections("open");
+    }
+
+    @Test
     void createReplicationGroupRejectsAnUnknownUserGroupBeforeProvisioning() {
         ElastiCacheService.CreateReplicationGroupRequest request = new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", null, null, null, null, null,

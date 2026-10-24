@@ -56,6 +56,14 @@ public class ElastiCacheProxyManager {
         }
     }
 
+    /** Closes the proxy's unencrypted connections; its encrypted ones carry on. */
+    public void dropUnencryptedConnections(String groupId) {
+        ElastiCacheAuthProxy proxy = proxies.get(groupId);
+        if (proxy != null) {
+            proxy.dropUnencryptedConnections();
+        }
+    }
+
     public void stopAll() {
         proxies.values().forEach(ElastiCacheAuthProxy::stop);
         proxies.clear();

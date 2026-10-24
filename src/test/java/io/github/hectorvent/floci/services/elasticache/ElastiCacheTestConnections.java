@@ -5,15 +5,13 @@ import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
+import io.github.hectorvent.floci.testing.TlsTrust;
 import jakarta.enterprise.inject.spi.CDI;
 
-import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
-import javax.net.ssl.TrustManagerFactory;
 import java.io.IOException;
 import java.net.Socket;
-import java.security.KeyStore;
 
 /** Real CA validation for cache data-plane tests; never uses a trust-all manager. */
 public final class ElastiCacheTestConnections {
@@ -49,8 +47,8 @@ public final class ElastiCacheTestConnections {
         }
         try {
             FlociCertificateAuthority authority = CDI.current().select(FlociCertificateAuthority.class).get();
-            SSLContext context = trustedContext(authority);
-            SSLSocket socket = (SSLSocket) context.getSocketFactory().createSocket(host, port);
+            SSLSocket socket = (SSLSocket) TlsTrust.trusting(authority.certificate()).getSocketFactory()
+                    .createSocket(host, port);
             SSLParameters parameters = socket.getSSLParameters();
             parameters.setEndpointIdentificationAlgorithm("HTTPS");
             socket.setSSLParameters(parameters);
@@ -60,16 +58,5 @@ public final class ElastiCacheTestConnections {
         } catch (Exception e) {
             throw new IOException("Could not establish a trusted cache TLS connection", e);
         }
-    }
-
-    public static SSLContext trustedContext(FlociCertificateAuthority authority) throws Exception {
-        KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
-        trust.load(null, null);
-        trust.setCertificateEntry("floci", authority.certificate());
-        TrustManagerFactory managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        managers.init(trust);
-        SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, managers.getTrustManagers(), null);
-        return context;
     }
 }
