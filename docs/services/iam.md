@@ -1668,9 +1668,13 @@ or on the `x-amz-cbor-1.1` one, names its resource and condition keys (a queue U
 authorizes an operation as a single action of another name, Floci does the same: `SendMessageBatch`
 is checked as `sqs:SendMessage` and `PublishBatch` as `sns:Publish`, so a policy granting the
 single-message action covers the batch call, and one naming the batch operation, which is not an
-IAM action, grants nothing. The mapping is taken from AWS's Service Reference and vendored in
-`src/main/resources/aws/iam-authorized-actions.json`. DynamoDB `TransactGetItems`, which AWS checks
-as `dynamodb:GetItem`, is checked item by item, as described under
+IAM action, grants nothing. Budgets operations other than its budget actions are checked as
+`budgets:ModifyBudget` or `budgets:ViewBudget`, which the Service Reference lists for them beside the
+`aws-portal` Billing console permissions. Those are not checked: the Billing and Cost Management user
+guide, on moving off them, says "Programmatic requests to AWS Cost Explorer, AWS Cost and Usage
+Reports, and AWS Budgets remains unaffected". The mapping is taken from AWS's Service Reference and
+vendored in `src/main/resources/aws/iam-authorized-actions.json`. DynamoDB `TransactGetItems`, which
+AWS checks as `dynamodb:GetItem`, is checked item by item, as described under
 [Condition keys floci populates](#condition-keys-floci-populates): each `Get` as
 `dynamodb:GetItem` on its own table, with its own `dynamodb:LeadingKeys`.
 
