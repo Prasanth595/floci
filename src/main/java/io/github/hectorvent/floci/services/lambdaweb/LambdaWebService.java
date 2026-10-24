@@ -231,11 +231,17 @@ public class LambdaWebService implements Resettable {
         return Optional.ofNullable(originHosts.get(host));
     }
 
-    /** Floci serves the MultiRegion global domain in the home region. */
+    /**
+     * AWS serves the MultiRegion global domain in the region nearest the caller. Floci takes the default region for
+     * that when the endpoint has it, and the home region otherwise.
+     */
     private void indexDomains(WebFunction fn, WebFunctionEndpoint endpoint) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.functionArn);
+        String defaultRegion = regionResolver.getDefaultRegion();
+        String servingRegion = "MultiRegion".equals(endpoint.endpointType) && endpoint.regions.contains(defaultRegion)
+                ? defaultRegion : arn.region();
         index(endpoint.domainName, new EndpointLocator(arn.accountId(), arn.region(), fn.functionName,
-                endpoint.endpointName, arn.region()));
+                endpoint.endpointName, servingRegion));
         endpoint.regionalDomainNames.forEach((region, domain) -> index(domain, new EndpointLocator(arn.accountId(),
                 arn.region(), fn.functionName, endpoint.endpointName, region)));
     }

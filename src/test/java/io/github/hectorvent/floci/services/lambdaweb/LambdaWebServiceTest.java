@@ -652,6 +652,28 @@ class LambdaWebServiceTest {
     }
 
     @Test
+    void theGlobalDomainIsServedInTheDefaultRegionWhenTheEndpointHasIt() {
+        LambdaWebService service = service();
+        service.createFunction("us-west-2", createRequest("app"));
+        String revisionId = service.getEndpoint("us-west-2", "app", "dev").revisionWeights.get(0).revisionId;
+        String near = service.createEndpoint("us-west-2", "app", multiRegion("near", revisionId, REGION)).domainName;
+        String far = service.createEndpoint("us-west-2", "app", multiRegion("far", revisionId, "eu-west-1")).domainName;
+
+        LambdaWebService.WebFunctionTarget target = service.locate(near).orElseThrow();
+        assertEquals("us-west-2", target.region());
+        assertEquals(REGION, target.servingRegion());
+        assertEquals("us-west-2", service.locate(far).orElseThrow().servingRegion());
+    }
+
+    private ObjectNode multiRegion(String name, String revisionId, String region) {
+        ObjectNode request = mapper.createObjectNode().put("endpointName", name).put("endpointType", "MultiRegion")
+                .put("authType", "ApplicationManaged");
+        request.putArray("regions").add(region);
+        request.putArray("revisionWeights").addObject().put("revisionId", revisionId).put("weight", 100);
+        return request;
+    }
+
+    @Test
     void eachRevisionKeepsTheCodeTheObjectHadWhenItWasCreated() throws IOException {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
