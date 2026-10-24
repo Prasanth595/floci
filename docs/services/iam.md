@@ -1526,8 +1526,8 @@ role each passes:
   `targetRoleArn`, which the association's role assumes. `CreateAccessEntry` passes `principalArn`
   to `ec2.amazonaws.com` when its `type` is `EC2_LINUX` or `EC2_WINDOWS`: "If you create an access
   entry with type EC2_LINUX or EC2_WINDOWS, the IAM principal creating the access entry must have
-  the iam:PassRole permission." AWS also checks it for `CreateCapability`, `UpdateCapability`,
-  `RegisterCluster` and `UpdateClusterConfig`, which Floci does not serve.
+  the iam:PassRole permission." `CreateCapability`, `UpdateCapability` and `RegisterCluster`, which
+  Floci does not serve, are checked from the table below.
 - **CloudFormation:** `CreateStack`, `UpdateStack`, `DeleteStack`, `CreateChangeSet` and
   `ContinueUpdateRollback` pass `RoleARN` to `cloudformation.amazonaws.com` when the request names
   one. `CreateStackSet` and `UpdateStackSet` pass `AdministrationRoleARN`, or, for a self-managed
@@ -1586,8 +1586,57 @@ holds it. Redshift takes a role only under the ARN IAM holds it under, path incl
 on the ARN as the request names it covers the role `COPY`, `UNLOAD` and Spectrum then use. The RDS
 user guide has the Enhanced Monitoring role checked: "The user that enables Enhanced Monitoring must
 be granted the PassRole permission." Removing a role from an RDS instance or cluster is checked as
-adding one is, since the Service Reference lists `iam:PassRole` for both. The role parameters of
-other services are not checked yet.
+adding one is, since the Service Reference lists `iam:PassRole` for both.
+
+Every other operation the Service Reference lists with `iam:PassRole`, in the services Floci serves
+over the JSON and Query protocols and Smithy RPC v2 CBOR and in the REST services whose routes are
+authorized as operations, is checked from a table generated from the Service Reference and
+botocore's models, `src/main/resources/aws/iam-passed-roles.json`. A request member names a role
+when its name ends in `Role`, `RoleArn` or `RoleName` (or a plural, or one of those followed by
+`Update` or `Override`) and it holds a string, or a list or map of them; it is read from a JSON or
+CBOR body or from Query form parameters, in either list form, and its role is passed to the service
+the Service Reference names. That covers Athena, CloudTrail, CloudWatch metric streams (to
+`streams.metrics.cloudwatch.amazonaws.com`), CodeBuild, CodeDeploy, CodePipeline, Cognito, Config,
+DataSync, ECR, Firehose, Glue, Kinesis Analytics, CloudWatch Logs, SageMaker, Secrets Manager,
+Budgets actions, SES, SSM, Service Catalog, SWF, Textract, Transcribe and Transfer Family, among
+others. The table lists an operation whether or not Floci serves it, so one Floci serves later is
+checked from the start; one it does not serve answers `AccessDenied` rather than its usual error
+when the caller may not pass the role.
+- A member whose documentation says it takes a role by name, as a Glue job's `Role` and a CodeBuild
+  build's `serviceRoleOverride` do, is checked on the ARN IAM holds the role under, path included,
+  or, for a role IAM does not hold, the ARN the name gives.
+- A role the Service Reference passes to no named service, as it does Cognito's group, user pool and
+  identity pool roles, is checked with no `iam:PassedToService`, so a grant conditioned on that key
+  does not cover it.
+- Members that name no role passed to the service are left out: the roles a Budgets IAM action
+  attaches a policy to, a CodePipeline action's `roleArn`, which the pipeline's role assumes, the
+  execution role of each SSM target account, the roles a Glue job's code-generated nodes assume with
+  STS, a role a Redshift cluster already holds, and Firehose's Snowflake role.
+- Members the rule does not see are added: a Cognito user pool's SMS caller roles, a Glue
+  connection's `ROLE_ARN` property ("The role to be used for running queries"), the role that
+  defines a Glue view, `TableInput.ViewDefinition.Definer` (Lake Formation's view prerequisites ask
+  for "The iam:PassRole permission for AWS Glue and Lake Formation"), and the Service Catalog
+  `AssumeRole` and `LAUNCH_ROLE` keys of a service action's definition and a provisioned product's
+  properties.
+- Some operations are read by hand instead. SNS names its roles in attributes: a topic's
+  `<ENDPOINT>SuccessFeedbackRoleArn` and `<ENDPOINT>FailureFeedbackRoleArn`, which "are used to give
+  Amazon SNS write access to use CloudWatch Logs on your behalf", a platform application's
+  `SuccessFeedbackRoleArn` and `FailureFeedbackRoleArn`, a Firehose subscription's
+  `SubscriptionRoleArn` and the SMS `DeliveryStatusIAMRole`, read as the SNS handlers read the map.
+  A CloudWatch Logs subscription filter policy names its `RoleArn` in its document. A Service
+  Catalog launch constraint names its role in its `Parameters` document, by `RoleArn` or by
+  `LocalRoleName`, which is checked on the ARN IAM holds the role under, and an update goes by the
+  type of the constraint it changes. The type is matched in any case, since Floci keeps it as given.
+  An SWF decision is read from the attributes its `decisionType` names.
+- Not read: an operation whose request names no role (SSM `CreateDocument`, for one); one whose role
+  is a parameter of the runbook it runs (SSM `StartAutomationExecution`, Config
+  `PutRemediationConfigurations`); one the Service Reference passes roles from to several services
+  without saying which member goes where (EMR `RunJobFlow`, whose `JobFlowRole` also names an
+  instance profile, EKS `UpdateClusterConfig`, CloudWatch Logs `CreateImportTask`, SageMaker
+  `CreateTrainingSession`); and one whose body is XML (S3 `PutBucketReplication`). EC2's
+  `RequestSpotFleet` names its roles in EC2's own protocol, one of them as an instance profile. The
+  REST services whose routes no rule maps yet, and API Gateway, which is authorized by HTTP method,
+  are not read either.
 
 A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
 path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that
@@ -1713,8 +1762,10 @@ policy it creates, checked against `*` like `logs:PutAccountPolicy` itself: `log
 for `DATA_PROTECTION_POLICY`, `logs:PutSubscriptionFilter` for `SUBSCRIPTION_FILTER_POLICY`,
 `logs:PutTransformer` for `TRANSFORMER_POLICY`, `logs:PutIndexPolicy` for `FIELD_INDEX_POLICY` and
 `logs:PutMetricExtractionPolicy` for `METRIC_EXTRACTION_POLICY`. Without it the request is refused with
-`AccessDeniedException` and no policy is stored. The `iam:PassRole` a subscription filter policy with a
-`RoleArn` also needs is not checked.
+`AccessDeniedException` and no policy is stored. A subscription filter policy whose document names a
+`RoleArn` also needs `iam:PassRole` on it for `logs.amazonaws.com`: "To perform a PutAccountPolicy
+subscription filter operation for any destination except a Lambda function, you must also have the
+iam:PassRole permission."
 `DescribeAccountPolicies` likewise needs the read action for the type it lists:
 `logs:GetDataProtectionPolicy`, `logs:DescribeSubscriptionFilters`, `logs:GetTransformer` or
 `logs:DescribeIndexPolicies`. Its reference names none for `METRIC_EXTRACTION_POLICY`, which needs only
