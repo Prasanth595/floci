@@ -741,9 +741,8 @@ public class CloudFrontServingController {
                         putHeader(headers, "Access-Control-Max-Age",
                                 Integer.toString(cors.maxAgeSeconds()));
                     }
-                    if (!cors.allowedHeaders().isEmpty()) {
-                        putHeader(headers, "Access-Control-Allow-Headers",
-                                String.join(", ", cors.allowedHeaders()));
+                    if (cors.allowHeaders() != null) {
+                        putHeader(headers, "Access-Control-Allow-Headers", cors.allowHeaders());
                     }
                     if (!cors.exposeHeaders().isEmpty()) {
                         putHeader(headers, "Access-Control-Expose-Headers",

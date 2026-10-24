@@ -1496,11 +1496,8 @@ public class S3Controller {
         if (cors.maxAgeSeconds() > 0) {
             builder.header("Access-Control-Max-Age", cors.maxAgeSeconds());
         }
-        if (!cors.allowedHeaders().isEmpty()) {
-            String hdrs = cors.allowedHeaders().contains("*")
-                    ? "*"
-                    : String.join(", ", cors.allowedHeaders());
-            builder.header("Access-Control-Allow-Headers", hdrs);
+        if (cors.allowHeaders() != null) {
+            builder.header("Access-Control-Allow-Headers", cors.allowHeaders());
         }
         if (!cors.exposeHeaders().isEmpty()) {
             builder.header("Access-Control-Expose-Headers", String.join(", ", cors.exposeHeaders()));

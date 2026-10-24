@@ -5478,10 +5478,14 @@ public class S3Service implements Resettable, ResourceProvider {
         return bucket.getCorsConfiguration();
     }
 
+    /**
+     * The CORS rule a request matched. {@code allowHeaders} is the preflight's
+     * Access-Control-Allow-Headers value, or null when the preflight asked for no headers.
+     */
     public record CorsEvalResult(
         String allowedOrigin,
         List<String> allowedMethods,
-        List<String> allowedHeaders,
+        String allowHeaders,
         List<String> exposeHeaders,
         int maxAgeSeconds
     ) {}
@@ -5534,14 +5538,28 @@ public class S3Service implements Resettable, ResourceProvider {
             if (requestHeaders != null && !requestHeaders.isEmpty()) {
                 boolean headersOk = allowedHeaders.contains("*")
                     || requestHeaders.stream().allMatch(rh ->
-                        allowedHeaders.stream().anyMatch(ah -> ah.equalsIgnoreCase(rh)));
+                        allowedHeaders.stream().anyMatch(ah -> matchesCorsHeader(ah, rh)));
                 if (!headersOk) continue;
             }
 
             String echoOrigin = allowedOrigins.contains("*") ? "*" : origin;
-            return Optional.of(new CorsEvalResult(echoOrigin, allowedMethods, allowedHeaders, exposeHeaders, maxAge));
+            // S3 sends back the headers the preflight asked for, and no Access-Control-Allow-Headers
+            // when it asked for none. An AllowedHeader such as x-amz-* is a pattern, not a header name
+            // a browser can match, so the requested names are listed; a bare * still answers *.
+            String allowHeaders = requestHeaders == null || requestHeaders.isEmpty() ? null
+                    : allowedHeaders.contains("*") ? "*" : String.join(", ", requestHeaders);
+            return Optional.of(new CorsEvalResult(echoOrigin, allowedMethods, allowHeaders, exposeHeaders, maxAge));
         }
         return Optional.empty();
+    }
+
+    /**
+     * Matches an AllowedHeader against a header named in Access-Control-Request-Headers. Header
+     * names are case-insensitive, and like an AllowedOrigin an AllowedHeader may hold one {@code *}
+     * wildcard, as in {@code x-amz-*}.
+     */
+    private static boolean matchesCorsHeader(String pattern, String header) {
+        return matchesCorsOrigin(pattern.toLowerCase(Locale.ROOT), header.toLowerCase(Locale.ROOT));
     }
 
     /**
