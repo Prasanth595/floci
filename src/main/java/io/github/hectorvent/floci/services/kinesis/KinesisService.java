@@ -1218,15 +1218,16 @@ public class KinesisService implements ResourceProvider {
 
         // Preserve ordinary-key placement, then resolve historical parents to an open descendant.
         // The producer holds the stream lock, shared with splitShard and mergeShards.
-        List<KinesisShard> shards = List.copyOf(stream.getShards());
+        List<KinesisShard> shards = stream.getShards();
         int index = (int) (Math.abs((long) partitionKey.hashCode()) % shards.size());
         KinesisShard selected = shards.get(index);
         if (!selected.isClosed()) {
             return selected;
         }
 
+        List<KinesisShard> snapshot = List.copyOf(shards);
         Map<String, List<KinesisShard>> children = new HashMap<>();
-        for (KinesisShard shard : shards) {
+        for (KinesisShard shard : snapshot) {
             if (shard.getParentShardId() != null) {
                 children.computeIfAbsent(shard.getParentShardId(), ignored -> new ArrayList<>()).add(shard);
             }

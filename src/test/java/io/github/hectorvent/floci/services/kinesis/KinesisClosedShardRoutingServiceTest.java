@@ -38,7 +38,7 @@ class KinesisClosedShardRoutingServiceTest {
         service.putRecord(STREAM, DATA, "c", REGION);
         split(stream.getShards().getFirst());
 
-        assertOpenDestinationAndUnchangedClosedRecords(stream, "c");
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "c", stream.getShards().get(1));
     }
 
     @Test
@@ -46,7 +46,7 @@ class KinesisClosedShardRoutingServiceTest {
         KinesisStream stream = splitTwoGenerations();
 
         // "b" hashes to 98, selecting the original parent at index zero modulo seven.
-        assertOpenDestinationAndUnchangedClosedRecords(stream, "b");
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "b", stream.getShards().get(3));
     }
 
     @ParameterizedTest
@@ -57,7 +57,7 @@ class KinesisClosedShardRoutingServiceTest {
         split(stream.getShards().get(closedChildIndex));
 
         // "d" selects the root modulo five, with one direct child still open.
-        assertOpenDestinationAndUnchangedClosedRecords(stream, "d");
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "d", stream.getShards().get(3 - closedChildIndex));
     }
 
     @ParameterizedTest
@@ -69,7 +69,7 @@ class KinesisClosedShardRoutingServiceTest {
         split(stream.getShards().get(2));
 
         // With five stored shards, these keys select each original merge parent.
-        assertOpenDestinationAndUnchangedClosedRecords(stream, partitionKey);
+        assertOpenDestinationAndUnchangedClosedRecords(stream, partitionKey, stream.getShards().get(3));
     }
 
     @Test
@@ -80,7 +80,21 @@ class KinesisClosedShardRoutingServiceTest {
                 stream.getShards().get(2).getShardId(), REGION);
         split(stream.getShards().get(3));
 
-        assertOpenDestinationAndUnchangedClosedRecords(stream, "f");
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "f", stream.getShards().get(4));
+    }
+
+    @Test
+    void putRecordUsesAReachableChildInsteadOfAnEarlierUnrelatedOpenShard() {
+        KinesisStream stream = service.createStream(STREAM, 2, REGION);
+        service.putRecordWithShardId(STREAM, DATA, "d", "0", REGION);
+        split(stream.getShards().getFirst());
+
+        // "d" selects the closed parent modulo four; shard one is unrelated and open.
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "d", stream.getShards().get(2));
+
+        assertEquals(1, stream.getShards().get(0).recordCount());
+        assertEquals(0, stream.getShards().get(1).recordCount());
+        assertEquals(1, stream.getShards().get(2).recordCount());
     }
 
     @Test
@@ -156,7 +170,8 @@ class KinesisClosedShardRoutingServiceTest {
                 .divide(BigInteger.TWO).toString(), REGION);
     }
 
-    private void assertOpenDestinationAndUnchangedClosedRecords(KinesisStream stream, String partitionKey) {
+    private void assertOpenDestinationAndUnchangedClosedRecords(KinesisStream stream, String partitionKey,
+                                                               KinesisShard expectedDestination) {
         Map<String, Integer> closedCounts = stream.getShards().stream().filter(KinesisShard::isClosed)
                 .collect(Collectors.toMap(KinesisShard::getShardId, KinesisShard::recordCount));
         KinesisService.PutRecordResult result = service.putRecordWithShardId(STREAM, DATA, partitionKey, REGION);
@@ -164,8 +179,7 @@ class KinesisClosedShardRoutingServiceTest {
                 .filter(shard -> result.shardId().equals(shard.getShardId())).findFirst().orElseThrow();
 
         assertFalse(destination.isClosed());
-        assertEquals(stream.getShards().stream()
-                .filter(shard -> !shard.isClosed()).findFirst().orElseThrow().getShardId(), result.shardId());
+        assertEquals(expectedDestination.getShardId(), result.shardId());
         assertEquals(result.sequenceNumber(), destination.getRecords().getLast().getSequenceNumber());
         stream.getShards().stream().filter(KinesisShard::isClosed)
                 .forEach(shard -> assertEquals(closedCounts.get(shard.getShardId()).intValue(), shard.recordCount()));
