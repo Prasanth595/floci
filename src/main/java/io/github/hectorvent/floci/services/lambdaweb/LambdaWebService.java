@@ -348,7 +348,7 @@ public class LambdaWebService implements Resettable {
                     throw new AwsException("ConflictException",
                             "The function " + functionArn(region, accountId, functionName) + " already exists.", 409);
                 }
-                if (functions.keys().stream().anyMatch(k -> k.endsWith("/" + functionName))) {
+                if (!functions.scan(k -> k.endsWith("/" + functionName)).isEmpty()) {
                     throw new AwsException("ConflictException", "A function named " + functionName
                             + " already exists in the account. Function names must be unique across all regions"
                             + " in an account.", 409);
