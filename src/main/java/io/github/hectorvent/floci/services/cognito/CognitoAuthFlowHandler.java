@@ -42,6 +42,7 @@ import java.util.function.Function;
  *
  * For CUSTOM_AUTH, dispatches Cognito Lambda triggers
  * (DefineAuthChallenge, CreateAuthChallenge, VerifyAuthChallengeResponse).
+ * CreateAuthChallenge is optional; decision and custom-challenge verification triggers are required.
  * CUSTOM_AUTH is trigger-driven: if any required trigger is not configured,
  * invocation fails, or the response is incomplete, authentication fails.
  *
@@ -1579,6 +1580,9 @@ final class CognitoAuthFlowHandler {
 
     private Map<String, Object> createAuthChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
                                                      CustomAuthSession state, String challengeName) {
+        if (resolveTriggerArn(pool, "CreateAuthChallenge") == null) {
+            return Map.of();
+        }
         Map<String, Object> req = new HashMap<>();
         req.put("challengeName", challengeName);
         req.put("session", new ArrayList<>(state.history));
