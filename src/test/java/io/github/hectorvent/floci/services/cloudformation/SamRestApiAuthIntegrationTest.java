@@ -267,7 +267,7 @@ class SamRestApiAuthIntegrationTest {
                 .when().post("/").then().statusCode(200);
         try {
             CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
-            assertEquals("CREATE_COMPLETE", state.status(), state.reason());
+            assertEquals("CREATE_COMPLETE", state.status(), () -> failureReason(stack, state));
             String outputs = given().contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "DescribeStacks").formParam("StackName", stack)
                     .when().post("/").then().statusCode(200).extract().asString();
@@ -278,6 +278,17 @@ class SamRestApiAuthIntegrationTest {
                     .when().post("/").then().statusCode(200);
             CfnStackWaits.awaitStackDeleted(stack);
         }
+    }
+
+    /**
+     * Why the stack did not reach CREATE_COMPLETE: a transform failure has only the stack's own
+     * reason, and a resource failure (ROLLBACK_COMPLETE) also has the failed resource's.
+     */
+    private static String failureReason(String stack, CfnStackWaits.StackState state) {
+        if (!"ROLLBACK_COMPLETE".equals(state.status())) {
+            return state.reason();
+        }
+        return state.reason() + " " + CfnStackWaits.failedResourceReason(stack);
     }
 
     @FunctionalInterface
