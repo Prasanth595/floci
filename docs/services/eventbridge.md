@@ -103,7 +103,8 @@ one or a malformed target `RoleArn` or `DeadLetterConfig.Arn` returns a
 `ValidationException` before any targets in the request are stored.
 Role ARNs must identify an IAM role with a non-empty name; dead-letter ARNs must
 identify an SQS queue with a region. Both require a published AWS partition and a
-12-digit account ID. These checks do not verify resource existence or permissions.
+12-digit account ID. Queue names are limited to 80 characters, including a FIFO
+suffix when present. These checks do not verify resource existence or permissions.
 
 ## Default Event Bus
 

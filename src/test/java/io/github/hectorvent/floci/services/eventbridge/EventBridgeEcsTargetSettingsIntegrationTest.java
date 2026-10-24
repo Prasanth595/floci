@@ -147,6 +147,21 @@ class EventBridgeEcsTargetSettingsIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"80, false", "80, true", "81, false", "81, true"})
+    void deadLetterQueueNamesRespectTheSqsLengthLimit(int length, boolean fifo) {
+        String name = "q".repeat(length - (fifo ? 5 : 0)) + (fifo ? ".fifo" : "");
+        String arn = "arn:aws:sqs:us-east-1:" + ACCOUNT + ":" + name;
+        if (length > 80) {
+            assertRejected("\"DeadLetterConfig\":{\"Arn\":\"" + arn + "\"}",
+                    "Parameter " + arn + " is not valid. Reason: Provided Arn is not in correct format.");
+        } else {
+            client.putTargets(request -> request.rule(rule).targets(Target.builder().id("t1").arn(CLUSTER)
+                    .deadLetterConfig(config -> config.arn(arn)).build()));
+            assertEquals(arn, listedTarget().deadLetterConfig().arn());
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"aws", "aws-us-gov", "aws-cn", "aws-iso", "aws-iso-b", "aws-iso-e", "aws-iso-f", "aws-eusc"})
     void wellFormedRoleAndDeadLetterArnsRemainAccepted(String partition) {
         String role = "arn:" + partition + ":iam::" + ACCOUNT + ":role/service-role/target";

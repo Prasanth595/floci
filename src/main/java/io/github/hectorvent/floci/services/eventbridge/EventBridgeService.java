@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
@@ -542,9 +543,8 @@ public class EventBridgeService implements ResourceProvider {
         if (AwsArnUtils.isArnFor(arn, service)) {
             AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
             boolean resourceValid = "iam".equals(service)
-                    ? parsed.region().isEmpty() && parsed.resource().startsWith("role/")
-                            && !parsed.resource().substring(5).isBlank() && !parsed.resource().endsWith("/")
-                    : !parsed.region().isBlank() && parsed.resource().matches("[A-Za-z0-9_-]+(?:\\.fifo)?");
+                    ? AwsArnShapes.isIamRole(parsed) && !parsed.resource().endsWith("/")
+                    : !parsed.region().isBlank() && AwsArnShapes.isSqsQueueName(parsed.resource());
             if (AwsPartitions.find(parsed.partition()).isPresent()
                     && parsed.accountId().matches("[0-9]{12}") && resourceValid) {
                 return;

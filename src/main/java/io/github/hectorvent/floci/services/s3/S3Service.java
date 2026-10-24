@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
@@ -5332,8 +5333,7 @@ public class S3Service implements Resettable, ResourceProvider {
             throw invalidNotificationArn(arn, argumentName);
         }
         boolean validResource = switch (service) {
-            case "sqs" -> parsed.resource().matches("[A-Za-z0-9_-]{1,80}")
-                    || parsed.resource().matches("[A-Za-z0-9_-]{1,75}\\.fifo");
+            case "sqs" -> AwsArnShapes.isSqsQueueName(parsed.resource());
             case "sns" -> parsed.resource().matches("[A-Za-z0-9_-]{1,256}")
                     || parsed.resource().matches("[A-Za-z0-9_-]{1,251}\\.fifo");
             case "lambda" -> parsed.resource().matches(
