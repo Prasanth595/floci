@@ -46,7 +46,7 @@ class RedshiftProxyManagerTest {
         EmulatorConfig.RedshiftServiceConfig redshiftConfig = mock(EmulatorConfig.RedshiftServiceConfig.class);
         when(redshiftConfig.proxyHandshakeTimeoutMillis()).thenReturn(5000);
         when(redshiftConfig.proxyBackendConnectTimeoutMillis()).thenReturn(5000);
-        when(redshiftConfig.proxyMaxConnections()).thenReturn(500);
+        when(redshiftConfig.proxyMaxConnections()).thenReturn(2000);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         when(servicesConfig.redshift()).thenReturn(redshiftConfig);
         EmulatorConfig config = mock(EmulatorConfig.class);
@@ -82,7 +82,7 @@ class RedshiftProxyManagerTest {
             Field permitsField = RedshiftAuthProxy.class.getDeclaredField("connectionPermits");
             permitsField.setAccessible(true);
             Semaphore permits = (Semaphore) permitsField.get(proxy);
-            assertEquals(500, permits.availablePermits());
+            assertEquals(2000, permits.availablePermits());
         } finally {
             manager.stopAll();
         }

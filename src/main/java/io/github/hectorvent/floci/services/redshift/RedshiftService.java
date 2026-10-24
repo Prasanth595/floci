@@ -175,7 +175,8 @@ public class RedshiftService {
             try {
                 LOG.infov("Recovering container for persisted cluster: {0}", cluster.getClusterIdentifier());
                 RedshiftContainerHandle handle = containerManager.adoptOrStart(
-                        entry.accountId(), cluster.getClusterIdentifier(), cluster.getMasterUsername(), password);
+                        entry.accountId(), cluster.getClusterIdentifier(), cluster.getMasterUsername(), password,
+                        CLUSTER_DB_NAME, cluster.getNodeType());
 
                 // A cluster persisted before the auth proxy existed has proxyPort == 0. Allocate one
                 // now; its endpoint changes exactly once after this upgrade. Existing clusters keep
@@ -272,7 +273,8 @@ public class RedshiftService {
         int proxyPort = -1;
         try {
             String accountId = clusters.accountId();
-            RedshiftContainerHandle handle = containerManager.start(accountId, identifier, username, password);
+            RedshiftContainerHandle handle = containerManager.start(
+                    accountId, identifier, username, password, CLUSTER_DB_NAME, cluster.getNodeType());
             proxyPort = allocateProxyPort();
             Endpoint endpoint = proxyEndpoint(proxyPort);
             cluster.setProxyPort(proxyPort);
@@ -994,7 +996,8 @@ public class RedshiftService {
 
             String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword() : "admin";
             RedshiftContainerHandle handle = containerManager.start(
-                    accountId, clusterIdentifier, cluster.getMasterUsername(), password);
+                    accountId, clusterIdentifier, cluster.getMasterUsername(), password,
+                    CLUSTER_DB_NAME, cluster.getNodeType());
 
             // Reuse the stored proxy port so the advertised endpoint is unchanged by a reboot.
             if (proxyPort < 0) {
@@ -1309,7 +1312,8 @@ public class RedshiftService {
         int proxyPort = -1;
         try {
             String accountId = clusters.accountId();
-            RedshiftContainerHandle handle = containerManager.start(accountId, clusterIdentifier, username, password);
+            RedshiftContainerHandle handle = containerManager.start(
+                    accountId, clusterIdentifier, username, password, CLUSTER_DB_NAME, cluster.getNodeType());
             proxyPort = allocateProxyPort();
             Endpoint endpoint = proxyEndpoint(proxyPort);
             cluster.setProxyPort(proxyPort);
