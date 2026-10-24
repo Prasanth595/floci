@@ -3,7 +3,6 @@ package com.floci.test;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
-import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 import software.amazon.awssdk.services.dynamodb.waiters.DynamoDbWaiter;
@@ -178,34 +177,18 @@ class DynamoDbExportTest {
     void s3Objects_manifestAndDataExist() throws Exception {
         assertThat(exportArn).isNotNull();
 
-        DescribeExportResponse descResp = ddb.describeExport(
-                DescribeExportRequest.builder().exportArn(exportArn).build());
-        String manifestSummaryKey = descResp.exportDescription().exportManifest();
-        assertThat(manifestSummaryKey).isNotBlank();
-
-        // Verify manifest-summary.json exists
-        ResponseBytes<GetObjectResponse> manifestSummary = s3.getObjectAsBytes(
-                GetObjectRequest.builder().bucket(BUCKET_NAME).key(manifestSummaryKey).build());
-        assertThat(new ObjectMapper().readTree(manifestSummary.asByteArray()).get("outputFormat").asText())
-                .isEqualTo("DYNAMODB_JSON");
-
+        ExportFiles files = readExportFiles(exportArn);
+        assertThat(files.manifestSummary().get("outputFormat").asText()).isEqualTo("DYNAMODB_JSON");
         String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
-        String manifestFilesKey = "exports/AWSDynamoDB/" + exportId + "/manifest-files.json";
+        assertThat(files.manifestSummary().get("manifestFilesS3Key").asText())
+                .isEqualTo("exports/AWSDynamoDB/" + exportId + "/manifest-files.json");
 
-        ResponseBytes<GetObjectResponse> manifestFiles = s3.getObjectAsBytes(
-                GetObjectRequest.builder().bucket(BUCKET_NAME).key(manifestFilesKey).build());
-        JsonNode dataFileEntry = new ObjectMapper().readTree(manifestFiles.asByteArray());
-        String dataKey = dataFileEntry.get("dataFileS3Key").asText();
+        String dataKey = files.dataFileEntry().get("dataFileS3Key").asText();
         assertThat(dataKey).endsWith(".json.gz");
         HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder().bucket(BUCKET_NAME).key(dataKey).build());
-        assertThat(head.eTag()).isEqualTo("\"" + dataFileEntry.get("etag").asText() + "\"").endsWith("-1\"");
+        assertThat(head.eTag()).isEqualTo("\"" + files.dataFileEntry().get("etag").asText() + "\"").endsWith("-1\"");
 
-        // Download and decompress the data file
-        ResponseBytes<GetObjectResponse> dataFile = s3.getObjectAsBytes(
-                GetObjectRequest.builder().bucket(BUCKET_NAME).key(dataKey).build());
-
-        String ndjson = decompressGzip(dataFile.asByteArray());
-        String[] lines = ndjson.split("\n");
+        String[] lines = files.data().split("\n");
         assertThat(lines).hasSize(3);
 
         for (String line : lines) {
@@ -291,20 +274,31 @@ class DynamoDbExportTest {
         try (DynamoDbWaiter waiter = DynamoDbWaiter.builder().client(ddb).build()) {
             waiter.waitUntilExportCompleted(r -> r.exportArn(desc.exportArn()));
         }
-        String exportDir = "exports-ion/AWSDynamoDB/" + desc.exportArn().substring(desc.exportArn().lastIndexOf('/') + 1);
-        JsonNode summary = new ObjectMapper().readTree(s3.getObjectAsBytes(GetObjectRequest.builder()
-                .bucket(BUCKET_NAME).key(exportDir + "/manifest-summary.json").build()).asByteArray());
-        assertThat(summary.get("outputFormat").asText()).isEqualTo("ION");
-        JsonNode dataFileEntry = new ObjectMapper().readTree(s3.getObjectAsBytes(GetObjectRequest.builder()
-                .bucket(BUCKET_NAME).key(exportDir + "/manifest-files.json").build()).asByteArray());
-        String dataKey = dataFileEntry.get("dataFileS3Key").asText();
-        assertThat(dataKey).endsWith(".ion.gz");
-
-        String ion = decompressGzip(s3.getObjectAsBytes(
-                GetObjectRequest.builder().bucket(BUCKET_NAME).key(dataKey).build()).asByteArray());
-        assertThat(ion.split("\n")).hasSize(4)
+        ExportFiles files = readExportFiles(desc.exportArn());
+        assertThat(files.manifestSummary().get("outputFormat").asText()).isEqualTo("ION");
+        assertThat(files.dataFileEntry().get("dataFileS3Key").asText()).endsWith(".ion.gz");
+        assertThat(files.data().split("\n")).hasSize(4)
                 .allSatisfy(line -> assertThat(line).startsWith("$ion_1_0 {Item:{").endsWith("}}"))
                 .anySatisfy(line -> assertThat(line).contains("pk:\"user-3\"", "sk:\"order-003\"", "total:15d1"));
+    }
+
+    /** The manifests and the data of an export that wrote one data file. */
+    private record ExportFiles(JsonNode manifestSummary, JsonNode dataFileEntry, String data) {}
+
+    private ExportFiles readExportFiles(String arn) throws Exception {
+        JsonNode manifestSummary = readJson(ddb.describeExport(DescribeExportRequest.builder().exportArn(arn).build())
+                .exportDescription().exportManifest());
+        JsonNode dataFileEntry = readJson(manifestSummary.get("manifestFilesS3Key").asText());
+        String data = decompressGzip(getObject(dataFileEntry.get("dataFileS3Key").asText()));
+        return new ExportFiles(manifestSummary, dataFileEntry, data);
+    }
+
+    private JsonNode readJson(String key) throws Exception {
+        return new ObjectMapper().readTree(getObject(key));
+    }
+
+    private byte[] getObject(String key) {
+        return s3.getObjectAsBytes(GetObjectRequest.builder().bucket(BUCKET_NAME).key(key).build()).asByteArray();
     }
 
     private String decompressGzip(byte[] data) throws Exception {
