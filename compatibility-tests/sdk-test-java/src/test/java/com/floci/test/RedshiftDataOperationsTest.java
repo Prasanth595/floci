@@ -24,6 +24,7 @@ import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultV2Re
 import software.amazon.awssdk.services.redshiftdata.model.ResultFormatString;
 import software.amazon.awssdk.services.redshiftdata.model.SqlParameter;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
+import software.amazon.awssdk.services.redshiftdata.model.SubStatementData;
 import software.amazon.awssdk.services.redshiftdata.model.ValidationException;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.Message;
@@ -143,8 +144,8 @@ class RedshiftDataOperationsTest {
                 .dbUser(USERNAME)
                 .sql("SELECT CAST(:value AS INTEGER) + 1 AS result")
                 .parameters(SqlParameter.builder().name("value").value("41").build())
+                .waitTimeSeconds(30)
                 .build()).id();
-        awaitFinished(id);
 
         GetStatementResultResponse result = data.getStatementResult(request -> request.id(id));
         assertThat(result.records()).hasSize(1);
@@ -167,7 +168,7 @@ class RedshiftDataOperationsTest {
         DescribeStatementResponse batch = describe(id);
         assertThat(batch.status()).isEqualTo(StatusString.FINISHED);
         assertThat(batch.subStatements()).hasSize(2);
-        assertThat(batch.subStatements()).extracting("statusAsString").containsOnly("FINISHED");
+        assertThat(batch.subStatements()).extracting(SubStatementData::statusAsString).containsOnly("FINISHED");
 
         GetStatementResultResponse parentResult = data.getStatementResult(request -> request.id(id));
         assertThat(parentResult.records().get(0).get(0).longValue()).isEqualTo(22L);
@@ -326,20 +327,32 @@ class RedshiftDataOperationsTest {
     }
 
     @Test
-    @DisplayName("cancellation reaches the SDK's ABORTED statement status")
-    void cancelStatementReturnsAbortedStatus() throws Exception {
-        String id = submit("SELECT pg_sleep(20)");
-        awaitStatus(id, StatusString.STARTED);
-
-        assertThat(data.cancelStatement(request -> request.id(id)).status()).isTrue();
-        assertThat(awaitStatus(id, StatusString.ABORTED).status()).isEqualTo(StatusString.ABORTED);
+    @DisplayName("cancellation rejects terminal statements with ValidationException")
+    void cancelStatementRejectsTerminalStatements() throws Exception {
+        String id = data.executeStatement(ExecuteStatementRequest.builder()
+                .clusterIdentifier(clusterId)
+                .database(DATABASE)
+                .dbUser(USERNAME)
+                .sql("SELECT 1")
+                .waitTimeSeconds(30)
+                .build()).id();
+        assertThatThrownBy(() -> data.cancelStatement(request -> request.id(id)))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining("Could not cancel a query that is already in FINISHED state with ID: " + id);
     }
 
     @Test
     @DisplayName("SDK surfaces service validation and statement failure separately")
     void sdkReportsStatementAndRequestErrors() throws Exception {
-        String failedId = submit("SELECT * FROM " + TestFixtures.uniqueName("missing_table").replace('-', '_'));
-        DescribeStatementResponse failed = awaitStatus(failedId, StatusString.FAILED);
+        String failedId = data.executeStatement(request -> request
+                        .clusterIdentifier(clusterId)
+                        .database(DATABASE)
+                        .dbUser(USERNAME)
+                        .sql("SELECT * FROM " + TestFixtures.uniqueName("missing_table").replace('-', '_'))
+                        .waitTimeSeconds(30))
+                .id();
+        DescribeStatementResponse failed = describe(failedId);
+        assertThat(failed.status()).isEqualTo(StatusString.FAILED);
         assertThat(failed.error()).contains("does not exist");
 
         assertThatThrownBy(() -> data.executeStatement(request -> request
@@ -482,21 +495,5 @@ class RedshiftDataOperationsTest {
 
     private DescribeStatementResponse describe(String id) {
         return data.describeStatement(DescribeStatementRequest.builder().id(id).build());
-    }
-
-    private DescribeStatementResponse awaitStatus(String id, StatusString expected) throws InterruptedException {
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(30));
-        DescribeStatementResponse statement = describe(id);
-        while (Instant.now().isBefore(deadline)) {
-            if (statement.status() == expected) {
-                return statement;
-            }
-            if (statement.status() == StatusString.FAILED || statement.status() == StatusString.ABORTED) {
-                throw new IllegalStateException("Statement " + id + " ended " + statement.status() + ": " + statement.error());
-            }
-            Thread.sleep(250);
-            statement = describe(id);
-        }
-        throw new IllegalStateException("Statement " + id + " did not reach " + expected + " in time");
     }
 }
