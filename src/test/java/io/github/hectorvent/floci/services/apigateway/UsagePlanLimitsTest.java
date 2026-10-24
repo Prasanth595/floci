@@ -159,6 +159,7 @@ class UsagePlanLimitsTest {
     static Stream<Arguments> wrongJsonTypes() {
         String list = "Start of list found where not expected";
         String notStructure = "Expected null";
+        String structureFound = "Start of structure or map found where not expected.";
         Map<String, Object> planThrottle = Map.of("burstLimit", 1, "rateLimit", 1);
         return Stream.of(
                 Arguments.of(Map.of("quota", "invalid"), notStructure),
@@ -176,7 +177,21 @@ class UsagePlanLimitsTest {
                 Arguments.of(Map.of("throttle", planThrottle, "apiStages", List.of(Map.of("apiId", "a", "stage", "v1",
                         "throttle", Map.of("/pets/GET", List.of())))), list),
                 // The body is read whole before anything in it is checked, so a wrong type outranks a bad quota.
-                Arguments.of(Map.of("quota", Map.of("limit", 1), "throttle", List.of()), list));
+                Arguments.of(Map.of("quota", Map.of("limit", 1), "throttle", List.of()), list),
+                // Scalar members, measured on API Gateway: text takes no list, map, number or boolean,
+                // and a number takes no list or map.
+                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", List.of(), "stage", "v1"))), list),
+                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", Map.of(), "stage", "v1"))), structureFound),
+                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", "a", "stage", List.of("v1")))), list),
+                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", "a", "stage", Map.of("a", 1)))),
+                        structureFound),
+                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", 5, "stage", "v1"))),
+                        "class com.amazon.coral.value.json.numbers.TruncatingBigNumber can not be converted to an String"),
+                Arguments.of(Map.of("apiStages", List.of(Map.of("apiId", "a", "stage", true))),
+                        "class java.lang.Boolean can not be converted to an String"),
+                Arguments.of(Map.of("throttle", Map.of("burstLimit", List.of())), list),
+                Arguments.of(Map.of("quota", Map.of("period", Map.of())), structureFound),
+                Arguments.of(Map.of("name", List.of()), list));
     }
 
     @ParameterizedTest

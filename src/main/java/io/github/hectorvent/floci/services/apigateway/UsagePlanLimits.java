@@ -81,8 +81,14 @@ public final class UsagePlanLimits {
      * wrong JSON type is refused first, wherever it is. JSON null reads as absent.
      */
     private static void requireJsonTypes(Map<String, Object> request) {
-        structure(request.get("throttle"));
-        structure(request.get("quota"));
+        text(request.get("name"));
+        text(request.get("description"));
+        numbers(structure(request.get("throttle")), "burstLimit", "rateLimit");
+        Map<?, ?> quota = structure(request.get("quota"));
+        numbers(quota, "limit", "offset");
+        if (quota != null) {
+            text(quota.get("period"));
+        }
         Object stages = request.get("apiStages");
         if (stages == null) {
             return;
@@ -92,12 +98,47 @@ public final class UsagePlanLimits {
         }
         for (Object entry : entries) {
             Map<?, ?> stage = structure(entry);
-            Map<?, ?> methods = stage == null ? null : structure(stage.get("throttle"));
+            if (stage == null) {
+                continue;
+            }
+            text(stage.get("apiId"));
+            text(stage.get("stage"));
+            Map<?, ?> methods = structure(stage.get("throttle"));
             if (methods != null) {
                 for (Object limits : methods.values()) {
-                    structure(limits);
+                    numbers(structure(limits), "burstLimit", "rateLimit");
                 }
             }
+        }
+    }
+
+    /** A member the model reads as text: a list, a map, a number or a boolean is API Gateway's SerializationException. */
+    private static void text(Object value) {
+        container(value);
+        if (value instanceof Number || value instanceof Boolean) {
+            // API Gateway names the class its parser read; a JSON number reads as TruncatingBigNumber there.
+            String type = value instanceof Boolean ? "java.lang.Boolean" : "com.amazon.coral.value.json.numbers.TruncatingBigNumber";
+            throw new AwsException(SERIALIZATION, "class " + type + " can not be converted to an String", 400);
+        }
+    }
+
+    /** The members of {@code settings} the model reads as numbers: a list or a map is a SerializationException. */
+    private static void numbers(Map<?, ?> settings, String... members) {
+        if (settings == null) {
+            return;
+        }
+        for (String member : members) {
+            container(settings.get(member));
+        }
+    }
+
+    /** A list or a map where the model expects a scalar. */
+    private static void container(Object value) {
+        if (value instanceof List<?>) {
+            throw new AwsException(SERIALIZATION, "Start of list found where not expected", 400);
+        }
+        if (value instanceof Map<?, ?>) {
+            throw new AwsException(SERIALIZATION, "Start of structure or map found where not expected.", 400);
         }
     }
 

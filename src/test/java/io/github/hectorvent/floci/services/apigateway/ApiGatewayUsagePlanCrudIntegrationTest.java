@@ -230,4 +230,20 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .body("__type", equalTo("SerializationException"))
                 .body("message", equalTo("Expected null"));
     }
+
+    @Test
+    void aStructuredStageIdentifierIsASerializationErrorAndStoresNoPlan() {
+        given().contentType(ContentType.JSON)
+                .body("{\"name\":\"structured-stage\",\"apiStages\":[{\"apiId\":[],\"stage\":{}}]}")
+                .post("/usageplans")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("Start of list found where not expected"));
+
+        given().get("/usageplans")
+                .then()
+                .statusCode(200)
+                .body("item.findAll { it.name == 'structured-stage' }", hasSize(0));
+    }
 }
