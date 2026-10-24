@@ -866,7 +866,9 @@ public class ApiGatewayController {
     /**
      * A CreateUsagePlan body as API Gateway reads it, measured: a zero-byte body is a missing input,
      * and malformed JSON, trailing content or a body that is neither a JSON object nor an array is a
-     * SerializationException without a message. An array is left to the shape check.
+     * SerializationException without a message. An array is left to the shape check. A fraction is
+     * read as a BigDecimal, which the conversion to the request map keeps, so an integer member is
+     * truncated from its decimal digits rather than from a double.
      */
     private JsonNode readCreateUsagePlanBody(String body) {
         if (body == null || body.isEmpty()) {
@@ -875,7 +877,9 @@ public class ApiGatewayController {
         }
         JsonNode node;
         try {
-            node = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(body);
+            node = objectMapper.reader()
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS, DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+                    .readTree(body);
         } catch (JsonProcessingException e) {
             throw new AwsException("SerializationException", null, 400);
         }

@@ -13,6 +13,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 class UsagePlanLimitsTest {
 
@@ -74,7 +77,7 @@ class UsagePlanLimitsTest {
                 new ApiStage("a", "v2")), limits.apiStages());
     }
 
-    // Measured on API Gateway: a JSON number for an int member is truncated toward zero and clamped.
+    // Measured on API Gateway: a positive JSON number for an int member is truncated and clamped.
     @Test
     void aJsonNumberIsTruncatedTowardZeroAndClampedToTheIntRange() {
         assertEquals(new Quota(1, 0, "DAY"),
@@ -87,6 +90,46 @@ class UsagePlanLimitsTest {
                 UsagePlanLimits.fromRequest(request("quota", Map.of("limit", 3000000000L, "period", "DAY"))).quota());
         assertEquals(new Throttle(0, 2.5),
                 UsagePlanLimits.fromRequest(request("throttle", Map.of("rateLimit", 2.5))).throttle());
+    }
+
+    // Measured on API Gateway: the decimal digits are kept, so a value just under a whole number is not rounded up.
+    @Test
+    void aJsonNumberIsTruncatedFromItsDecimalDigitsWithoutRoundingThroughADouble() {
+        assertEquals(new Quota(1, 0, "DAY"), UsagePlanLimits.fromRequest(
+                request("quota", Map.of("limit", new BigDecimal("1.99999999999999999"), "period", "DAY"))).quota());
+        assertEquals(new Quota(1, 0, "DAY"), UsagePlanLimits.fromRequest(request("quota",
+                Map.of("limit", 1, "offset", new BigDecimal("0.99999999999999999"), "period", "DAY"))).quota());
+        assertEquals(new Throttle(2, 0.0), UsagePlanLimits.fromRequest(
+                request("throttle", Map.of("burstLimit", new BigDecimal("2.99999999999999999")))).throttle());
+        assertEquals(new Quota(Integer.MAX_VALUE, 0, "DAY"), UsagePlanLimits.fromRequest(
+                request("quota", Map.of("limit", new BigDecimal("2147483647.9"), "period", "DAY"))).quota());
+        assertEquals(new Throttle(0, 1.0), UsagePlanLimits.fromRequest(
+                request("throttle", Map.of("rateLimit", new BigDecimal("1.00000000000000000001")))).throttle());
+    }
+
+    // Measured on API Gateway: a negative fraction is refused as negative, not truncated to 0.
+    @Test
+    void aNegativeFractionIsRefusedAsNegative() {
+        String limit = "Usage Plan quota limit must be a non-negative numeric";
+        assertRefused(() -> UsagePlanLimits.fromRequest(
+                        request("quota", Map.of("limit", new BigDecimal("-0.9"), "period", "DAY"))),
+                "BadRequestException", 400, limit);
+        assertRefused(() -> UsagePlanLimits.fromRequest(request("quota", Map.of("limit", -0.9, "period", "DAY"))),
+                "BadRequestException", 400, limit);
+    }
+
+    // The int bounds are compared before rounding, so an extreme exponent is never expanded into its digits.
+    @Test
+    void anExtremeExponentIsReadWithoutExpandingIt() {
+        assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
+            assertEquals(new Quota(Integer.MAX_VALUE, 0, "DAY"), UsagePlanLimits.fromRequest(
+                    request("quota", Map.of("limit", new BigDecimal("1e1000000000"), "period", "DAY"))).quota());
+            assertEquals(new Quota(0, 0, "DAY"), UsagePlanLimits.fromRequest(
+                    request("quota", Map.of("limit", new BigDecimal("1e-1000000000"), "period", "DAY"))).quota());
+            assertRefused(() -> UsagePlanLimits.fromRequest(
+                            request("quota", Map.of("limit", new BigDecimal("-1e-1000000000"), "period", "DAY"))),
+                    "BadRequestException", 400, "Usage Plan quota limit must be a non-negative numeric");
+        });
     }
 
     // CreateUsagePlan's input model: the service lists this with a missing name in one ValidationException.

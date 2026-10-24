@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.services.apigateway.model.UsagePlan.Limits;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan.Quota;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan.Throttle;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -19,6 +21,8 @@ import java.util.Objects;
 public final class UsagePlanLimits {
 
     private static final List<String> PERIODS = List.of("DAY", "WEEK", "MONTH");
+    private static final BigDecimal INT_MIN = BigDecimal.valueOf(Integer.MIN_VALUE);
+    private static final BigDecimal INT_MAX = BigDecimal.valueOf(Integer.MAX_VALUE);
     private static final String BAD_REQUEST = "BadRequestException";
     private static final String THROTTLE_INVALID =
             "Usage Plan throttle rate limit and burst limit must be numeric and greater than zero";
@@ -197,20 +201,39 @@ public final class UsagePlanLimits {
     }
 
     /**
-     * {@code value} as an int, or null when it is not one. A number is truncated toward zero and
-     * clamped to the int range, as API Gateway reads a JSON number; text must be a whole number in
-     * int range.
+     * {@code value} as an int, or null when it is not one. A number is read from its decimal digits,
+     * rounded toward negative infinity and clamped to the int range, as API Gateway reads a JSON
+     * number; text must be a whole number in int range.
      */
     private static Integer intValue(Object value) {
-        if (value instanceof Number number) {
-            return (int) number.doubleValue();
-        }
         try {
+            if (value instanceof Number number) {
+                return floorToInt(new BigDecimal(number.toString()));
+            }
             return Integer.valueOf(String.valueOf(value).trim());
         } catch (NumberFormatException expected) {
-            // The caller reports a non-integer with API Gateway's message for the field.
+            // The caller reports a non-integer, or a NaN or infinite double, with API Gateway's message for the field.
             return null;
         }
+    }
+
+    /**
+     * {@code value} rounded toward negative infinity and clamped to the int range. The bounds and a
+     * fraction below one are settled before any rounding, so an exponent such as {@code 1e1000000000}
+     * or {@code 1e-1000000000} is never expanded into its digits.
+     */
+    private static int floorToInt(BigDecimal value) {
+        if (value.compareTo(INT_MAX) >= 0) {
+            return Integer.MAX_VALUE;
+        }
+        if (value.compareTo(INT_MIN) <= 0) {
+            return Integer.MIN_VALUE;
+        }
+        if (value.abs().compareTo(BigDecimal.ONE) < 0) {
+            return value.signum() < 0 ? -1 : 0;
+        }
+        // FLOOR: positive values truncate and negative ones stay negative, so they are refused, as on API Gateway.
+        return value.setScale(0, RoundingMode.FLOOR).intValue();
     }
 
     /** {@code value} as a finite double, or null when it is not one. */

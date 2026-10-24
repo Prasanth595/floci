@@ -285,6 +285,32 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .body("quota.limit", equalTo(1));
     }
 
+    // Measured on API Gateway: the limit is truncated from its decimal digits, not first rounded to 2.0 as a double.
+    @Test
+    void aLimitJustUnderAWholeNumberIsStoredTruncated() {
+        String usagePlanId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"precise-limit\",\"quota\":{\"limit\":1.99999999999999999,\"period\":\"DAY\"}}")
+                .post("/usageplans")
+                .then()
+                .statusCode(201)
+                .body("quota.limit", equalTo(1))
+                .extract()
+                .path("id");
+
+        given().get("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(200)
+                .body("quota.limit", equalTo(1));
+    }
+
+    // Measured on API Gateway: a negative fraction is refused, not truncated to 0.
+    @Test
+    void aNegativeFractionalLimitIsRefusedAndStoresNoPlan() {
+        assertCreateRefused("{\"name\":\"negative-fraction-limit\",\"quota\":{\"limit\":-0.9,\"period\":\"DAY\"}}",
+                "BadRequestException", "Usage Plan quota limit must be a non-negative numeric");
+    }
+
     // In body order the list throttle comes first; API Gateway reads quota before throttle by name.
     @Test
     void theFirstWrongJsonTypeInMemberNameOrderIsReported() {

@@ -593,9 +593,10 @@ API Gateway read, such as `class java.lang.String can not be converted to an Int
 `"limit": "100"` or `class java.lang.String is not an expected Json type` for a text `rateLimit`. When
 several members are wrong, the one reported is the first in member-name order, and a map's entries
 are read in key order, at every level, whatever order the body has. An integer member (`limit`,
-`offset`, `burstLimit`) reads any JSON number, truncated toward zero and clamped to the int range, so
-`1.5` is stored as `1` and `3000000000` as `2147483647`, while a numeric string such as `"100"` is
-refused.
+`offset`, `burstLimit`) reads any JSON number, truncated from its decimal digits and clamped to the int
+range, so `1.5` and `1.99999999999999999` are stored as `1` and `3000000000` as `2147483647`. A
+negative fraction such as `-0.9` is refused as negative rather than truncated to `0`, and a numeric
+string such as `"100"` is refused.
 
 A zero-byte body is a `ValidationException` (`Value null at 'createUsagePlanInput'`). A whitespace-only
 body, malformed JSON, trailing content after the object, and a body that is a string, a number or

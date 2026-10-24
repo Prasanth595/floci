@@ -23,9 +23,10 @@ import java.util.Set;
  * and true or false a {@code java.lang.Boolean}, and a double member words the refusal as "is not an
  * expected Json type". And it reads a structure's members in member-name order, at every level, so
  * the first bad member by name is reported whatever order the body has. An integer member takes any
- * JSON number, which the operation truncates toward zero and clamps to the int range, but refuses a
- * numeric string such as {@code "100"}; a double member refuses text too. Only string, integer and
- * double members were probed, so a member of another scalar type is left to the operation.
+ * JSON number but refuses a numeric string such as {@code "100"}; the operation truncates the number
+ * from its decimal digits, clamps it to the int range and refuses a negative fraction as negative. A
+ * double member refuses text too. Only string, integer and double members were probed, so a member
+ * of another scalar type is left to the operation.
  */
 final class ApiGatewayRequestShapes {
 
