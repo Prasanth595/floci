@@ -49,13 +49,14 @@ class KinesisClosedShardRoutingServiceTest {
         assertOpenDestinationAndUnchangedClosedRecords(stream, "b");
     }
 
-    @Test
-    void putRecordPrefersAnOpenDirectChildOverADeeperDescendant() {
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2})
+    void putRecordPrefersAnOpenDirectChildOverADeeperDescendant(int closedChildIndex) {
         KinesisStream stream = service.createStream(STREAM, 1, REGION);
         split(stream.getShards().getFirst());
-        split(stream.getShards().get(1));
+        split(stream.getShards().get(closedChildIndex));
 
-        // "d" selects the root modulo five, whose second child is still open.
+        // "d" selects the root modulo five, with one direct child still open.
         assertOpenDestinationAndUnchangedClosedRecords(stream, "d");
     }
 
