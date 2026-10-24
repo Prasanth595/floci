@@ -45,14 +45,11 @@ class IamRestRouteCoverageTest {
      * Operations Floci does not serve, whose request runs as another operation instead and so is checked
      * as that one: S3 has no bucket metadata configuration, and {@code ?metadataConfiguration} on a
      * bucket falls through to ListObjects and DeleteBucket. Checking it as the metadata table action
-     * would let that action list or delete the bucket. EKS takes an access entry's principal as the rest
-     * of the path, so an entry's access policy routes read and delete the entry of a longer principal.
+     * would let that action list or delete the bucket.
      */
     private static final Map<String, String> RUN_AS_ANOTHER_OPERATION = Map.of(
             "GetBucketMetadataConfiguration", "s3:ListBucket",
-            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket",
-            "ListAssociatedAccessPolicies", "eks:DescribeAccessEntry",
-            "DisassociateAccessPolicy", "eks:DeleteAccessEntry");
+            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket");
 
     /** Models every operation of which is checked: the services whose routes the registry maps in full. */
     private static final Set<String> FULLY_ROUTED_MODELS =
@@ -153,12 +150,18 @@ class IamRestRouteCoverageTest {
             return ctx;
         }
 
-        /** The path with each {@code {label}} filled in, and a greedy {@code {label+}} given two segments. */
+        /**
+         * The path with each {@code {label}} filled in, and a greedy {@code {label+}} given two segments. A
+         * {@code {policyArn}} gets a cluster access policy ARN, encoded as an SDK sends it, since only that
+         * shape routes to the policy operations.
+         */
         private static String fill(String template) {
             Matcher label = LABEL.matcher(template);
             StringBuilder path = new StringBuilder();
             while (label.find()) {
-                String value = label.group(1).toLowerCase() + "-value";
+                String value = label.group(1).equals("policyArn")
+                        ? "arn%3Aaws%3Aeks%3A%3Aaws%3Acluster-access-policy%2FAmazonEKSViewPolicy"
+                        : label.group(1).toLowerCase() + "-value";
                 label.appendReplacement(path, label.group(2).isEmpty() ? value : value + "/part");
             }
             label.appendTail(path);
