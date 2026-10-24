@@ -9,6 +9,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.List;
 import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
@@ -26,6 +27,10 @@ class SesBulkV2IntegrationTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
+    // Senders of their own: an identity under example.com would outlive this class and reach the
+    // other SES classes that share the application.
+    private static final List<String> SENDERS =
+            List.of("bulk-v2@floci.test", "bulk-v2-second@floci.test", "bulk-v2-inline@floci.test");
 
     private static final String DESTINATION_COUNT_MESSAGE =
             "You must specify at least 1 destination, and no more than 50 destinations";
@@ -33,6 +38,16 @@ class SesBulkV2IntegrationTest {
     @Test
     @Order(1)
     void createTemplate() {
+        for (String sender : SENDERS) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"EmailIdentity\": \"" + sender + "\"}")
+            .when()
+                .post("/v2/email/identities")
+            .then()
+                .statusCode(200);
+        }
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
@@ -60,7 +75,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "bulk@example.com",
+                  "FromEmailAddress": "bulk-v2@floci.test",
                   "DefaultContent": {
                     "Template": {
                       "TemplateName": "v2-bulk-welcome",
@@ -103,7 +118,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "bulk2@example.com",
+                  "FromEmailAddress": "bulk-v2-second@floci.test",
                   "DefaultContent": {
                     "Template": {
                       "TemplateName": "v2-bulk-welcome",
@@ -156,7 +171,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "inline@example.com",
+                  "FromEmailAddress": "bulk-v2-inline@floci.test",
                   "DefaultContent": {
                     "Template": {
                       "TemplateContent": {
@@ -203,7 +218,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "bulk@example.com",
+                  "FromEmailAddress": "bulk-v2@floci.test",
                   "DefaultContent": {
                     "Template": {"TemplateName": "ghost"}
                   },
@@ -227,7 +242,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "bulk@example.com",
+                  "FromEmailAddress": "bulk-v2@floci.test",
                   "DefaultContent": {
                     "Template": {"TemplateName": "v2-bulk-welcome"}
                   },
@@ -250,7 +265,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "bulk@example.com",
+                  "FromEmailAddress": "bulk-v2@floci.test",
                   "DefaultContent": {},
                   "BulkEmailEntries": [
                     {"Destination": {"ToAddresses": ["alice@example.com"]}}
@@ -272,7 +287,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "bulk@example.com",
+                  "FromEmailAddress": "bulk-v2@floci.test",
                   "DefaultContent": {
                     "Template": {"TemplateName": "v2-bulk-welcome"}
                   },
@@ -295,7 +310,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "bulk@example.com",
+                  "FromEmailAddress": "bulk-v2@floci.test",
                   "DefaultContent": {
                     "Template": {"TemplateName": "v2-bulk-welcome", "TemplateData": "{\\"team\\":\\"floci\\"}"}
                   },
@@ -368,14 +383,14 @@ class SesBulkV2IntegrationTest {
         return Stream.of(
                 Arguments.of("BulkEmailEntries element is null", """
                     {
-                      "FromEmailAddress": "bulk@example.com",
+                      "FromEmailAddress": "bulk-v2@floci.test",
                       %s,
                       "BulkEmailEntries": [null]
                     }
                     """.formatted(validDefaultTemplate)),
                 Arguments.of("DefaultTemplateData as invalid JSON string", """
                     {
-                      "FromEmailAddress": "bulk@example.com",
+                      "FromEmailAddress": "bulk-v2@floci.test",
                       "DefaultContent": {
                         "Template": {"TemplateName": "v2-bulk-welcome", "TemplateData": "{not json"}
                       },
@@ -390,21 +405,21 @@ class SesBulkV2IntegrationTest {
         return Stream.of(
                 Arguments.of("BulkEmailEntries element is string", """
                     {
-                      "FromEmailAddress": "bulk@example.com",
+                      "FromEmailAddress": "bulk-v2@floci.test",
                       %s,
                       "BulkEmailEntries": ["bad"]
                     }
                     """.formatted(validDefaultTemplate)),
                 Arguments.of("Destination as string", """
                     {
-                      "FromEmailAddress": "bulk@example.com",
+                      "FromEmailAddress": "bulk-v2@floci.test",
                       %s,
                       "BulkEmailEntries": [{"Destination": "bad"}]
                     }
                     """.formatted(validDefaultTemplate)),
                 Arguments.of("DefaultTemplateData as object", """
                     {
-                      "FromEmailAddress": "bulk@example.com",
+                      "FromEmailAddress": "bulk-v2@floci.test",
                       "DefaultContent": {
                         "Template": {"TemplateName": "v2-bulk-welcome", "TemplateData": {"team": "floci"}}
                       },
@@ -413,7 +428,7 @@ class SesBulkV2IntegrationTest {
                     """),
                 Arguments.of("per-entry ReplacementTemplateData as object", """
                     {
-                      "FromEmailAddress": "bulk@example.com",
+                      "FromEmailAddress": "bulk-v2@floci.test",
                       %s,
                       "BulkEmailEntries": [
                         {
@@ -427,7 +442,7 @@ class SesBulkV2IntegrationTest {
                     """.formatted(validDefaultTemplate)),
                 Arguments.of("ReplacementEmailContent as string", """
                     {
-                      "FromEmailAddress": "bulk@example.com",
+                      "FromEmailAddress": "bulk-v2@floci.test",
                       %s,
                       "BulkEmailEntries": [
                         {
@@ -439,7 +454,7 @@ class SesBulkV2IntegrationTest {
                     """.formatted(validDefaultTemplate)),
                 Arguments.of("ReplacementEmailContent as array", """
                     {
-                      "FromEmailAddress": "bulk@example.com",
+                      "FromEmailAddress": "bulk-v2@floci.test",
                       %s,
                       "BulkEmailEntries": [
                         {
@@ -451,7 +466,7 @@ class SesBulkV2IntegrationTest {
                     """.formatted(validDefaultTemplate)),
                 Arguments.of("ReplacementTemplate as array", """
                     {
-                      "FromEmailAddress": "bulk@example.com",
+                      "FromEmailAddress": "bulk-v2@floci.test",
                       "DefaultContent": {
                         "Template": {"TemplateName": "v2-bulk-welcome", "TemplateData": "{\\"team\\":\\"floci\\"}"}
                       },
@@ -479,7 +494,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "bulk@example.com",
+                  "FromEmailAddress": "bulk-v2@floci.test",
                   "DefaultContent": {
                     "Template": {"TemplateName": "v2-bulk-welcome"}
                   },
@@ -503,7 +518,7 @@ class SesBulkV2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body("""
                 {
-                  "FromEmailAddress": "bulk@example.com",
+                  "FromEmailAddress": "bulk-v2@floci.test",
                   "DefaultContent": {
                     "Template": {
                       "TemplateName": "v2-bulk-welcome",

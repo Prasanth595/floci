@@ -32,12 +32,26 @@ class SesBulkV1IntegrationTest {
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
 
+    // A sender of its own: an identity under example.com would outlive this class and reach the
+    // other SES classes that share the application.
+    private static final String SENDER = "bulk-v1@floci.test";
+
     private static final Pattern MESSAGE_ID_PATTERN =
             Pattern.compile("<MessageId>([^<]+)</MessageId>");
 
     @Test
     @Order(1)
     void createTemplate() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "VerifyEmailIdentity")
+            .formParam("EmailAddress", SENDER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
@@ -59,7 +73,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
             .formParam("DefaultTemplateData", "{\"team\":\"floci\"}")
             .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
@@ -111,7 +125,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Template", "ghost")
             .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
         .when()
@@ -128,7 +142,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
         .when()
             .post("/")
@@ -144,7 +158,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
         .when()
             .post("/")
@@ -164,7 +178,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
             .formParam("DefaultTemplateData", "{\"team\":\"floci\"}")
             .formParam("Destinations.member.1.ReplacementTemplateData", "{\"name\":\"Ghost\"}")
@@ -196,7 +210,7 @@ class SesBulkV1IntegrationTest {
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", AUTH)
                 .formParam("Action", "SendBulkTemplatedEmail")
-                .formParam("Source", "bulk@example.com")
+                .formParam("Source", SENDER)
                 .formParam("Template", "v1-bulk-welcome")
                 .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
             .when()
@@ -223,7 +237,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Template", "ghost"), 51)
         .when()
             .post("/")
@@ -244,7 +258,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
             .formParam("DefaultTemplateData", "{\"team\":\"floci\"}")
             .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
@@ -268,7 +282,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
             .formParam("DefaultTemplateData", defaultTemplateData)
             .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com");
@@ -297,7 +311,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome");
         for (int i = 1; i <= 51; i++) {
             spec = spec.formParam(
@@ -319,7 +333,7 @@ class SesBulkV1IntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "bulk@example.com")
+            .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
             .formParam("DefaultTemplateData", "{\"name\":\"X\",\"team\":\"floci\"}"), 50)
         .when()

@@ -809,8 +809,10 @@ public class SesQueryHandler {
         List<MessageTag> defaultEmailTags = extractMessageTags(params, "DefaultTags");
         List<BulkEmailEntryResult> results = sesService.sendBulkEmail(SendBulkEmailRequest.builder()
                 .source(source)
+                .sourceArn(getParam(params, "SourceArn"))
                 .replyToAddresses(replyToAddresses)
                 .returnPath(returnPath)
+                .returnPathArn(getParam(params, "ReturnPathArn"))
                 .configurationSetName(configurationSetName)
                 .defaultEmailTags(defaultEmailTags)
                 .region(region)

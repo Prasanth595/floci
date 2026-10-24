@@ -11,7 +11,6 @@ import io.github.hectorvent.floci.services.ses.address.SesAddressSyntax;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.EmailContent;
-import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageAttachment;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
@@ -49,8 +48,7 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception
  * {@code /v2/email/outbound-custom-verification-emails}. Every other v2 URL group has its own
  * controller in this package; the send path stays here because it is the one group that reads
  * across several domains. It goes through the {@link SesService} facade for that reason, and
- * through {@link SesTemplateService} and {@link SesAccountService} for the stored template and
- * the account-level sending switch.
+ * through {@link SesAccountService} for the account-level sending switch.
  */
 @Path("/v2/email")
 @Produces(MediaType.APPLICATION_JSON)
@@ -62,19 +60,15 @@ public class SesSendController {
     private static final List<String> TRACKING_VALUES = List.of("ENABLED", "DISABLED");
 
     private final SesService sesService;
-    // The bulk send resolves a stored template's content before handing the entries to the facade.
-    private final SesTemplateService templateService;
     // The send endpoints read the account-level sending switch before building the message.
     private final SesAccountService accountService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public SesSendController(SesService sesService, SesTemplateService templateService,
-                         SesAccountService accountService, RegionResolver regionResolver,
-                         ObjectMapper objectMapper) {
+    public SesSendController(SesService sesService, SesAccountService accountService,
+                             RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.sesService = sesService;
-        this.templateService = templateService;
         this.accountService = accountService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
@@ -143,8 +137,8 @@ public class SesSendController {
                 }
                 requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                 SendEmailRequest rawRequest = sendRequest.content(new EmailContent.Raw(rawData, true)).build();
-                sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
-                        rawRequest.hasRecipients(), configurationSetName, regionResolver.getAccountId(), region);
+                sesService.requireRawSendingTenant(tenantName, rawData, configurationSetName,
+                        regionResolver.getAccountId(), region);
                 messageId = sesService.sendEmail(rawRequest);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
@@ -164,7 +158,7 @@ public class SesSendController {
                         .content(new EmailContent.Simple(subject, bodyText, bodyHtml, additionalHeaders,
                                 attachments))
                         .build();
-                sesService.checkTenantSendAccess(simpleRequest, null, regionResolver.getAccountId());
+                sesService.requireSendingTenant(simpleRequest, regionResolver.getAccountId());
                 messageId = sesService.sendEmail(simpleRequest);
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
@@ -197,7 +191,7 @@ public class SesSendController {
                     SendEmailRequest templateRequest = sendRequest
                             .content(new EmailContent.Template(resolvedName, templateData, additionalHeaders))
                             .build();
-                    sesService.checkTenantSendAccess(templateRequest, resolvedName, regionResolver.getAccountId());
+                    sesService.requireSendingTenant(templateRequest, regionResolver.getAccountId());
                     messageId = sesService.sendEmail(templateRequest);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
@@ -213,7 +207,7 @@ public class SesSendController {
                             .content(new EmailContent.InlineTemplate(subject, text, html, templateData,
                                     additionalHeaders))
                             .build();
-                    sesService.checkTenantSendAccess(inlineRequest, null, regionResolver.getAccountId());
+                    sesService.requireSendingTenant(inlineRequest, regionResolver.getAccountId());
                     messageId = sesService.sendEmail(inlineRequest);
                 }
             } else {
@@ -288,9 +282,8 @@ public class SesSendController {
             String subject = null;
             String text = null;
             String html = null;
-            // Inline template content is not a stored template resource, so it stays out of the
-            // tenant gate below.
-            String gateTemplateName = null;
+            // The send looks the stored template up only after its sender checks (probe-confirmed).
+            String storedTemplateName = null;
             if (hasInline) {
                 JsonNode inline = template.path("TemplateContent");
                 subject = inline.path("Subject").asText(null);
@@ -303,13 +296,9 @@ public class SesSendController {
             // template up (probe-confirmed).
             SesService.requireBulkDestinationCount(bulkEntries.size());
             if (!hasInline) {
-                String resolvedName = hasName
+                storedTemplateName = hasName
                         ? templateName
                         : SesTemplateService.templateNameFromArn(templateArn);
-                gateTemplateName = resolvedName;
-                subject = null;
-                text = null;
-                html = null;
             }
 
             JsonNode defaultTemplateData = parseTemplateData(template, "TemplateData");
@@ -337,28 +326,24 @@ public class SesSendController {
                 entryIndex++;
             }
 
-            // The tenant gate runs only after every part of the request has been parsed and
+            // The tenant lookup runs only after every part of the request has been parsed and
             // validated — AWS reports malformed content before a missing tenant (probe-confirmed).
-            sesService.checkTenantBulkSendAccess(tenantName, fromEmailAddress, configurationSetName,
-                    gateTemplateName, entries, regionResolver.getAccountId(), region);
-            // SES reports an unknown or DISABLED tenant before an unknown stored template (probe-confirmed).
-            if (gateTemplateName != null) {
-                EmailTemplate stored = templateService.getTemplate(gateTemplateName, region);
-                subject = stored.getSubject();
-                text = stored.getTextPart();
-                html = stored.getHtmlPart();
-            }
+            sesService.requireBulkSendingTenant(tenantName, entries, regionResolver.getAccountId(), region);
+            EmailContent defaultContent = storedTemplateName == null
+                    ? new EmailContent.InlineTemplate(subject, text, html, defaultTemplateData, defaultHeaders)
+                    : new EmailContent.Template(storedTemplateName, defaultTemplateData, defaultHeaders);
 
             List<BulkEmailEntryResult> results = sesService.sendBulkEmail(SendBulkEmailRequest.builder()
                     .source(fromEmailAddress)
+                    .sourceArn(request.path("FromEmailAddressIdentityArn").asText(null))
                     .replyToAddresses(replyToAddresses)
                     .returnPath(feedbackForwardingAddress)
+                    .returnPathArn(request.path("FeedbackForwardingEmailAddressIdentityArn").asText(null))
                     .configurationSetName(configurationSetName)
                     .defaultEmailTags(defaultEmailTags)
                     .tenantName(tenantName)
                     .region(region)
-                    .defaultContent(new EmailContent.InlineTemplate(subject, text, html, defaultTemplateData,
-                            defaultHeaders))
+                    .defaultContent(defaultContent)
                     .entries(entries)
                     .build());
 
