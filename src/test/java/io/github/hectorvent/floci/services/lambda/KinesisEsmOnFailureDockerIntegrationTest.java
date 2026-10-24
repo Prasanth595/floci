@@ -5,6 +5,7 @@ import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.testing.DockerAvailability;
 import io.github.hectorvent.floci.testing.SqsTestQueue;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -54,7 +55,7 @@ class KinesisEsmOnFailureDockerIntegrationTest {
 
     @BeforeEach
     void requireDocker() {
-        Assumptions.assumeTrue(isDockerAvailable(),
+        Assumptions.assumeTrue(DockerAvailability.answers(dockerClient),
                 "Docker daemon must be available for the Kinesis OnFailure integration test");
     }
 
@@ -164,15 +165,5 @@ class KinesisEsmOnFailureDockerIntegrationTest {
             zip.closeEntry();
         }
         return Base64.getEncoder().encodeToString(bytes.toByteArray());
-    }
-
-    private boolean isDockerAvailable() {
-        try {
-            dockerClient.pingCmd().exec();
-            return true;
-        } catch (Exception expected) {
-            // Docker is unreachable, so requireDocker() skips the test rather than failing it.
-            return false;
-        }
     }
 }
