@@ -83,8 +83,8 @@ class LambdaWebEnvironmentManagerTest {
                 mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), containerBuilder,
                 mock(ContainerLifecycleManager.class), mock(DockerClient.class), mock(ImageResolver.class),
                 mock(EcrRegistryManager.class), mock(LambdaWebCode.class), mock(ZipExtractor.class),
-                mock(LaunchedContainerAwsEnv.class), credentials, executionRole, mock(LambdaWebLogs.class),
-                mock(LambdaWebMetrics.class));
+                mock(LaunchedContainerAwsEnv.class), credentials, executionRole, mock(LambdaWebMetadataServer.class),
+                mock(LambdaWebLogs.class), mock(LambdaWebMetrics.class));
         WebFunction fn = new WebFunction();
         fn.functionName = "fn";
         fn.functionArn = "arn:aws:lambda:us-east-1:000000000000:web-function/fn";

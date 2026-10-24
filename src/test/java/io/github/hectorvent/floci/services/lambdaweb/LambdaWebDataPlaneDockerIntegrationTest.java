@@ -105,6 +105,16 @@ class LambdaWebDataPlaneDockerIntegrationTest {
               if (req.url.startsWith('/status/')) {
                 res.writeHead(Number(req.url.split('/')[2]), {'x-app': 'yes'}); res.end('status body'); return;
               }
+              if (req.url.startsWith('/metadata')) {
+                const url = 'http://' + process.env.AWS_LAMBDA_METADATA_API + '/2026-01-15/metadata/execution-environment';
+                const auth = {headers: {authorization: 'Bearer ' + process.env.AWS_LAMBDA_METADATA_TOKEN}};
+                Promise.all([fetch(url, auth), fetch(url)]).then(async ([ok, refused]) => {
+                  res.end(JSON.stringify({status: ok.status, body: await ok.text(), refused: refused.status,
+                    api: process.env.AWS_LAMBDA_METADATA_API, runtimeApi: process.env.AWS_LAMBDA_RUNTIME_API,
+                    token: process.env.AWS_LAMBDA_METADATA_TOKEN}));
+                }, (e) => { res.statusCode = 500; res.end(String(e)); });
+                return;
+              }
               if (req.url.startsWith('/crash')) { setTimeout(() => process.exit(1), 50); return; }
               if (req.url.startsWith('/exit')) { res.end('bye', () => process.exit(0)); return; }
               let body = '';
@@ -407,6 +417,20 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
         given().header("Host", domain).when().get("/status/200")
                 .then().statusCode(200).header("lambda-web-logstream", not(equalTo(logStream)));
+    }
+
+    @Test
+    @Timeout(180)
+    void theMetadataEndpointAnswersTheZoneToTheEnvironmentToken() throws Exception {
+        String domain = createFunction(30);
+
+        JsonPath answer = given().header("Host", domain).when().get("/metadata").then().statusCode(200)
+                .extract().jsonPath();
+        assertEquals(200, answer.getInt("status"));
+        assertEquals("{\"AvailabilityZoneID\":\"use1-az1\"}\n", answer.getString("body"));
+        assertEquals(401, answer.getInt("refused"));
+        assertEquals(answer.getString("api"), answer.getString("runtimeApi"));
+        assertTrue(answer.getString("token").matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"));
     }
 
     @Test
