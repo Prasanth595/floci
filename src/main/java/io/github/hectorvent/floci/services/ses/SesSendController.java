@@ -137,8 +137,6 @@ public class SesSendController {
                 }
                 requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                 SendEmailRequest rawRequest = sendRequest.content(new EmailContent.Raw(rawData, true)).build();
-                sesService.requireRawSendingTenant(tenantName, rawData, configurationSetName,
-                        regionResolver.getAccountId(), region);
                 messageId = sesService.sendEmail(rawRequest);
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
@@ -158,7 +156,6 @@ public class SesSendController {
                         .content(new EmailContent.Simple(subject, bodyText, bodyHtml, additionalHeaders,
                                 attachments))
                         .build();
-                sesService.requireSendingTenant(simpleRequest, regionResolver.getAccountId());
                 messageId = sesService.sendEmail(simpleRequest);
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
@@ -191,7 +188,6 @@ public class SesSendController {
                     SendEmailRequest templateRequest = sendRequest
                             .content(new EmailContent.Template(resolvedName, templateData, additionalHeaders))
                             .build();
-                    sesService.requireSendingTenant(templateRequest, regionResolver.getAccountId());
                     messageId = sesService.sendEmail(templateRequest);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
@@ -207,7 +203,6 @@ public class SesSendController {
                             .content(new EmailContent.InlineTemplate(subject, text, html, templateData,
                                     additionalHeaders))
                             .build();
-                    sesService.requireSendingTenant(inlineRequest, regionResolver.getAccountId());
                     messageId = sesService.sendEmail(inlineRequest);
                 }
             } else {
@@ -289,7 +284,7 @@ public class SesSendController {
                 subject = inline.path("Subject").asText(null);
                 text = inline.path("Text").asText(null);
                 html = inline.path("Html").asText(null);
-                // Shape validation belongs before the tenant gate below, as on SendEmail.
+                // Shape validation belongs before the send's tenant lookup, as on SendEmail.
                 SesService.requireInlineTemplateContent(subject, text, html);
             }
             // AWS counts the entries after the inline content check and before it looks the stored
@@ -326,10 +321,9 @@ public class SesSendController {
                 entryIndex++;
             }
 
-            // The tenant lookup runs only after every part of the request has been parsed and
-            // validated — AWS reports malformed content before a missing tenant (probe-confirmed).
-            sesService.requireBulkSendingTenant(tenantName, entries, regionResolver.getAccountId(), region);
-            EmailContent defaultContent = storedTemplateName == null
+            // The send looks the tenant up, so only after every part of the request has been parsed
+            // and validated: AWS reports malformed content before a missing tenant (probe-confirmed).
+            EmailContent.TemplateContent defaultContent = storedTemplateName == null
                     ? new EmailContent.InlineTemplate(subject, text, html, defaultTemplateData, defaultHeaders)
                     : new EmailContent.Template(storedTemplateName, defaultTemplateData, defaultHeaders);
 

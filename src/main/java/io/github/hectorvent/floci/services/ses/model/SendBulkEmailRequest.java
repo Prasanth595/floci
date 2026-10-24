@@ -21,15 +21,11 @@ public record SendBulkEmailRequest(
         List<MessageTag> defaultEmailTags,
         String tenantName,
         String region,
-        EmailContent defaultContent,
+        EmailContent.TemplateContent defaultContent,
         List<BulkEmailEntry> entries) {
 
     public SendBulkEmailRequest {
         Objects.requireNonNull(defaultContent, "defaultContent");
-        if (!(defaultContent instanceof EmailContent.Template)
-                && !(defaultContent instanceof EmailContent.InlineTemplate)) {
-            throw new IllegalArgumentException("defaultContent must be a template");
-        }
     }
 
     /**
@@ -53,7 +49,7 @@ public record SendBulkEmailRequest(
         private List<MessageTag> defaultEmailTags = List.of();
         private String tenantName;
         private String region;
-        private EmailContent defaultContent;
+        private EmailContent.TemplateContent defaultContent;
         private List<BulkEmailEntry> entries = List.of();
 
         private Builder() {
@@ -68,7 +64,7 @@ public record SendBulkEmailRequest(
         public Builder defaultEmailTags(List<MessageTag> defaultEmailTags) { this.defaultEmailTags = defaultEmailTags; return this; }
         public Builder tenantName(String tenantName) { this.tenantName = tenantName; return this; }
         public Builder region(String region) { this.region = region; return this; }
-        public Builder defaultContent(EmailContent defaultContent) { this.defaultContent = defaultContent; return this; }
+        public Builder defaultContent(EmailContent.TemplateContent defaultContent) { this.defaultContent = defaultContent; return this; }
         public Builder entries(List<BulkEmailEntry> entries) { this.entries = entries; return this; }
 
         public SendBulkEmailRequest build() {

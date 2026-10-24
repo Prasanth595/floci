@@ -801,7 +801,6 @@ public class SesQueryHandler {
         }
         // AWS counts the destinations before it looks the template up (probe-confirmed).
         SesService.requireBulkDestinationCount(entries.size());
-        EmailTemplate template = templateService.getTemplate(resolvedName, region);
         JsonNode defaultTemplateData = parseTemplateData(defaultDataRaw);
 
         String configurationSetName = getParam(params, "ConfigurationSetName");
@@ -816,8 +815,7 @@ public class SesQueryHandler {
                 .configurationSetName(configurationSetName)
                 .defaultEmailTags(defaultEmailTags)
                 .region(region)
-                .defaultContent(new EmailContent.InlineTemplate(template.getSubject(), template.getTextPart(),
-                        template.getHtmlPart(), defaultTemplateData, List.of()))
+                .defaultContent(new EmailContent.Template(resolvedName, defaultTemplateData, List.of()))
                 .entries(entries)
                 .build());
 

@@ -62,7 +62,12 @@ class SesTenantSendOrderV2IntegrationTest {
     }
 
     private static String raw(String from) {
-        String mime = "From: " + from + "\r\nTo: success@simulator.amazonses.com\r\nSubject: s\r\n\r\nt";
+        return raw(from, "");
+    }
+
+    private static String raw(String from, String extraHeaders) {
+        String mime = "From: " + from + "\r\nTo: success@simulator.amazonses.com\r\n" + extraHeaders
+                + "Subject: s\r\n\r\nt";
         return "\"Content\":{\"Raw\":{\"Data\":\""
                 + Base64.getEncoder().encodeToString(mime.getBytes(StandardCharsets.UTF_8)) + "\"}}";
     }
@@ -158,8 +163,17 @@ class SesTenantSendOrderV2IntegrationTest {
         assertNotVerified(bulk(unverifiedReturnPath), UNVERIFIED);
     }
 
+    // The configuration set a raw message names only in its X-SES-CONFIGURATION-SET header is the one
+    // the send uses, so it must be associated too.
     @Test
     @Order(8)
+    void associatedIdentity_rawHeaderConfigurationSet_is403() {
+        assertNotAssociated(send(member("FromEmailAddress", FROM),
+                raw(FROM, "X-SES-CONFIGURATION-SET: " + CONFIG_SET + "\r\n")), "configuration-set/" + CONFIG_SET);
+    }
+
+    @Test
+    @Order(9)
     void cleanup() {
         v2().body("{\"TenantName\":\"" + TENANT + "\"}")
                 .when().post("/v2/email/tenants/delete").then().statusCode(200);
