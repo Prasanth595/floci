@@ -908,10 +908,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * A request that passes a role to a service also needs {@code iam:PassRole} on that role (see
      * {@link PassedRoles}), checked as the caller with {@code iam:PassedToService} naming the
-     * service and the keys that say who is calling, which {@code callerArns} writes when it is known.
-     * What a request names that holds roles, an instance profile, a launch template or a task
-     * definition, is looked up in the request's account, as the service resolves it; one that does not
-     * exist passes nothing, and the operation reports it. Returns true when the request was aborted.
+     * service, when AWS's Service Reference names one, and the keys that say who is calling, which
+     * {@code callerArns} writes when it is known. What a request names that holds roles, an instance
+     * profile, a launch template or a task definition, is looked up in the request's account, as the
+     * service resolves it; one that does not exist passes nothing, and the operation reports it. Returns
+     * true when the request was aborted.
      */
     private boolean abortIfRolePassDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
                                           CallerArns callerArns, String action, String credentialScope,
@@ -921,7 +922,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             if (callerArns != null) {
                 callerArns.putPrincipalKeys(context);
             }
-            context.put("iam:PassedToService", List.of(passed.passedToService()));
+            if (passed.passedToService() != null) {
+                context.put("iam:PassedToService", List.of(passed.passedToService()));
+            }
             if (abortIfDenied(ctx, caller, principal, "iam:PassRole", action, credentialScope,
                     List.of(passed.roleArn()), List.of(context), region, accountId, akid)) {
                 return true;
@@ -979,6 +982,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             @Override
             public Optional<String> heldRoleArn(String roleName) {
                 return iamService.findRole(accountId, roleName).map(IamRole::getArn);
+            }
+
+            @Override
+            public Optional<String> serviceCatalogConstraintType(String constraintId) {
+                return firstFound(lookup -> lookup.serviceCatalogConstraintType(constraintId));
             }
         };
     }
@@ -1505,7 +1513,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
-     * Logs and Secrets Manager targets depend on the serving operation and the request's partition;
+     * Logs and Secrets Manager targets depend on the serving operation and the request's partition, STS
+     * targets on the serving operation;
      * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in.
      */
     private List<String> targetResources(String credentialScope, String action, ContainerRequestContext ctx,
@@ -1516,7 +1525,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("secretsmanager".equals(credentialScope)) {
             return arnBuilder.buildSecretsManagerResources(action, ctx, region, accountId, requestPartition());
         }
-        if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope)) {
+        if ("sts".equals(credentialScope)) {
+            return arnBuilder.buildStsResources(action, ctx);
+        }
+        if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope) || "dsql".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
         return arnBuilder.buildResources(credentialScope, ctx, region, accountId);

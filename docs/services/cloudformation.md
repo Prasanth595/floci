@@ -211,10 +211,10 @@ cross-resource references.
 | GuardDuty | `MalwareProtectionPlan` (management plane only: no scan runs, so the plan stays ACTIVE; Ref returns the plan id; a BucketName change is rejected) |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
-| Kinesis Data Firehose | `DeliveryStream` |
+| Kinesis Data Firehose | `DeliveryStream` (`DeliveryStreamName`, `Tags` and, from an S3 destination, `BucketARN`, `RoleARN`, `Prefix`, `ErrorOutputPrefix`, `CompressionFormat`, `BufferingHints`, `CloudWatchLoggingOptions` and `ProcessingConfiguration` are applied; other properties are ignored, and a destination member the template drops on update keeps its stored value, as on AWS) |
 | IoT Core | `Authorizer`, `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
 | CloudFront | `CachePolicy`, `Distribution`, `Function` (`KeyValueStoreAssociations` is ignored), `KeyGroup`, `OriginAccessControl`, `OriginRequestPolicy`, `PublicKey`, `ResponseHeadersPolicy` |
-| CloudWatch | `Alarm`, `Dashboard` |
+| CloudWatch | `Alarm`, `CompositeAlarm`, `Dashboard`. Composite alarms have backing definitions with name Ref and Arn GetAtt, rollback, and replacement cleanup. Composite actions are stored only; suppression properties are rejected. |
 | CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |
 | WAFv2 | `IPSet`, `LoggingConfiguration`, `WebACL`, `WebACLAssociation` |
 | Config | `ConfigRule` |
@@ -449,7 +449,14 @@ hash covers every property floci gives the function, its code's parameter refere
 above, plus its `SnapStart`; those properties differ from the ones SAM generates, so these ids are
 floci's own rather than SAM's. An `AutoPublishCodeSha256` that is a string, or a `Ref` to a
 parameter holding one, replaces the hash with its first ten characters, under
-`AutoPublishAliasAllProperties` too; an empty value leaves the hash in place. `Globals` can set
+`AutoPublishAliasAllProperties` too; an empty value leaves the hash in place. As in SAM, a given
+`AutoPublishCodeSha256` is also appended to the function's `Description`, after a space, so the
+version a new value names publishes even when nothing else changed. The description's parameter
+references are resolved first, one that is another intrinsic function is joined with the value by
+`Fn::Join`, and a function without a description gets the value alone. An empty
+`AutoPublishCodeSha256` appends nothing, but SAM checks the property as written, so a `Ref` to a
+parameter holding an empty value still appends it: a description then ends in a space, and a
+function without one gets an empty `Description`. `Globals` can set
 `AutoPublishAliasAllProperties` and `VersionDeletionPolicy`, but as in SAM not
 `AutoPublishCodeSha256`, which fails the transform there. floci does not honour a resource's
 `IgnoreGlobals`, so no function can opt out of a `VersionDeletionPolicy` in `Globals` with it: one
@@ -462,8 +469,6 @@ configuration changed since its last version. Otherwise the new version resource
 version and the alias stays where it is, as when an update changes only one of these:
 
 - A change to `SnapStart`: floci does not give the function `SnapStart`.
-- A new `AutoPublishCodeSha256` alone: on AWS this publishes, because SAM appends it to the
-  function's `Description`, but floci's transform sets no `Description` on the function.
 - Under `AutoPublishAliasAllProperties`, a change to `Tags` or `ReservedConcurrentExecutions`
   only: AWS fails that update with
   `A version for this Lambda function exists ( N ). Modify the function to create a new version.`,

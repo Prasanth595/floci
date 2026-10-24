@@ -140,6 +140,7 @@ public class LambdaWebService implements Resettable {
     private final LambdaWebCode code;
     private final ObjectMapper objectMapper;
     private final Instance<RequestContext> requestContext;
+    private final LambdaWebExecutionRole executionRole;
 
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
@@ -152,7 +153,7 @@ public class LambdaWebService implements Resettable {
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
                             S3Service s3Service, LambdaWebCode code, ObjectMapper objectMapper,
-                            Instance<RequestContext> requestContext) {
+                            Instance<RequestContext> requestContext, LambdaWebExecutionRole executionRole) {
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
         this.config = config;
@@ -160,6 +161,7 @@ public class LambdaWebService implements Resettable {
         this.code = code;
         this.objectMapper = objectMapper;
         this.requestContext = requestContext;
+        this.executionRole = executionRole;
     }
 
     @PostConstruct
@@ -189,11 +191,16 @@ public class LambdaWebService implements Resettable {
         code.clear();
     }
 
-    /** Where a request to an endpoint domain goes. Domains are unique across accounts and regions. */
-    public record WebFunctionTarget(String accountId, String region, WebFunction function, WebFunctionEndpoint endpoint) {
+    /**
+     * Where a request to an endpoint domain goes. Domains are unique across accounts and regions.
+     * {@code region} is the function's home region and {@code servingRegion} the region of the domain.
+     */
+    public record WebFunctionTarget(String accountId, String region, WebFunction function, WebFunctionEndpoint endpoint,
+                                    String servingRegion) {
     }
 
-    private record EndpointLocator(String accountId, String region, String functionName, String endpointName) {
+    private record EndpointLocator(String accountId, String region, String functionName, String endpointName,
+                                   String servingRegion) {
     }
 
     public Optional<WebFunctionTarget> locate(String host) {
@@ -211,7 +218,7 @@ public class LambdaWebService implements Resettable {
                 }
                 WebFunction fn = copy(stored.get(), WebFunction.class);
                 return Optional.of(new WebFunctionTarget(locator.accountId(), locator.region(), fn,
-                        fn.endpoints.get(locator.endpointName())));
+                        fn.endpoints.get(locator.endpointName()), locator.servingRegion()));
             }
         });
     }
@@ -224,11 +231,13 @@ public class LambdaWebService implements Resettable {
         return Optional.ofNullable(originHosts.get(host));
     }
 
+    /** Floci serves the MultiRegion global domain in the home region. */
     private void indexDomains(WebFunction fn, WebFunctionEndpoint endpoint) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.functionArn);
-        EndpointLocator locator = new EndpointLocator(arn.accountId(), arn.region(), fn.functionName, endpoint.endpointName);
-        index(endpoint.domainName, locator);
-        endpoint.regionalDomainNames.values().forEach(domain -> index(domain, locator));
+        index(endpoint.domainName, new EndpointLocator(arn.accountId(), arn.region(), fn.functionName,
+                endpoint.endpointName, arn.region()));
+        endpoint.regionalDomainNames.forEach((region, domain) -> index(domain, new EndpointLocator(arn.accountId(),
+                arn.region(), fn.functionName, endpoint.endpointName, region)));
     }
 
     private void index(String domain, EndpointLocator locator) {
@@ -301,7 +310,7 @@ public class LambdaWebService implements Resettable {
                     "The revisionConfig and endpointConfig must be specified.", 400);
         }
         requireValidTags(tags);
-        validateRevisionRules(revisionConfig);
+        validateRevisionRules(region, revisionConfig);
         String accountId = regionResolver.getAccountId();
         WebFunctionEndpoint endpoint = draftEndpoint(region, accountId, functionName, endpointConfig, false);
         return storeNewFunction(region, functionName, tags, fn -> {
@@ -333,19 +342,29 @@ public class LambdaWebService implements Resettable {
         }
     }
 
-    /** Stores a new function under its lock, refusing a name the region already has. */
+    /**
+     * Stores a new function under its lock, refusing a name the account already has in any region.
+     * Creates of one name in every region of the account share a lock, so two regions cannot both take it.
+     */
     private WebFunction storeNewFunction(String region, String functionName, Map<String, String> tags,
                                          Consumer<WebFunction> populate) {
         String accountId = regionResolver.getAccountId();
-        synchronized (lockFor(region, functionName)) {
-            if (functions.get(key(region, functionName)).isPresent()) {
-                throw new AwsException("ConflictException",
-                        "The function " + functionArn(region, accountId, functionName) + " already exists.", 409);
+        synchronized (locks.computeIfAbsent(accountId + "/" + functionName, k -> new Object())) {
+            synchronized (lockFor(region, functionName)) {
+                if (functions.get(key(region, functionName)).isPresent()) {
+                    throw new AwsException("ConflictException",
+                            "The function " + functionArn(region, accountId, functionName) + " already exists.", 409);
+                }
+                if (!functions.scan(k -> k.endsWith("/" + functionName)).isEmpty()) {
+                    throw new AwsException("ConflictException", "A function named " + functionName
+                            + " already exists in the account. Function names must be unique across all regions"
+                            + " in an account.", 409);
+                }
+                WebFunction fn = newFunction(region, accountId, functionName, tags == null ? Map.of() : tags);
+                populate.accept(fn);
+                functions.put(key(region, functionName), fn);
+                return copy(fn, WebFunction.class);
             }
-            WebFunction fn = newFunction(region, accountId, functionName, tags == null ? Map.of() : tags);
-            populate.accept(fn);
-            functions.put(key(region, functionName), fn);
-            return copy(fn, WebFunction.class);
         }
     }
 
@@ -401,8 +420,8 @@ public class LambdaWebService implements Resettable {
         LambdaWebValidation validation = new LambdaWebValidation();
         validateRevisionShape(validation, request, "");
         validation.throwIfAny();
-        validateRevisionRules(request);
         String functionName = resolveFunctionName(region, functionNameOrArn, "CreateWebFunctionRevision");
+        validateRevisionRules(region, request);
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             WebFunctionRevision revision = buildRevision(fn, request);
@@ -507,8 +526,12 @@ public class LambdaWebService implements Resettable {
     }
 
     /** The rules a revision request must meet before the function is looked up. */
-    private static void validateRevisionRules(JsonNode request) {
+    private void validateRevisionRules(String region, JsonNode request) {
         JsonNode service = LambdaWebJson.structure(request, "serviceConfig");
+        String role = LambdaWebJson.text(service, "executionRoleArn");
+        if (!AwsArnUtils.parse(role).accountId().equals(regionResolver.getAccountId())) {
+            throw new LambdaWebAccessDeniedException("Cross-account pass role is not allowed.");
+        }
         Map<String, String> environment = LambdaWebJson.stringMap(service, "environmentVariables", false);
         if (environment != null) {
             List<String> reserved = environment.keySet().stream().filter(RESERVED_ENVIRONMENT_KEYS::contains).toList();
@@ -522,6 +545,7 @@ public class LambdaWebService implements Resettable {
             throw new AwsException("ValidationException", "The logGroup " + logGroup
                     + " is invalid. Log group names starting with aws/ (case-insensitive) are reserved for AWS.", 400);
         }
+        executionRole.requireAssumable(region, role);
     }
 
     private WebFunctionRevision buildRevision(WebFunction fn, JsonNode request) {
@@ -907,8 +931,9 @@ public class LambdaWebService implements Resettable {
         if ("MultiRegion".equals(endpoint.endpointType)) {
             endpoint.domainName = randomLowercase(DOMAIN_ID_LENGTH) + ".lambda-web.global." + host;
         } else {
+            String id = randomLowercase(DOMAIN_ID_LENGTH);
             for (String each : endpoint.regions) {
-                endpoint.regionalDomainNames.put(each, regionalDomain(each, host));
+                endpoint.regionalDomainNames.put(each, regionalDomain(id, each, host));
             }
             endpoint.domainName = endpoint.regionalDomainNames.get(region);
         }
@@ -916,8 +941,8 @@ public class LambdaWebService implements Resettable {
         endpoint.updatedAt = endpoint.createdAt;
     }
 
-    private static String regionalDomain(String region, String host) {
-        return randomLowercase(DOMAIN_ID_LENGTH) + "." + DOMAIN_SHARD + ".lambda-web." + region + "." + host;
+    private static String regionalDomain(String id, String region, String host) {
+        return id + "." + DOMAIN_SHARD + ".lambda-web." + region + "." + host;
     }
 
     private static void requireModeAllowed(String mode, String endpointType) {

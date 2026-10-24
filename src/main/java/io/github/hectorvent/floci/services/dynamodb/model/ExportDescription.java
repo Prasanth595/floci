@@ -69,6 +69,9 @@ public class ExportDescription {
     @JsonProperty("FailureMessage")
     private String failureMessage;
 
+    @JsonProperty("DestinationType")
+    private String destinationType = "S3";
+
     public String getExportArn() { return exportArn; }
     public void setExportArn(String exportArn) { this.exportArn = exportArn; }
 
@@ -125,4 +128,7 @@ public class ExportDescription {
 
     public String getFailureMessage() { return failureMessage; }
     public void setFailureMessage(String failureMessage) { this.failureMessage = failureMessage; }
+
+    public String getDestinationType() { return destinationType; }
+    public void setDestinationType(String destinationType) { this.destinationType = destinationType; }
 }

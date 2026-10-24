@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.DhcpConfiguration;
+import io.github.hectorvent.floci.services.ec2.model.DhcpOptions;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -67,6 +69,18 @@ import static org.mockito.Mockito.when;
 class Ec2ServicePersistenceTest {
 
     private static final String REGION = "us-east-1";
+
+    @Test
+    void dhcpOptionsSurviveRestart(@TempDir Path dir) {
+        Ec2Service original = newService(dir);
+        String id = original.createDhcpOptions(REGION,
+                List.of(new DhcpConfiguration("domain-name", List.of("persistent.example")))).getDhcpOptionsId();
+
+        DhcpOptions restored = newService(dir).describeDhcpOptions(REGION, List.of(id), List.of(), 0, null)
+                .items().getFirst();
+        assertEquals(id, restored.getDhcpOptionsId());
+        assertEquals("persistent.example", restored.getConfigurations().getFirst().getValues().getFirst());
+    }
 
     @Test
     void elasticIpMetadataSurvivesRestart(@TempDir Path dir) {
@@ -685,7 +699,8 @@ class Ec2ServicePersistenceTest {
                 load(dir, "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 load(dir, "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
                 load(dir, "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
-                load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
+                load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}),
+                load(dir, "ec2-dhcp-options.json", new TypeReference<Map<String, DhcpOptions>>() {}));
     }
 
     private <V> StorageBackend<String, V> load(Path dir, String file, TypeReference<Map<String, V>> type) {

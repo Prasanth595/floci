@@ -11,6 +11,14 @@ public final class Digests {
     private Digests() {
     }
 
+    public static byte[] md5(byte[] data) {
+        try {
+            return MessageDigest.getInstance("MD5").digest(data);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 is not available", e);
+        }
+    }
+
     public static byte[] sha1(byte[] data) {
         try {
             return MessageDigest.getInstance("SHA-1").digest(data);

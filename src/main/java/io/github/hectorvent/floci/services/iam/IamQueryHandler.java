@@ -66,6 +66,11 @@ public class IamQueryHandler {
     /** {@code MaxItems} on the readers that page through {@link #paginate}: "defaults to 100", range 1 to 1000. */
     private static final int DEFAULT_MAX_ITEMS = 100;
     private static final int MAX_MAX_ITEMS = 1000;
+    /** {@code jobIDType} on every report reader: min 36 and max 36, which is a UUID string. */
+    private static final int JOB_ID_LENGTH = 36;
+    /** {@code arnType} on {@code PolicySourceArn}: 20 to 2048, with no pattern. */
+    private static final int ARN_MIN_LENGTH = 20;
+    private static final int ARN_MAX_LENGTH = 2048;
     /** {@code sortKeyType} on {@code GetOrganizationsAccessReport}. */
     private static final Set<String> SORT_KEYS = Set.of("SERVICE_NAMESPACE_ASCENDING",
             "SERVICE_NAMESPACE_DESCENDING", "LAST_AUTHENTICATED_TIME_ASCENDING",
@@ -341,6 +346,7 @@ public class IamQueryHandler {
             case "SendDelegationToken" -> handleSendDelegationToken(params, authorization);
             case "GetDelegationRequest" -> handleGetDelegationRequest(params);
             case "ListDelegationRequests" -> handleListDelegationRequests(params);
+            case "GetHumanReadableSummary" -> handleGetHumanReadableSummary(params);
 
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.IAM, 400);
@@ -1446,7 +1452,7 @@ public class IamQueryHandler {
         String description = params.getFirst("Description");
         if (description == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at 'description' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("description"));
         }
         IamRole role = iamService.updateRoleDescription(getParam(params, "RoleName"), description);
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
@@ -2158,7 +2164,7 @@ public class IamQueryHandler {
     }
 
     private Response handleSimulatePrincipalPolicy(MultivaluedMap<String, String> params) {
-        String policySourceArn = getParam(params, "PolicySourceArn");
+        String policySourceArn = validatedPolicySourceArn(params);
         CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
         List<String> actionNames = requireActionNames(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
@@ -2248,7 +2254,7 @@ public class IamQueryHandler {
     }
 
     private Response handleGetContextKeysForPrincipalPolicy(MultivaluedMap<String, String> params) {
-        String policySourceArn = getParam(params, "PolicySourceArn");
+        String policySourceArn = validatedPolicySourceArn(params);
         // "Only context keys referenced by the identity-based policies attached to the specified
         // entity, and any additional policies that you provide, are included": a grant the account
         // applies without attaching it is therefore not read here, though a simulation evaluates
@@ -2275,6 +2281,9 @@ public class IamQueryHandler {
                                                               String authorization) {
         String accountId = accountResolver.resolve(authorization);
         String arn = requireParam(params, "Arn");
+        // The same rule as the readers below: the granularity is a declared enum, so it is read
+        // before the ARN is resolved rather than inside the generate it is passed to.
+        ServiceLastAccessedService.validateGranularity(params.getFirst("Granularity"));
         AccessAdvisorTarget target = resolveAccessAdvisorTarget(accountId, arn);
         // Already sorted and expanded, including the wildcard and NotAction grants that name no
         // namespace of their own.
@@ -2293,8 +2302,10 @@ public class IamQueryHandler {
      */
     private Response handleGetServiceLastAccessedDetails(MultivaluedMap<String, String> params,
                                                          String authorization) {
+        String jobId = validatedJobId(params);
+        validatePagingInputs(params);
         ServiceLastAccessedJob job = serviceLastAccessedService.get(
-                accountResolver.resolve(authorization), requireParam(params, "JobId"));
+                accountResolver.resolve(authorization), jobId);
         Page<String> page = paginate(job.getServiceNamespaces(), Function.identity(), params);
         XmlBuilder xml = new XmlBuilder()
                 .elem("JobStatus", "COMPLETED")
@@ -2351,10 +2362,11 @@ public class IamQueryHandler {
      */
     private Response handleGetOrganizationsAccessReport(MultivaluedMap<String, String> params,
                                                         String authorization) {
-        String jobId = requireParam(params, "JobId");
+        String jobId = validatedJobId(params);
         // Read before the lookup, because a value outside the enum is a bad request whether or not
         // the job exists: validating it after would answer NoSuchEntity for a request AWS rejects.
         String sortKey = validatedSortKey(params);
+        validatePagingInputs(params);
         OrganizationsAccessReportJob job = organizationsAccessReportService.get(
                 accountResolver.resolve(authorization), jobId);
         XmlBuilder xml = new XmlBuilder()
@@ -2391,6 +2403,93 @@ public class IamQueryHandler {
         }
         return Response.ok(AwsQueryResponse.envelope("GetOrganizationsAccessReport",
                 AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * {@code MaxItems} if the request carries one inside the range the reference publishes, null if
+     * it carries none. Read without the list it will page, so a reader can check it before it looks
+     * anything up.
+     */
+    private static Integer validatedMaxItems(MultivaluedMap<String, String> params) {
+        String raw = params.getFirst("MaxItems");
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        int limit;
+        try {
+            limit = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidInput",
+                    "The value " + raw + " at 'maxItems' is not a number.", 400);
+        }
+        if (limit < 1) {
+            throw validationError(raw, "maxItems", "Member must have value greater than or equal to 1");
+        }
+        if (limit > MAX_MAX_ITEMS) {
+            throw validationError(raw, "maxItems",
+                    "Member must have value less than or equal to " + MAX_MAX_ITEMS);
+        }
+        return limit;
+    }
+
+    /**
+     * {@code JobId} held to the fixed 36 characters {@code jobIDType} declares, before the job is
+     * looked up. The order is the whole point: a value that breaks a declared constraint is a bad
+     * request whether or not the job exists, and the validation AWS runs ahead of an operation
+     * never reaches its store, so checking it afterwards answers {@code NoSuchEntity} 404 where
+     * AWS answers 400.
+     *
+     * <p>A fixed length reports as one constraint rather than as both bounds, the form
+     * {@code lifecycleActionToken} already uses for the same shape in Auto Scaling, and the
+     * offending value is left out, which is how the most recent IAM recordings render one.
+     */
+    private String validatedJobId(MultivaluedMap<String, String> params) {
+        String jobId = requireParam(params, "JobId");
+        if (jobId.length() != JOB_ID_LENGTH) {
+            throw SmithyValidationErrors.validationError("Value at 'jobId' failed to satisfy "
+                    + "constraint: Member must have length equal to " + JOB_ID_LENGTH);
+        }
+        return jobId;
+    }
+
+    /**
+     * The paging members, read ahead of the lookup whose result they page, for the reason
+     * {@link #validatedJobId} is. {@link #paginate} reads them again when it runs: most of the
+     * readers paged there look nothing up first, and a check only one caller performs is one the
+     * next caller forgets.
+     */
+    private void validatePagingInputs(MultivaluedMap<String, String> params) {
+        validatedMaxItems(params);
+        String marker = params.getFirst("Marker");
+        if (marker != null && !marker.isBlank() && markers.cursorOf(marker.trim()) == null) {
+            markerIndex(marker);
+        }
+    }
+
+    /**
+     * {@code PolicySourceArn} held to the 20 to 2048 characters {@code arnType} declares, before
+     * the entity it names is resolved. IAM answers that minimum on a sibling ARN member with a
+     * {@code ValidationError} naming the length, so a value too short to be any ARN is refused on
+     * its shape rather than resolved to whatever follows its last slash.
+     *
+     * <p>A value that clears 20 characters and still parses as no ARN is left alone: the member
+     * publishes a length and no pattern, and what AWS answers for one is not recorded. An absent
+     * or blank value is left alone too, the resolver below reporting that one.
+     */
+    private String validatedPolicySourceArn(MultivaluedMap<String, String> params) {
+        String arn = getParam(params, "PolicySourceArn");
+        if (arn == null || arn.isBlank()) {
+            return arn;
+        }
+        if (arn.length() < ARN_MIN_LENGTH) {
+            throw SmithyValidationErrors.validationError("Value at 'policySourceArn' failed to satisfy "
+                    + "constraint: Member must have length greater than or equal to " + ARN_MIN_LENGTH);
+        }
+        if (arn.length() > ARN_MAX_LENGTH) {
+            throw SmithyValidationErrors.validationError("Value at 'policySourceArn' failed to satisfy "
+                    + "constraint: Member must have length less than or equal to " + ARN_MAX_LENGTH);
+        }
+        return arn;
     }
 
     /**
@@ -2436,9 +2535,11 @@ public class IamQueryHandler {
      */
     private Response handleGetServiceLastAccessedDetailsWithEntities(MultivaluedMap<String, String> params,
                                                                      String authorization) {
-        ServiceLastAccessedJob job = serviceLastAccessedService.get(
-                accountResolver.resolve(authorization), requireParam(params, "JobId"));
+        String jobId = validatedJobId(params);
         String namespace = requireParam(params, "ServiceNamespace");
+        validatePagingInputs(params);
+        ServiceLastAccessedJob job = serviceLastAccessedService.get(
+                accountResolver.resolve(authorization), jobId);
         // The report named the services it covers, so an entity is only reported for one of those.
         List<ServiceLastAccessedEntity> reported = job.getServiceNamespaces().contains(namespace)
                 ? job.getEntities() : List.of();
@@ -2689,6 +2790,27 @@ public class IamQueryHandler {
         return xml.build();
     }
 
+    /**
+     * The summary of a delegation request, in Markdown, with the generation state beside it.
+     *
+     * <p>{@code SummaryContent} is left out of the answer unless the state is {@code AVAILABLE},
+     * the model saying it "is non-empty only if the SummaryState is AVAILABLE": an absent member
+     * and an empty one read the same to an SDK, and omitting it keeps the response from carrying a
+     * summary that is not there.
+     */
+    private Response handleGetHumanReadableSummary(MultivaluedMap<String, String> params) {
+        DelegationRequestService.Summary summary = delegationRequestService.summarize(
+                regionResolver.getAccountId(), getParam(params, "EntityArn"),
+                getParam(params, "Locale"));
+        String result = new XmlBuilder()
+                .elem("SummaryContent", summary.content())
+                .elem("Locale", summary.locale())
+                .elem("SummaryState", summary.state())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GetHumanReadableSummary",
+                AwsNamespaces.IAM, result)).build();
+    }
+
     /** {@code Permissions} is a structure, so its members arrive dotted under that prefix. */
     private DelegationPermission parseDelegationPermissions(MultivaluedMap<String, String> params) {
         String templateArn = getParam(params, "Permissions.PolicyTemplateArn");
@@ -2697,7 +2819,13 @@ public class IamQueryHandler {
             String prefix = "Permissions.Parameters.member." + index;
             List<String> values = new ArrayList<>();
             for (int valueIndex : memberIndices(params, prefix + ".Values.member.")) {
-                values.add(getParam(params, prefix + ".Values.member." + valueIndex));
+                // An index is read off the keys, so one can be present through a key of its own
+                // that carries no value, as a dotted sub-member does. That is no value to store:
+                // AWS reads the member it knows and nothing from the key it does not.
+                String value = getParam(params, prefix + ".Values.member." + valueIndex);
+                if (value != null) {
+                    values.add(value);
+                }
             }
             parameters.add(new PolicyParameter(getParam(params, prefix + ".Name"),
                     getParam(params, prefix + ".Type"), values));
@@ -2813,22 +2941,9 @@ public class IamQueryHandler {
         // it would be against AWS. Operations that model no MaxItems at all pass through whole.
         int limit = maxItemsModeled ? DEFAULT_MAX_ITEMS : items.size();
         if (maxItemsModeled) {
-            String raw = params.getFirst("MaxItems");
-            if (raw != null && !raw.isBlank()) {
-                try {
-                    limit = Integer.parseInt(raw.trim());
-                } catch (NumberFormatException e) {
-                    throw new AwsException("InvalidInput",
-                            "The value " + raw + " at 'maxItems' is not a number.", 400);
-                }
-                if (limit < 1) {
-                    throw validationError(raw, "maxItems",
-                            "Member must have value greater than or equal to 1");
-                }
-                if (limit > MAX_MAX_ITEMS) {
-                    throw validationError(raw, "maxItems",
-                            "Member must have value less than or equal to " + MAX_MAX_ITEMS);
-                }
+            Integer asked = validatedMaxItems(params);
+            if (asked != null) {
+                limit = asked;
             }
         }
         if (from >= items.size()) {
@@ -3472,9 +3587,7 @@ public class IamQueryHandler {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at '"
-                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
-                            + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(Character.toLowerCase(name.charAt(0)) + name.substring(1)));
         }
         return value;
     }

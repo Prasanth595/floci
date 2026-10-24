@@ -1,8 +1,9 @@
 name: IAM Data Drift
 
-# Checks the three vendored files that come from AWS's live service reference rather than from a
+# Checks the four vendored files that come from AWS's live service reference rather than from a
 # pinned dependency: the IAM service namespace list, the map of which resource each IAM action is
-# authorized against, and the map of operations AWS authorizes as an action of another name. That
+# authorized against, the map of operations AWS authorizes as an action of another name, and the
+# table of the operations that pass a role and the services they pass it to. That
 # needs the live service reference index, so unlike every other check here it can
 # fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
 # retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
@@ -36,6 +37,9 @@ on:
       - 'src/main/resources/aws/iam-authorized-actions.json'
       - 'tools/aws/regen_iam_authorized_actions.py'
       - 'tools/aws/test_regen_iam_authorized_actions.py'
+      - 'src/main/resources/aws/iam-passed-roles.json'
+      - 'tools/aws/regen_iam_passed_roles.py'
+      - 'tools/aws/test_regen_iam_passed_roles.py'
       - '.github/workflows/iam-data-drift.yml'
   schedule:
     # Mondays at 06:00 UTC, before the working week rather than during it.

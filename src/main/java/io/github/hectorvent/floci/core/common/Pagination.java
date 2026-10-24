@@ -112,6 +112,15 @@ public final class Pagination {
         }
     }
 
+    /**
+     * True when {@code token} decodes to a cursor that starts with {@code prefix}, for callers that
+     * need to tell a token they issued under another scope from one that is not theirs at all.
+     */
+    public static boolean tokenStartsWith(String token, String prefix) {
+        String decoded = decodeToken(token);
+        return decoded != null && decoded.startsWith(prefix);
+    }
+
     private static String encodeToken(String cursor) {
         return Base64Url.encode(cursor);
     }
@@ -121,15 +130,21 @@ public final class Pagination {
         if (token == null || token.isEmpty()) {
             return null;
         }
-        String decoded;
-        try {
-            decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            throw invalidToken.apply(token);
-        }
-        if (!decoded.startsWith(prefix)) {
+        String decoded = decodeToken(token);
+        if (decoded == null || !decoded.startsWith(prefix)) {
             throw invalidToken.apply(token);
         }
         return decoded.substring(prefix.length());
+    }
+
+    private static String decodeToken(String token) {
+        if (token == null || token.isEmpty()) {
+            return null;
+        }
+        try {
+            return new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 }

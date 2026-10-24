@@ -188,7 +188,7 @@ public class IotFleetIndexingService {
         String nextToken = text(request.path("nextToken"), "nextToken");
         List<String> errors = new ArrayList<>();
         if (queryString == null) {
-            errors.add("Value null at 'queryString' failed to satisfy constraint: Member must not be null");
+            errors.add(SmithyValidationErrors.notNull("queryString"));
         } else if (queryString.isEmpty()) {
             errors.add("Value '' at 'queryString' failed to satisfy constraint: "
                     + "Member must have length greater than or equal to 1");
@@ -468,8 +468,7 @@ public class IotFleetIndexingService {
         String value = text(node.path(member), prefix + "." + member);
         if (value == null) {
             if (required) {
-                errors.add("Value null at '" + prefix + "." + member
-                        + "' failed to satisfy constraint: Member must not be null");
+                errors.add(SmithyValidationErrors.notNull(prefix + "." + member));
             }
             return "OFF";
         }

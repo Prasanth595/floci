@@ -504,6 +504,21 @@ public class CodeArtifactService implements Resettable {
         return id;
     }
 
+    /**
+     * {@link #ensureFormatContainerId} plus {@link RepositorySidecarManager#beginUse}, both under
+     * this same {@code synchronized} monitor {@link #deleteRepository} also holds for its own
+     * sidecar cleanup, so a delete can never run its cleanup in the gap between resolving
+     * {@code repoId} and registering use of it. Only {@link #listPackageVersions} needs this: it
+     * is the one caller of {@link #ensureFormatContainerId} whose sidecar call is bracketed by
+     * {@code beginUse}/{@code endUse} at all.
+     */
+    private synchronized String resolveContainerIdAndBeginUse(String format, String region, String domain,
+            String domainOwner, String repository, RepositorySidecarManager manager) {
+        String id = ensureFormatContainerId(format, region, domain, domainOwner, repository);
+        manager.beginUse(id);
+        return id;
+    }
+
     public synchronized CodeArtifactRepository updateRepository(String region, String domain, String domainOwner,
                                                                   String repository, String description,
                                                                   List<String> upstreams) {
@@ -960,16 +975,22 @@ public class CodeArtifactService implements Resettable {
         List<PackageVersionEntry> entries;
         String preferredDisplayVersion = null;
         if (CONTAINER_BACKED_FORMATS.contains(format)) {
-            String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
             RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
                     .orElseThrow(() -> notFound("Package '" + packageName + "' was not found.", packageName,
                             "package"));
+            // Resolves repoId and registers use of it atomically (see
+            // resolveContainerIdAndBeginUse's own javadoc): a repository delete racing in between
+            // those two steps must not be able to run a sidecar's own cleanup to completion before
+            // this call gets a chance to register itself as using repoId.
+            String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
             List<RepositorySidecarManager.PackageVersionTimestamp> raw;
             try {
                 raw = manager.listPackageVersions(repoId, domain, repository, namespace, packageName);
             } catch (UnsupportedOperationException e) {
                 throw new AwsException("InternalServerException", "Listing " + format + " package versions is not "
                         + "yet supported by this emulator.", 500);
+            } finally {
+                manager.endUse(repoId);
             }
             if (raw.isEmpty() && !hasOriginConfig) {
                 throw notFound("Package '" + packageName + "' was not found.", packageName, "package");

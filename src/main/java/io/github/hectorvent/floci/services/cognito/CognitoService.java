@@ -2032,7 +2032,7 @@ public class CognitoService implements ResourceProvider {
     private void validateLogConfigurations(List<Map<String, Object>> configs) {
         if (configs == null) {
             throw validationErrors(List.of(
-                    "Value null at 'logConfigurations' failed to satisfy constraint: Member must not be null"));
+                    SmithyValidationErrors.notNull("logConfigurations")));
         }
 
         List<String> errors = new ArrayList<>();

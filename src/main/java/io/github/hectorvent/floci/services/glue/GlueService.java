@@ -88,7 +88,12 @@ public class GlueService {
             "StringColumnStatisticsData",
             List.of("MaximumLength", "AverageLength", "NumberOfNulls", "NumberOfDistinctValues"),
             "BinaryColumnStatisticsData",
-            List.of("MaximumLength", "AverageLength", "NumberOfNulls"));
+            List.of("MaximumLength", "AverageLength", "NumberOfNulls"),
+            "LongColumnStatisticsData", List.of("NumberOfNulls", "NumberOfDistinctValues"),
+            "DoubleColumnStatisticsData", List.of("NumberOfNulls", "NumberOfDistinctValues"),
+            "DecimalColumnStatisticsData", List.of("NumberOfNulls", "NumberOfDistinctValues"),
+            "DateColumnStatisticsData", List.of("NumberOfNulls", "NumberOfDistinctValues"),
+            "BooleanColumnStatisticsData", List.of("NumberOfTrues", "NumberOfFalses", "NumberOfNulls"));
     private static final Pattern COMPARISON_EXPRESSION = Pattern.compile(
             "\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(=|<>|<=|>=|<|>)\\s*('?[^']*'?|[^\\s]+)\\s*",
             Pattern.CASE_INSENSITIVE);
@@ -1310,7 +1315,7 @@ public class GlueService {
     }
 
     /**
-     * Glue reads back the numeric string and binary statistics a writer left out as 0, and clients such as Trino
+     * Glue reads back the required numeric statistics a writer left out as 0, and clients such as Trino
      * unbox them without a null check, so every statistic read back carries all of them, whatever the stored
      * record holds.
      */

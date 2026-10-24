@@ -41,6 +41,7 @@ import org.jboss.resteasy.reactive.server.core.CurrentRequestManager;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PushbackInputStream;
 import java.net.IDN;
 import java.net.URI;
@@ -863,7 +864,8 @@ public class CloudFrontServingController {
 
     /**
      * The origin's connection settings for one request: {@code Origin.ConnectionTimeout},
-     * {@code CustomOriginConfig.OriginReadTimeout} and {@code Origin.ConnectionAttempts}. A value
+     * {@code CustomOriginConfig.OriginReadTimeout}, {@code CustomOriginConfig.OriginKeepaliveTimeout},
+     * {@code Origin.ConnectionAttempts} and {@code Origin.ResponseCompletionTimeout}. A value
      * outside the range AWS accepts falls back to the AWS default, since the model can be built
      * programmatically or loaded from persisted state without the API validation.
      */
@@ -882,8 +884,19 @@ public class CloudFrontServingController {
                 CloudFrontOriginTimeouts.MIN_CONNECTION_ATTEMPTS,
                 CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS,
                 CloudFrontOriginTimeouts.DEFAULT_CONNECTION_ATTEMPTS);
+        int keepAliveSeconds = clampToDefault(
+                intOrDefault(origin.getCustomOriginConfig(), "OriginKeepaliveTimeout",
+                        CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS),
+                CloudFrontOriginTimeouts.MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS);
+        Integer completionSeconds = origin.getResponseCompletionTimeout();
+        Duration completionTimeout = (completionSeconds == null || completionSeconds <= 0)
+                ? CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT
+                : Duration.ofSeconds(completionSeconds);
         return new CloudFrontOriginHttpClient.OriginTimeouts(
-                Duration.ofSeconds(connectSeconds), Duration.ofSeconds(readSeconds), attempts);
+                Duration.ofSeconds(connectSeconds), Duration.ofSeconds(readSeconds), attempts,
+                completionTimeout, Duration.ofSeconds(keepAliveSeconds));
     }
 
     private static int clampToDefault(int value, int min, int max, int fallback) {
@@ -1116,7 +1129,7 @@ public class CloudFrontServingController {
                 InputStream body = origin.stream();
                 StreamingOutput entity = output -> {
                     try (InputStream in = body) {
-                        in.transferTo(output);
+                        streamToViewer(in, output);
                     }
                 };
                 rb.entity(entity);
@@ -1133,6 +1146,21 @@ public class CloudFrontServingController {
         } catch (RuntimeException e) {
             origin.closeStream();
             throw e;
+        }
+    }
+
+    /**
+     * Copies the origin's body to the viewer, flushing every chunk, so the viewer's response
+     * starts before the body is over, as CloudFront's does. A response the origin never completes
+     * ends with the bytes that did arrive and a closed connection, the way CloudFront ends it,
+     * instead of an error page that hides what the viewer already received.
+     */
+    private static void streamToViewer(InputStream in, OutputStream out) throws IOException {
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = in.read(buffer)) >= 0) {
+            out.write(buffer, 0, read);
+            out.flush();
         }
     }
 
