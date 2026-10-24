@@ -18,12 +18,19 @@ final class LambdaWebMetricStatistics {
 
     /** {@code Sum} and {@code SampleCount} add up over the periods, {@code Maximum} is the largest. */
     static double of(String namespace, String metric, Map<String, String> dimensions, String statistic) {
+        return of("us-east-1", namespace, metric, dimensions, statistic);
+    }
+
+    static double of(String region, String namespace, String metric, Map<String, String> dimensions,
+                     String statistic) {
         RestAssuredJsonUtils.configureAwsContentTypes();
         Instant now = Instant.now();
         String filter = dimensions.entrySet().stream()
                 .map(each -> "{\"Name\":\"" + each.getKey() + "\",\"Value\":\"" + each.getValue() + "\"}")
                 .collect(Collectors.joining(","));
         JsonPath result = given().contentType("application/x-amz-json-1.0")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/" + region
+                        + "/monitoring/aws4_request, SignedHeaders=host, Signature=abc")
                 .header("X-Amz-Target", "GraniteServiceVersion20100801.GetMetricStatistics")
                 .body("{\"Namespace\":\"" + namespace + "\",\"MetricName\":\"" + metric + "\",\"Dimensions\":[" + filter
                         + "],\"StartTime\":" + now.minusSeconds(600).getEpochSecond() + ",\"EndTime\":"

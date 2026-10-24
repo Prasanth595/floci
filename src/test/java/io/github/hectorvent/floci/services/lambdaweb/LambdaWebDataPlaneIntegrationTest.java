@@ -302,6 +302,36 @@ class LambdaWebDataPlaneIntegrationTest {
     }
 
     @Test
+    void aPerRegionEndpointCountsAPageInTheRegionThatServedAndInTheHomeRegion() {
+        String functionName = "dp-regions-" + Long.toString(System.nanoTime(), 36);
+        createFunction(functionName);
+        String endpoints = BASE + "/web-functions/" + functionName + "/endpoints";
+        String revisionId = given().when().get(endpoints + "/dev").then().statusCode(200)
+                .extract().path("revisionWeights[0].revisionId");
+        String west = given().contentType("application/json")
+                .body("""
+                        {"endpointName": "per", "endpointType": "PerRegion", "regions": ["us-west-2"],
+                         "authType": "IamAuth", "revisionWeights": [{"revisionId": "%s", "weight": 100}]}"""
+                        .formatted(revisionId))
+                .when().put(endpoints)
+                .then().statusCode(202)
+                .extract().path("regionalEndpoints.us-west-2.domainName");
+        given().header("Host", west).when().get("/").then().statusCode(403);
+
+        Map<String, String> endpoint = Map.of("FunctionName", functionName, "EndpointName", "per");
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        assertEquals(1, LambdaWebMetricStatistics.of("us-west-2", LambdaWebMetrics.NAMESPACE,
+                "HTTPResponseStatusClass4XX", endpoint, "Sum"));
+        assertEquals(1, LambdaWebMetricStatistics.of("us-east-1", LambdaWebMetrics.NAMESPACE,
+                "HTTPResponseStatusClass4XX", endpoint, "Sum"));
+
+        given().when().delete(endpoints + "/per").then().statusCode(204);
+        given().header("Host", west).when().get("/")
+                .then().statusCode(404).header("lambda-web-error-type", "Platform.InvalidEndpoint");
+        given().when().delete(BASE + "/web-functions/" + functionName).then().statusCode(204);
+    }
+
+    @Test
     void otherHostsStillReachTheControlPlane() {
         given().when().get(BASE + "/web-account-settings").then().statusCode(200);
     }

@@ -42,6 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -434,6 +435,74 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     }
 
     @Test
+    @Timeout(240)
+    void aPerRegionEndpointServesEachRegionFromItsOwnEnvironments() throws Exception {
+        createFunction(30, 1);
+        String endpoints = BASE + "/web-functions/" + functionName + "/endpoints";
+        String revisionId = given().when().get(endpoints + "/dev").then().statusCode(200)
+                .extract().path("revisionWeights[0].revisionId");
+        JsonPath created = given().contentType("application/json")
+                .body("""
+                        {"endpointName": "per", "endpointType": "PerRegion", "regions": ["us-west-2"],
+                         "authType": "ApplicationManaged", "scalingConfig": {"maxEnvironments": 2},
+                         "revisionWeights": [{"revisionId": "%s", "weight": 100}]}""".formatted(revisionId))
+                .when().put(endpoints)
+                .then().statusCode(202)
+                .extract().jsonPath();
+        String east = created.getString("regionalEndpoints.us-east-1.domainName");
+        String west = created.getString("regionalEndpoints.us-west-2.domainName");
+
+        Response westEcho = given().header("Host", west).when().get("/");
+        westEcho.then().statusCode(200).body("env.region", equalTo("us-west-2"));
+        String westStream = westEcho.header("lambda-web-logstream");
+        given().header("Host", east).when().get("/").then().statusCode(200).body("env.region", equalTo("us-east-1"))
+                .header("lambda-web-logstream", not(equalTo(westStream)));
+        JsonPath zone = given().header("Host", west).when().get("/metadata").then().statusCode(200)
+                .extract().jsonPath();
+        assertEquals("{\"AvailabilityZoneID\":\"usw2-az1\"}\n", zone.getString("body"));
+
+        // maxEnvironments holds in each region on its own, as on AWS.
+        AtomicInteger next = new AtomicInteger();
+        CyclicBarrier together = new CyclicBarrier(4);
+        List<String> waited = parallel(4, () -> raw("GET /wait HTTP/1.1\r\nHost: "
+                + (next.getAndIncrement() % 2 == 0 ? east : west) + "\r\nConnection: close\r\n\r\n", together));
+        assertTrue(waited.stream().allMatch(response -> response.startsWith("HTTP/1.1 200 ")),
+                String.join("\n----\n", waited));
+
+        // The .local group is in the region that served and the centralized one in the home region.
+        String group = "/aws/lambda/web/" + functionName;
+        Predicate<List<String>> started = events -> events.stream().anyMatch(event -> event.contains("\"starting\""));
+        List<String> local = awaitLogEvents("us-west-2", group + ".local", westStream, started);
+        JsonPath starting = JsonPath.from(local.stream().filter(event -> event.contains("\"starting\""))
+                .findFirst().orElseThrow());
+        assertEquals("us-west-2", starting.getString("region"));
+        JsonPath initStart = platformEvent(local, "platform.initStart");
+        assertEquals("us-west-2", initStart.getString("region"));
+        assertTrue(initStart.getString("record.runtimeVersionArn").startsWith(
+                "arn:aws:lambda:us-west-2::runtime/nodejs24.x/version/"), initStart.prettify());
+        assertTrue(started.test(awaitLogEvents("us-east-1", group, westStream + "-000000000000-us-west-2", started)));
+        assertEquals(List.of(), logEvents("us-east-1", group + ".local", westStream));
+
+        // AWS/Lambda/Web is also centralized in the home region. The usage metrics are not.
+        Map<String, String> endpoint = Map.of("FunctionName", functionName, "EndpointName", "per");
+        Map<String, String> westUsage = Map.of("FunctionName", functionName, "EndpointName", "per",
+                "ExecutionRegion", "us-west-2");
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        assertEquals(4, LambdaWebMetricStatistics.of("us-west-2", LambdaWebMetrics.NAMESPACE, "ExecutedRequests",
+                endpoint, "Sum"));
+        assertEquals(7, LambdaWebMetricStatistics.of("us-east-1", LambdaWebMetrics.NAMESPACE, "ExecutedRequests",
+                endpoint, "Sum"));
+        assertEquals(4, LambdaWebMetricStatistics.of("us-west-2", LambdaWebMetrics.USAGE_NAMESPACE,
+                "ExecutedRequests", westUsage, "Sum"));
+        assertEquals(0, LambdaWebMetricStatistics.of("us-east-1", LambdaWebMetrics.USAGE_NAMESPACE,
+                "ExecutedRequests", westUsage, "Sum"));
+
+        given().when().delete(endpoints + "/per").then().statusCode(204);
+        given().header("Host", west).when().get("/").then().statusCode(404)
+                .header("lambda-web-error-type", "Platform.InvalidEndpoint");
+    }
+
+    @Test
     @Timeout(180)
     void anEnvironmentRunsTheCodeTheRevisionWasCreatedFrom() throws Exception {
         String domain = createFunction(30);
@@ -747,11 +816,16 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     /** The messages of a log stream once they are {@code complete}, or what it holds after 15 seconds. */
     private static List<String> awaitLogEvents(String logGroup, String logStream, Predicate<List<String>> complete)
             throws InterruptedException {
+        return awaitLogEvents("us-east-1", logGroup, logStream, complete);
+    }
+
+    private static List<String> awaitLogEvents(String region, String logGroup, String logStream,
+                                               Predicate<List<String>> complete) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-        List<String> messages = logEvents(logGroup, logStream);
+        List<String> messages = logEvents(region, logGroup, logStream);
         while (!complete.test(messages) && System.nanoTime() < deadline) {
             Thread.sleep(200);
-            messages = logEvents(logGroup, logStream);
+            messages = logEvents(region, logGroup, logStream);
         }
         return messages;
     }
@@ -786,9 +860,18 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     }
 
     private static List<String> logEvents(String logGroup, String logStream) {
-        List<String> messages = RestAssuredJsonUtils.awsAction("Logs_20140328", "GetLogEvents",
-                        "{\"logGroupName\": \"%s\", \"logStreamName\": \"%s\", \"startFromHead\": true}"
-                                .formatted(logGroup, logStream))
+        return logEvents("us-east-1", logGroup, logStream);
+    }
+
+    private static List<String> logEvents(String region, String logGroup, String logStream) {
+        List<String> messages = given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/" + region
+                        + "/logs/aws4_request, SignedHeaders=host, Signature=abc")
+                .header("X-Amz-Target", "Logs_20140328.GetLogEvents")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"logGroupName\": \"%s\", \"logStreamName\": \"%s\", \"startFromHead\": true}"
+                        .formatted(logGroup, logStream))
+                .when().post("/")
                 .then().extract().jsonPath().getList("events.message", String.class);
         return messages == null ? List.of() : messages;
     }
