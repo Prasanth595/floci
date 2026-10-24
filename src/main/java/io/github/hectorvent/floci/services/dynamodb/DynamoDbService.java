@@ -4954,9 +4954,7 @@ public class DynamoDbService {
         }
         Instant time = exportTime != null ? exportTime : startTime;
 
-        // AWS ids an export by its start time in milliseconds, like a backup.
-        String exportId = String.format("%014d", startTime.toEpochMilli()) + "-"
-                + UUID.randomUUID().toString().substring(0, 8);
+        String exportId = DynamoDbBackupArns.timedId(startTime);
         String exportArn = AwsArnUtils.Arn.of("dynamodb", tableRegion, regionResolver.getAccountId(), "table/" + table.getTableName() + "/export/" + exportId).toString();
 
         ExportDescription desc = new ExportDescription();
