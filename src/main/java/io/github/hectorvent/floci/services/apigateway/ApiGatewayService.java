@@ -1498,6 +1498,7 @@ public class ApiGatewayService implements ResourceProvider {
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
+        UsagePlan.Limits limits = UsagePlanLimits.fromRequest(request);
         Map<String, String> tags = new HashMap<>();
         if (request.get("tags") instanceof Map<?, ?> rawTags) {
             rawTags.forEach((key, value) -> tags.put(String.valueOf(key), String.valueOf(value)));
@@ -1511,14 +1512,7 @@ public class ApiGatewayService implements ResourceProvider {
         plan.setName((String) request.get("name"));
         plan.setDescription((String) request.get("description"));
         plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
-
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> apiStages = (List<Map<String, Object>>) request.get("apiStages");
-        if (apiStages != null) {
-            for (Map<String, Object> as : apiStages) {
-                plan.getApiStages().add(new UsagePlan.ApiStage((String) as.get("apiId"), (String) as.get("stage")));
-            }
-        }
+        plan.applyLimits(limits);
 
         usagePlanStore.put(usagePlanKey(region, plan.getId()), plan);
         LOG.infov("Created Usage Plan {0}", plan.getId());
@@ -1527,7 +1521,7 @@ public class ApiGatewayService implements ResourceProvider {
 
     public UsagePlan getUsagePlan(String region, String usagePlanId) {
         return usagePlanStore.get(usagePlanKey(region, usagePlanId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Usage Plan not found", 404));
+                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid Usage Plan ID specified", 404));
     }
 
     public UsagePlan updateUsagePlan(String region, String usagePlanId, List<Map<String, String>> patchOperations) {
@@ -1558,13 +1552,14 @@ public class ApiGatewayService implements ResourceProvider {
                         throw new AwsException("BadRequestException",
                                 "apiStages value must be in the form apiId:stage", 400);
                     }
-                    UsagePlan.ApiStage stage = new UsagePlan.ApiStage(parts[0], parts[1]);
+                    // Matched by API and stage alone: a stage's method throttle is not part of its identity.
+                    int index = UsagePlanLimits.indexOf(newApiStages, parts[0], parts[1]);
                     if ("add".equals(opType)) {
-                        if (!newApiStages.contains(stage)) {
-                            newApiStages.add(stage);
+                        if (index < 0) {
+                            newApiStages.add(new UsagePlan.ApiStage(parts[0], parts[1]));
                         }
-                    } else {
-                        newApiStages.remove(stage);
+                    } else if (index >= 0) {
+                        newApiStages.remove(index);
                     }
                     continue;
                 }
@@ -1582,8 +1577,8 @@ public class ApiGatewayService implements ResourceProvider {
         }
         plan.setName(newName);
         plan.setDescription(newDescription);
-        plan.getApiStages().clear();
-        plan.getApiStages().addAll(newApiStages);
+        // A new list, not an in-place refill, so a concurrent read copies either the old stages or the new ones.
+        plan.setApiStages(newApiStages);
         usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
         return plan;
     }
@@ -1659,10 +1654,9 @@ public class ApiGatewayService implements ResourceProvider {
      * {@code [used, remaining]} pair per day of the inclusive range. {@code position} is absent
      * when there is no further page, which is what stops a caller's pagination loop.
      *
-     * <p><strong>Both numbers are zero.</strong> Nothing counts requests per API key, and a
-     * {@link UsagePlan} carries no quota, so there is no limit to subtract from. Storing a quota on
-     * the usage plan and counting on the execute path are the two pieces still missing; this method
-     * is where they would surface.
+     * <p><strong>Both numbers are zero.</strong> Nothing counts requests per API key, so there is no
+     * use to report or to subtract from a plan's quota. Counting on the execute path is the piece
+     * still missing; this method is where it would surface.
      */
     public UsageReport getUsage(String region, String usagePlanId, String startDate, String endDate,
                                 String keyId, Integer limit, String position) {
@@ -1708,7 +1702,7 @@ public class ApiGatewayService implements ResourceProvider {
         for (UsagePlanKey key : page) {
             List<long[]> perDay = new ArrayList<>();
             for (int day = 0; day < days; day++) {
-                // [used, remaining]: nothing is metered, and no quota is stored to subtract from.
+                // [used, remaining]: nothing is metered, so there is no use to report or subtract from a quota.
                 perDay.add(new long[] {0L, 0L});
             }
             items.put(key.getId(), perDay);

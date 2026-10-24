@@ -576,6 +576,17 @@ aws apigateway create-deployment \
 curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 ```
 
+### Usage plan stages, throttle and quota
+
+`CreateUsagePlan`, `GetUsagePlan`, `GetUsagePlans` and `UpdateUsagePlan` return a plan's `apiStages`,
+as `[]` for a plan with none, with each stage's per-method `throttle`, and the plan's `throttle` and
+`quota`. `CreateUsagePlan` validates them with API Gateway's messages: a quota needs a `DAY`, `WEEK`
+or `MONTH` period and an offset inside it, a per-method throttle needs a plan throttle, and listing a
+stage twice is a `ConflictException`.
+
+Floci does not check that a stage's API, stage or method exists, does not filter `GetUsagePlans` by
+`keyId`, and does not enforce throttles or quotas.
+
 ### Usage reporting
 
 `GetUsage` returns the real response envelope: a `values` map of API key id to one `[used, remaining]`
@@ -596,11 +607,9 @@ The lower bound is a deliberate divergence: real API Gateway answers `limit=0` a
 an `InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected
 as a `BadRequestException` instead of reproducing a 500.
 
-**Both numbers are always zero.** Nothing meters requests per API key, and a usage plan stores no
-quota to subtract from, so there is no limit to report against. Throttle settings are likewise
-accepted and stored but never enforced. Storing a quota on the usage plan and counting on the
-execute path are the two pieces still missing; a caller that sums the used counts gets zero, which
-is what it already got before the action existed, without having to special-case a missing endpoint.
+**Both numbers are always zero.** Nothing meters requests per API key, so there is no use to report
+or to subtract from a plan's quota. Throttle settings and quotas are stored and returned but never
+enforced.
 
 ### Usage Plan Tags and Custom IDs
 
