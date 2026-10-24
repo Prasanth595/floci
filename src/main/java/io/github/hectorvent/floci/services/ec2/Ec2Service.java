@@ -6249,10 +6249,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * Allocates a /56 the way an Amazon-provided association looks on the wire. AWS hands out a
      * block from its own pool with no say from the caller, so the exact prefix is not something a
      * client can predict or assert on, what matters is that one is returned at all, that it is a
-     * well-formed /56, and that it comes back unchanged on every later read.
+     * well-formed /56 in canonical text, and that it comes back unchanged on every later read.
+     * A random group can start with a zero digit, which canonical text drops, and an all-zero
+     * fourth group folds into the "::".
      */
     private VpcIpv6CidrBlockAssociation amazonProvidedIpv6Association(String region) {
-        String block = "2600:1f18:" + randomHex(4) + ":" + randomHex(2) + "00::/56";
+        String block = CidrCanonicalizer.canonicalize(
+                "2600:1f18:" + randomHex(4) + ":" + randomHex(2) + "00::/56").orElseThrow();
         return new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), block, region);
     }
 
