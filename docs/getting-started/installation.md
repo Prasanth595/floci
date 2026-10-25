@@ -54,8 +54,9 @@ Standard and compat have identical startup time (~24 ms) and memory footprint (~
 ## Native binary
 
 Every release attaches a standalone executable for each platform to its
-[GitHub release](https://github.com/floci-io/floci/releases). It is the same native build as the image,
-without the image around it, so Floci runs with no Docker at all.
+[GitHub release](https://github.com/floci-io/floci/releases), so Floci runs with no Docker at all. The
+Linux binaries are the same native builds the image ships; the macOS and Windows ones are built on
+their own runners and are not in any image.
 
 | Platform | Asset |
 |---|---|
@@ -108,9 +109,10 @@ gh attestation verify "$ASSET" --repo floci-io/floci
 
 ### Where state goes
 
-The binary listens on `127.0.0.1:4566` and keeps state in memory, as the image does. When persistence is
-turned on (`FLOCI_STORAGE_MODE=persistent`, `hybrid` or `wal`), state goes to your user data directory
-rather than the working directory:
+The binary listens on `127.0.0.1:4566` (the image listens on `0.0.0.0` inside its container, so a
+published port reaches it). Like the image, it keeps state in memory. When persistence is turned on
+(`FLOCI_STORAGE_MODE=persistent`, `hybrid` or `wal`), state goes to your user data directory rather
+than the working directory:
 
 | Platform | Default path |
 |---|---|
