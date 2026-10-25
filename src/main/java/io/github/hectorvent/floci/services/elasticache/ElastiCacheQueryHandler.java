@@ -690,12 +690,8 @@ public class ElastiCacheQueryHandler {
      * list must read as null, never as the empty list a replace would mean.
      */
     private static List<String> optionalSecurityGroupIds(MultivaluedMap<String, String> params) {
-        for (String prefix : List.of("SecurityGroupIds.SecurityGroupId", "SecurityGroupIds.member")) {
-            if (params.containsKey(prefix + ".1")) {
-                return parseSecurityGroupIds(params);
-            }
-        }
-        return null;
+        List<String> securityGroupIds = parseSecurityGroupIds(params);
+        return securityGroupIds.isEmpty() ? null : securityGroupIds;
     }
 
 private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> params) {

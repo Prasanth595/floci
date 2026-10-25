@@ -19,7 +19,9 @@ import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupR
 import software.amazon.awssdk.services.elasticache.model.DeleteUserGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeCacheClustersRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeCacheClustersResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeUsersRequest;
@@ -420,12 +422,13 @@ class ElastiCacheTest {
                 .securityGroupIds("sg-compat-1", "sg-compat-2")
                 .build());
 
-        var described = elasticache.describeReplicationGroups(DescribeReplicationGroupsRequest.builder()
+        DescribeReplicationGroupsResponse described = elasticache.describeReplicationGroups(
+                DescribeReplicationGroupsRequest.builder()
                 .replicationGroupId(groupId)
                 .build());
         assertThat(described.replicationGroups().get(0).memberClusters()).hasSize(1);
 
-        var clusters = elasticache.describeCacheClusters(DescribeCacheClustersRequest.builder()
+        DescribeCacheClustersResponse clusters = elasticache.describeCacheClusters(DescribeCacheClustersRequest.builder()
                 .cacheClusterId(described.replicationGroups().get(0).memberClusters().get(0))
                 .build());
         assertThat(clusters.cacheClusters().get(0).securityGroups())
