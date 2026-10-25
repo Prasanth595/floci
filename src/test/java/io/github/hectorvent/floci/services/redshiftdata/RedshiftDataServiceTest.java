@@ -37,6 +37,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class RedshiftDataServiceTest {
@@ -52,6 +53,7 @@ class RedshiftDataServiceTest {
     private RedshiftDataService service;
     private SpectrumQueryPreparation preparation;
     private RedshiftDataExecutor executor;
+    private RedshiftDataConnectionFactory factory;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -62,7 +64,7 @@ class RedshiftDataServiceTest {
                 "arn:aws:redshift:us-east-1:000000000000:cluster:wh", "127.0.0.1", 5439, "dev", "admin", "x",
                 new SpectrumSession("000000000000", "000000000000:wh", "dev", List.of(), false)));
 
-        RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
+        factory = mock(RedshiftDataConnectionFactory.class);
         when(factory.open(any())).thenAnswer(inv -> DriverManager.getConnection(jdbcUrl, "sa", ""));
 
         preparation = mock(SpectrumQueryPreparation.class);
@@ -284,6 +286,84 @@ class RedshiftDataServiceTest {
             array.add(sql);
         }
         return r;
+    }
+
+    @Test
+    void batchBindsSharedParametersAndReportsOriginalValues() {
+        service.executeStatement(req("CREATE TABLE batch_parameters(id integer, payload varchar(100))"), REGION);
+        ObjectNode request = batchReq("INSERT INTO batch_parameters VALUES (:id, :value)",
+                "UPDATE batch_parameters SET payload = :updated WHERE id = :id",
+                "SELECT payload FROM batch_parameters WHERE id = :id OR id = :id");
+        ArrayNode parameters = request.putArray("Parameters");
+        parameters.addObject().put("name", "id").put("value", "42");
+        parameters.addObject().put("name", "value").put("value", "first");
+        parameters.addObject().put("name", "updated").put("value", "Robert'); DROP TABLE batch_parameters; --");
+
+        String id = service.batchExecuteStatement(request, REGION).path("Id").asText();
+
+        ObjectNode description = service.describeStatement(idOf(id));
+        assertEquals("FINISHED", description.path("Status").asText(), description.toString());
+        assertEquals(parameters, description.path("QueryParameters"));
+        assertEquals(request.path("Sqls").get(0).asText(), description.path("SubStatements").get(0).path("QueryString").asText());
+        assertEquals("Robert'); DROP TABLE batch_parameters; --",
+                service.getStatementResult(idOf(id)).path("Records").get(0).get(0).path("stringValue").asText());
+        assertEquals(parameters, service.listStatements(om.createObjectNode()).path("Statements").get(0).path("QueryParameters"));
+    }
+
+    @Test
+    void batchParametersRollBackEarlierWritesWhenALaterStatementFails() {
+        service.executeStatement(req("CREATE TABLE batch_rollback(id integer)"), REGION);
+        ObjectNode request = batchReq("INSERT INTO batch_rollback VALUES (:id)", "INSERT INTO nonexistent VALUES (:id)");
+        request.putArray("Parameters").addObject().put("name", "id").put("value", "42");
+        String id = service.batchExecuteStatement(request, REGION).path("Id").asText();
+        assertEquals("FAILED", service.describeStatement(idOf(id)).path("Status").asText());
+        String count = service.executeStatement(req("SELECT COUNT(*) FROM batch_rollback"), REGION).path("Id").asText();
+        assertEquals(0, service.getStatementResult(idOf(count)).path("Records").get(0).get(0).path("longValue").asInt());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "[]", "{}", "[{}]", "[{\"name\":\"id\"}]", "[{\"name\":\"id\",\"value\":null}]",
+            "[{\"name\":\"id\",\"value\":42}]", "[{\"name\":42,\"value\":\"42\"}]",
+            "[{\"name\":\"id\",\"value\":\"\"}]", "[{\"name\":\"bad-name\",\"value\":\"42\"}]",
+            "[{\"name\":\"id\",\"value\":\"1\"},{\"name\":\"id\",\"value\":\"2\"}]"
+    })
+    void invalidBatchParameterObjectsAreRejectedBeforeExecution(String json) throws Exception {
+        ObjectNode request = batchReq("SELECT 1", "SELECT :id");
+        request.set("Parameters", om.readTree(json));
+        AwsException error = assertThrows(AwsException.class, () -> service.batchExecuteStatement(request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        verifyNoInteractions(factory);
+    }
+
+    @Test
+    void missingBatchParameterIsRejectedBeforeAnyStatementRuns() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.batchExecuteStatement(batchReq("SELECT 1", "SELECT :missing"), REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        verifyNoInteractions(factory);
+    }
+
+    @Test
+    void parameterMentionedOnlyInLiteralsAndCommentsIsUnused() {
+        ObjectNode request = batchReq("SELECT ':unused' /* :unused */ -- :unused\n", "SELECT $tag$:unused$tag$");
+        request.putArray("Parameters").addObject().put("name", "unused").put("value", "42");
+        AwsException error = assertThrows(AwsException.class, () -> service.batchExecuteStatement(request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        verifyNoInteractions(factory);
+    }
+
+    @Test
+    void batchAcceptsNumericParameterNamesAndDoesNotReexecuteClientTokenRetries() {
+        service.executeStatement(req("CREATE TABLE numeric_batch(id integer)"), REGION);
+        ObjectNode request = batchReq("INSERT INTO numeric_batch VALUES (:1)", "SELECT id FROM numeric_batch WHERE id = :1");
+        request.put("ClientToken", "numeric-batch");
+        request.putArray("Parameters").addObject().put("name", "1").put("value", "42");
+        String id = service.batchExecuteStatement(request, REGION).path("Id").asText();
+        assertEquals("FINISHED", service.describeStatement(idOf(id)).path("Status").asText());
+        assertEquals(id, service.batchExecuteStatement(request, REGION).path("Id").asText());
+        String count = service.executeStatement(req("SELECT COUNT(*) FROM numeric_batch"), REGION).path("Id").asText();
+        assertEquals(1, service.getStatementResult(idOf(count)).path("Records").get(0).get(0).path("longValue").asInt());
     }
 
     @Test

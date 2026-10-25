@@ -382,11 +382,7 @@ public class RedshiftDataService implements Resettable {
         stored.dbUser = target.user();
         stored.database = target.database();
         stored.resultFormat = request.path("ResultFormat").asText("JSON");
-        if (!parameters.isEmpty()) {
-            stored.queryParameters = parameters.entrySet().stream()
-                    .map(entry -> new StoredParameter(entry.getKey(), entry.getValue()))
-                    .toList();
-        }
+        stored.queryParameters = storedParameters(parameters);
         capture(stored, target, region, request);
 
         return new PendingStatement(stored, (execution, session) -> runStatement(stored, target, sql, parameters, execution, session),
@@ -792,6 +788,7 @@ public class RedshiftDataService implements Resettable {
         for (JsonNode n : sqlsNode) {
             sqls.add(n.asText());
         }
+        Map<String, String> parameters = RedshiftDataSqlParameters.parseBatchParameters(request, sqls);
 
         ResolvedTarget resolved = resolveTarget(request, region, owner);
         RedshiftDataResourceResolver.DatabaseTarget target = resolved.target();
@@ -806,13 +803,14 @@ public class RedshiftDataService implements Resettable {
         parent.database = target.database();
         parent.resultFormat = request.path("ResultFormat").asText("JSON");
         parent.subStatements = new ArrayList<>();
+        parent.queryParameters = storedParameters(parameters);
         capture(parent, target, region, request);
 
-        return new PendingStatement(parent, (execution, session) -> runBatch(parent, sqls, target, execution, session),
+        return new PendingStatement(parent, (execution, session) -> runBatch(parent, sqls, parameters, target, execution, session),
                 target, request.deepCopy(), owner);
     }
 
-    private void runBatch(RedshiftDataStatementStore.StoredStatement parent, List<String> sqls,
+    private void runBatch(RedshiftDataStatementStore.StoredStatement parent, List<String> sqls, Map<String, String> parameters,
                           RedshiftDataResourceResolver.DatabaseTarget target, RedshiftDataExecution execution,
                           RedshiftDataSessions.Reservation session) {
         long totalDuration = 0;
@@ -849,7 +847,7 @@ public class RedshiftDataService implements Resettable {
                     sub.updatedAt = now;
                     try {
                         execution.checkCancellation();
-                        runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum(), execution, false);
+                        runOnConnection(sub, connection, sqls.get(n), parameters, target.spectrum(), execution, false);
                     } catch (SQLException e) {
                         sub.status = RedshiftDataStatementStore.Status.FAILED;
                         sub.error = e.getMessage();
@@ -1236,6 +1234,11 @@ public class RedshiftDataService implements Resettable {
         } else {
             response.putNull("WorkgroupName");
         }
+    }
+
+    private static List<StoredParameter> storedParameters(Map<String, String> parameters) {
+        return parameters.isEmpty() ? null : parameters.entrySet().stream()
+                .map(entry -> new StoredParameter(entry.getKey(), entry.getValue())).toList();
     }
 
     private static void putQueryParameters(ObjectNode target, List<StoredParameter> parameters) {

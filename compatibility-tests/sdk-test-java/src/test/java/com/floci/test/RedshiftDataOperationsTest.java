@@ -177,6 +177,23 @@ class RedshiftDataOperationsTest {
     }
 
     @Test
+    @DisplayName("batch parameters are shared across statements and preserved in metadata")
+    void batchBindsSharedParameters() throws Exception {
+        run("CREATE TABLE compat_batch_parameters (id integer, payload varchar(100))");
+        SqlParameter id = SqlParameter.builder().name("id").value("42").build();
+        SqlParameter payload = SqlParameter.builder().name("payload").value("O'Reilly :literal").build();
+        String batch = data.batchExecuteStatement(request -> request.clusterIdentifier(clusterId).database(DATABASE)
+                .dbUser(USERNAME).parameters(id, payload)
+                .sqls("INSERT INTO compat_batch_parameters VALUES (:id, :payload)",
+                        "SELECT payload FROM compat_batch_parameters WHERE id = :id OR id = :id")).id();
+        awaitFinished(batch);
+
+        assertThat(describe(batch).queryParameters()).containsExactlyInAnyOrder(id, payload);
+        assertThat(data.getStatementResult(request -> request.id(batch)).records().getFirst().getFirst().stringValue())
+                .isEqualTo("O'Reilly :literal");
+    }
+
+    @Test
     @DisplayName("result paging returns every row once through SDK next tokens")
     void resultPagingRoundTripsSdkNextToken() throws Exception {
         String sql = IntStream.rangeClosed(1, 1001).mapToObj(value -> "SELECT " + value + " AS value")
