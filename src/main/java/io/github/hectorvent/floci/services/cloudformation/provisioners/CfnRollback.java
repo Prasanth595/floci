@@ -128,9 +128,11 @@ public final class CfnRollback {
 
     /**
      * Holds the name, description and endpoint configuration a REST API had before an in-place
-     * update patched them, and whether the update also re-applied an OpenAPI document, so a failed
-     * stack update can put them back. Written by {@code ApiGatewayRestApiCfnProvisioner} before its
-     * update call and spent by its {@code rollbackUpdate}.
+     * update patched them, so a failed stack update can put them back, and a {@code body} flag set
+     * once the update's OpenAPI document was applied, which the snapshot cannot undo. Written by
+     * {@code ApiGatewayRestApiCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}; when its own undo did not complete, the provisioner carries it onto
+     * the restored resource through {@code mergeFailedUpdateResourceTracking}.
      */
     public static final String REST_API_UPDATE_SNAPSHOT_ATTR = "__FlociRestApiUpdateSnapshot";
 
