@@ -107,9 +107,10 @@ publishes for customizing EMR Serverless images (`public.ecr.aws/emr-serverless/
 `spark-submit` in local mode in it: the container holds the driver and its executors.
 
 * **States**: a run is `SCHEDULED` while its image is pulled and its container starts (the first run
-  of a release pulls its image, 3.5 to 4.3 GB unpacked; Floci gives a pull three attempts of five
-  minutes, so on a slow connection run `docker pull` on the image first, or the run is `FAILED` with
-  "Could not pull image"), and `RUNNING` once the Spark driver runs, which sets `startedAt`. It
+  of a release pulls its image, 3.5 to 4.3 GB unpacked; a pull still downloading after
+  [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md), five minutes by default,
+  is tried again, three attempts in all, so on a slow connection raise it or run `docker pull` on the
+  image first, or the run is `FAILED` with "Could not pull image"), and `RUNNING` once the Spark driver runs, which sets `startedAt`. It
   is `SUCCESS` when the driver exits with code 0 and `FAILED` otherwise, with the exit code in
   `stateDetails`. `CancelJobRun`, or a `BATCH` run passing its `executionTimeoutMinutes`, makes it
   `CANCELLING` until the driver is stopped, then `CANCELLED`, as the job run states describe. A run

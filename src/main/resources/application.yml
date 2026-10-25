@@ -377,6 +377,11 @@ floci:
     # attempt: a control-plane request that is safe to repeat is tried up to six times. Keep in step with
     # the @WithDefault on EmulatorConfig.DockerConfig.apiTimeoutSeconds: a value set here WINS over the annotation.
     api-timeout-seconds: 300
+    # FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS: how long each attempt at an image pull may take; a pull
+    # still downloading when it passes is tried again, three attempts in all.
+    # Keep in step with the @WithDefault on EmulatorConfig.DockerConfig.imagePullTimeoutSeconds: a value
+    # set here WINS over the annotation.
+    image-pull-timeout-seconds: 300
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume

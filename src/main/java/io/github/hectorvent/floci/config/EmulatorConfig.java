@@ -3870,6 +3870,15 @@ public interface EmulatorConfig {
         int apiTimeoutSeconds();
 
         /**
+         * How long each attempt at pulling an image may take before it is given up, in seconds. A pull
+         * still downloading when the limit passes is tried again, three attempts in all, so a launch that
+         * needs an image can wait up to about three times this before it fails. A large image, such as an EMR Serverless runtime of 3.5 to 4.3 GB, can need longer
+         * on a slow connection.
+         */
+        @WithDefault("300")
+        int imagePullTimeoutSeconds();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */
