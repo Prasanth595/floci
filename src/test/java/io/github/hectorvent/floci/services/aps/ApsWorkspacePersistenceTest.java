@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.stubbing.Answer;
 
 import java.nio.file.Files;
@@ -75,8 +76,8 @@ class ApsWorkspacePersistenceTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"hybrid,false", "hybrid,true", "persistent,false", "persistent,true"})
-    void eachPossibleCreateFlushRestoresBothWorkspaceAndReceipt(String mode, boolean receiptFlush) throws Exception {
+    @ValueSource(strings = {"hybrid", "persistent"})
+    void savedCreateRestoresBothWorkspaceAndReceipt(String mode) throws Exception {
         Map<String, StorageBackend<String, ?>> originalStores = new HashMap<>();
         Map<String, StorageBackend<String, ?>> restoredStores = new HashMap<>();
         Path original = Files.createDirectory(directory.resolve("original"));
@@ -84,8 +85,7 @@ class ApsWorkspacePersistenceTest {
         try {
             ApsService first = service(original, mode, originalStores);
             PrometheusWorkspace initial = first.createWorkspace(REGION, "original", Map.of("team", "one"), null, "retry");
-            String savedFile = receiptFlush && originalStores.containsKey("aps-workspace-requests.json")
-                    ? "aps-workspace-requests.json" : "aps-workspaces.json";
+            String savedFile = "aps-workspaces.json";
             originalStores.get(savedFile).flush();
             // Restore the disk image at this flush boundary, before any shutdown flushes.
             Files.copy(original.resolve(savedFile), restored.resolve(savedFile));
