@@ -583,6 +583,70 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .body("apiStages[0].throttle['/pets/GET'].burstLimit", equalTo(1));
     }
 
+    // Measured on API Gateway: an op outside the model's enum is a ValidationException and leaves the plan as it was.
+    @Test
+    void anOpOutsideTheEnumIsAValidationExceptionAndLeavesThePlanAsItWas() {
+        String usagePlanId = createNamedPlan("op-enum");
+        for (String op : new String[] {"frobnicate", "ADD", ""}) {
+            given().contentType(ContentType.JSON)
+                    .body("{\"patchOperations\":[{\"op\":\"" + op + "\",\"path\":\"/name\",\"value\":\"changed\"}]}")
+                    .patch("/usageplans/{usagePlanId}", usagePlanId)
+                    .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", equalTo("1 validation error detected: Value '" + op + "' at "
+                            + "'updateUsagePlanInput.patchOperations.1.member.op' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [add, remove, move, test, replace, copy]"));
+            assertPlanNamed(usagePlanId, "op-enum");
+        }
+    }
+
+    // Measured on API Gateway: an op that is a number is refused by the deserializer.
+    @Test
+    void aNumericOpIsASerializationExceptionAndLeavesThePlanAsItWas() {
+        String usagePlanId = createNamedPlan("op-number");
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":5,\"path\":\"/name\",\"value\":\"changed\"}]}")
+                .patch("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("class com.amazon.coral.value.json.numbers.TruncatingBigNumber "
+                        + "can not be converted to an String"));
+        assertPlanNamed(usagePlanId, "op-number");
+    }
+
+    // copy is in the model's enum, so it passes the input model and the usage plan refuses it.
+    @Test
+    void anOpInTheEnumThatAUsagePlanDoesNotTakeKeepsItsBusinessMessage() {
+        String usagePlanId = createNamedPlan("op-copy");
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"copy\",\"path\":\"/name\",\"value\":\"changed\"}]}")
+                .patch("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Invalid patch operation specified. Must be 'add'|'remove'|'replace'"));
+        assertPlanNamed(usagePlanId, "op-copy");
+    }
+
+    private static String createNamedPlan(String name) {
+        return given().contentType(ContentType.JSON)
+                .body("{\"name\":\"" + name + "\"}")
+                .post("/usageplans")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+    }
+
+    private static void assertPlanNamed(String usagePlanId, String name) {
+        given().get("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo(name));
+    }
+
     private static int planCount() {
         return given().get("/usageplans").then().statusCode(200).extract().path("item.size()");
     }

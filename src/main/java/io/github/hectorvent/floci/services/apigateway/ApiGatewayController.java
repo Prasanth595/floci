@@ -913,9 +913,33 @@ public class ApiGatewayController {
     @Path("/usageplans/{usagePlanId}")
     public Response updateUsagePlan(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId, String body) {
         String region = regionResolver.resolveRegion(headers);
+        checkUpdateUsagePlanInput(body);
         List<Map<String, String>> patchOperations = parsePatchOperations(body);
         UsagePlan plan = service.updateUsagePlan(region, usagePlanId, patchOperations);
         return Response.ok(toUsagePlanNode(plan, true).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    /**
+     * UpdateUsagePlan's input model, measured on API Gateway: a member of the wrong JSON type is a
+     * SerializationException, then every op outside the model's enum is listed in one
+     * ValidationException. A body that is not a JSON object is left to {@link #parsePatchOperations}.
+     */
+    private void checkUpdateUsagePlanInput(String body) {
+        JsonNode node;
+        try {
+            node = objectMapper.readTree(body);
+        } catch (JsonProcessingException | IllegalArgumentException expected) {
+            // parsePatchOperations answers a body that is not JSON, as it does for every PATCH operation.
+            return;
+        }
+        if (node == null || !node.isObject()) {
+            return;
+        }
+        ApiGatewayRequestShapes.check("UpdateUsagePlan", node);
+        List<String> violations = UsagePlanLimits.opViolations(node.path("patchOperations"));
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
     }
 
     @DELETE

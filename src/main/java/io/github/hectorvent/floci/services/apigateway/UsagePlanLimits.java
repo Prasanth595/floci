@@ -43,6 +43,8 @@ public final class UsagePlanLimits {
             "Can not remove usage plan throttling if fine grain throttling is defined for one or more api-stages.";
     private static final String STAGES_PREFIX = "/apiStages/";
     private static final String STAGE_THROTTLE = "/throttle";
+    /** The input model's op enum, in the order its violation lists it. */
+    private static final List<String> OP_ENUM = List.of("add", "remove", "move", "test", "replace", "copy");
     /** The paths UpdateUsagePlan allows per op, verbatim from API Gateway's error ("apidId" is AWS's own spelling). */
     private static final Map<String, String> PATCH_PATHS = Map.of(
             "add", "[/apiStages, /productCode, /quota/period, /quota/limit, /quota/offset, /throttle/rateLimit, "
@@ -567,6 +569,23 @@ public final class UsagePlanLimits {
         if (!"add".equals(op) && !"replace".equals(op)) {
             throw invalidPatchPath(op, path);
         }
+    }
+
+    /**
+     * UpdateUsagePlan's input-model violations, one per op outside the model's enum, each at its
+     * 1-based index, as API Gateway lists them before its own op check. A missing or null op is not
+     * one; {@link #requirePatchOp} refuses it.
+     */
+    public static List<String> opViolations(JsonNode patchOperations) {
+        List<String> violations = new ArrayList<>();
+        for (int i = 0; i < patchOperations.size(); i++) {
+            JsonNode op = patchOperations.get(i).path("op");
+            if (op.isTextual() && !OP_ENUM.contains(op.textValue())) {
+                violations.add(SmithyValidationErrors.notInEnum(op.textValue(),
+                        "updateUsagePlanInput.patchOperations." + (i + 1) + ".member.op", OP_ENUM));
+            }
+        }
+        return violations;
     }
 
     /** API Gateway refuses any op but add, remove and replace, a missing one included, before it reads the path. */

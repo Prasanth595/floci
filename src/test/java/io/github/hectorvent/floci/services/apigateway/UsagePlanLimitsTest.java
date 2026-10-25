@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
@@ -558,6 +559,23 @@ class UsagePlanLimitsTest {
         assertRefused(() -> patch(fixture(), "replace", "/apiStages/a:v1/throttle//pets/GET/burstLimit",
                         "3000000000"), "BadRequestException", 400,
                 "Usage Plan throttle rate limit and burst limit must be numeric and greater than zero");
+    }
+
+    // Measured on API Gateway: UpdateUsagePlan's input model lists every op outside its enum, by 1-based index.
+    @Test
+    void anOpOutsideTheModelsEnumIsAnInputModelViolation() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode operations = mapper.readTree("[{\"op\":\"frobnicate\"},{\"op\":\"replace\"},"
+                + "{\"op\":\"ADD\"},{\"path\":\"/name\"},{\"op\":\"\"},{\"op\":\"copy\"},{\"op\":null},null]");
+        assertEquals(List.of(opViolation("frobnicate", 1), opViolation("ADD", 3), opViolation("", 5)),
+                UsagePlanLimits.opViolations(operations));
+        assertEquals(List.of(), UsagePlanLimits.opViolations(mapper.readTree("[]")));
+        assertEquals(List.of(), UsagePlanLimits.opViolations(mapper.readTree("{}").path("patchOperations")));
+    }
+
+    private static String opViolation(String op, int index) {
+        return "Value '" + op + "' at 'updateUsagePlanInput.patchOperations." + index + ".member.op' failed to satisfy "
+                + "constraint: Member must satisfy enum value set: [add, remove, move, test, replace, copy]";
     }
 
     @Test
