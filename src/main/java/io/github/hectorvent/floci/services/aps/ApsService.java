@@ -19,6 +19,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -31,14 +32,18 @@ public class ApsService implements TagHandler {
     private static final int MAX_PAGE = 1000;
     private static final int MAX_NAMESPACE_NAME_LENGTH = 128;
     private static final Pattern NAMESPACE_NAME = Pattern.compile(".*[0-9A-Za-z][-.0-9A-Z_a-z]*.*");
+    private static final Pattern CLIENT_TOKEN = Pattern.compile("[!-~]{1,64}");
 
     private final StorageBackend<String, PrometheusWorkspace> storage;
+    private final StorageBackend<String, PrometheusWorkspace> workspaceRequests;
     private final StorageBackend<String, RuleGroupsNamespace> namespaceStorage;
     private final RegionResolver regionResolver;
 
     @Inject
     public ApsService(StorageFactory storageFactory, RegionResolver regionResolver) {
         this.storage = storageFactory.create("aps", "aps-workspaces.json",
+                new TypeReference<Map<String, PrometheusWorkspace>>() {});
+        this.workspaceRequests = storageFactory.create("aps", "aps-workspace-requests.json",
                 new TypeReference<Map<String, PrometheusWorkspace>>() {});
         this.namespaceStorage = storageFactory.create("aps", "aps-rule-groups-namespaces.json",
                 new TypeReference<Map<String, RuleGroupsNamespace>>() {});
@@ -47,6 +52,29 @@ public class ApsService implements TagHandler {
 
     public PrometheusWorkspace createWorkspace(String region, String alias, Map<String, String> tags,
                                                String kmsKeyArn) {
+        return createWorkspace(region, alias, tags, kmsKeyArn, null);
+    }
+
+    // ponytail: serialize token claims; use per-token locks if workspace-create throughput matters.
+    public synchronized PrometheusWorkspace createWorkspace(String region, String alias, Map<String, String> tags,
+                                                            String kmsKeyArn, String clientToken) {
+        if (clientToken != null && !CLIENT_TOKEN.matcher(clientToken).matches()) {
+            throw new AwsException("ValidationException",
+                    "clientToken must contain 1 to 64 printable ASCII characters without spaces.", 400);
+        }
+        Map<String, String> requestedTags = tags != null ? tags : Map.of();
+        if (clientToken != null) {
+            PrometheusWorkspace receipt = workspaceRequests.get(key(region, clientToken)).orElse(null);
+            if (receipt != null) {
+                if (!Objects.equals(stripAlias(alias), receipt.getAlias())
+                        || !Objects.equals(kmsKeyArn, receipt.getKmsKeyArn())
+                        || !requestedTags.equals(receipt.getTags())) {
+                    throw new AwsException("ConflictException",
+                            "clientToken has already been used with different workspace parameters.", 409);
+                }
+                return copyWorkspace(receipt);
+            }
+        }
         String workspaceId = "ws-" + UUID.randomUUID();
         String arn = regionResolver.buildArn("aps", region, "workspace/" + workspaceId);
 
@@ -66,9 +94,26 @@ public class ApsService implements TagHandler {
             workspace.getTags().putAll(tags);
         }
 
+        PrometheusWorkspace response = clientToken != null ? copyWorkspace(workspace) : workspace;
         storage.put(key(region, workspaceId), workspace);
+        if (clientToken != null) {
+            workspaceRequests.put(key(region, clientToken), response);
+        }
         LOG.infov("Created AMP workspace: {0} in {1}", workspaceId, region);
-        return workspace;
+        return clientToken != null ? copyWorkspace(response) : workspace;
+    }
+
+    private static PrometheusWorkspace copyWorkspace(PrometheusWorkspace source) {
+        PrometheusWorkspace copy = new PrometheusWorkspace();
+        copy.setWorkspaceId(source.getWorkspaceId());
+        copy.setAlias(source.getAlias());
+        copy.setArn(source.getArn());
+        copy.setStatus(source.getStatus());
+        copy.setPrometheusEndpoint(source.getPrometheusEndpoint());
+        copy.setCreatedAt(source.getCreatedAt());
+        copy.setKmsKeyArn(source.getKmsKeyArn());
+        copy.setTags(source.getTags());
+        return copy;
     }
 
     public PrometheusWorkspace describeWorkspace(String region, String workspaceId) {
