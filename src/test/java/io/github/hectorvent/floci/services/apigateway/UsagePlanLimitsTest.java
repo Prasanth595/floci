@@ -553,6 +553,25 @@ class UsagePlanLimitsTest {
                 400, message);
     }
 
+    // Measured on API Gateway: unlike a create body, a whole-stage throttle value is read through a double, so
+    // a burst limit just under a whole number rounds up and a negative fraction truncates to 0.
+    @Test
+    void aStageThrottleValueReadsItsNumbersThroughADouble() {
+        assertEquals(Map.of("/pets/GET", new Throttle(2, 2.0)),
+                replacedStageThrottle("{\"/pets/GET\":{\"burstLimit\":1.99999999999999999,\"rateLimit\":2}}"));
+        assertEquals(Map.of("/pets/GET", new Throttle(Integer.MAX_VALUE, 0.0)),
+                replacedStageThrottle("{\"/pets/GET\":{\"burstLimit\":2147483647.0000001}}"));
+        assertEquals(Map.of("/pets/GET", new Throttle(0, 0.0)),
+                replacedStageThrottle("{\"/pets/GET\":{\"burstLimit\":-0.5}}"));
+        assertRefused(() -> replacedStageThrottle("{\"/pets/GET\":{\"burstLimit\":2147483647.9}}"),
+                "BadRequestException", 400, "Invalid API Stage throttle specified for usageplan");
+    }
+
+    /** The method throttles a replace of stage a:v1's whole throttle with {@code value} leaves. */
+    private static Map<String, Throttle> replacedStageThrottle(String value) {
+        return patch(fixture(), "replace", "/apiStages/a:v1/throttle", value).apiStages().get(0).throttle();
+    }
+
     // A single limit is read as before: outside the int range it is an invalid throttle, not a stage throttle.
     @Test
     void aSingleBurstLimitOutsideTheIntRangeIsAnInvalidThrottle() {

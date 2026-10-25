@@ -630,6 +630,41 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
         assertPlanNamed(usagePlanId, "op-copy");
     }
 
+    // Measured on API Gateway: a refused op rolls back the whole request, the ops before it included.
+    @Test
+    void aRefusedPatchRollsBackEveryOpInTheRequest() {
+        String usagePlanId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"compat10\",\"throttle\":{\"burstLimit\":20,\"rateLimit\":10},"
+                        + "\"quota\":{\"limit\":1000,\"offset\":0,\"period\":\"MONTH\"}}")
+                .post("/usageplans")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":["
+                        + "{\"op\":\"replace\",\"path\":\"/name\",\"value\":\"compat10-renamed\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/throttle/burstLimit\",\"value\":\"30\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/quota/period\",\"value\":\"DAY\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/quota/offset\",\"value\":\"3\"}]}")
+                .patch("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Usage Plan quota offset must be zero in the DAY period"));
+
+        given().get("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("compat10"))
+                .body("throttle.burstLimit", equalTo(20))
+                .body("quota.limit", equalTo(1000))
+                .body("quota.offset", equalTo(0))
+                .body("quota.period", equalTo("MONTH"));
+    }
+
     private static String createNamedPlan(String name) {
         return given().contentType(ContentType.JSON)
                 .body("{\"name\":\"" + name + "\"}")
