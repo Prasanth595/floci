@@ -4697,7 +4697,7 @@ class DynamoDbServiceTest {
                 List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
         Instant creationSecond = svc.describeTable("NoBackups", "us-east-1").getCreationDateTime()
                 .truncatedTo(ChronoUnit.SECONDS);
-        clock.advance(Duration.ofMinutes(20));
+        clock.advance(Duration.ofHours(25));
         Instant now = clock.instant();
 
         Instant beforeCreation = creationSecond.minusMillis(1);
@@ -4710,11 +4710,17 @@ class DynamoDbServiceTest {
                 "Incremental export period from time should not be greater or equal to incremental export period to time");
         expectInvalidExportTime(svc, "NoBackups", creationSecond, creationSecond.plus(Duration.ofMinutes(15)).minusMillis(1),
                 "Difference between export period from time and export period to time is less than 15 minutes");
-        AwsException noBackups = assertThrows(AwsException.class, () -> incrementalExport(svc, "NoBackups",
-                creationSecond, creationSecond.plus(Duration.ofMinutes(15))));
-        assertEquals("PointInTimeRecoveryUnavailableException", noBackups.getErrorCode());
+        Instant overADay = creationSecond.plus(Duration.ofHours(24)).plusSeconds(1);
+        String overADayMessage = "Difference between export period from time and export period to time is greater than 24 hours";
+        expectInvalidExportTime(svc, "NoBackups", creationSecond, overADay, overADayMessage);
+        for (Duration period : List.of(Duration.ofMinutes(15), Duration.ofHours(24).plusMillis(1))) {
+            AwsException noBackups = assertThrows(AwsException.class, () -> incrementalExport(svc, "NoBackups",
+                    creationSecond, creationSecond.plus(period)));
+            assertEquals("PointInTimeRecoveryUnavailableException", noBackups.getErrorCode());
+        }
         svc.updateContinuousBackups("Users", false, null, "us-east-1");
         svc.updateContinuousBackups("Users", true, null, "us-east-1");
+        expectInvalidExportTime(svc, "Users", creationSecond, overADay, overADayMessage);
         expectInvalidExportTime(svc, "Users", creationSecond, creationSecond.plus(Duration.ofMinutes(15)),
                 "Export period from time cannot be earlier than the Point in Time Recovery window");
     }

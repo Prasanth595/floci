@@ -4928,6 +4928,7 @@ public class DynamoDbService {
     private static final List<String> EXPORT_VIEW_TYPES = List.of("NEW_AND_OLD_IMAGES", "NEW_IMAGE");
     private static final List<String> S3_SSE_ALGORITHMS = List.of("AES256", "KMS");
     private static final Duration MIN_INCREMENTAL_EXPORT_PERIOD = Duration.ofMinutes(15);
+    private static final Duration MAX_INCREMENTAL_EXPORT_PERIOD = Duration.ofHours(24);
 
     /** The IncrementalExportSpecification of a request. A member it leaves out is null. */
     public record IncrementalExportRequest(Instant from, Instant to, String viewType) {}
@@ -5240,6 +5241,11 @@ public class DynamoDbService {
         if (Duration.between(from, to).compareTo(MIN_INCREMENTAL_EXPORT_PERIOD) < 0) {
             throw new AwsException("InvalidExportTimeException",
                     "Difference between export period from time and export period to time is less than 15 minutes", 400);
+        }
+        // AWS takes 24 h + 1 ms but not 24 h + 1 s.
+        if (Duration.between(from, to).toSeconds() > MAX_INCREMENTAL_EXPORT_PERIOD.toSeconds()) {
+            throw new AwsException("InvalidExportTimeException",
+                    "Difference between export period from time and export period to time is greater than 24 hours", 400);
         }
     }
 

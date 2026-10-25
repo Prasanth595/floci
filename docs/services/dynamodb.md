@@ -455,7 +455,7 @@ aws dynamodb export-table-to-point-in-time \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
-The period starts at `ExportFromTime` and ends just before `ExportToTime`, or at the request time when `ExportToTime` is not set. Each line is a record with `Metadata.WriteTimestampMicros`, `Keys`, and the `OldImage` and `NewImage` of the item. `ExportViewType` `NEW_IMAGE` leaves out `OldImage`. An item that ends the period as it started it, such as one inserted and then deleted, gets no record. As on AWS, the images list attribute names and set members in sorted order, and the data files go to the shared `<prefix>/AWSDynamoDB/data/` folder. As on AWS, the period must be at least 15 minutes, must not start before the table creation or `EarliestRestorableDateTime`, and must not end in the future. Floci keeps the time of a write in milliseconds, so `WriteTimestampMicros` always ends in `000`.
+The period starts at `ExportFromTime` and ends just before `ExportToTime`, or at the request time when `ExportToTime` is not set. Each line is a record with `Metadata.WriteTimestampMicros`, `Keys`, and the `OldImage` and `NewImage` of the item. `ExportViewType` `NEW_IMAGE` leaves out `OldImage`. An item that ends the period as it started it, such as one inserted and then deleted, gets no record. As on AWS, the images list attribute names and set members in sorted order, and the data files go to the shared `<prefix>/AWSDynamoDB/data/` folder. As on AWS, the period must be at least 15 minutes and at most 24 hours, must not start before the table creation or `EarliestRestorableDateTime`, and must not end in the future. Floci keeps the time of a write in milliseconds, so `WriteTimestampMicros` always ends in `000`.
 
 ## Import from S3
 
