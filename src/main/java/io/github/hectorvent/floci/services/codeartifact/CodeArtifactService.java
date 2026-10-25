@@ -237,6 +237,19 @@ public class CodeArtifactService implements Resettable {
     // ever parsing a stored key back into parts.
     private final ConcurrentHashMap<String, Set<String>> containerBackedOverriddenVersionsByPackage =
             new ConcurrentHashMap<>();
+    // Raised by Greptile's review of this PR: a namespace-less format's own caller can have no
+    // reliable package-version coordinate at all to look an override up by directly (a PyPI twine
+    // upload's version form field is optional, and its name field is no more trustworthy without
+    // one, since pypiserver indexes by the uploaded filename, never the form). This answers "which
+    // package names in this one repository+format currently have any override at all", kept under
+    // a (version- and package-free) repository+format key, so a caller with only a filename can
+    // test it against every override that actually exists instead of trusting an unverified
+    // coordinate. Only ever written for a namespace-less format: Maven's GAV path always supplies a
+    // reliable version on its own, so it never needs this, and folding its own real namespace in
+    // here too would risk two different namespaces' same-spelled package name colliding into one
+    // entry for no caller that would ever need it.
+    private final ConcurrentHashMap<String, Set<String>> containerBackedOverriddenPackagesByRepository =
+            new ConcurrentHashMap<>();
 
     /**
      * {@code publishedEpochSeconds} is carried forward from whichever value was already true for
@@ -538,6 +551,10 @@ public class CodeArtifactService implements Resettable {
                 .filter(k -> k.startsWith(ownerScopedOriginPrefix))
                 .toList()
                 .forEach(containerBackedOverriddenVersionsByPackage::remove);
+        containerBackedOverriddenPackagesByRepository.keySet().stream()
+                .filter(k -> k.startsWith(ownerScopedOriginPrefix))
+                .toList()
+                .forEach(containerBackedOverriddenPackagesByRepository::remove);
         return r;
     }
 
@@ -1767,6 +1784,11 @@ public class CodeArtifactService implements Resettable {
                 accountingName));
         containerBackedOverriddenVersionsByPackage.computeIfAbsent(packageKey, k -> ConcurrentHashMap.newKeySet())
                 .add(normalizedVersion);
+        if (namespace == null) {
+            String repoFormatKey = ownerScopedKey(owner, repositoryFormatKey(region, domain, repository, format));
+            containerBackedOverriddenPackagesByRepository.computeIfAbsent(repoFormatKey,
+                    k -> ConcurrentHashMap.newKeySet()).add(accountingName);
+        }
     }
 
     /**
@@ -1960,6 +1982,45 @@ public class CodeArtifactService implements Resettable {
             PackageVersionStatusOverride override = containerBackedPackageVersionStatusOverrides.get(versionKey);
             if (override != null) {
                 result.put(version, override);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Every package in this one repository+format that currently carries a status override on any
+     * version at all, each by its own version-to-status map, for a caller with no reliable
+     * package-version coordinate of its own to look an override up by directly. Raised by
+     * Greptile's follow-up review of this PR: a real twine upload's {@code version} form field is
+     * optional, and its {@code name} field is no more trustworthy without one, since pypiserver
+     * indexes a publish by the uploaded filename itself, never the form ({@code
+     * PypiserverSidecarClient#filenameEmbedsVersion}'s own javadoc); a wrong {@code name} field
+     * would otherwise have {@code CodeArtifactPypiController#upload} search the wrong package's
+     * overrides entirely and never find a real Archived/Disposed one the filename actually names.
+     * Only ever answers for a namespace-less format ({@link
+     * #containerBackedOverriddenPackagesByRepository}'s own javadoc explains why): the caller
+     * matches {@code filename} against whichever of these (package, version) pairs it actually
+     * names, trusting this store's own recorded package name over whatever the caller's own
+     * request happened to claim. Empty for the overwhelming common case, a repository no one has
+     * ever called {@code UpdatePackageVersionsStatus}/{@code DisposePackageVersions} against for
+     * this format.
+     */
+    public synchronized Map<String, Map<String, String>> containerBackedOverriddenVersionStatusesByRepository(
+            String region, String domain, String domainOwner, String repository, String format) {
+        String owner = effectiveOwner(domainOwner);
+        Set<String> packageNames = containerBackedOverriddenPackagesByRepository.get(
+                ownerScopedKey(owner, repositoryFormatKey(region, domain, repository, format)));
+        if (packageNames == null || packageNames.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Map<String, String>> result = new LinkedHashMap<>();
+        for (String packageName : packageNames) {
+            Map<String, PackageVersionStatusOverride> overrides = containerBackedOverridesForPackage(owner, region,
+                    domain, repository, format, null, packageName);
+            if (!overrides.isEmpty()) {
+                Map<String, String> statuses = new LinkedHashMap<>();
+                overrides.forEach((version, override) -> statuses.put(version, override.status()));
+                result.put(packageName, statuses);
             }
         }
         return result;
@@ -2179,6 +2240,13 @@ public class CodeArtifactService implements Resettable {
                     .toList()
                     .forEach(containerBackedPackageVersionStatusOverrides::remove);
             containerBackedOverriddenVersionsByPackage.remove(ownerScopedKey(owner, accountingKey));
+            if (namespace == null) {
+                Set<String> packageNames = containerBackedOverriddenPackagesByRepository.get(
+                        ownerScopedKey(owner, repositoryFormatKey(region, domain, repository, format)));
+                if (packageNames != null) {
+                    packageNames.remove(accountingPackageName(format, packageName));
+                }
+            }
         } else {
             List<CodeArtifactPackageVersion> versions = genericPackageVersions(region, domain, owner, repository,
                     format, namespace, packageName);
@@ -3326,6 +3394,7 @@ public class CodeArtifactService implements Resettable {
         packageVersionReadmes.clear();
         containerBackedPackageVersionStatusOverrides.clear();
         containerBackedOverriddenVersionsByPackage.clear();
+        containerBackedOverriddenPackagesByRepository.clear();
         authorizationTokens.clear();
         if (inMemory) {
             memoryAssetStore.clear();
@@ -3566,6 +3635,13 @@ public class CodeArtifactService implements Resettable {
                 .toList()
                 .forEach(containerBackedPackageVersionStatusOverrides::remove);
         containerBackedOverriddenVersionsByPackage.remove(ownerScopedKey);
+        if (namespace == null) {
+            Set<String> packageNames = containerBackedOverriddenPackagesByRepository.get(
+                    ownerScopedKey(owner, repositoryFormatKey(region, domain, repository, format)));
+            if (packageNames != null) {
+                packageNames.remove(accountingPackageName(format, packageName));
+            }
+        }
     }
 
     /**
@@ -3954,6 +4030,10 @@ public class CodeArtifactService implements Resettable {
 
     private static String repositoryKey(String region, String domain, String repository) {
         return region + "::" + domain + "::" + repository;
+    }
+
+    private static String repositoryFormatKey(String region, String domain, String repository, String format) {
+        return repositoryKey(region, domain, repository) + "::" + format;
     }
 
     private static String packageVersionKey(String region, String domain, String repository, String format,

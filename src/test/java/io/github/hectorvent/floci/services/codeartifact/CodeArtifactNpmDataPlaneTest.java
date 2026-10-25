@@ -461,6 +461,49 @@ class CodeArtifactNpmDataPlaneTest {
     }
 
     /**
+     * Raised by Greptile's review of the fix above: the guard passing is not the whole story.
+     * {@link CodeArtifactNpmDataPlane#forwardSpooled}'s own post-write bookkeeping, including the
+     * override-clearing call that undoes a concurrent dispose racing this exact write (see
+     * {@code CodeArtifactService#forgetContainerBackedStatusOverrideIfUnchanged}'s own javadoc),
+     * keys entirely off {@code readmeByVersion}. An earlier version of this fix left that map
+     * empty for the oversized-readme fallback, which let the guard run but then skipped every one
+     * of those for whichever version it let through, the exact gap a concurrent dispose could
+     * still exploit afterward. This version's own forward must still reach that bookkeeping.
+     */
+    @Test
+    void aPublishWhoseReadmeOverflowsTheStrictScanStillRunsPostWriteBookkeeping() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(201).end())
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        byte[] content = "fresh bytes".getBytes(StandardCharsets.UTF_8);
+        String oversizedReadme = "x".repeat(1_000_001);
+        String envelope = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\",\"version\":\"1.0.0\","
+                + "\"readme\":\"" + oversizedReadme + "\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\","
+                + "\"integrity\":\"" + integrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
+                + "\"content_type\":\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length + "}}}";
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
+                envelope);
+
+        assertEquals(201, response.statusCode());
+        verify(service).forgetContainerBackedStatusOverrideIfUnchanged(eq("us-east-1"), eq(DOMAIN),
+                eq("000000000000"), eq(REPOSITORY), eq("npm"), isNull(), eq("my-pkg"), eq("1.0.0"), isNull());
+    }
+
+    /**
      * The identity used to look up an existing match comes from the URL the publish was sent to,
      * not the envelope's own {@code name} field. A mismatched body must not be checked against
      * another package's stored copy; the stub here holds a match for that other package, and the

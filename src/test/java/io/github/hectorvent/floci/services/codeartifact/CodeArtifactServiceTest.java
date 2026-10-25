@@ -3968,6 +3968,29 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void containerBackedOverriddenVersionStatusesByRepositoryReturnsEveryOverriddenPackageInOneFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("pypi");
+        when(pypiserverClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000))));
+        when(pypiserverClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("other-pkg")))
+                .thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("2.0.0", Instant.ofEpochSecond(2000))));
+
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "pypi", null, "my-pkg", List.of("1.0.0"),
+                null, null, "Archived");
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "pypi", null, "other-pkg", List.of("2.0.0"),
+                null, null, "Unlisted");
+
+        assertEquals(Map.of("my-pkg", Map.of("1.0.0", "Archived"), "other-pkg", Map.of("2.0.0", "Unlisted")),
+                service.containerBackedOverriddenVersionStatusesByRepository(REGION, "dom", null, "repo", "pypi"));
+        assertEquals(Map.of(),
+                service.containerBackedOverriddenVersionStatusesByRepository(REGION, "dom", null, "repo", "npm"));
+    }
+
+    @Test
     void disposePackageVersionsDeletesEveryRealAssetAndKeepsListingTheVersionAsDisposed() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());

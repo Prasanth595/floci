@@ -500,27 +500,42 @@ public class CodeArtifactNpmDataPlane {
             // NpmPublishEnvelopeScanner#scanLeniently's own javadoc), not because anything is
             // actually wrong with it; StreamConstraintsException is specifically that case, not
             // genuinely malformed JSON (a plain JsonParseException, handled below exactly as
-            // before). That second, far-more-tolerant pass recovers just the version names so the
-            // guard can still run; if even that fails, there is no safe way left to know what
-            // this publish names, so it is refused outright instead of silently forwarded with no
-            // guard having run.
-            Set<String> versionsFromLenientScan;
+            // before). That second, far-more-tolerant pass recovers the full envelope (not just
+            // the version names) so this can populate readmeByVersion the normal way too: {@link
+            // #forwardSpooled}'s own post-write bookkeeping, byte accounting, readme capture, and
+            // the override-clearing call that undoes a concurrent dispose racing the write (see
+            // CodeArtifactService#forgetContainerBackedStatusOverrideIfUnchanged's own javadoc),
+            // all key off readmeByVersion alone; leaving it empty here, as an earlier version of
+            // this fix did, would have let the guard below run but then skipped every one of
+            // those for whichever version it let through. If even this more tolerant pass fails,
+            // there is no safe way left to know what this publish names, so it is refused
+            // outright instead of silently forwarded with no guard having run.
+            NpmPublishEnvelopeScanner.Envelope lenientEnvelope;
             try (InputStream in = new BufferedInputStream(Files.newInputStream(Path.of(spoolPath)))) {
-                versionsFromLenientScan = NpmPublishEnvelopeScanner.scanLeniently(in).versions().keySet();
+                lenientEnvelope = NpmPublishEnvelopeScanner.scanLeniently(in);
             } catch (IOException lenientFailure) {
                 return new RepublishCheck(false, 0L, identity, Map.of(),
                         "Could not determine which version(s) this publish names.", Map.of());
             }
-            for (String version : versionsFromLenientScan) {
+            long lenientTotalAttachmentBytes = lenientEnvelope.attachments().values().stream()
+                    .mapToLong(NpmPublishEnvelopeScanner.Attachment::size)
+                    .sum();
+            Map<String, String> lenientReadmeByVersion = new HashMap<>();
+            lenientEnvelope.versions().forEach((version, v) -> lenientReadmeByVersion.put(version, v.readme()));
+            Map<String, String> lenientBeforeRevisionByVersion = new HashMap<>();
+            for (String version : lenientReadmeByVersion.keySet()) {
                 try {
-                    service.requireContainerBackedVersionNotArchivedOrDisposed(scope.region(), npmRequest.domain(),
-                            scope.owner(), npmRequest.repository(), "npm", identity.namespace(),
-                            identity.packageName(), version);
+                    String beforeRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(
+                            scope.region(), npmRequest.domain(), scope.owner(), npmRequest.repository(), "npm",
+                            identity.namespace(), identity.packageName(), version);
+                    lenientBeforeRevisionByVersion.put(version, beforeRevision);
                 } catch (AwsException blocked) {
-                    return new RepublishCheck(false, 0L, identity, Map.of(), blocked.getMessage(), Map.of());
+                    return new RepublishCheck(false, lenientTotalAttachmentBytes, identity, lenientReadmeByVersion,
+                            blocked.getMessage(), lenientBeforeRevisionByVersion);
                 }
             }
-            return new RepublishCheck(false, 0L, identity, Map.of(), null, Map.of());
+            return new RepublishCheck(false, lenientTotalAttachmentBytes, identity, lenientReadmeByVersion, null,
+                    lenientBeforeRevisionByVersion);
         } catch (IOException e) {
             LOG.debugv(e, "Publish for {0}/{1} is not a confirmable republish: {2}",
                     npmRequest.domain(), npmRequest.repository(), e.getMessage());
