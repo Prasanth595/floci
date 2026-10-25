@@ -1782,7 +1782,11 @@ public class ResourceArnBuilder {
                                              String partition) {
         Set<String> resources = new LinkedHashSet<>();
         resources.add(keyTarget(body, "KeyId", region, accountId, partition));
-        String grantKey = grantKeyArn(body, region);
+        String grantKey = kmsService == null
+                ? null
+                : kmsService.get()
+                        .findGrantKeyArn(null, body.path("GrantId").asText(null), region)
+                        .orElse(null);
         if (grantKey != null) {
             resources.add(grantKey);
         }

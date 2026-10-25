@@ -1411,6 +1411,12 @@ class ResourceArnBuilderTest {
         setJsonBody("{\"KeyId\":\"other-key\",\"GrantId\":\"grant-id\"}");
         assertEquals(List.of(KMS_OTHER_KEY_ARN, KMS_KEY_ARN),
                 backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        when(kms.findGrantKeyArn("grant-token", "grant-id", "us-east-1"))
+                .thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\",\"GrantId\":\"grant-id\",\"GrantToken\":\"grant-token\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────
