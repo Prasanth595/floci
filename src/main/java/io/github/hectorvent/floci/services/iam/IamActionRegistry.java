@@ -542,13 +542,18 @@ public class IamActionRegistry {
         }
 
         // JSON 1.1: X-Amz-Target → the action AWS checks for the operation it names
-        String target = ctx.getHeaderString("X-Amz-Target");
-        if (target != null && target.contains(".")) {
-            String operationName = target.substring(target.lastIndexOf('.') + 1);
+        String operationName = targetOperation(ctx);
+        if (operationName != null) {
             return resolveOperation(credentialScope, operationName, ctx);
         }
 
         return resolveRoute(credentialScope, ctx);
+    }
+
+    /** The operation a JSON request's {@code X-Amz-Target} names, the part after its last dot; null without one. */
+    public static String targetOperation(ContainerRequestContext ctx) {
+        String target = ctx.getHeaderString("X-Amz-Target");
+        return target != null && target.contains(".") ? target.substring(target.lastIndexOf('.') + 1) : null;
     }
 
     /** The action for a dispatched operation, including statement-dependent JSON and CBOR calls. */
@@ -688,6 +693,7 @@ public class IamActionRegistry {
             sub("website",           "s3:GetBucketWebsite"),
             sub("logging",           "s3:GetBucketLogging"),
             sub("policy",            "s3:GetBucketPolicy"),
+            sub("policyStatus",      "s3:GetBucketPolicyStatus"),
             sub("cors",              "s3:GetBucketCORS"),
             sub("lifecycle",         "s3:GetLifecycleConfiguration"),
             sub("acl",               "s3:GetBucketAcl"),

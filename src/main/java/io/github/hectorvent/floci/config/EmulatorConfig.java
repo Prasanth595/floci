@@ -1104,6 +1104,34 @@ public interface EmulatorConfig {
         /** How long a BATCH job run stays RUNNING before it succeeds; 0 = a run succeeds as soon as it starts. */
         @WithDefault("0")
         int jobRunDurationSeconds();
+
+        /**
+         * {@code immediate} follows the job run states without running anything; {@code docker} runs
+         * each Spark job run's {@code spark-submit} in a container of the release's EMR Serverless image.
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        Optional<String> dockerNetwork();
+
+        /**
+         * The image a {@code docker} job run uses, with {@code %s} standing for the application's
+         * release label, for example "registry.internal/emr-serverless/spark/%s:20250425". If omitted,
+         * Floci uses the release's public image on Amazon ECR Public.
+         */
+        Optional<String> imageTemplate();
+
+        /**
+         * When true, Floci removes, in the {@code docker} runner mode, every EMR Serverless driver a
+         * previous run of <em>this same</em> Floci left on the daemon (matched by the
+         * {@code io.floci.owner} label) before its first job run starts. Turn it off when two Floci
+         * instances share a daemon with the same port and no resource namespace, so one does not
+         * remove the other's drivers.
+         *
+         * Env var: FLOCI_SERVICES_EMRSERVERLESS_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
     }
 
     interface Route53ResolverServiceConfig {
@@ -1575,6 +1603,9 @@ public interface EmulatorConfig {
         @WithDefault("9399")
         int kafkaHostPortMax();
 
+        @WithDefault("5000")
+        long scramReconciliationIntervalMs();
+
         /**
          * Only applies when Floci runs in a container. Each broker then has a second Kafka
          * listener, published to a host port from the kafka-host-port range so clients on the
@@ -1726,7 +1757,7 @@ public interface EmulatorConfig {
         int proxyHandshakeTimeoutMillis();
         @WithDefault("5000")
         int proxyBackendConnectTimeoutMillis();
-        @WithDefault("100")
+        @WithDefault("2000")
         int proxyMaxConnections();
 
         @WithDefault("1000000")
@@ -1934,9 +1965,20 @@ public interface EmulatorConfig {
         @WithDefault("emr-7.5.0")
         String defaultReleaseLabel();
 
-        /** Delay before a cluster reaches WAITING; 0 = advance synchronously. */
+        /**
+         * How long a new cluster takes to be ready to run steps, the first half STARTING and the second
+         * BOOTSTRAPPING; 0 makes it ready as soon as it is created.
+         */
         @WithDefault("0")
         int clusterStartupDelaySeconds();
+
+        /** How long a step stays RUNNING before it completes; 0 completes it as soon as it starts. */
+        @WithDefault("0")
+        int stepDurationSeconds();
+
+        /** How long a cluster stays TERMINATING before it is TERMINATED; 0 ends it at once. */
+        @WithDefault("0")
+        int clusterTerminationDelaySeconds();
     }
 
     interface WafV2ServiceConfig {

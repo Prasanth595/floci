@@ -478,6 +478,7 @@ floci:
     msk:
       enabled: true
       mock: false
+      scram-reconciliation-interval-ms: 5000
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
@@ -526,7 +527,7 @@ floci:
       # endpoint-host: localhost                 # Hostname clients use; empty -> DockerHostResolver
       proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
       proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
-      proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
+      proxy-max-connections: 2000                 # Max concurrent proxy connections before new ones are refused
       spectrum-max-rows: 1000000                  # FLOCI_SERVICES_REDSHIFT_SPECTRUM_MAX_ROWS; rows loaded per external table per query
     rds:
       enabled: true
@@ -577,6 +578,9 @@ floci:
       enabled: true
     emr:
       enabled: true
+      cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
+      step-duration-seconds: 0              # 0 = a step completes as soon as it starts
+      cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
     wafv2:
       enabled: true
     scheduler:
@@ -968,6 +972,12 @@ floci:
     emrserverless:
       enabled: true
       job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
+      runner-mode: immediate        # docker = run each Spark job run's spark-submit in a container
+      # docker-network: floci-network
+      # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
+      # Remove the drivers a previous run of this deployment left on the daemon before the first
+      # job run starts. Scoped to this deployment's own containers.
+      reconcile-containers-on-startup: true
     ssoadmin:
       enabled: true
     ssooidc:

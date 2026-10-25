@@ -1708,6 +1708,17 @@ public class SesService {
         }
     }
 
+    // Probe-confirmed: both bulk sends count the destinations before the stored template lookup,
+    // v2 also before the configuration set and tenant lookups, and v2 answers an empty list with
+    // the same message. The v1 order against the configuration set has not been probed.
+    static void requireBulkDestinationCount(int count) {
+        if (count < 1 || count > MAX_BULK_DESTINATIONS) {
+            throw new AwsException("InvalidParameterValue",
+                    "You must specify at least 1 destination, and no more than "
+                            + MAX_BULK_DESTINATIONS + " destinations", 400);
+        }
+    }
+
     // SES refuses the send outright for an attachment type it does not accept, unlike the content
     // scan, which accepts the message and rejects it afterwards.
     private static void rejectBlockedAttachments(Message parsed) {
@@ -1722,16 +1733,8 @@ public class SesService {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
         requireInlineTemplateContent(template.subject(), template.textPart(), template.htmlPart());
-        if (request.entries() == null || request.entries().isEmpty()) {
-            throw new AwsException("InvalidParameterValue",
-                    "At least one destination entry is required.", 400);
-        }
+        requireBulkDestinationCount(sizeOf(request.entries()));
         configSetService.validateForSending(request.configurationSetName(), request.region());
-        if (request.entries().size() > MAX_BULK_DESTINATIONS) {
-            throw new AwsException("MessageRejected",
-                    "Number of destinations (" + request.entries().size() + ") exceeds the maximum of "
-                            + MAX_BULK_DESTINATIONS + ".", 400);
-        }
         for (BulkEmailEntry entry : request.entries()) {
             int recipientCount = sizeOf(entry.toAddresses())
                     + sizeOf(entry.ccAddresses())

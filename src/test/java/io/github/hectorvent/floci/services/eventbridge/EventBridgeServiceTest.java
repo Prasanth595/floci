@@ -308,6 +308,18 @@ class EventBridgeServiceTest {
                 .getEventSourceArn());
     }
 
+    @Test
+    void archiveLengthBoundsCountSupplementaryCharactersOnce() {
+        String scalar = "\uD83D\uDE00";
+        String pattern = "{\"detail\":[\"" + scalar.repeat(4081) + "\"]}";
+        assertDoesNotThrow(() -> service.createArchive(
+                "unicode-archive", DEFAULT_BUS, scalar.repeat(512), pattern, 0, REGION));
+        assertThrows(AwsException.class, () -> service.createArchive(
+                "long-description", DEFAULT_BUS, scalar.repeat(513), null, 0, REGION));
+        assertThrows(AwsException.class, () -> service.createArchive(
+                "long-pattern", DEFAULT_BUS, null, pattern + " ", 0, REGION));
+    }
+
     /** The messages AWS returns; the account is checked before the region. */
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
@@ -763,15 +775,24 @@ class EventBridgeServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {1, 1600})
-    void putTargetsAcceptsRoleArnAtModelLengthBounds(int length) {
+    @ValueSource(ints = {38, 1600})
+    void putTargetsAcceptsWellFormedRoleArnWithinModelLengthBounds(int length) {
         service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
         Target target = new Target("workflow", "arn:aws:states:us-east-1:000000000000:stateMachine:example", null, null);
-        target.setRoleArn("r".repeat(length));
+        String prefix = "arn:aws:iam::000000000000:role/";
+        target.setRoleArn(prefix + "r".repeat(length - prefix.length()));
 
         service.putTargets("role-rule", null, List.of(target), REGION);
 
         assertEquals(target.getRoleArn(), service.listTargetsByRule("role-rule", null, REGION).getFirst().getRoleArn());
+    }
+
+    @Test
+    void putTargetsRejectsRoleArnThatOnlySatisfiesTheMinimumLength() {
+        Target target = new Target("workflow", "arn:aws:states:us-east-1:000000000000:stateMachine:example", null, null);
+        target.setRoleArn("r");
+
+        assertPutTargetsValidation("Parameter r is not valid. Reason: Provided Arn is not in correct format.", target);
     }
 
     @Test

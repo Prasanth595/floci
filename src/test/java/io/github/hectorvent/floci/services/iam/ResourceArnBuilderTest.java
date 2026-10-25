@@ -295,9 +295,11 @@ class ResourceArnBuilderTest {
     }
 
     /**
-     * A policy, MFA device, SAML provider or OIDC provider is named by an ARN the request already
-     * carries, so it is passed through. Rebuilding it from parts would only invent a second
-     * spelling of the resource the caller already named.
+     * A policy, MFA device, SAML provider, OIDC provider or role template is named by an ARN the
+     * request already carries, so it is passed through. Rebuilding it from parts would only invent
+     * a second spelling of the resource the caller already named, and a role template's ARN could
+     * not be rebuilt at all: it names the {@code aws} account rather than the caller's, and
+     * carries a major version after a colon.
      */
     @Test
     void iamPassesThroughAnArnTheRequestAlreadyCarries() {
@@ -317,6 +319,10 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:iam::000000000000:user/bob",
                 resourceOf(builder, "Action=SimulatePrincipalPolicy"
                         + "&PolicySourceArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Auser%2Fbob"));
+        assertEquals("arn:aws:iam::aws:role-template/ec2.amazonaws.com/AmazonEC2RoleforSSM:1",
+                resourceOf(builder, "Action=GetRoleTemplateVersion"
+                        + "&TemplateArn=arn%3Aaws%3Aiam%3A%3Aaws%3Arole-template%2F"
+                        + "ec2.amazonaws.com%2FAmazonEC2RoleforSSM%3A1"));
     }
 
     /**
@@ -1229,6 +1235,24 @@ class ResourceArnBuilderTest {
         when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/my-function/invocations");
         String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function", arn);
+    }
+
+    /** CreateFunction is checked on the function its body names, in the caller's account and Region. */
+    @Test
+    void lambdaCreateFunctionIsCheckedOnTheFunctionItsBodyNames() {
+        when(uriInfo.getPath()).thenReturn("/2015-03-31/functions");
+        when(ctx.getMethod()).thenReturn("POST");
+        setJsonBody("{\"FunctionName\":\"my-function\",\"Runtime\":\"nodejs20.x\"}");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"FunctionName\":\"arn:aws:lambda:us-east-1:111122223333:function:my-function\"}");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"Runtime\":\"nodejs20.x\"}");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(ctx.getMethod()).thenReturn("GET");
+        setJsonBody("{\"FunctionName\":\"my-function\"}");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
     }
 
     @Test

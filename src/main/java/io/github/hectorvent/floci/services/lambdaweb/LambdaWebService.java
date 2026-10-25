@@ -6,15 +6,19 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.PublicAccessConditions;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
@@ -30,11 +34,9 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -141,6 +143,7 @@ public class LambdaWebService implements Resettable {
     private final ObjectMapper objectMapper;
     private final Instance<RequestContext> requestContext;
     private final LambdaWebExecutionRole executionRole;
+    private final ServiceCallAuthorizer serviceCalls;
 
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
@@ -153,7 +156,8 @@ public class LambdaWebService implements Resettable {
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
                             S3Service s3Service, LambdaWebCode code, ObjectMapper objectMapper,
-                            Instance<RequestContext> requestContext, LambdaWebExecutionRole executionRole) {
+                            Instance<RequestContext> requestContext, LambdaWebExecutionRole executionRole,
+                            ServiceCallAuthorizer serviceCalls) {
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
         this.config = config;
@@ -162,6 +166,7 @@ public class LambdaWebService implements Resettable {
         this.objectMapper = objectMapper;
         this.requestContext = requestContext;
         this.executionRole = executionRole;
+        this.serviceCalls = serviceCalls;
     }
 
     @PostConstruct
@@ -191,11 +196,16 @@ public class LambdaWebService implements Resettable {
         code.clear();
     }
 
-    /** Where a request to an endpoint domain goes. Domains are unique across accounts and regions. */
-    public record WebFunctionTarget(String accountId, String region, WebFunction function, WebFunctionEndpoint endpoint) {
+    /**
+     * Where a request to an endpoint domain goes. Domains are unique across accounts and regions.
+     * {@code region} is the function's home region and {@code servingRegion} the region of the domain.
+     */
+    public record WebFunctionTarget(String accountId, String region, WebFunction function, WebFunctionEndpoint endpoint,
+                                    String servingRegion) {
     }
 
-    private record EndpointLocator(String accountId, String region, String functionName, String endpointName) {
+    private record EndpointLocator(String accountId, String region, String functionName, String endpointName,
+                                   String servingRegion) {
     }
 
     public Optional<WebFunctionTarget> locate(String host) {
@@ -213,7 +223,7 @@ public class LambdaWebService implements Resettable {
                 }
                 WebFunction fn = copy(stored.get(), WebFunction.class);
                 return Optional.of(new WebFunctionTarget(locator.accountId(), locator.region(), fn,
-                        fn.endpoints.get(locator.endpointName())));
+                        fn.endpoints.get(locator.endpointName()), locator.servingRegion()));
             }
         });
     }
@@ -226,11 +236,19 @@ public class LambdaWebService implements Resettable {
         return Optional.ofNullable(originHosts.get(host));
     }
 
+    /**
+     * AWS serves the MultiRegion global domain in the region nearest the caller. Floci takes the default region for
+     * that when the endpoint has it, and the home region otherwise.
+     */
     private void indexDomains(WebFunction fn, WebFunctionEndpoint endpoint) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.functionArn);
-        EndpointLocator locator = new EndpointLocator(arn.accountId(), arn.region(), fn.functionName, endpoint.endpointName);
-        index(endpoint.domainName, locator);
-        endpoint.regionalDomainNames.values().forEach(domain -> index(domain, locator));
+        String defaultRegion = regionResolver.getDefaultRegion();
+        String servingRegion = "MultiRegion".equals(endpoint.endpointType) && endpoint.regions.contains(defaultRegion)
+                ? defaultRegion : arn.region();
+        index(endpoint.domainName, new EndpointLocator(arn.accountId(), arn.region(), fn.functionName,
+                endpoint.endpointName, servingRegion));
+        endpoint.regionalDomainNames.forEach((region, domain) -> index(domain, new EndpointLocator(arn.accountId(),
+                arn.region(), fn.functionName, endpoint.endpointName, region)));
     }
 
     private void index(String domain, EndpointLocator locator) {
@@ -613,11 +631,16 @@ public class LambdaWebService implements Resettable {
         WebFunctionRevision.BuildConfig build = revision.buildConfig;
         long size;
         try (S3Service.ObjectRead object = openCode(build)) {
+            if (build.versionId == null && object.object().getVersionId() == null) {
+                throw new AwsException("ValidationException", "You must enable S3 versioning for your S3 bucket"
+                        + " when S3ObjectStorageMode is set to REFERENCE.", 400);
+            }
             // AWS accepts an object of exactly this size, despite the wording.
             if (LambdaWebCode.MAX_BYTES < object.object().getSize()) {
                 throw new AwsException("ValidationException", "Zipped size must be smaller than "
                         + LambdaWebCode.MAX_BYTES + " bytes", 400);
             }
+            requireLambdaCanRead(fn, revision);
             size = code.store(accountId, region, fn.functionName, revision.revisionId, object.body());
         } catch (IOException e) {
             throw new UncheckedIOException("Could not close the code object s3://" + build.bucket + "/" + build.key, e);
@@ -636,6 +659,21 @@ public class LambdaWebService implements Resettable {
         }
         if (revision.failureReason != null) {
             code.deleteRevision(accountId, region, fn.functionName, revision.revisionId);
+        }
+    }
+
+    /** AWS evaluates only s3:GetObjectVersion, although its message names both actions. */
+    private void requireLambdaCanRead(WebFunction fn, WebFunctionRevision revision) {
+        WebFunctionRevision.BuildConfig build = revision.buildConfig;
+        AwsArnUtils.Arn function = AwsArnUtils.parse(fn.functionArn);
+        String objectArn = AwsArnUtils.Arn.global(function.partition(), "s3", "", build.bucket + "/" + build.key)
+                .toString();
+        if (serviceCalls.authorize("lambda", "s3:GetObjectVersion", objectArn, revision.revisionArn,
+                function.accountId()) == Decision.DENY) {
+            throw new AwsException("ValidationException", "Lambda service principal " + ServicePrincipals.of("lambda")
+                    + " does not have s3:GetObject and s3:GetObjectVersion permission on s3://" + build.bucket + "/"
+                    + build.key + ". Update the bucket policy to grant the Lambda service principal access and retry.",
+                    400);
         }
     }
 
@@ -924,8 +962,9 @@ public class LambdaWebService implements Resettable {
         if ("MultiRegion".equals(endpoint.endpointType)) {
             endpoint.domainName = randomLowercase(DOMAIN_ID_LENGTH) + ".lambda-web.global." + host;
         } else {
+            String id = randomLowercase(DOMAIN_ID_LENGTH);
             for (String each : endpoint.regions) {
-                endpoint.regionalDomainNames.put(each, regionalDomain(each, host));
+                endpoint.regionalDomainNames.put(each, regionalDomain(id, each, host));
             }
             endpoint.domainName = endpoint.regionalDomainNames.get(region);
         }
@@ -933,8 +972,8 @@ public class LambdaWebService implements Resettable {
         endpoint.updatedAt = endpoint.createdAt;
     }
 
-    private static String regionalDomain(String region, String host) {
-        return randomLowercase(DOMAIN_ID_LENGTH) + "." + DOMAIN_SHARD + ".lambda-web." + region + "." + host;
+    private static String regionalDomain(String id, String region, String host) {
+        return id + "." + DOMAIN_SHARD + ".lambda-web." + region + "." + host;
     }
 
     private static void requireModeAllowed(String mode, String endpointType) {
@@ -1593,7 +1632,7 @@ public class LambdaWebService implements Resettable {
     private static AwsException tokenError(String token) {
         String decoded;
         try {
-            decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            decoded = Base64Url.decode(token);
         } catch (IllegalArgumentException expected) {
             // Not base64, so not a token Floci issued.
             decoded = "";

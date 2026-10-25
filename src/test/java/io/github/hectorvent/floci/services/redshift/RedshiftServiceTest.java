@@ -513,6 +513,15 @@ class RedshiftServiceTest {
         verify(clusterBackend, atLeastOnce()).flush();
     }
 
+    @Test
+    void createClusterPassesNodeTypeToContainerManager() {
+        when(cm.start("111111111111", "c-ra3", "admin", "pw"))
+                .thenReturn(new RedshiftContainerHandle("c-ra3", "c-ra3", "localhost", 5432));
+        service.createCluster("c-ra3", "ra3.xlplus", "admin", "pw",
+                null, List.of(), List.of(), null);
+        verify(cm).start("111111111111", "c-ra3", "admin", "pw", "dev", "ra3.xlplus");
+    }
+
     private StorageFactory sf;
     private AccountAwareStorageBackend<Cluster> clusterBackend;
     private AccountAwareStorageBackend<Snapshot> snapshotBackend;
@@ -544,6 +553,10 @@ class RedshiftServiceTest {
         snapshotScheduleBackend = mock(AccountAwareStorageBackend.class);
         integrationBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
+        when(cm.start(any(), any(), any(), any(), any(), any())).thenAnswer(inv ->
+                cm.start(inv.getArgument(0), inv.getArgument(1), inv.getArgument(2), inv.getArgument(3)));
+        when(cm.adoptOrStart(any(), any(), any(), any(), any(), any())).thenAnswer(inv ->
+                cm.adoptOrStart(inv.getArgument(0), inv.getArgument(1), inv.getArgument(2), inv.getArgument(3)));
         proxyManager = mock(RedshiftProxyManager.class);
         dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.resolve()).thenReturn("localhost");

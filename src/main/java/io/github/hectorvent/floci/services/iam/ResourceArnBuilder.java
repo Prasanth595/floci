@@ -249,6 +249,11 @@ public class ResourceArnBuilder {
      * belongs to an action the handler does not dispatch, so there is no request to name a
      * resource for.
      *
+     * <p>Empty since {@code GetRoleTemplateVersion} was dispatched: {@code role-template} was the
+     * last entry and the action carries its ARN, so the type is resolved through
+     * {@link #IAM_ARN_PARAMETERS} like any other the request names. The map stays because the next
+     * action AWS publishes a type for arrives before Floci dispatches it.
+     *
      * <p>Declared rather than implied so that a type which is neither resolved nor listed here
      * fails a test naming it, instead of quietly putting that action back on {@code *}. The
      * resolver's fallback for a type it does not know is the permissive answer, so a regeneration
@@ -260,8 +265,7 @@ public class ResourceArnBuilder {
      * its type would leave it evaluated against {@code *}, which is the fail-open this class
      * exists to close.
      */
-    static final Map<String, String> UNRESOLVED_TYPES = Map.of(
-            "role-template", "GetRoleTemplateVersion is not dispatched");
+    static final Map<String, String> UNRESOLVED_TYPES = Map.of();
 
     /**
      * The IAM actions whose target the request carries as an ARN, and the parameter holding it.
@@ -342,6 +346,9 @@ public class ResourceArnBuilder {
                 "GenerateServiceLastAccessedDetails", "ListPoliciesGrantingServiceAccess");
         arnParameter(parameters, "PolicySourceArn",
                 "GetContextKeysForPrincipalPolicy", "SimulatePrincipalPolicy");
+        // AWS owns role templates, so the ARN names one in the aws account rather than the
+        // caller's, and it is still the resource the action is authorized against.
+        arnParameter(parameters, "TemplateArn", "GetRoleTemplateVersion");
         return Map.copyOf(parameters);
     }
 
@@ -766,7 +773,9 @@ public class ResourceArnBuilder {
         }
         // path: /2015-03-31/functions/name or similar
         String name = extractSegmentAfter(path, "functions");
-        if (name == null) return "*";
+        if (name == null) {
+            return createdFunctionArn(path, ctx, region, accountId);
+        }
         boolean qualifiedTarget = path.endsWith("/functions/" + name + "/invocations")
                 || path.endsWith("/functions/" + name + "/response-streaming-invocations")
                 || path.endsWith("/functions/" + name + "/provisioned-concurrency");
@@ -791,6 +800,30 @@ public class ResourceArnBuilder {
         } catch (AwsException e) {
             // A reference Lambda refuses, which its handler answers with a 400 before acting on anything.
             return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
+        }
+    }
+
+    /**
+     * The function {@code CreateFunction} makes, which its body names, in the caller's account and Region, as
+     * every route but an invoke acts there: the Service Reference gives it the {@code function} resource, so
+     * its own action, and the tagging action its tags need, are checked on that function. {@code *} for any
+     * other route that names no function.
+     */
+    private String createdFunctionArn(String path, ContainerRequestContext ctx, String region, String accountId) {
+        if (!"POST".equalsIgnoreCase(ctx.getMethod()) || !"/2015-03-31/functions".equals(path)) {
+            return "*";
+        }
+        JsonNode body = readJsonBody(ctx);
+        JsonNode name = body == null ? null : body.get("FunctionName");
+        if (name == null || !name.isTextual() || name.asText().isEmpty()) {
+            return "*";
+        }
+        try {
+            return AwsArnUtils.Arn.of("lambda", region, accountId,
+                    "function:" + LambdaArnUtils.resolve(name.asText()).name()).toString();
+        } catch (AwsException e) {
+            // A name Lambda refuses, which its handler answers with a 400 before creating anything.
+            return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name.asText()).toString();
         }
     }
 

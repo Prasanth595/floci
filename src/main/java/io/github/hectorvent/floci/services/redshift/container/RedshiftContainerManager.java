@@ -35,6 +35,8 @@ public class RedshiftContainerManager {
 
     private static final Logger LOG = Logger.getLogger(RedshiftContainerManager.class);
     private static final String DEFAULT_DATABASE = "dev";
+    static final int DEFAULT_MAX_CONNECTIONS = 500;
+    static final int LARGE_CLUSTER_MAX_CONNECTIONS = 2000;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -69,27 +71,34 @@ public class RedshiftContainerManager {
     }
 
     public RedshiftContainerHandle start(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
-        return start(accountId, clusterIdentifier, masterUsername, masterPassword, DEFAULT_DATABASE);
+        return start(accountId, clusterIdentifier, masterUsername, masterPassword, DEFAULT_DATABASE, null);
     }
 
     /** Starts the container with {@code databaseName} as its one database, instead of the default {@code dev}. */
     public RedshiftContainerHandle start(String accountId, String clusterIdentifier, String masterUsername,
                                          String masterPassword, String databaseName) {
+        return start(accountId, clusterIdentifier, masterUsername, masterPassword, databaseName, null);
+    }
+
+    public RedshiftContainerHandle start(String accountId, String clusterIdentifier, String masterUsername,
+                                         String masterPassword, String databaseName, String nodeType) {
         String image = config.services().redshift().imageVersion();
         String containerName = containerName(accountId, clusterIdentifier);
         // Only the current name: adoptOrStart does not look for legacy-named survivors.
         stop(accountId, clusterIdentifier);
 
+        String effectiveDb = (databaseName != null && !databaseName.isBlank()) ? databaseName : DEFAULT_DATABASE;
         List<String> envVars = List.of(
                 "POSTGRES_USER=" + masterUsername,
                 "POSTGRES_PASSWORD=" + masterPassword,
-                "POSTGRES_DB=" + databaseName
+                "POSTGRES_DB=" + effectiveDb
         );
 
+        int maxConnections = maxConnections(clusterIdentifier, nodeType);
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv(envVars)
-                .withCmd(List.of("postgres", "-c", "allow_system_table_mods=on"))
+                .withCmd(List.of("postgres", "-c", "allow_system_table_mods=on", "-c", "max_connections=" + maxConnections))
                 .withDockerNetwork(config.services().redshift().dockerNetwork())
                 .withLogRotation();
 
@@ -103,7 +112,7 @@ public class RedshiftContainerManager {
         ContainerSpec spec = specBuilder.build();
         ContainerInfo info = lifecycleManager.createAndStartEphemeral(spec);
         return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort,
-                databaseName);
+                effectiveDb);
     }
 
     /**
@@ -117,20 +126,26 @@ public class RedshiftContainerManager {
      * project's decision not to provision reusable named volumes for Redshift containers.
      */
     public RedshiftContainerHandle adoptOrStart(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
-        return adoptOrStart(accountId, clusterIdentifier, masterUsername, masterPassword, DEFAULT_DATABASE);
+        return adoptOrStart(accountId, clusterIdentifier, masterUsername, masterPassword, DEFAULT_DATABASE, null);
     }
 
     /** As {@link #adoptOrStart(String, String, String, String)} for a container whose database is not {@code dev}. */
     public RedshiftContainerHandle adoptOrStart(String accountId, String clusterIdentifier, String masterUsername,
                                                 String masterPassword, String databaseName) {
+        return adoptOrStart(accountId, clusterIdentifier, masterUsername, masterPassword, databaseName, null);
+    }
+
+    public RedshiftContainerHandle adoptOrStart(String accountId, String clusterIdentifier, String masterUsername,
+                                                String masterPassword, String databaseName, String nodeType) {
         String containerName = containerName(accountId, clusterIdentifier);
         Optional<Container> existing = lifecycleManager.findByName(containerName);
         if (existing.isEmpty()) {
             LOG.warnv("No surviving container for cluster {0}; starting a fresh empty one: the previous"
                     + " contents are not recoverable (no reusable named volume backs Redshift containers)", clusterIdentifier);
-            return start(accountId, clusterIdentifier, masterUsername, masterPassword, databaseName);
+            return start(accountId, clusterIdentifier, masterUsername, masterPassword, databaseName, nodeType);
         }
 
+        String effectiveDb = (databaseName != null && !databaseName.isBlank()) ? databaseName : DEFAULT_DATABASE;
         adoptedContainers.put(containerKey(accountId, clusterIdentifier), existing.get().getId());
         LOG.infov("Adopting existing container {0} for cluster {1} to avoid discarding its data",
                 containerName, clusterIdentifier);
@@ -138,7 +153,24 @@ public class RedshiftContainerManager {
         ContainerInfo info = lifecycleManager.adopt(existing.get().getId(), List.of(enginePort),
                 containerBuilder.resolveDockerNetwork(config.services().redshift().dockerNetwork()));
         return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort,
-                databaseName);
+                effectiveDb);
+    }
+
+    static int maxConnections(String clusterIdentifier, String nodeType) {
+        return maxConnectionsForNodeType(nodeType);
+    }
+
+    static int maxConnectionsForNodeType(String nodeType) {
+        if (nodeType == null || nodeType.isBlank()) {
+            return DEFAULT_MAX_CONNECTIONS;
+        }
+        String normalized = nodeType.toLowerCase().trim();
+        if (normalized.startsWith("ra3") || normalized.startsWith("rg")
+                || normalized.endsWith("8xlarge") || normalized.endsWith("16xlarge")
+                || normalized.equals("serverless")) {
+            return LARGE_CLUSTER_MAX_CONNECTIONS;
+        }
+        return DEFAULT_MAX_CONNECTIONS;
     }
 
     private RedshiftContainerHandle initializeAndRegisterHandle(

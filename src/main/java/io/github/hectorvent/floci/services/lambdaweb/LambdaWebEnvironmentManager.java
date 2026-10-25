@@ -8,6 +8,7 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -313,8 +314,9 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
      * for it. The least busy one is taken, the one idle longest on a tie, so requests rotate. When
      * all are full a new one starts. At {@code maxEnvironments} an idle environment of another
      * revision makes room, and without one the request is {@link Throttled}. {@code endpointKey}
-     * names one creation of the endpoint in one region, so a recreated endpoint starts afresh. The
-     * caller releases the environment when the request is over. Blocks on Docker and S3.
+     * names one creation of the endpoint in one region, so a recreated endpoint starts afresh.
+     * {@code region} is the region the environment serves. The caller releases the environment
+     * when the request is over. Blocks on Docker and S3.
      */
     public Environment acquire(String accountId, String region, WebFunction fn, String endpointKey,
                                Integer maxEnvironments, WebFunctionRevision revision) {
@@ -547,7 +549,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     }
 
     private void start(Environment environment, String region, WebFunction fn, WebFunctionRevision revision) {
-        if (!executionRole.assumableFor(region, fn.functionArn, revision.serviceConfig.executionRoleArn)) {
+        String homeRegion = AwsArnUtils.parse(fn.functionArn).region();
+        if (!executionRole.assumableFor(homeRegion, fn.functionArn, revision.serviceConfig.executionRoleArn)) {
             throw new StartFailure(LambdaWebErrorPages.CANNOT_ASSUME_ROLE);
         }
         // Before the session and the token, which a failed start must not leave behind.
@@ -594,17 +597,17 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         }
         LambdaWebPlatformLog platform = null;
         try {
-            copyCode(containerId, accountId, region, fn, revision);
+            copyCode(containerId, accountId, homeRegion, fn, revision);
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, RUNTIME_DIR, "index.js",
                     runtime, 0644);
             environment.containerId = containerId;
             environment.logStream = LOG_STREAM_DATE.format(Instant.now()) + "/" + fn.functionName + "["
                     + revision.revisionId + "]" + UUID.randomUUID().toString().replace("-", "");
-            environment.logs = logs.open(accountId, region, revision.serviceConfig.logGroup, environment.logStream,
-                    revision.serviceConfig.systemLogLevel);
+            environment.logs = logs.open(accountId, region, homeRegion, revision.serviceConfig.logGroup,
+                    environment.logStream, revision.serviceConfig.systemLogLevel);
             platform = new LambdaWebPlatformLog(environment.logs, region, fn.functionName, revision.revisionId,
                     revision.buildConfig.runtime, revision.serviceConfig.applicationLogLevel,
-                    metrics.environment(accountId, region, fn.functionName));
+                    metrics.environment(accountId, region, homeRegion, fn.functionName));
             environment.platformLog = platform;
             ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             platform.initStart();

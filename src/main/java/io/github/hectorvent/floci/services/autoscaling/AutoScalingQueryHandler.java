@@ -2002,8 +2002,7 @@ public class AutoScalingQueryHandler {
             }
             if (deviceName == null || deviceName.isBlank()) {
                 throw SmithyValidationErrors.validationError(
-                        "Value null at '" + prefix
-                                + ".DeviceName' failed to satisfy constraint: Member must not be null");
+                        SmithyValidationErrors.notNull(prefix + ".DeviceName"));
             }
             LaunchConfigurationBlockDeviceMapping mapping = new LaunchConfigurationBlockDeviceMapping();
             mapping.setDeviceName(deviceName);
@@ -2080,8 +2079,7 @@ public class AutoScalingQueryHandler {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at '" + key
-                            + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(key));
         }
         if (!"true".equalsIgnoreCase(val) && !"false".equalsIgnoreCase(val)) {
             throw SmithyValidationErrors.validationError(

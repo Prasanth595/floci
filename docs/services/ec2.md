@@ -299,6 +299,10 @@ naming different VPCs find nothing.
 | DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
+| CreateDhcpOptions | Creates a DHCP options set with the supplied configurations and optional tags. |
+| DescribeDhcpOptions | Lists DHCP options sets by ID or filters, with paginated results. |
+| AssociateDhcpOptions | Associates an options set with a VPC; `default` leaves the VPC with no DHCP options. |
+| DeleteDhcpOptions | Deletes an unassociated DHCP options set. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
 | CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. `IpAddressType` defaults to `ipv4`. Interface and gateway address types are stored as metadata. Synthesized endpoint interfaces still carry IPv4 only; IPv6 networking is not emulated. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints, including their IP address type. |
@@ -778,7 +782,19 @@ instance's retained launch preference and target. A failed membership write repo
 subsequent access reconciles released membership from persisted instance state.
 
 Membership and available counts publish in one atomic storage batch. Older snapshots without
-membership remain readable. Capacity reservation resource-group targeting is unsupported.
+membership remain readable.
+
+`CapacityReservationResourceGroupArn` targets the members of an existing capacity pool
+in the caller's account and region. Only members with matching instance type, platform,
+Availability Zone and tenancy are eligible. Both open and targeted member reservations
+can supply capacity. The default permits On-Demand fallback when the group has no
+matching available capacity; `capacity-reservations-only` forbids that fallback at launch
+and restart. A group target cannot accompany a reservation ID, `none`, or a Spot request.
+DescribeInstances retains the group target separately from the acquired reservation ID.
+Running group-targeted instances can acquire newly added matching members or move to
+another matching member after cancellation or expiration. Existing membership survives
+group deletion until the instance releases its reservation.
+
 
 Capacity reservation zone IDs must be among those returned by `DescribeAvailabilityZones`.
 

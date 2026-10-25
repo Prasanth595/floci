@@ -53,7 +53,7 @@ class RedshiftSnapshotCfnIntegrationTest {
 
     @BeforeEach
     void prepareRuntime() {
-        when(containers.start(anyString(), anyString(), anyString(), anyString()))
+        when(containers.start(anyString(), anyString(), anyString(), anyString(), any(), any()))
                 .thenAnswer(invocation -> new RedshiftContainerHandle("mock-container",
                         invocation.getArgument(1), "localhost", 5432));
         doAnswer(invocation -> {

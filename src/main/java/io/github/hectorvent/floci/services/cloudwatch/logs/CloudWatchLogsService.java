@@ -31,10 +31,8 @@ import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -618,7 +616,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
                                                       int maxResults, String region) {
         String[] parts;
         try {
-            String raw = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+            String raw = Base64Url.decode(nextToken);
             parts = raw.split(":", 3);
         } catch (IllegalArgumentException e) {
             throw invalidNextToken();

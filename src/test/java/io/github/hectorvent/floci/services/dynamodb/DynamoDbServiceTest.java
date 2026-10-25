@@ -49,6 +49,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -4532,11 +4533,7 @@ class DynamoDbServiceTest {
 
     @Test
     void exportPutsItsFilesUnderThePrefix() {
-        S3Service s3 = mock(S3Service.class);
-        when(s3.initiateMultipartUpload(eq("bucket"), anyString(), eq("application/octet-stream")))
-                .thenAnswer(invocation -> new MultipartUpload("bucket", invocation.getArgument(1), "application/octet-stream"));
-        when(s3.completeMultipartUpload(eq("bucket"), anyString(), anyString(), eq(List.of(1)), isNull(), isNull()))
-                .thenReturn(new S3Object("bucket", "file", new byte[0], "application/octet-stream", "\"0123-1\""));
+        S3Service s3 = exportBucket();
         DynamoDbService svc = inlineExportService(s3);
         String longest = "a".repeat(948);
 
@@ -4552,6 +4549,43 @@ class DynamoDbServiceTest {
         verify(s3, atLeastOnce()).initiateMultipartUpload(eq("bucket"), keys.capture(), eq("application/octet-stream"));
         assertEquals(1024, keys.getAllValues().stream().filter(key -> key.startsWith(longest))
                 .mapToInt(key -> key.getBytes(StandardCharsets.UTF_8).length).max().orElseThrow());
+    }
+
+    @Test
+    void ionExportWritesIonLines() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        svc.putItem("Users", mapper.readTree("{\"userId\": {\"S\": \"u1\"}, \"total\": {\"N\": \"150\"}}"), "us-east-1");
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", "exports-ion",
+                "ExportFormat", "ION"), null, "us-east-1").getExportArn();
+
+        ExportDescription described = svc.describeExport(exportArn);
+        assertEquals("COMPLETED", described.getExportStatus());
+        assertEquals("ION", described.getExportFormat());
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<byte[]> parts = ArgumentCaptor.forClass(byte[].class);
+        verify(s3, atLeastOnce()).uploadPart(eq("bucket"), keys.capture(), anyString(), eq(1), parts.capture());
+        String dir = "exports-ion/AWSDynamoDB/" + exportArn.substring(exportArn.lastIndexOf('/') + 1) + "/";
+        List<String> uploadedKeys = keys.getAllValues();
+        String dataKey = uploadedKeys.stream().filter(key -> key.endsWith(".ion.gz")).findFirst().orElseThrow();
+        assertTrue(dataKey.matches(dir + "data/[a-z2-7]{26}\\.ion\\.gz"), dataKey);
+        byte[] dataFile = parts.getAllValues().get(uploadedKeys.indexOf(dataKey));
+        try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(dataFile))) {
+            assertEquals("$ion_1_0 {Item:{userId:\"u1\",total:15d1}}\n", new String(gzip.readAllBytes(), StandardCharsets.UTF_8));
+        }
+        byte[] summary = parts.getAllValues().get(uploadedKeys.indexOf(dir + "manifest-summary.json"));
+        assertEquals("ION", mapper.readTree(summary).get("outputFormat").asText());
+    }
+
+    /** A bucket that takes every upload, each completing with a one-part ETag. */
+    private static S3Service exportBucket() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.initiateMultipartUpload(eq("bucket"), anyString(), eq("application/octet-stream")))
+                .thenAnswer(invocation -> new MultipartUpload("bucket", invocation.getArgument(1), "application/octet-stream"));
+        when(s3.completeMultipartUpload(eq("bucket"), anyString(), anyString(), eq(List.of(1)), isNull(), isNull()))
+                .thenReturn(new S3Object("bucket", "file", new byte[0], "application/octet-stream", "\"0123-1\""));
+        return s3;
     }
 
     /** Runs each export on the calling thread, with Users created and point-in-time recovery on. */

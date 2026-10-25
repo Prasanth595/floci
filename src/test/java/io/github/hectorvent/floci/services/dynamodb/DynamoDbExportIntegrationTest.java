@@ -176,21 +176,23 @@ class DynamoDbExportIntegrationTest {
     }
 
     @Test
-    void exportTableToPointInTime_ionFormat_returnsValidationException() {
-        given()
-            .header("X-Amz-Target", "DynamoDB_20120810.ExportTableToPointInTime")
-            .contentType(DYNAMODB_CONTENT_TYPE)
-            .body("""
-                {
-                    "TableArn": "%s",
-                    "S3Bucket": "%s",
-                    "ExportFormat": "ION"
-                }
-                """.formatted(TABLE_ARN, BUCKET_NAME))
-            .when().post("/")
-            .then()
-            .statusCode(400)
-            .body("__type", containsString("ValidationException"));
+    void exportFormatIsCheckedAsAwsChecksIt() {
+        String enumSet = "' at 'exportFormat' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [ION, DYNAMODB_JSON]";
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "ExportFormat": "ion", "S3Prefix": "x"}
+            """.formatted(TABLE_ARN_PREFIX + "ExportFormatMissing", BUCKET_NAME)), "ValidationException",
+                "1 validation error detected: Value 'ion" + enumSet);
+        String over1024 = "a".repeat(1025);
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "ExportFormat": "", "S3Prefix": "%s"}
+            """.formatted(TABLE_ARN, BUCKET_NAME, over1024)), "ValidationException",
+                "2 validation errors detected: Value '" + over1024 + "' at 's3Prefix' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 1024; Value '" + enumSet);
+        ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "exports-ion", "ExportFormat": "ION"}
+            """.formatted(TABLE_ARN, BUCKET_NAME)).statusCode(200)
+            .body("ExportDescription.ExportFormat", equalTo("ION"));
     }
 
     @Test
@@ -377,6 +379,21 @@ class DynamoDbExportIntegrationTest {
                 "Invalid Request: S3 Prefix is too long");
         exportWithPrefix(TABLE_NAME, "ends-with/").statusCode(200)
             .body("ExportDescription.S3Prefix", equalTo("ends-with/"));
+    }
+
+    @Test
+    void s3PrefixLengthCountsSupplementaryCharactersOnce() {
+        String scalar = "\uD83D\uDE00";
+        String shortPrefix = scalar.repeat(2);
+        expectError(exportWithPrefix("ExportPrefixMissing", shortPrefix), "ValidationException",
+                "Invalid Request: 1 validation error detected: Value '" + shortPrefix
+                        + "' at 's3Prefix' failed to satisfy constraint: Member must have length greater than or equal to 3");
+        expectError(exportWithPrefix("ExportPrefixMissing", scalar.repeat(1024)), "TableNotFoundException",
+                "Table not found: " + TABLE_ARN_PREFIX + "ExportPrefixMissing");
+        String longPrefix = scalar.repeat(1025);
+        expectError(exportWithPrefix("ExportPrefixMissing", longPrefix), "ValidationException",
+                "1 validation error detected: Value '" + longPrefix
+                        + "' at 's3Prefix' failed to satisfy constraint: Member must have length less than or equal to 1024");
     }
 
     // --- Helpers ---

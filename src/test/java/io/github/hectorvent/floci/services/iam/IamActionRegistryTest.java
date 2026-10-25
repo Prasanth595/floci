@@ -722,6 +722,7 @@ class IamActionRegistryTest {
         assertEquals("s3:ListBucketVersions", bucketAction("GET", "versions"));
         assertEquals("s3:ListBucketMultipartUploads", bucketAction("GET", "uploads"));
         assertEquals("s3:GetBucketPolicy", bucketAction("GET", "policy"));
+        assertEquals("s3:GetBucketPolicyStatus", bucketAction("GET", "policyStatus"));
         assertEquals("s3:GetLifecycleConfiguration", bucketAction("GET", "lifecycle"));
         assertEquals("s3:GetEncryptionConfiguration", bucketAction("GET", "encryption"));
     }

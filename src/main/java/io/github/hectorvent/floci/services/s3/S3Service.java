@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
@@ -2851,7 +2852,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * links. A failed pin removes whatever it created, since the caller never gets its path.
      */
     private Path pinFile(Path file) {
-        Path pinned = file.resolveSibling(file.getFileName() + ".tmp-" + UUID.randomUUID());
+        Path pinned = file.resolveSibling(tempSiblingName());
         try {
             try {
                 Files.createLink(pinned, file);
@@ -3661,7 +3662,7 @@ public class S3Service implements Resettable, ResourceProvider {
             return null;
         }
         try {
-            return new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            return Base64Url.decode(token);
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidArgument", "The continuation token you provided is invalid.", 400);
         }
@@ -5332,8 +5333,7 @@ public class S3Service implements Resettable, ResourceProvider {
             throw invalidNotificationArn(arn, argumentName);
         }
         boolean validResource = switch (service) {
-            case "sqs" -> parsed.resource().matches("[A-Za-z0-9_-]{1,80}")
-                    || parsed.resource().matches("[A-Za-z0-9_-]{1,75}\\.fifo");
+            case "sqs" -> AwsArnShapes.isSqsQueueName(parsed.resource());
             case "sns" -> parsed.resource().matches("[A-Za-z0-9_-]{1,256}")
                     || parsed.resource().matches("[A-Za-z0-9_-]{1,251}\\.fifo");
             case "lambda" -> parsed.resource().matches(
@@ -5451,6 +5451,11 @@ public class S3Service implements Resettable, ResourceProvider {
         return bucket.getPolicy();
     }
 
+    /** Returns whether the bucket policy grants public access according to S3 policy-status rules. */
+    public boolean isBucketPolicyPublic(String bucketName) {
+        return S3PublicAccessEvaluator.policyIsPublic(objectMapper, getBucketPolicy(bucketName));
+    }
+
     /**
      * {@code BlockPublicPolicy} rejects a bucket policy that grants public access. As on AWS the
      * check runs whoever the caller is, so it does not sit behind {@code enforce-auth}, and it
@@ -5478,10 +5483,14 @@ public class S3Service implements Resettable, ResourceProvider {
         return bucket.getCorsConfiguration();
     }
 
+    /**
+     * The CORS rule a request matched. {@code allowHeaders} is the preflight's
+     * Access-Control-Allow-Headers value, or null when the preflight asked for no headers.
+     */
     public record CorsEvalResult(
         String allowedOrigin,
         List<String> allowedMethods,
-        List<String> allowedHeaders,
+        String allowHeaders,
         List<String> exposeHeaders,
         int maxAgeSeconds
     ) {}
@@ -5534,14 +5543,28 @@ public class S3Service implements Resettable, ResourceProvider {
             if (requestHeaders != null && !requestHeaders.isEmpty()) {
                 boolean headersOk = allowedHeaders.contains("*")
                     || requestHeaders.stream().allMatch(rh ->
-                        allowedHeaders.stream().anyMatch(ah -> ah.equalsIgnoreCase(rh)));
+                        allowedHeaders.stream().anyMatch(ah -> matchesCorsHeader(ah, rh)));
                 if (!headersOk) continue;
             }
 
             String echoOrigin = allowedOrigins.contains("*") ? "*" : origin;
-            return Optional.of(new CorsEvalResult(echoOrigin, allowedMethods, allowedHeaders, exposeHeaders, maxAge));
+            // S3 sends back the headers the preflight asked for, and no Access-Control-Allow-Headers
+            // when it asked for none. An AllowedHeader such as x-amz-* is a pattern, not a header name
+            // a browser can match, so the requested names are listed; a bare * still answers *.
+            String allowHeaders = requestHeaders == null || requestHeaders.isEmpty() ? null
+                    : allowedHeaders.contains("*") ? "*" : String.join(", ", requestHeaders);
+            return Optional.of(new CorsEvalResult(echoOrigin, allowedMethods, allowHeaders, exposeHeaders, maxAge));
         }
         return Optional.empty();
+    }
+
+    /**
+     * Matches an AllowedHeader against a header named in Access-Control-Request-Headers. Header
+     * names are case-insensitive, and like an AllowedOrigin an AllowedHeader may hold one {@code *}
+     * wildcard, as in {@code x-amz-*}.
+     */
+    private static boolean matchesCorsHeader(String pattern, String header) {
+        return matchesCorsOrigin(pattern.toLowerCase(Locale.ROOT), header.toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -7346,6 +7369,12 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private static final String DATA_SUFFIX = ".s3data";
 
+    // Linux file names cap at 255 bytes; S3 key segments have no cap, so a segment over its
+    // budget below is stored as a readable prefix plus the SHA-256 of the whole segment.
+    private static final int MAX_FILE_NAME_BYTES = 255;
+    private static final char ENCODED_SEGMENT_SEPARATOR = '~';
+    private static final int SHA256_HEX_CHARS = 64;
+
     // A 12-digit bucket name is valid on S3 and would otherwise collide with an account ID,
     // making dataRoot/<accountId>/... indistinguishable from the legacy dataRoot/<bucket>/...
     // layout. A leading "." keeps this namespace unreachable by any real bucket name.
@@ -7386,6 +7415,69 @@ public class S3Service implements Resettable, ResourceProvider {
         return resolved;
     }
 
+    /**
+     * Encodes the '/'-separated segments of an object key into names the filesystem can hold.
+     * A segment within its byte budget is kept as written, so every path an earlier Floci could
+     * create is still found; a longer one, and any segment shaped like an encoded one so a
+     * crafted short key cannot land on an encoded name, becomes a readable prefix, '~', and the
+     * SHA-256 of the whole segment. The digest keeps the mapping injective: the same key always
+     * resolves to one path and two keys never share a file. Listing reads keys from the object
+     * store, never from these names, so the encoding never needs reversing.
+     */
+    private static String encodePathSegments(String key, int lastSegmentBudget, int segmentBudget) {
+        String[] segments = key.split("/", -1);
+        for (int i = 0; i < segments.length; i++) {
+            segments[i] = encodePathSegment(segments[i], i == segments.length - 1 ? lastSegmentBudget : segmentBudget);
+        }
+        return String.join("/", segments);
+    }
+
+    private static String encodePathSegment(String segment, int budget) {
+        if (utf8Length(segment) <= budget && !hasEncodedShape(segment, budget)) {
+            return segment;
+        }
+        return truncateUtf8(segment, budget - 1 - SHA256_HEX_CHARS)
+                + ENCODED_SEGMENT_SEPARATOR + Digests.sha256Hex(segment);
+    }
+
+    /** Whether {@code segment} could itself be the output of {@link #encodePathSegment}. */
+    private static boolean hasEncodedShape(String segment, int budget) {
+        if (utf8Length(segment) > budget || segment.length() <= SHA256_HEX_CHARS) {
+            return false;
+        }
+        if (segment.charAt(segment.length() - SHA256_HEX_CHARS - 1) != ENCODED_SEGMENT_SEPARATOR) {
+            return false;
+        }
+        for (int i = segment.length() - SHA256_HEX_CHARS; i < segment.length(); i++) {
+            char c = segment.charAt(i);
+            if ((c < '0' || c > '9') && (c < 'a' || c > 'f')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String truncateUtf8(String segment, int maxBytes) {
+        int end = 0;
+        int used = 0;
+        int i = 0;
+        while (i < segment.length()) {
+            int codePoint = segment.codePointAt(i);
+            int byteCount = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
+            if (used + byteCount > maxBytes) {
+                break;
+            }
+            used += byteCount;
+            i += Character.charCount(codePoint);
+            end = i;
+        }
+        return segment.substring(0, end);
+    }
+
+    private static int utf8Length(String segment) {
+        return segment.getBytes(StandardCharsets.UTF_8).length;
+    }
+
     // Unlike bucketStore/objectStore, object bytes get no automatic account prefixing — two
     // accounts can own a bucket named "orders" and would collide here without this scoping.
     private String physicalKey(String bucketName, String key) {
@@ -7416,7 +7508,9 @@ public class S3Service implements Resettable, ResourceProvider {
             safeKey = safeKey.substring(1);
         }
 
-        Path resolved = bucketDir.resolve(safeKey + DATA_SUFFIX).normalize();
+        String encodedKey = encodePathSegments(safeKey,
+                MAX_FILE_NAME_BYTES - DATA_SUFFIX.length(), MAX_FILE_NAME_BYTES);
+        Path resolved = bucketDir.resolve(encodedKey + DATA_SUFFIX).normalize();
         if (!resolved.startsWith(bucketDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
         }
@@ -7461,7 +7555,8 @@ public class S3Service implements Resettable, ResourceProvider {
             safeKey = safeKey.substring(1);
         }
 
-        Path resolved = baseDir.resolve(safeKey).resolve(versionId + DATA_SUFFIX).normalize();
+        Path resolved = baseDir.resolve(encodePathSegments(safeKey, MAX_FILE_NAME_BYTES, MAX_FILE_NAME_BYTES))
+                .resolve(versionId + DATA_SUFFIX).normalize();
         if (!resolved.startsWith(baseDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
         }
@@ -7683,11 +7778,13 @@ public class S3Service implements Resettable, ResourceProvider {
      * read surfaced as an empty {@code src-Config} secondary source. Writing to a unique sibling
      * temp file and atomically renaming it over the target closes that window. The temp name is
      * unique per call so concurrent writers to the same key never clobber each other's temp file;
-     * whichever rename lands last wins, and every rename is all-or-nothing.
+     * whichever rename lands last wins, and every rename is all-or-nothing. It is also
+     * constant-length, because a name derived from the target's would exceed the 255-byte
+     * file-name limit for a target at that limit.
      */
     private void atomicWrite(Path filePath, byte[] data) throws IOException {
         Files.createDirectories(filePath.getParent());
-        Path tmp = filePath.resolveSibling(filePath.getFileName() + ".tmp-" + UUID.randomUUID());
+        Path tmp = filePath.resolveSibling(tempSiblingName());
         try {
             Files.write(tmp, data);
             replaceAtomically(tmp, filePath);
@@ -7705,6 +7802,13 @@ public class S3Service implements Resettable, ResourceProvider {
             // because the default overlay/ext filesystems used here support atomic rename.
             Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
         }
+    }
+
+    // A name derived from the target's, like the earlier "<target>.tmp-<uuid>", would run past
+    // the 255-byte file-name limit for a target at that limit. This one is constant-length and
+    // still unique per call, and never collides with an object file (those end in ".s3data").
+    private static String tempSiblingName() {
+        return ".tmp-" + UUID.randomUUID();
     }
 
     /**
@@ -7735,7 +7839,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private void linkIntoPlace(Path source, Path target) {
         ReentrantLock lock = diskFileLock(target);
         lock.lock();
-        Path tmp = target.resolveSibling(target.getFileName() + ".tmp-" + UUID.randomUUID());
+        Path tmp = target.resolveSibling(tempSiblingName());
         try {
             Files.createDirectories(target.getParent());
             try {

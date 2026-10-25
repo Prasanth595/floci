@@ -182,6 +182,7 @@ floci:
     msk:
       enabled: true
       mock: true
+      scram-reconciliation-interval-ms: 5000
       default-image: "redpandadata/redpanda:latest"
     amazonmq:
       enabled: true
@@ -215,7 +216,7 @@ floci:
       default-credential-duration-seconds: 900
       proxy-handshake-timeout-millis: 10000
       proxy-backend-connect-timeout-millis: 5000
-      proxy-max-connections: 100
+      proxy-max-connections: 2000
       spectrum-max-rows: 1000000
     rds:
       enabled: true
@@ -500,6 +501,7 @@ floci:
     emrserverless:
       enabled: true
       job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
+      runner-mode: immediate
     ssoadmin:
       enabled: true
     ssooidc:

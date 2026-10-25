@@ -56,7 +56,7 @@ class LambdaWebIntegrationTest {
     @BeforeAll
     void seedCode() {
         LambdaWebRoles.trustLambda(iamService, ROLE);
-        s3Service.createBucket(BUCKET, "us-east-1");
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
         s3Service.putObject(BUCKET, KEY, LambdaWebZips.indexJs(""), "application/zip", Map.of());
     }
 
@@ -364,6 +364,21 @@ class LambdaWebIntegrationTest {
                 .then().statusCode(404)
                 .header("X-Amzn-Errortype", "ResourceNotFoundException")
                 .body("message", equalTo("The endpoint global does not exist."));
+
+        // The regional domains of a PerRegion endpoint share one id, and the home one leads.
+        String home = given().contentType("application/json")
+                .body("{\"endpointName\": \"per\", \"endpointType\": \"PerRegion\", \"regions\": [\"us-west-2\"],"
+                        + " \"authType\": \"ApplicationManaged\","
+                        + " \"revisionWeights\": [{\"revisionId\": \"" + revision1 + "\", \"weight\": 100}]}")
+                .when().put(endpoints)
+                .then().statusCode(202)
+                .body("domainName", matchesPattern("[a-z0-9]{16}\\.001\\.lambda-web\\.us-east-1\\..+"))
+                .extract().path("domainName");
+        given().when().get(endpoints + "/per")
+                .then().statusCode(200)
+                .body("regionalEndpoints.us-east-1.domainName", equalTo(home))
+                .body("regionalEndpoints.us-west-2.domainName", equalTo(home.replace(".us-east-1.", ".us-west-2.")));
+        given().when().delete(endpoints + "/per").then().statusCode(204);
     }
 
     @Test

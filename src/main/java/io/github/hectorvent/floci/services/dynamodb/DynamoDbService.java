@@ -708,11 +708,13 @@ public class DynamoDbService {
             requireVectorIndexMember(index.getProjectionType(), memberPath + ".projection");
             requireVectorIndexMember(index.getDistanceFunction(), memberPath + ".distanceFunction");
             String indexName = index.getIndexName();
-            if (indexName == null || indexName.length() < MIN_VECTOR_INDEX_NAME_LENGTH) {
-                throw SmithyValidationErrors.validationException(
-                        "Value '" + indexName + "' at '"
-                        + memberPath + ".indexName' failed to satisfy constraint: "
-                        + "Member must have length greater than or equal to " + MIN_VECTOR_INDEX_NAME_LENGTH);
+            String nameViolation = indexName == null
+                    ? SmithyValidationErrors.lengthTooShort(
+                            memberPath + ".indexName", null, MIN_VECTOR_INDEX_NAME_LENGTH)
+                    : SmithyValidationErrors.lengthOutOfRange(
+                            memberPath + ".indexName", indexName, MIN_VECTOR_INDEX_NAME_LENGTH, Integer.MAX_VALUE);
+            if (nameViolation != null) {
+                throw SmithyValidationErrors.validationException(nameViolation);
             }
             String distanceFunction = index.getDistanceFunction();
             if (!VECTOR_DISTANCE_FUNCTIONS.contains(distanceFunction)) {
@@ -802,8 +804,7 @@ public class DynamoDbService {
     private static void requireVectorIndexMember(Object value, String memberPath) {
         if (value == null) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at '" + memberPath
-                    + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(memberPath));
         }
     }
 
@@ -4919,36 +4920,40 @@ public class DynamoDbService {
 
     // --- Export Operations ---
 
+    private static final List<String> EXPORT_FORMATS = List.of("ION", "DYNAMODB_JSON");
+
     /** As on AWS, an ExportTime after LatestRestorableDateTime is accepted up to now. */
     public ExportDescription exportTable(Map<String, Object> request, Instant exportTime, String region) {
         String tableArn = (String) request.get("TableArn");
         String s3Bucket = (String) request.get("S3Bucket");
         String s3Prefix = request.containsKey("S3Prefix") ? (String) request.get("S3Prefix") : null;
-        String exportFormat = request.containsKey("ExportFormat") ? (String) request.get("ExportFormat") : "DYNAMODB_JSON";
+        String exportFormat = request.get("ExportFormat") != null ? (String) request.get("ExportFormat") : "DYNAMODB_JSON";
         String exportType = request.containsKey("ExportType") ? (String) request.get("ExportType") : "FULL_EXPORT";
         String clientToken = request.containsKey("ClientToken") ? (String) request.get("ClientToken") : null;
         String s3SseAlgorithm = request.containsKey("S3SseAlgorithm") ? (String) request.get("S3SseAlgorithm") : null;
         String s3BucketOwner = request.containsKey("S3BucketOwner") ? (String) request.get("S3BucketOwner") : null;
 
-        if (s3Prefix != null) {
-            int length = s3Prefix.codePointCount(0, s3Prefix.length());
-            if (1024 < length) {
-                throw SmithyValidationErrors.validationException("Value '" + s3Prefix
-                        + "' at 's3Prefix' failed to satisfy constraint: Member must have length less than or equal to 1024");
-            }
-            if (length < 3) {
-                throw new AwsException("ValidationException", "Invalid Request: " + SmithyValidationErrors.message(
-                        List.of("Value '" + s3Prefix + "' at 's3Prefix' failed to satisfy constraint: "
-                                + "Member must have length greater than or equal to 3")), 400);
-            }
+        List<String> violations = new ArrayList<>();
+        String prefixLengthViolation = s3Prefix == null ? null
+                : SmithyValidationErrors.lengthOutOfRange("s3Prefix", s3Prefix, 0, 1024);
+        if (prefixLengthViolation != null) {
+            violations.add(prefixLengthViolation);
+        }
+        if (!EXPORT_FORMATS.contains(exportFormat)) {
+            violations.add(SmithyValidationErrors.notInEnum(exportFormat, "exportFormat", EXPORT_FORMATS));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+        prefixLengthViolation = s3Prefix == null ? null
+                : SmithyValidationErrors.lengthOutOfRange("s3Prefix", s3Prefix, 3, Integer.MAX_VALUE);
+        if (prefixLengthViolation != null) {
+            throw new AwsException("ValidationException", "Invalid Request: "
+                    + SmithyValidationErrors.message(List.of(prefixLengthViolation)), 400);
         }
         if ("INCREMENTAL_EXPORT".equals(exportType)) {
             throw new AwsException("ValidationException",
                     "ExportType INCREMENTAL_EXPORT is not supported", 400);
-        }
-        if ("ION".equals(exportFormat)) {
-            throw new AwsException("ValidationException",
-                    "ExportFormat ION is not supported", 400);
         }
 
         DynamoDbTableNames.ResolvedTableRef ref = DynamoDbTableNames.resolveWithRegion(tableArn, region);
@@ -5038,8 +5043,9 @@ public class DynamoDbService {
                 throw e;
             }
 
-            byte[] gzipData = buildGzipNdjson(snapshot);
-            String dataKey = exportDir + "data/" + exportFileName() + ".json.gz";
+            boolean ion = "ION".equals(desc.getExportFormat());
+            byte[] gzipData = buildGzipExportData(snapshot, ion);
+            String dataKey = exportDir + "data/" + exportFileName() + (ion ? ".ion.gz" : ".json.gz");
             ObjectNode dataFile = objectMapper.createObjectNode();
             dataFile.put("itemCount", snapshot.size());
             dataFile.put("md5Checksum", Base64.getEncoder().encodeToString(Digests.md5(gzipData)));
@@ -5073,14 +5079,18 @@ public class DynamoDbService {
         }
     }
 
-    private byte[] buildGzipNdjson(List<JsonNode> items) throws IOException {
+    private byte[] buildGzipExportData(List<JsonNode> items, boolean ion) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (GZIPOutputStream gzip = new GZIPOutputStream(baos)) {
             for (JsonNode item : items) {
-                ObjectNode line = objectMapper.createObjectNode();
-                line.set("Item", item);
-                byte[] lineBytes = objectMapper.writeValueAsBytes(line);
-                gzip.write(lineBytes);
+                if (ion) {
+                    gzip.write(DynamoDbIonText.exportLine(item).getBytes(StandardCharsets.UTF_8));
+                } else {
+                    ObjectNode line = objectMapper.createObjectNode();
+                    line.set("Item", item);
+                    byte[] lineBytes = objectMapper.writeValueAsBytes(line);
+                    gzip.write(lineBytes);
+                }
                 gzip.write('\n');
             }
         }
@@ -5472,8 +5482,7 @@ public class DynamoDbService {
         var clientToken = request.path("ClientToken").asText(null);
         if (clientToken != null && clientToken.isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value '" + clientToken
-                    + "' at 'clientToken' failed to satisfy constraint: Member must have length greater than or equal to 1");
+                    SmithyValidationErrors.lengthTooShort("clientToken", clientToken, 1));
         }
         if (clientToken == null || importStore == null) {
             return null;

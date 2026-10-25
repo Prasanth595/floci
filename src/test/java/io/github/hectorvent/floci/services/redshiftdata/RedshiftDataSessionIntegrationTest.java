@@ -21,11 +21,13 @@ import software.amazon.awssdk.services.redshiftdata.model.DescribeStatementRespo
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementRequest;
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementResponse;
 import software.amazon.awssdk.services.redshiftdata.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.redshiftdata.model.SqlParameter;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 import software.amazon.awssdk.services.redshiftdata.model.ValidationException;
 
 import java.net.URI;
 import java.sql.DriverManager;
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -113,6 +115,41 @@ class RedshiftDataSessionIntegrationTest {
             assertThrows(ResourceNotFoundException.class, () -> otherRegion.executeStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId()).sql("SELECT 2")));
         }
         finished(data.executeStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId()).sql("SELECT 3")).id());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void sdkBatchBindsSharedParametersAndReturnsTheirMetadata(boolean serverless) throws Exception {
+        ExecuteStatementRequest.Builder create = ExecuteStatementRequest.builder().waitTimeSeconds(30).database("dev")
+                .sessionKeepAliveSeconds(60).sql("CREATE LOCAL TEMPORARY TABLE batch_params(id integer, payload varchar(100))");
+        if (serverless) {
+            create.workgroupName("analytics");
+        } else {
+            create.clusterIdentifier("warehouse").dbUser("admin");
+        }
+        ExecuteStatementResponse created = data.executeStatement(create.build());
+        finished(created.id());
+        SqlParameter id = SqlParameter.builder().name("id").value("42").build();
+        SqlParameter payload = SqlParameter.builder().name("payload").value("O'Reilly :not_a_parameter").build();
+        String batch = data.batchExecuteStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId())
+                .sqls("INSERT INTO batch_params VALUES (:id, :payload)", "SELECT payload FROM batch_params WHERE id = :id")
+                .parameters(id, payload)).id();
+
+        DescribeStatementResponse described = finished(batch);
+        assertEquals(List.of(id, payload), described.queryParameters());
+        assertEquals(2, described.subStatements().size());
+        assertEquals("O'Reilly :not_a_parameter",
+                data.getStatementResult(r -> r.id(batch)).records().getFirst().getFirst().stringValue());
+        verify(factory).open(any());
+    }
+
+    @Test
+    void sdkRejectsUnusedBatchParameterBeforeOpeningAConnection() {
+        ValidationException error = assertThrows(ValidationException.class, () -> data.batchExecuteStatement(r -> r
+                .clusterIdentifier("warehouse").dbUser("admin").database("dev").sqls("SELECT 1", "SELECT ':unused'")
+                .parameters(SqlParameter.builder().name("unused").value("42").build())));
+        assertEquals(400, error.statusCode());
+        verifyNoInteractions(factory);
     }
 
     @Test

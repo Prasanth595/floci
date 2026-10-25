@@ -108,7 +108,7 @@ class RedshiftFinalSnapshotStorageTest {
         when(access.storageMode("redshift")).thenReturn("persistent");
         StorageFactory factory = new StorageFactory(config, access);
         RedshiftContainerManager manager = mock(RedshiftContainerManager.class);
-        when(manager.start(anyString(), anyString(), anyString(), anyString()))
+        when(manager.start(anyString(), anyString(), anyString(), anyString(), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("container", "restored", "localhost", 5432));
         doAnswer(invocation -> {
             Files.writeString(invocation.getArgument(3, Path.class), "backup contents");

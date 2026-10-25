@@ -19,6 +19,11 @@ public final class Digests {
         }
     }
 
+    /** The MD5 digest of {@code data} as lowercase hex. */
+    public static String md5Hex(byte[] data) {
+        return HexFormat.of().formatHex(md5(data));
+    }
+
     public static byte[] sha1(byte[] data) {
         try {
             return MessageDigest.getInstance("SHA-1").digest(data);

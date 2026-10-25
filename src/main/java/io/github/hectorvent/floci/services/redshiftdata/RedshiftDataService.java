@@ -20,6 +20,8 @@ import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPrepar
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSqlException;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataStatementStore.StoredParameter;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataStatementStore.StoredStatement;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -395,6 +397,7 @@ public class RedshiftDataService implements Resettable {
         stored.dbUser = target.user();
         stored.database = target.database();
         stored.resultFormat = request.path("ResultFormat").asText("JSON");
+        stored.queryParameters = storedParameters(parameters);
         capture(stored, target, region, request);
 
         return new PendingStatement(stored, (execution, session) -> runStatement(stored, target, sql, parameters, execution, session),
@@ -726,6 +729,7 @@ public class RedshiftDataService implements Resettable {
             response.put("Error", stored.error);
         }
         response.put("QueryString", stored.sql);
+        putQueryParameters(response, stored.queryParameters);
         int stableId = stored.id.hashCode() & Integer.MAX_VALUE;
         response.put("RedshiftPid", stableId);
         response.put("RedshiftQueryId", (long) stableId);
@@ -864,6 +868,7 @@ public class RedshiftDataService implements Resettable {
         for (JsonNode n : sqlsNode) {
             sqls.add(n.asText());
         }
+        Map<String, String> parameters = RedshiftDataSqlParameters.parseBatchParameters(request, sqls);
 
         ResolvedTarget resolved = resolveTarget(request, region, owner);
         RedshiftDataResourceResolver.DatabaseTarget target = resolved.target();
@@ -878,13 +883,14 @@ public class RedshiftDataService implements Resettable {
         parent.database = target.database();
         parent.resultFormat = request.path("ResultFormat").asText("JSON");
         parent.subStatements = new ArrayList<>();
+        parent.queryParameters = storedParameters(parameters);
         capture(parent, target, region, request);
 
-        return new PendingStatement(parent, (execution, session) -> runBatch(parent, sqls, target, execution, session),
+        return new PendingStatement(parent, (execution, session) -> runBatch(parent, sqls, parameters, target, execution, session),
                 target, request.deepCopy(), owner);
     }
 
-    private void runBatch(RedshiftDataStatementStore.StoredStatement parent, List<String> sqls,
+    private void runBatch(RedshiftDataStatementStore.StoredStatement parent, List<String> sqls, Map<String, String> parameters,
                           RedshiftDataResourceResolver.DatabaseTarget target, RedshiftDataExecution execution,
                           RedshiftDataSessions.Reservation session) {
         long totalDuration = 0;
@@ -923,7 +929,7 @@ public class RedshiftDataService implements Resettable {
                     try {
                         execution.checkCancellation();
                         publishActivity(parent, target, sqls.get(n));
-                        runBatchEntry(sub, connection, sqls.get(n), target.spectrum(), execution, userChanges);
+                        runBatchEntry(sub, connection, sqls.get(n), parameters, target.spectrum(), execution, userChanges);
                     } catch (SQLException e) {
                         sub.status = RedshiftDataStatementStore.Status.FAILED;
                         sub.error = e.getMessage();
@@ -995,11 +1001,12 @@ public class RedshiftDataService implements Resettable {
     }
 
     private void runBatchEntry(RedshiftDataStatementStore.StoredStatement sub, Connection connection, String sql,
-                               SpectrumSession context, RedshiftDataExecution execution, UserChanges userChanges)
+                               Map<String, String> parameters, SpectrumSession context,
+                               RedshiftDataExecution execution, UserChanges userChanges)
             throws SQLException {
         List<String> commands = RedshiftAuditSql.statements(sql);
         if (commands.isEmpty()) {
-            runOnConnection(sub, connection, sql, Map.of(), context, execution, false);
+            runOnConnection(sub, connection, sql, parameters, context, execution, false);
             return;
         }
         long duration = 0;
@@ -1009,9 +1016,9 @@ public class RedshiftDataService implements Resettable {
             try {
                 String command = commands.get(i);
                 if (RedshiftAuditSql.isCommit(command)) {
-                    execution.commit(() -> runOnConnection(result, connection, command, Map.of(), context, execution, false));
+                    execution.commit(() -> runOnConnection(result, connection, command, parameters, context, execution, false));
                 } else {
-                    runOnConnection(result, connection, command, Map.of(), context, execution, false);
+                    runOnConnection(result, connection, command, parameters, context, execution, false);
                 }
                 userChanges.complete(command);
             } finally {
@@ -1065,6 +1072,7 @@ public class RedshiftDataService implements Resettable {
                 node.put("StatementName", s.statementName);
             }
             node.put("IsBatchStatement", s.batch);
+            putQueryParameters(node, s.queryParameters);
             node.put("ResultRows", s.resultRows);
             node.put("ResultSize", s.resultSize);
             node.put("Duration", s.durationNanos);
@@ -1346,6 +1354,27 @@ public class RedshiftDataService implements Resettable {
             response.put("WorkgroupName", stored.workgroupName);
         } else {
             response.putNull("WorkgroupName");
+        }
+    }
+
+    private static List<StoredParameter> storedParameters(Map<String, String> parameters) {
+        return parameters.isEmpty() ? null : parameters.entrySet().stream()
+                .map(entry -> new StoredParameter(entry.getKey(), entry.getValue())).toList();
+    }
+
+    private static void putQueryParameters(ObjectNode target, List<StoredParameter> parameters) {
+        if (parameters == null || parameters.isEmpty()) {
+            return;
+        }
+        ArrayNode queryParameters = target.putArray("QueryParameters");
+        for (StoredParameter parameter : parameters) {
+            ObjectNode paramNode = queryParameters.addObject();
+            paramNode.put("name", parameter.name());
+            if (parameter.value() == null) {
+                paramNode.putNull("value");
+            } else {
+                paramNode.put("value", parameter.value());
+            }
         }
     }
 
