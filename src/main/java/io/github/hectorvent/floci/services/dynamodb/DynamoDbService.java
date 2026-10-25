@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.json.JsonWriteFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -5133,6 +5135,8 @@ public class DynamoDbService {
     }
 
     private byte[] buildGzipExportData(List<JsonNode> items, boolean ion, boolean incremental) throws IOException {
+        // AWS writes a character above U+FFFF as UTF-8, where Jackson writes two escapes by default.
+        ObjectWriter lineWriter = objectMapper.writer().with(JsonWriteFeature.COMBINE_UNICODE_SURROGATES_IN_UTF8);
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (GZIPOutputStream gzip = new GZIPOutputStream(baos)) {
             for (JsonNode item : items) {
@@ -5140,11 +5144,11 @@ public class DynamoDbService {
                     String line = incremental ? DynamoDbIonText.recordLine(item) : DynamoDbIonText.exportLine(item);
                     gzip.write(line.getBytes(StandardCharsets.UTF_8));
                 } else if (incremental) {
-                    gzip.write(objectMapper.writeValueAsBytes(item));
+                    gzip.write(lineWriter.writeValueAsBytes(item));
                 } else {
                     ObjectNode line = objectMapper.createObjectNode();
                     line.set("Item", item);
-                    byte[] lineBytes = objectMapper.writeValueAsBytes(line);
+                    byte[] lineBytes = lineWriter.writeValueAsBytes(line);
                     gzip.write(lineBytes);
                 }
                 gzip.write('\n');

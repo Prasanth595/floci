@@ -4576,6 +4576,19 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void jsonExportWritesCharactersAboveUffffAsUtf8() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        svc.putItem("Users", item("userId", "u1", "😀", "😀"), "us-east-1");
+
+        svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket"), null, null, "us-east-1");
+
+        byte[] dataFile = uploadedFiles(s3).entrySet().stream().filter(file -> file.getKey().endsWith(".json.gz"))
+                .findFirst().orElseThrow().getValue();
+        assertEquals("{\"Item\":{\"userId\":{\"S\":\"u1\"},\"😀\":{\"S\":\"😀\"}}}\n", gunzip(dataFile));
+    }
+
+    @Test
     void incrementalExportWritesARecordForEachChangedItem() throws Exception {
         S3Service s3 = exportBucket();
         DynamoDbService svc = incrementalExportService(s3);
@@ -4586,7 +4599,7 @@ class DynamoDbServiceTest {
         Instant from = clock.instant();
         svc.putItem("Users", item("userId", "updated", "v", "after"), "us-east-1");
         svc.deleteItem("Users", item("userId", "deleted"), "us-east-1");
-        svc.putItem("Users", item("userId", "new", "v", "new"), "us-east-1");
+        svc.putItem("Users", item("userId", "new", "v", "new 😀"), "us-east-1");
         svc.putItem("Users", item("userId", "newThenDeleted", "v", "new"), "us-east-1");
         svc.deleteItem("Users", item("userId", "newThenDeleted"), "us-east-1");
         svc.putItem("Users", item("userId", "same", "v", "before"), "us-east-1");
@@ -4623,7 +4636,7 @@ class DynamoDbServiceTest {
                 "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"deleted\"}},"
                         + "\"OldImage\":{\"userId\":{\"S\":\"deleted\"},\"v\":{\"S\":\"before\"}}}",
                 "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"new\"}},"
-                        + "\"NewImage\":{\"userId\":{\"S\":\"new\"},\"v\":{\"S\":\"new\"}}}",
+                        + "\"NewImage\":{\"userId\":{\"S\":\"new\"},\"v\":{\"S\":\"new 😀\"}}}",
                 "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"twice\"}},"
                         + "\"OldImage\":{\"userId\":{\"S\":\"twice\"},\"v\":{\"S\":\"before\"}},"
                         + "\"NewImage\":{\"userId\":{\"S\":\"twice\"},\"v\":{\"S\":\"second\"}}}",
