@@ -13,9 +13,12 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.PublicAccessConditions;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
@@ -140,6 +143,7 @@ public class LambdaWebService implements Resettable {
     private final ObjectMapper objectMapper;
     private final Instance<RequestContext> requestContext;
     private final LambdaWebExecutionRole executionRole;
+    private final ServiceCallAuthorizer serviceCalls;
 
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
@@ -152,7 +156,8 @@ public class LambdaWebService implements Resettable {
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
                             S3Service s3Service, LambdaWebCode code, ObjectMapper objectMapper,
-                            Instance<RequestContext> requestContext, LambdaWebExecutionRole executionRole) {
+                            Instance<RequestContext> requestContext, LambdaWebExecutionRole executionRole,
+                            ServiceCallAuthorizer serviceCalls) {
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
         this.config = config;
@@ -161,6 +166,7 @@ public class LambdaWebService implements Resettable {
         this.objectMapper = objectMapper;
         this.requestContext = requestContext;
         this.executionRole = executionRole;
+        this.serviceCalls = serviceCalls;
     }
 
     @PostConstruct
@@ -625,11 +631,16 @@ public class LambdaWebService implements Resettable {
         WebFunctionRevision.BuildConfig build = revision.buildConfig;
         long size;
         try (S3Service.ObjectRead object = openCode(build)) {
+            if (build.versionId == null && object.object().getVersionId() == null) {
+                throw new AwsException("ValidationException", "You must enable S3 versioning for your S3 bucket"
+                        + " when S3ObjectStorageMode is set to REFERENCE.", 400);
+            }
             // AWS accepts an object of exactly this size, despite the wording.
             if (LambdaWebCode.MAX_BYTES < object.object().getSize()) {
                 throw new AwsException("ValidationException", "Zipped size must be smaller than "
                         + LambdaWebCode.MAX_BYTES + " bytes", 400);
             }
+            requireLambdaCanRead(fn, revision);
             size = code.store(accountId, region, fn.functionName, revision.revisionId, object.body());
         } catch (IOException e) {
             throw new UncheckedIOException("Could not close the code object s3://" + build.bucket + "/" + build.key, e);
@@ -648,6 +659,21 @@ public class LambdaWebService implements Resettable {
         }
         if (revision.failureReason != null) {
             code.deleteRevision(accountId, region, fn.functionName, revision.revisionId);
+        }
+    }
+
+    /** AWS evaluates only s3:GetObjectVersion, although its message names both actions. */
+    private void requireLambdaCanRead(WebFunction fn, WebFunctionRevision revision) {
+        WebFunctionRevision.BuildConfig build = revision.buildConfig;
+        AwsArnUtils.Arn function = AwsArnUtils.parse(fn.functionArn);
+        String objectArn = AwsArnUtils.Arn.global(function.partition(), "s3", "", build.bucket + "/" + build.key)
+                .toString();
+        if (serviceCalls.authorize("lambda", "s3:GetObjectVersion", objectArn, revision.revisionArn,
+                function.accountId()) == Decision.DENY) {
+            throw new AwsException("ValidationException", "Lambda service principal " + ServicePrincipals.of("lambda")
+                    + " does not have s3:GetObject and s3:GetObjectVersion permission on s3://" + build.bucket + "/"
+                    + build.key + ". Update the bucket policy to grant the Lambda service principal access and retry.",
+                    400);
         }
     }
 

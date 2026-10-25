@@ -56,7 +56,7 @@ class LambdaWebIntegrationTest {
     @BeforeAll
     void seedCode() {
         LambdaWebRoles.trustLambda(iamService, ROLE);
-        s3Service.createBucket(BUCKET, "us-east-1");
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
         s3Service.putObject(BUCKET, KEY, LambdaWebZips.indexJs(""), "application/zip", Map.of());
     }
 

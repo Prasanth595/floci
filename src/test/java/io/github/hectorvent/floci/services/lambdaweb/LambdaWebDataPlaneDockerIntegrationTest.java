@@ -631,7 +631,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                                   String mode, String authType, String nodeOptions) throws IOException {
         functionName = "dp-docker-" + Long.toString(System.nanoTime(), 36);
         LambdaWebRoles.trustLambda(iamService, ROLE);
-        s3Service.createBucket(BUCKET, "us-east-1");
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
         s3Service.putObject(BUCKET, functionName + ".zip", zip(APP), "application/zip", Map.of());
         return given().contentType("application/json")
                 .body("""

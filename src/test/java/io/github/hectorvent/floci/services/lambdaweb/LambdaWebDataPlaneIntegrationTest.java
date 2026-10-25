@@ -383,7 +383,7 @@ class LambdaWebDataPlaneIntegrationTest {
 
     private String createFunction(String region, String functionName, String authType, byte[] code, String role) {
         LambdaWebRoles.trustLambda(iamService, role);
-        s3Service.createBucket(BUCKET, "us-east-1");
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
         s3Service.putObject(BUCKET, "app.zip", code, "application/zip", Map.of());
         return given().header("Authorization", auth("test", region, "lambda")).contentType("application/json")
                 .body("""
