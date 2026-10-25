@@ -33,6 +33,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -493,12 +494,7 @@ public class EcrService implements ResourceProvider {
         try {
             RegistryHttpClient http = registryManager.httpClient();
             List<String> tags = http.listTags(internal);
-            List<ImageIdentifier> out = new ArrayList<>();
-            for (String tag : tags) {
-                String digest = http.headManifestDigest(internal, tag, null);
-                out.add(new ImageIdentifier(tag, digest));
-            }
-            return out;
+            return imageIdentifiers(http, internal, tags);
         } catch (Exception e) {
             LOG.warnv("ListImages registry query failed for {0}: {1}", repositoryName, e.getMessage());
             return List.of();
@@ -512,9 +508,28 @@ public class EcrService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 1000", 400);
         }
         String namespace = "ListImages:" + region + ":" + effectiveAccount(registryId) + ":" + repositoryName;
-        return Pagination.paginate(listImages(repositoryName, registryId, region), ImageIdentifier::getImageTag,
-                limit, nextToken, namespace,
-                token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
+        Repository repo = requireRepo(repositoryName, registryId, region);
+        requireRegistry();
+        String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
+        try {
+            RegistryHttpClient http = registryManager.httpClient();
+            PaginatedResult<String> page = Pagination.paginate(http.listTags(internal), Function.identity(),
+                    limit, nextToken, namespace,
+                    token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
+            return new PaginatedResult<>(imageIdentifiers(http, internal, page.items()), page.nextToken());
+        } catch (IOException | InterruptedException e) {
+            LOG.warnv("ListImages registry query failed for {0}: {1}", repositoryName, e.getMessage());
+            return new PaginatedResult<>(List.of(), null);
+        }
+    }
+
+    private static List<ImageIdentifier> imageIdentifiers(RegistryHttpClient http, String internal, List<String> tags)
+            throws IOException, InterruptedException {
+        List<ImageIdentifier> identifiers = new ArrayList<>();
+        for (String tag : tags) {
+            identifiers.add(new ImageIdentifier(tag, http.headManifestDigest(internal, tag, null)));
+        }
+        return identifiers;
     }
 
     public DescribeImagesResult describeImages(String repositoryName,

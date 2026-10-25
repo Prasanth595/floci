@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
@@ -65,6 +66,7 @@ class EcrListImagesPaginationIntegrationTest {
 
     private final Map<String, String> images = new ConcurrentHashMap<>();
     private final List<SeededRepository> repositories = new ArrayList<>();
+    private final AtomicInteger manifestHeads = new AtomicInteger();
     private HttpServer registry;
     private EcrClient client;
     private String repository;
@@ -135,6 +137,26 @@ class EcrListImagesPaginationIntegrationTest {
         assertNull(last.nextToken());
         assertEquals(101, client.listImages(request -> request.repositoryName(repository)
                 .maxResults(1000)).imageIds().size());
+    }
+
+    @Test
+    void sdkFetchesOnlyTheDigestsOnEachReturnedPage() {
+        seed(3);
+        ListImagesResponse first = client.listImages(request -> request.repositoryName(repository).maxResults(1));
+        assertEquals(1, manifestHeads.get());
+        assertNotNull(first.nextToken());
+        ListImagesResponse second = client.listImages(request -> request.repositoryName(repository)
+                .maxResults(1).nextToken(first.nextToken()));
+        assertEquals(List.of("tag-001"), tags(second));
+        assertEquals(2, manifestHeads.get());
+    }
+
+    @Test
+    void sdkRejectsInvalidTokensWithoutFetchingDigests() {
+        seed(3);
+        assertThrows(InvalidParameterException.class,
+                () -> client.listImages(request -> request.repositoryName(repository).nextToken("%%%%")));
+        assertEquals(0, manifestHeads.get());
     }
 
     @ParameterizedTest
@@ -222,6 +244,7 @@ class EcrListImagesPaginationIntegrationTest {
                 exchange.sendResponseHeaders(200, bytes.length);
                 exchange.getResponseBody().write(bytes);
             } else {
+                manifestHeads.incrementAndGet();
                 String digest = images.get(path.substring(path.lastIndexOf('/') + 1));
                 if (digest != null) {
                     exchange.getResponseHeaders().set("Docker-Content-Digest", digest);
