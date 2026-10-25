@@ -99,7 +99,8 @@ public class BedrockAgentCoreEventService {
         event.setPayload(resolvedPayload);
         event.setBranch(branch != null ? branch : new Branch(DEFAULT_BRANCH));
 
-        eventStore.put(eventKey(memoryId, actorId, resolvedSession, event.getEventId()), event);
+        memoryService.writeEvent(memoryId, region,
+                () -> eventStore.put(eventKey(memoryId, actorId, resolvedSession, event.getEventId()), event));
         LOG.debugv("CreateEvent: memory={0} actor={1} session={2} event={3}",
                 memoryId, actorId, resolvedSession, event.getEventId());
         return event;

@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
 class BedrockAgentCoreEventServiceTest {
@@ -18,8 +21,12 @@ class BedrockAgentCoreEventServiceTest {
     @Test
     void deletingAMemoryDropsOnlyItsEvents() {
         InMemoryStorage<String, MemoryEvent> events = new InMemoryStorage<>();
-        BedrockAgentCoreEventService service = new BedrockAgentCoreEventService(
-                events, mock(BedrockAgentCoreMemoryService.class));
+        BedrockAgentCoreMemoryService memories = mock(BedrockAgentCoreMemoryService.class);
+        doAnswer(call -> {
+            call.<Runnable>getArgument(2).run();
+            return null;
+        }).when(memories).writeEvent(anyString(), anyString(), any());
+        BedrockAgentCoreEventService service = new BedrockAgentCoreEventService(events, memories);
         String gone = "gone-0123456789";
         String kept = "kept-0123456789";
         service.createEvent(gone, "actor1", "sess1", 1789300800d, List.of(), true, null, REGION);

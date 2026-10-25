@@ -8,10 +8,14 @@ import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.Memory;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -139,6 +143,61 @@ class BedrockAgentCoreMemoryServiceTest {
         service.delete(id, "del-1", REGION);
         service.delete(id, "del-1", REGION);
         assertEquals(List.of(new MemoryDeleted(id)), deleted);
+    }
+
+    @Test
+    void failedEventCleanupLeavesTheMemoryForARetry() {
+        AtomicBoolean cleanupFails = new AtomicBoolean(true);
+        List<MemoryDeleted> deleted = new ArrayList<>();
+        service = new BedrockAgentCoreMemoryService(
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), clock, event -> {
+                    if (cleanupFails.get()) {
+                        throw new IllegalStateException("events file write failed");
+                    }
+                    deleted.add(event);
+                });
+        String id = create("myMemory").getMemoryId();
+
+        assertThrows(IllegalStateException.class, () -> service.delete(id, "del-1", REGION));
+        assertEquals(id, service.get(id, REGION).getMemoryId());
+
+        cleanupFails.set(false);
+        assertEquals("DELETING", service.delete(id, "del-1", REGION).getStatus());
+        assertEquals(List.of(new MemoryDeleted(id)), deleted);
+    }
+
+    @Test
+    @Timeout(10)
+    void deleteWaitsForAnEventWriteInProgress() throws InterruptedException {
+        List<String> order = Collections.synchronizedList(new ArrayList<>());
+        service = new BedrockAgentCoreMemoryService(
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), clock,
+                event -> order.add("cleanup"));
+        String id = create("myMemory").getMemoryId();
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread writer = new Thread(() -> service.writeEvent(id, REGION, () -> {
+            writing.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            order.add("write");
+        }));
+        writer.start();
+        writing.await();
+
+        Thread deleter = new Thread(() -> service.delete(id, null, REGION));
+        deleter.start();
+        while (deleter.isAlive() && deleter.getState() != Thread.State.WAITING) {
+            Thread.onSpinWait();
+        }
+        release.countDown();
+        writer.join();
+        deleter.join();
+
+        assertEquals(List.of("write", "cleanup"), order);
     }
 
     @Test

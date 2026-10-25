@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 
 /** CRUD for AgentCore memory resources. Metadata registry only. */
@@ -38,8 +40,11 @@ public class BedrockAgentCoreMemoryService {
     // DeletedTokenLedger.TTL, after which a replay 404s like an unknown token.
     private final DeletedTokenLedger deletedTokens;
     private final Consumer<MemoryDeleted> onDelete;
+    // Shared while an event is written, exclusive while a memory is deleted: an event written
+    // after its memory's events were dropped would be unreachable.
+    private final ReadWriteLock eventWrites = new ReentrantReadWriteLock();
 
-    /** Fired after a memory is deleted, so the data plane can drop the memory's events. */
+    /** Fired before a memory is deleted, so the data plane can drop the memory's events. */
     public record MemoryDeleted(String memoryId) {}
 
     @Inject
@@ -149,7 +154,27 @@ public class BedrockAgentCoreMemoryService {
         }
     }
 
+    /** Runs an event write for the memory, which cannot be deleted until the write is done. */
+    public void writeEvent(String id, String region, Runnable write) {
+        eventWrites.readLock().lock();
+        try {
+            get(id, region);
+            write.run();
+        } finally {
+            eventWrites.readLock().unlock();
+        }
+    }
+
     public Memory delete(String id, String clientToken, String region) {
+        eventWrites.writeLock().lock();
+        try {
+            return deleteExclusively(id, clientToken, region);
+        } finally {
+            eventWrites.writeLock().unlock();
+        }
+    }
+
+    private Memory deleteExclusively(String id, String clientToken, String region) {
         Optional<Memory> found = storage.get(key(region, id));
         if (found.isEmpty()) {
             if (clientToken != null && deletedTokens.contains(region + " " + clientToken)) {
@@ -161,8 +186,9 @@ public class BedrockAgentCoreMemoryService {
             throw new AwsException("ResourceNotFoundException", "Memory not found: " + id, 404);
         }
         Memory memory = found.get();
-        storage.delete(key(region, id));
+        // Events go first: if dropping them fails, the memory is still there to retry the delete.
         onDelete.accept(new MemoryDeleted(id));
+        storage.delete(key(region, id));
         if (clientToken != null) {
             deletedTokens.record(region + " " + clientToken);
         }
