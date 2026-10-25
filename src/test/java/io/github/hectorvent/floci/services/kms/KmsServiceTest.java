@@ -154,6 +154,31 @@ class KmsServiceTest {
         assertEquals(Optional.empty(), kmsService.findKeyArn("   ", REGION));
     }
 
+    /**
+     * The enforcement filter resolves the key a grant operation acts on through this lookup for
+     * the same reason it reads {@code findKeyArn}: a request naming no grant the account holds
+     * answers its own {@code NotFoundException}, so the check must not refuse the request first.
+     * The token wins over the id, as {@code retireGrant} resolves the grant it deletes.
+     */
+    @Test
+    void findGrantKeyArnResolvesTheTokenFirstAndRefusesNothing() {
+        KmsKey key = kmsService.createKey("granted", REGION);
+        KmsGrant grant = kmsService.createGrant(key.getKeyId(),
+                "arn:aws:iam::000000000000:user/grantee", List.of("Encrypt"), REGION);
+
+        assertEquals(Optional.of(key.getArn()),
+                kmsService.findGrantKeyArn(grant.getGrantToken(), null, REGION));
+        assertEquals(Optional.of(key.getArn()),
+                kmsService.findGrantKeyArn(grant.getGrantToken(), grant.getGrantId(), REGION));
+        assertEquals(Optional.of(key.getArn()),
+                kmsService.findGrantKeyArn(null, grant.getGrantId(), REGION));
+        assertEquals(Optional.empty(),
+                kmsService.findGrantKeyArn("no-such-token", grant.getGrantId(), REGION));
+        assertEquals(Optional.empty(), kmsService.findGrantKeyArn(null, "no-such-grant", REGION));
+        assertEquals(Optional.empty(), kmsService.findGrantKeyArn(null, null, REGION));
+        assertEquals(Optional.empty(), kmsService.findGrantKeyArn("   ", "   ", REGION));
+    }
+
     @Test
     void createMultiRegionKeyUsesMrkIdAndPrimaryMetadata() {
         KmsKey key = kmsService.createKey("multi-region key", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",

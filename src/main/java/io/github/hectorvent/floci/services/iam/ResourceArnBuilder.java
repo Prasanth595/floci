@@ -1622,7 +1622,17 @@ public class ResourceArnBuilder {
      * <p>{@code ReEncrypt} is a stopgap here: AWS authorizes it as {@code kms:ReEncryptFrom} on
      * the source key and {@code kms:ReEncryptTo} on the destination, while this evaluates the
      * single {@code kms:ReEncrypt} action against both keys, so a policy naming either action
-     * AWS publishes still binds to nothing.
+     * AWS publishes still binds to nothing. The source is the key its optional
+     * {@code SourceKeyId} names and otherwise the key that encrypted the
+     * {@code CiphertextBlob}, never a {@code KeyId} member, which the handler does not read on
+     * {@code ReEncrypt}.
+     *
+     * <p>The grant operations name the key the grant they act on belongs to, the way the handler
+     * resolves it: a {@code RetireGrant} carrying a {@code GrantToken} the key the grant it
+     * names belongs to, a {@code RetireGrant} or a {@code RevokeGrant} identifying its grant by
+     * {@code KeyId} and {@code GrantId} the key it names together with the key that grant
+     * belongs to. They coincide for a request naming a grant on its own key; naming both closes
+     * the pair that names one key while retiring or revoking another key's grant.
      *
      * <p>A request nothing resolves names every key the account holds, which the permissive
      * {@code key/*} pattern a policy may scope to still matches; the operation then fails in the
@@ -1642,6 +1652,8 @@ public class ResourceArnBuilder {
             case "kms:DeleteAlias" -> deleteAliasTargets(body, region, accountId, partition);
             case "kms:Decrypt" -> List.of(decryptTarget(body, region, accountId, partition));
             case "kms:ReEncrypt" -> reEncryptTargets(body, region, accountId, partition);
+            case "kms:RetireGrant" -> retireGrantTargets(body, region, accountId, partition);
+            case "kms:RevokeGrant" -> revokeGrantTargets(body, region, accountId, partition);
             default -> List.of(keyTarget(body, "KeyId", region, accountId, partition));
         };
     }
@@ -1690,6 +1702,15 @@ public class ResourceArnBuilder {
         if (keyId != null && !keyId.isBlank()) {
             return keyArn(keyId, region, accountId, partition);
         }
+        return ciphertextKeyTarget(body, region, accountId, partition);
+    }
+
+    /**
+     * The key that encrypted the request's {@code CiphertextBlob}, read out of the blob the
+     * same way the handler reads it, or every key the account holds when the blob names none
+     * the account holds.
+     */
+    private String ciphertextKeyTarget(JsonNode body, String region, String accountId, String partition) {
         JsonNode ciphertext = body.path("CiphertextBlob");
         if (kmsService != null && !ciphertext.isMissingNode() && !ciphertext.isNull()) {
             byte[] blob;
@@ -1707,21 +1728,76 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * Both keys a {@code ReEncrypt} acts on, the source the ciphertext or its optional
-     * {@code SourceKeyId} names and the destination its {@code DestinationKeyId} names. The
+     * Both keys a {@code ReEncrypt} acts on: the source its optional {@code SourceKeyId} names
+     * and otherwise the key that encrypted the {@code CiphertextBlob}, which is the key the
+     * service decrypts with, and the destination its {@code DestinationKeyId} names. The
+     * handler never reads a {@code KeyId} on {@code ReEncrypt}, so neither does this. The
      * filter authorizes a request once per resource, so the caller has to be allowed on both.
      */
     private List<String> reEncryptTargets(JsonNode body, String region, String accountId,
                                           String partition) {
         Set<String> keys = new LinkedHashSet<>();
         String sourceKeyId = body.path("SourceKeyId").asText(null);
-        if (sourceKeyId == null || sourceKeyId.isBlank()) {
-            keys.add(decryptTarget(body, region, accountId, partition));
-        } else {
-            keys.add(keyArn(sourceKeyId, region, accountId, partition));
-        }
+        keys.add(sourceKeyId == null || sourceKeyId.isBlank()
+                ? ciphertextKeyTarget(body, region, accountId, partition)
+                : keyArn(sourceKeyId, region, accountId, partition));
         keys.add(keyTarget(body, "DestinationKeyId", region, accountId, partition));
         return new ArrayList<>(keys);
+    }
+
+    /**
+     * The key a {@code RetireGrant} acts on, as the handler resolves it: the key the grant its
+     * {@code GrantToken} names belongs to, since the handler finds the grant by the token
+     * alone and only cross-verifies the other members against it, and for a request identifying
+     * its grant by {@code KeyId} and {@code GrantId} the key it names together with the key
+     * that grant belongs to, which the pair identifies for the handler. A token naming no
+     * grant the account holds keeps the permissive fallback; the handler refuses the request
+     * with its own {@code NotFoundException}.
+     */
+    private List<String> retireGrantTargets(JsonNode body, String region, String accountId,
+                                             String partition) {
+        String grantToken = body.path("GrantToken").asText(null);
+        if (grantToken != null && !grantToken.isBlank()) {
+            String grantKey = grantKeyArn(body, region);
+            return grantKey == null
+                    ? List.of(keyWildcard(region, accountId, partition))
+                    : List.of(grantKey);
+        }
+        Set<String> resources = new LinkedHashSet<>();
+        resources.add(keyTarget(body, "KeyId", region, accountId, partition));
+        String grantKey = grantKeyArn(body, region);
+        if (grantKey != null) {
+            resources.add(grantKey);
+        }
+        return new ArrayList<>(resources);
+    }
+
+    /**
+     * The keys a {@code RevokeGrant} acts on: the key its {@code KeyId} names, which the
+     * handler resolves, and the key the grant its {@code GrantId} names belongs to, which the
+     * handler deletes. They coincide for a request naming a grant on its own key, and naming
+     * both closes the pair that names one key while revoking another key's grant.
+     */
+    private List<String> revokeGrantTargets(JsonNode body, String region, String accountId,
+                                             String partition) {
+        Set<String> resources = new LinkedHashSet<>();
+        resources.add(keyTarget(body, "KeyId", region, accountId, partition));
+        String grantKey = grantKeyArn(body, region);
+        if (grantKey != null) {
+            resources.add(grantKey);
+        }
+        return new ArrayList<>(resources);
+    }
+
+    /** The stored ARN of the key the request's grant belongs to, or null when none resolves. */
+    private String grantKeyArn(JsonNode body, String region) {
+        if (kmsService == null) {
+            return null;
+        }
+        return kmsService.get()
+                .findGrantKeyArn(body.path("GrantToken").asText(null),
+                        body.path("GrantId").asText(null), region)
+                .orElse(null);
     }
 
     /**

@@ -31,6 +31,12 @@ import static org.hamcrest.Matchers.equalTo;
  * User Guide's "Allow access to a KMS key" pattern scopes the policy's Resource to one key ARN,
  * and a Deny scoped to one key ARN fires for that key: the gap issue #6256 describes, where
  * every KMS call was evaluated against {@code key/*}.
+ *
+ * <p>The same mirror rule covers the members a handler reads that a plain {@code KeyId} does
+ * not name: a {@code ReEncrypt} that names no {@code SourceKeyId} is authorized against the key
+ * that encrypted its {@code CiphertextBlob}, never against a {@code KeyId} it carries, which
+ * the handler ignores, and a token-only {@code RetireGrant} against the key its grant belongs
+ * to, which is the key the handler retires the grant under.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -135,11 +141,113 @@ class KmsKeyArnEnforcementIntegrationTest {
                 .then().statusCode(400).body("__type", equalTo("InvalidCiphertextException"));
     }
 
+    /**
+     * The review's attack on ReEncrypt: a caller allowed on one key submits ciphertext another,
+     * denied key encrypted and carries a KeyId naming the allowed one, which the handler never
+     * reads. The source the request is authorized against is the key that encrypted the
+     * ciphertext, so the denied key's data does not come out re-encrypted under the allowed one.
+     */
+    @Test
+    void aReEncryptIsAuthorizedAgainstTheKeyThatEncryptedTheCiphertextNotAKeyIdItCarries() {
+        String deniedArn = createKey();
+        String allowedArn = createKey();
+        String deniedCiphertext = accountCall("Encrypt", encryptBody(deniedArn))
+                .then().statusCode(200).extract().path("CiphertextBlob");
+        String allowedCiphertext = accountCall("Encrypt", encryptBody(allowedArn))
+                .then().statusCode(200).extract().path("CiphertextBlob");
+        Session session = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"kms:ReEncrypt","Resource":"%s*"},
+                  {"Effect":"Deny","Action":"kms:ReEncrypt","Resource":"%s"}]}"""
+                .formatted(KEY_ARN_PREFIX, deniedArn));
+
+        keyCall(session, "ReEncrypt",
+                "{\"CiphertextBlob\": \"" + deniedCiphertext + "\", \"KeyId\": \"" + allowedArn
+                        + "\", \"DestinationKeyId\": \"" + allowedArn + "\"}")
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+
+        keyCall(session, "ReEncrypt",
+                "{\"CiphertextBlob\": \"" + allowedCiphertext + "\", \"DestinationKeyId\": \""
+                        + allowedArn + "\"}")
+                .then().statusCode(200).body("KeyId", equalTo(allowedArn))
+                .body("SourceKeyId", equalTo(allowedArn));
+    }
+
+    /**
+     * A token-only RetireGrant is authorized against the key the token's grant belongs to, the
+     * key the handler finds the grant under, so a policy allowing retirement on that key alone
+     * permits it and one allowing another key does not.
+     */
+    @Test
+    void aTokenOnlyRetireGrantIsAuthorizedAgainstTheKeyItsGrantBelongsTo() {
+        String keyArn = createKey();
+        String otherArn = createKey();
+        Grant grant = createGrantOn(keyArn);
+        Session onTheGrantsKey = assumeRoleWith(grantOperationOn("kms:RetireGrant", keyArn));
+        Session onAnotherKey = assumeRoleWith(grantOperationOn("kms:RetireGrant", otherArn));
+
+        keyCall(onAnotherKey, "RetireGrant", "{\"GrantToken\": \"" + grant.token() + "\"}")
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        keyCall(onTheGrantsKey, "RetireGrant", "{\"GrantToken\": \"" + grant.token() + "\"}")
+                .then().statusCode(200);
+        accountCall("ListGrants", "{\"KeyId\": \"" + keyArn + "\"}")
+                .then().statusCode(200).body("Grants.size()", equalTo(0));
+    }
+
+    /** A wildcard allow with a Deny on the grant's key still fires for a token-only RetireGrant. */
+    @Test
+    void aDenyOnTheGrantsKeyFiresForATokenOnlyRetireGrant() {
+        String keyArn = createKey();
+        Grant grant = createGrantOn(keyArn);
+        Session session = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"kms:RetireGrant","Resource":"%s*"},
+                  {"Effect":"Deny","Action":"kms:RetireGrant","Resource":"%s"}]}"""
+                .formatted(KEY_ARN_PREFIX, keyArn));
+
+        keyCall(session, "RetireGrant", "{\"GrantToken\": \"" + grant.token() + "\"}")
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        accountCall("ListGrants", "{\"KeyId\": \"" + keyArn + "\"}")
+                .then().statusCode(200).body("Grants.size()", equalTo(1));
+    }
+
+    /**
+     * A RevokeGrant naming one key while the grant belongs to another is denied: the request is
+     * authorized against both, so the pair cannot revoke a grant the named key does not hold.
+     */
+    @Test
+    void aRevokeGrantNamingOneKeyWhileTheGrantBelongsToAnotherIsDenied() {
+        String grantKeyArn = createKey();
+        String otherArn = createKey();
+        Grant grant = createGrantOn(grantKeyArn);
+        Session onTheNamedKey = assumeRoleWith(grantOperationOn("kms:RevokeGrant", otherArn));
+
+        keyCall(onTheNamedKey, "RevokeGrant",
+                "{\"KeyId\": \"" + otherArn + "\", \"GrantId\": \"" + grant.id() + "\"}")
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        accountCall("ListGrants", "{\"KeyId\": \"" + grantKeyArn + "\"}")
+                .then().statusCode(200).body("Grants.size()", equalTo(1));
+
+        Session onTheGrantsKey = assumeRoleWith(grantOperationOn("kms:RevokeGrant", grantKeyArn));
+        keyCall(onTheGrantsKey, "RevokeGrant",
+                "{\"KeyId\": \"" + grantKeyArn + "\", \"GrantId\": \"" + grant.id() + "\"}")
+                .then().statusCode(200);
+        accountCall("ListGrants", "{\"KeyId\": \"" + grantKeyArn + "\"}")
+                .then().statusCode(200).body("Grants.size()", equalTo(0));
+    }
+
     private static String decryptOn(String keyArn) {
         return """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"kms:Decrypt","Resource":"%s"}]}"""
                 .formatted(keyArn);
+    }
+
+    private static String grantOperationOn(String action, String keyArn) {
+        return """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"%s","Resource":"%s"}]}"""
+                .formatted(action, keyArn);
     }
 
     private static String encryptBody(String keyId) {
@@ -149,6 +257,18 @@ class KmsKeyArnEnforcementIntegrationTest {
     private String createKey() {
         return accountCall("CreateKey", "{\"Description\": \"kms-iam-enforcement\"}")
                 .then().statusCode(200).extract().path("KeyMetadata.Arn");
+    }
+
+    /** The id and the token of a grant the account itself creates on {@code keyArn}. */
+    private record Grant(String id, String token) {}
+
+    private Grant createGrantOn(String keyArn) {
+        Response created = accountCall("CreateGrant",
+                "{\"KeyId\": \"" + keyArn + "\", \"GranteePrincipal\": \"arn:aws:iam::" + ACCOUNT
+                        + ":user/grantee\", \"Operations\": [\"Encrypt\"]}");
+        created.then().statusCode(200);
+        return new Grant(created.jsonPath().getString("GrantId"),
+                created.jsonPath().getString("GrantToken"));
     }
 
     private void createAlias(String aliasName, String keyArn) {

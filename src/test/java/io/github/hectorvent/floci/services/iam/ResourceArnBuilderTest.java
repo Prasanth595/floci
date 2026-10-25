@@ -1353,6 +1353,66 @@ class ResourceArnBuilderTest {
                 backed.buildKmsResources("kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    /**
+     * A {@code ReEncrypt} never reads a {@code KeyId}: its source is the key that encrypted the
+     * ciphertext when the request names no {@code SourceKeyId}, so a {@code KeyId} naming
+     * another key cannot choose the key the request is authorized against. This is the gap the
+     * review on the enforcement PR describes: a caller allowed on the claimed key only submits
+     * another key's ciphertext and has it re-encrypted under the allowed one.
+     */
+    @Test
+    void kmsReEncryptNamesTheSourceTheHandlerDecryptsWithNotAKeyId() {
+        byte[] blob = "ciphertext".getBytes(StandardCharsets.UTF_8);
+        String encoded = Base64.getEncoder().encodeToString(blob);
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(kms.decryptToKeyArn(blob, "us-east-1")).thenReturn(KMS_KEY_ARN);
+        when(kms.findKeyArn("alias/claimed", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        ResourceArnBuilder backed = backedBy(kms);
+
+        setJsonBody("{\"CiphertextBlob\":\"" + encoded
+                + "\",\"KeyId\":\"alias/claimed\",\"DestinationKeyId\":\"" + KMS_OTHER_KEY_ARN + "\"}");
+        assertEquals(List.of(KMS_KEY_ARN, KMS_OTHER_KEY_ARN),
+                backed.buildKmsResources("kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * A grant operation names the key the grant it acts on belongs to: a token-only
+     * {@code RetireGrant} the key the token's grant belongs to, since the handler finds the
+     * grant by the token alone, and a {@code RetireGrant} or a {@code RevokeGrant} identifying
+     * its grant by {@code KeyId} and {@code GrantId} the key it names together with that grant's
+     * key. A token naming no grant the account holds keeps the permissive fallback.
+     */
+    @Test
+    void kmsGrantOperationsNameTheKeyTheGrantTheyActOnBelongsTo() {
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArn(KMS_KEY_ID, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArn("other-key", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        when(kms.findGrantKeyArn("grant-token", null, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findGrantKeyArn(null, "grant-id", "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findGrantKeyArn("unknown-token", null, "us-east-1")).thenReturn(Optional.empty());
+        ResourceArnBuilder backed = backedBy(kms);
+
+        setJsonBody("{\"GrantToken\":\"grant-token\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"GrantToken\":\"unknown-token\"}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\",\"GrantId\":\"grant-id\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"KeyId\":\"other-key\",\"GrantId\":\"grant-id\"}");
+        assertEquals(List.of(KMS_OTHER_KEY_ARN, KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── SSM ──────────────────────────────────────────────────────────────────────
 
     @Test

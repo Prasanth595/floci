@@ -2220,6 +2220,33 @@ public class KmsService implements ResourceProvider {
     }
 
     /**
+     * The stored ARN of the key the grant a retirement or a revocation acts on belongs to: the
+     * grant its {@code GrantToken} names when the request carries one, and otherwise the grant
+     * its {@code GrantId} names, or empty when the account holds no such grant in the region.
+     * The enforcement filter reads this rather than {@link #retireGrant} and
+     * {@link #revokeGrant}: a request naming no grant the account holds answers its own
+     * {@code NotFoundException} whether a policy allows it or not, so the check keeps its
+     * permissive fallback instead of refusing the request before the handler can. The token wins
+     * over the id exactly as {@link #retireGrant} resolves the grant it deletes.
+     */
+    public Optional<String> findGrantKeyArn(String grantToken, String grantId, String region) {
+        if (grantToken != null && !grantToken.isBlank()) {
+            String prefix = region + "::";
+            return grantStore.scan(k -> k.startsWith(prefix)).stream()
+                    .filter(grant -> grantToken.equals(grant.getGrantToken()))
+                    .findFirst()
+                    .map(KmsGrant::getKeyArn)
+                    .filter(arn -> !arn.isBlank());
+        }
+        if (grantId == null || grantId.isBlank()) {
+            return Optional.empty();
+        }
+        return grantStore.get(region + "::" + grantId)
+                .map(KmsGrant::getKeyArn)
+                .filter(arn -> !arn.isBlank());
+    }
+
+    /**
      * The stored key id a request's identifier names, resolving an alias name or an alias ARN to
      * the key it points at and a key ARN to its trailing id, and refusing an ARN from another
      * region as the crypto paths refuse it.
