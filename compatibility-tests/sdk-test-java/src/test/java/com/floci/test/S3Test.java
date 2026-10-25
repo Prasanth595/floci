@@ -696,10 +696,14 @@ class S3Test {
         } finally {
             try {
                 s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+                // cleanup only: an already-deleted object must not mask the assertion
+            }
             try {
                 s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+                // cleanup only: an already-emptied bucket must not mask the assertion
+            }
         }
     }
 }
