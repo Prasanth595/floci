@@ -314,7 +314,12 @@ class StepFunctionsExecutionHistoryTest {
             assertThat(newest.events().get(0).id()).isEqualTo(122L);
             assertThat(newest.nextToken()).isNotNull();
         } finally {
-            try { sfn.deleteStateMachine(b -> b.stateMachineArn(smArn)); } catch (Exception ignored) {}
+            try {
+                sfn.deleteStateMachine(b -> b.stateMachineArn(smArn));
+            } catch (Exception ignored) {
+                // Cleanup only: the state machine has a unique name, so one left behind cannot
+                // affect another test, and a failure here must not hide the test's own result.
+            }
         }
     }
 
