@@ -87,6 +87,7 @@ public class SecretsManagerService implements ResourceProvider {
     private final Object[] rotationLockStripes = newLockStripes(ROTATION_LOCK_STRIPE_COUNT);
     // Entries exist only while a service owner changes backend credentials outside the stripe.
     private final Set<String> managedReleases = ConcurrentHashMap.newKeySet();
+    private final Map<String, String> managedRotationTokens = new ConcurrentHashMap<>();
 
     private static Object[] newLockStripes(int count) {
         Object[] stripes = new Object[count];
@@ -1313,7 +1314,28 @@ public class SecretsManagerService implements ResourceProvider {
             }
         }
 
+        String managedToken = serviceManaged && rotateImmediately
+                ? clientRequestToken != null && !clientRequestToken.isEmpty()
+                ? clientRequestToken : UUID.randomUUID().toString() : null;
+
         synchronized (lockFor(secret.getArn())) {
+            if (managedToken != null && managedRotator != null) {
+                if (managedToken.equals(secret.getCurrentVersionId())) {
+                    return secret;
+                }
+                String activeToken = managedRotationTokens.get(secret.getArn());
+                if (activeToken != null) {
+                    if (activeToken.equals(managedToken)) {
+                        return secret;
+                    }
+                    throw new AwsException("InvalidRequestException",
+                            "A previous rotation isn't complete. That rotation will be reattempted.", 400);
+                }
+                if (managedReleases.contains(secret.getArn())) {
+                    throw new AwsException("InvalidRequestException",
+                            "The secret's managed credentials are being released. Try again after the release completes.", 400);
+                }
+            }
             SecretVersion pendingVersion = findVersionByStage(secret, "AWSPENDING");
             if (pendingVersion != null) {
                 SecretVersion currentVersion = findVersionByStage(secret, "AWSCURRENT");
@@ -1336,6 +1358,10 @@ public class SecretsManagerService implements ResourceProvider {
             // on success would leave the background sweep retrying it on every tick forever.
             secret.setNextRotationDate(computeNextRotationDate(secret.getRotationRules(), Instant.now()));
             persist(secret, region);
+            if (managedToken != null && managedRotator != null) {
+                managedRotationTokens.put(secret.getArn(), managedToken);
+                managedReleases.add(secret.getArn());
+            }
         }
 
         if (serviceManaged) {
@@ -1347,12 +1373,7 @@ public class SecretsManagerService implements ResourceProvider {
                 return secret;
             }
             String arn = secret.getArn();
-            String token = clientRequestToken != null && !clientRequestToken.isEmpty()
-                    ? clientRequestToken : UUID.randomUUID().toString();
-            if (token.equals(secret.getCurrentVersionId())) {
-                return secret;
-            }
-            rotationExecutor.submit(() -> executeManagedRotation(arn, token, region, managedRotator));
+            rotationExecutor.submit(() -> executeManagedRotation(arn, managedToken, region, managedRotator));
             LOG.infov("Started service-managed rotation for secret: {0}", secret.getName());
             return secret;
         }
@@ -1375,11 +1396,6 @@ public class SecretsManagerService implements ResourceProvider {
 
     private void executeManagedRotation(String secretArn, String token, String region,
                                         ManagedSecretRotator rotator) {
-        synchronized (lockFor(secretArn)) {
-            if (!managedReleases.add(secretArn)) {
-                return;
-            }
-        }
         try {
             Secret secret = resolveSecret(secretArn, region);
             String previousVersionId = secret.getCurrentVersionId();
@@ -1421,7 +1437,12 @@ public class SecretsManagerService implements ResourceProvider {
                 persist(current, region);
             }
         } finally {
-            managedReleases.remove(secretArn);
+            synchronized (lockFor(secretArn)) {
+                if (token.equals(managedRotationTokens.get(secretArn))) {
+                    managedRotationTokens.remove(secretArn);
+                    managedReleases.remove(secretArn);
+                }
+            }
         }
     }
 

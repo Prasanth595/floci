@@ -720,6 +720,7 @@ class RedshiftServiceTest {
         cluster.setClusterStatus("available");
         when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "managed-cluster", cluster)));
+        when(clusterBackend.getForAccount("111111111111", "managed-cluster")).thenReturn(Optional.of(cluster));
 
         AtomicReference<String> secretValue = new AtomicReference<>();
         assertTrue(service.supports(cluster.getMasterPasswordSecretArn(), "us-east-1"));
@@ -731,8 +732,9 @@ class RedshiftServiceTest {
         verify(proxyManager).updateMasterPassword(eq("111111111111:managed-cluster"),
                 argThat(password -> !"OldPassword123".equals(password)));
         assertNotNull(secretValue.get());
-        assertEquals(cluster.getMasterPassword(), new ObjectMapper().readTree(secretValue.get())
-                .path("password").asText());
+        String rotatedPassword = new ObjectMapper().readTree(secretValue.get()).path("password").asText();
+        assertEquals(cluster.getMasterPassword(), rotatedPassword);
+        assertFalse(rotatedPassword.chars().anyMatch(character -> "'\"/@".indexOf(character) >= 0));
     }
 
     @Test

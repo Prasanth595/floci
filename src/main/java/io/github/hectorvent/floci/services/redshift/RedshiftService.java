@@ -104,7 +104,11 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private <T> T withResourceLock(String kind, String identifier, Supplier<T> work) {
-        ResourceKey key = new ResourceKey(clusters.accountId(), kind, identifier);
+        return withResourceLock(clusters.accountId(), kind, identifier, work);
+    }
+
+    private <T> T withResourceLock(String accountId, String kind, String identifier, Supplier<T> work) {
+        ResourceKey key = new ResourceKey(accountId, kind, identifier);
         ResourceLock scoped = resourceLocks.compute(key, (ignored, existing) -> {
             ResourceLock selected = existing == null ? new ResourceLock() : existing;
             selected.users++;
@@ -909,29 +913,41 @@ public class RedshiftService implements ManagedSecretRotator {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The Redshift cluster for this managed secret no longer exists.", 400));
-        Cluster cluster = entry.value();
-        if (!"available".equals(cluster.getClusterStatus())) {
-            throw new AwsException("InvalidRequestException",
-                    "The Redshift cluster must be available to rotate its master password.", 400);
-        }
-        String oldPassword = cluster.getMasterPassword();
-        String newPassword = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
-        rotation.commit(() -> {
-            containerManager.alterUserPassword(entry.accountId(), cluster.getClusterIdentifier(),
-                    cluster.getMasterUsername(), newPassword);
-            proxyManager.updateMasterPassword(relayKey(entry.accountId(), cluster.getClusterIdentifier()), newPassword);
-            cluster.setMasterPassword(newPassword);
-            clusters.putForAccount(entry.accountId(), cluster.getClusterIdentifier(), cluster);
-            clusters.flush();
-            return managedMasterSecret(cluster, newPassword);
-        }, () -> {
-            containerManager.alterUserPassword(entry.accountId(), cluster.getClusterIdentifier(),
-                    cluster.getMasterUsername(), oldPassword);
-            proxyManager.updateMasterPassword(relayKey(entry.accountId(), cluster.getClusterIdentifier()), oldPassword);
-            cluster.setMasterPassword(oldPassword);
-            clusters.putForAccount(entry.accountId(), cluster.getClusterIdentifier(), cluster);
-            clusters.flush();
-        });
+        withResourceLock(entry.accountId(), "cluster", entry.key(), () -> mutate(() -> {
+            Cluster cluster = clusters.getForAccount(entry.accountId(), entry.key())
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "The Redshift cluster for this managed secret no longer exists.", 400));
+            if (!secretArn.equals(cluster.getMasterPasswordSecretArn())) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The Redshift cluster for this managed secret no longer exists.", 400);
+            }
+            if (!"available".equals(cluster.getClusterStatus())) {
+                throw new AwsException("InvalidRequestException",
+                        "The Redshift cluster must be available to rotate its master password.", 400);
+            }
+            String oldPassword = cluster.getMasterPassword();
+            String newPassword = RandomPasswordGenerator.generate(objectMapper.createObjectNode()
+                    .put("ExcludeCharacters", "'\"/@"));
+            rotation.commit(() -> {
+                containerManager.alterUserPassword(entry.accountId(), cluster.getClusterIdentifier(),
+                        cluster.getMasterUsername(), newPassword);
+                proxyManager.updateMasterPassword(
+                        relayKey(entry.accountId(), cluster.getClusterIdentifier()), newPassword);
+                cluster.setMasterPassword(newPassword);
+                clusters.putForAccount(entry.accountId(), cluster.getClusterIdentifier(), cluster);
+                clusters.flush();
+                return managedMasterSecret(cluster, newPassword);
+            }, () -> {
+                containerManager.alterUserPassword(entry.accountId(), cluster.getClusterIdentifier(),
+                        cluster.getMasterUsername(), oldPassword);
+                proxyManager.updateMasterPassword(
+                        relayKey(entry.accountId(), cluster.getClusterIdentifier()), oldPassword);
+                cluster.setMasterPassword(oldPassword);
+                clusters.putForAccount(entry.accountId(), cluster.getClusterIdentifier(), cluster);
+                clusters.flush();
+            });
+            return null;
+        }));
     }
 
     public Cluster describeLoggingStatus(String clusterIdentifier) {

@@ -61,8 +61,11 @@ class ManagedSecretRotationServiceTest {
         }, () -> { })));
         try {
             Secret original = create(service);
-            service.rotateSecret(original.getArn(), UUID.randomUUID().toString(), null, rules(), true, REGION);
+            String activeToken = UUID.randomUUID().toString();
+            service.rotateSecret(original.getArn(), activeToken, null, rules(), true, REGION);
             assertTrue(changing.await(5, TimeUnit.SECONDS));
+            assertThrows(AwsException.class, () -> service.rotateSecret(original.getArn(),
+                    UUID.randomUUID().toString(), null, rules(), true, REGION));
             assertThrows(AwsException.class, () -> service.putSecretValue(original.getArn(), "other", null, null, REGION, null));
             assertThrows(AwsException.class, () -> service.updateSecret(original.getArn(), "other", null, REGION));
             assertThrows(AwsException.class, () -> service.deleteSecret(original.getArn(), null, true, REGION));
