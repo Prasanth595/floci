@@ -31,6 +31,11 @@ public final class SmithyValidationErrors {
         return "Value null at '" + path + "' failed to satisfy constraint: Member must not be null";
     }
 
+    /** The same violation in the form some operations answer, without {@code null} after "Value". */
+    public static String notNullWithoutValue(String path) {
+        return "Value at '" + path + "' failed to satisfy constraint: Member must not be null";
+    }
+
     /** The 400 error carrying {@link #message} under the protocol's validation error code. */
     public static AwsException exception(String errorCode, List<String> violations) {
         return new AwsException(errorCode, message(violations), 400);
@@ -78,6 +83,25 @@ public final class SmithyValidationErrors {
                     + "Member must have value less than or equal to " + max;
         }
         return null;
+    }
+
+    /** The violation for a string outside its length bounds, or {@code null} for one inside. */
+    public static String lengthOutOfRange(String path, String value, int min, int max) {
+        int length = value.codePointCount(0, value.length());
+        if (length < min) {
+            return lengthTooShort(path, value, min);
+        }
+        if (length > max) {
+            return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to " + max;
+        }
+        return null;
+    }
+
+    /** Also used by services that reject whitespace-only input as an empty member. */
+    public static String lengthTooShort(String path, String value, int min) {
+        return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to " + min;
     }
 
     /** The violation for a value outside its enum, listing the allowed values in the model's order. */

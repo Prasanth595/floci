@@ -47,7 +47,7 @@ class RedshiftFinalSnapshotIntegrationTest {
 
     @BeforeEach
     void prepareRuntime() {
-        when(containerManager.start(anyString(), anyString(), anyString(), anyString()))
+        when(containerManager.start(anyString(), anyString(), anyString(), anyString(), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("mock-container", "cluster", "localhost", 5432));
         doAnswer(invocation -> {
             Files.writeString(invocation.getArgument(3, Path.class), DUMP);

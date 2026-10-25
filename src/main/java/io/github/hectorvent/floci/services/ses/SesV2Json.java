@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -14,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Predicate;
 
 /**
  * Helpers shared by the SES v2 REST JSON controllers: body and member shape checks that answer
@@ -113,17 +115,23 @@ final class SesV2Json {
         return !node.isMissingNode() && !node.isNull() && !node.isTextual();
     }
 
-    /** Parse an option PUT body into a JSON object, treating an empty body as {}. */
+    /**
+     * Parse a request body into a JSON object. Only an empty body reads as {}: AWS answers a
+     * whitespace-only body, malformed JSON and a trailing token after the object (even a second
+     * value) with a {@code SerializationException} without a message.
+     */
     static JsonNode readOptionBody(ObjectMapper objectMapper, String body) {
-        try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
-            return request;
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        if (body == null || body.isEmpty()) {
+            return objectMapper.createObjectNode();
         }
+        JsonNode request;
+        try {
+            request = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(body);
+        } catch (JsonProcessingException e) {
+            throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
+        }
+        requireJsonObject(request);
+        return request;
     }
 
     /** Read an optional string member, rejecting a non-string value the way the AWS deserialization layer does. */
@@ -200,6 +208,22 @@ final class SesV2Json {
      * an empty one.
      */
     static Map<String, String> filterValues(Map<String, String> filter, List<String> keys) {
+        return filterValues(filter, keys, String::isEmpty, "Member must have length greater than or equal to 1");
+    }
+
+    /**
+     * As above, for a filter whose values are bounded above too. SES printed both bounds for an
+     * empty value, so a value over the bound is taken to be answered the same way.
+     */
+    static Map<String, String> filterValues(Map<String, String> filter, List<String> keys, int maxValueLength) {
+        return filterValues(filter, keys,
+                v -> v.isEmpty() || v.codePointCount(0, v.length()) > maxValueLength,
+                "Member must have length less than or equal to " + maxValueLength
+                        + ", Member must have length greater than or equal to 1");
+    }
+
+    private static Map<String, String> filterValues(Map<String, String> filter, List<String> keys,
+                                                    Predicate<String> invalidValue, String valueConstraint) {
         if (filter == null) {
             return Map.of();
         }
@@ -208,10 +232,10 @@ final class SesV2Json {
                     + "failed to satisfy constraint: Map keys must satisfy constraint: "
                     + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]");
         }
-        if (filter.containsValue("")) {
+        if (filter.values().stream().anyMatch(v -> v != null && invalidValue.test(v))) {
             throw SmithyValidationErrors.badRequest( "Value at 'filter' "
                     + "failed to satisfy constraint: Map value must satisfy constraint: "
-                    + "[Member must have length greater than or equal to 1]");
+                    + "[" + valueConstraint + "]");
         }
         Map<String, String> values = new LinkedHashMap<>();
         filter.forEach((key, value) -> {

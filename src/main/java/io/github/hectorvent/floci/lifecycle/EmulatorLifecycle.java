@@ -398,8 +398,9 @@ public class EmulatorLifecycle {
         // SIGTERM grace window and trigger SIGKILL; if the flush ran last it would be skipped and
         // in-memory (hybrid) data would be lost on an otherwise-graceful shutdown. shutdownAll()
         // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
-        // DynamoDB stream consumers stop first, so the flush holds their final checkpoints.
+        // Stream consumers stop first, so the flush holds their final checkpoints.
         runCleanup("DynamoDB Streams poller", dynamodbStreamsPoller::shutdown);
+        runCleanup("Kinesis poller", kinesisPoller::shutdown);
         runCleanup("Redshift zero-ETL consumer", redshiftZeroEtlConsumer::shutdown);
         runCleanup("storage flush", storageFactory::flushAll);
         runCleanup("EC2 metadata server", () -> {

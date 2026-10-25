@@ -1104,6 +1104,34 @@ public interface EmulatorConfig {
         /** How long a BATCH job run stays RUNNING before it succeeds; 0 = a run succeeds as soon as it starts. */
         @WithDefault("0")
         int jobRunDurationSeconds();
+
+        /**
+         * {@code immediate} follows the job run states without running anything; {@code docker} runs
+         * each Spark job run's {@code spark-submit} in a container of the release's EMR Serverless image.
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        Optional<String> dockerNetwork();
+
+        /**
+         * The image a {@code docker} job run uses, with {@code %s} standing for the application's
+         * release label, for example "registry.internal/emr-serverless/spark/%s:20250425". If omitted,
+         * Floci uses the release's public image on Amazon ECR Public.
+         */
+        Optional<String> imageTemplate();
+
+        /**
+         * When true, Floci removes, in the {@code docker} runner mode, every EMR Serverless driver a
+         * previous run of <em>this same</em> Floci left on the daemon (matched by the
+         * {@code io.floci.owner} label) before its first job run starts. Turn it off when two Floci
+         * instances share a daemon with the same port and no resource namespace, so one does not
+         * remove the other's drivers.
+         *
+         * Env var: FLOCI_SERVICES_EMRSERVERLESS_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
     }
 
     interface Route53ResolverServiceConfig {
@@ -1575,6 +1603,9 @@ public interface EmulatorConfig {
         @WithDefault("9399")
         int kafkaHostPortMax();
 
+        @WithDefault("5000")
+        long scramReconciliationIntervalMs();
+
         /**
          * Only applies when Floci runs in a container. Each broker then has a second Kafka
          * listener, published to a host port from the kafka-host-port range so clients on the
@@ -1726,7 +1757,7 @@ public interface EmulatorConfig {
         int proxyHandshakeTimeoutMillis();
         @WithDefault("5000")
         int proxyBackendConnectTimeoutMillis();
-        @WithDefault("100")
+        @WithDefault("2000")
         int proxyMaxConnections();
 
         @WithDefault("1000000")
@@ -1934,9 +1965,20 @@ public interface EmulatorConfig {
         @WithDefault("emr-7.5.0")
         String defaultReleaseLabel();
 
-        /** Delay before a cluster reaches WAITING; 0 = advance synchronously. */
+        /**
+         * How long a new cluster takes to be ready to run steps, the first half STARTING and the second
+         * BOOTSTRAPPING; 0 makes it ready as soon as it is created.
+         */
         @WithDefault("0")
         int clusterStartupDelaySeconds();
+
+        /** How long a step stays RUNNING before it completes; 0 completes it as soon as it starts. */
+        @WithDefault("0")
+        int stepDurationSeconds();
+
+        /** How long a cluster stays TERMINATING before it is TERMINATED; 0 ends it at once. */
+        @WithDefault("0")
+        int clusterTerminationDelaySeconds();
     }
 
     interface WafV2ServiceConfig {
@@ -3011,6 +3053,17 @@ public interface EmulatorConfig {
         int containerIdleTimeoutSeconds();
 
         /**
+         * Seconds a newly started runtime has to finish its init and request its first invocation,
+         * matching the 10 second Init phase AWS allows. A function whose Timeout is longer waits
+         * that long instead, as AWS re-runs a slow init inside the invoke. The function's Timeout
+         * itself starts when the invocation is dispatched.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS
+         */
+        @WithDefault("10")
+        int initTimeoutSeconds();
+
+        /**
          * One shutdown drain budget shared by provisioned and on-demand Lambda containers.
          * Values outside 1 through 300 seconds fail initialization.
          *
@@ -3217,6 +3270,9 @@ public interface EmulatorConfig {
     interface Ec2ServiceConfig {
         /** Optional full EC2 catalog file for locally built guest images. */
         Optional<String> imageCatalogPath();
+
+        /** Optional JSON file of additional regional AWS-managed prefix lists. */
+        Optional<String> managedPrefixListCatalogPath();
 
         @WithDefault("true")
         boolean enabled();
@@ -3539,6 +3595,13 @@ public interface EmulatorConfig {
         String endpointMode();
 
         /**
+         * Hostname advertised for {@code endpoint-mode=host} endpoints instead of {@code localhost}, for
+         * clients on other machines. It is also added to the k3s server certificate as a SAN, so the
+         * endpoint still verifies against the cluster CA.
+         */
+        Optional<String> endpointHost();
+
+        /**
          * When true, wires a token-authentication webhook into k3s so that the bearer token
          * produced by {@code aws eks get-token} is validated by Floci and mapped to cluster-admin.
          * This makes the native {@code aws eks update-kubeconfig} + {@code kubectl} flow work.
@@ -3816,6 +3879,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("300")
         int apiTimeoutSeconds();
+
+        /**
+         * How long each attempt at pulling an image may take before it is given up, in seconds. A pull
+         * still downloading when the limit passes is tried again, three attempts in all, so a launch that
+         * needs an image can wait up to about three times this before it fails. A large image, such as an EMR Serverless runtime of 3.5 to 4.3 GB, can need longer
+         * on a slow connection.
+         */
+        @WithDefault("300")
+        int imagePullTimeoutSeconds();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

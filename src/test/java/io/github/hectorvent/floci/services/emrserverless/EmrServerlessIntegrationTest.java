@@ -140,7 +140,8 @@ public class EmrServerlessIntegrationTest {
             .statusCode(200)
             .body("application.applicationId", equalTo(applicationId))
             .body("application.name", equalTo("my-test-app"))
-            .body("application.state", equalTo("CREATED"));
+            .body("application.state", equalTo("CREATED"))
+            .body("application", not(hasKey("clientToken")));
     }
 
     @Test
@@ -239,7 +240,10 @@ public class EmrServerlessIntegrationTest {
                     },
                     "interactiveConfiguration": {
                         "studioEnabled": true
-                    }
+                    },
+                    "runtimeConfiguration": [
+                        {"classification": "spark-defaults", "properties": {"spark.executor.memory": "4g"}}
+                    ]
                 }
                 """)
         .when()
@@ -256,7 +260,9 @@ public class EmrServerlessIntegrationTest {
             .statusCode(200)
             .body("application.releaseLabel", equalTo("emr-6.7.0"))
             .body("application.monitoringConfiguration", notNullValue())
-            .body("application.interactiveConfiguration", notNullValue());
+            .body("application.interactiveConfiguration", notNullValue())
+            .body("application.runtimeConfiguration[0].classification", equalTo("spark-defaults"))
+            .body("application.runtimeConfiguration[0].properties.'spark.executor.memory'", equalTo("4g"));
     }
 
     @Test
@@ -368,5 +374,58 @@ public class EmrServerlessIntegrationTest {
             .body("message", equalTo("1 validation error detected: "
                     + "Value '[CREATING, CREATED, STARTING, STARTED, STOPPING, STOPPED, TERMINATED, CREATED]' "
                     + "at 'states' failed to satisfy constraint: Member must have length less than or equal to 7"));
+    }
+
+    @Test
+    @Order(11)
+    void createApplicationKeepsEveryConfigurationItTakes() {
+        String id = givenReq()
+            .body("""
+                {
+                    "name": "configured-app",
+                    "releaseLabel": "emr-7.5.0",
+                    "type": "SPARK",
+                    "clientToken": "%s",
+                    "imageConfiguration": {
+                        "imageUri": "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                        "applicationLevelDigestResolution": true
+                    },
+                    "runtimeConfiguration": [
+                        {"classification": "spark-defaults", "properties": {"spark.driver.cores": "2"}}
+                    ],
+                    "monitoringConfiguration": {"s3MonitoringConfiguration": {"logUri": "s3://bucket/logs/"}},
+                    "schedulerConfiguration": {"queueTimeoutMinutes": 30, "maxConcurrentRuns": 5},
+                    "diskEncryptionConfiguration": {
+                        "encryptionKeyArn": "arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+                    },
+                    "interactiveConfiguration": {"studioEnabled": true, "livyEndpointEnabled": false},
+                    "identityCenterConfiguration": {
+                        "identityCenterInstanceArn": "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+                    },
+                    "jobLevelCostAllocationConfiguration": {"enabled": true}
+                }
+                """.formatted(UUID.randomUUID()))
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(200)
+            .extract().path("applicationId");
+
+        givenReq()
+        .when()
+            .get("/applications/" + id)
+        .then()
+            .statusCode(200)
+            .body("application.imageConfiguration.applicationLevelDigestResolution", equalTo(true))
+            .body("application.runtimeConfiguration[0].classification", equalTo("spark-defaults"))
+            .body("application.runtimeConfiguration[0].properties.'spark.driver.cores'", equalTo("2"))
+            .body("application.monitoringConfiguration.s3MonitoringConfiguration.logUri", equalTo("s3://bucket/logs/"))
+            .body("application.schedulerConfiguration.maxConcurrentRuns", equalTo(5))
+            .body("application.diskEncryptionConfiguration.encryptionKeyArn",
+                    equalTo("arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab"))
+            .body("application.interactiveConfiguration.studioEnabled", equalTo(true))
+            .body("application.identityCenterConfiguration.identityCenterInstanceArn",
+                    equalTo("arn:aws:sso:::instance/ssoins-1234567890abcdef"))
+            .body("application.jobLevelCostAllocationConfiguration.enabled", equalTo(true));
     }
 }

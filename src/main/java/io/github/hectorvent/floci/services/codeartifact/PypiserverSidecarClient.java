@@ -206,6 +206,24 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
         }
     }
 
+    /**
+     * Delegates to {@link SidecarConcurrency#beginUse}: {@code CodeArtifactService} calls this
+     * right after it resolves {@code repositoryContainerId}, closing the window between that
+     * resolution and this client's own {@link #listPackageVersions} call, which brackets the
+     * same key again internally. Nesting is safe: {@link SidecarConcurrency}'s bookkeeping is a
+     * reference count, not a flag.
+     */
+    @Override
+    public void beginUse(String repositoryContainerId) {
+        SidecarConcurrency.beginUse(repositoryContainerId);
+    }
+
+    /** Delegates to {@link SidecarConcurrency#endUse}, pairing {@link #beginUse} above. */
+    @Override
+    public void endUse(String repositoryContainerId) {
+        SidecarConcurrency.endUse(repositoryContainerId);
+    }
+
     private Instant lastModified(String fileUrl) {
         HttpRequest request = HttpRequest.newBuilder(URI.create(fileUrl)).timeout(Duration.ofSeconds(10))
                 .method("HEAD", BodyPublishers.noBody()).build();
@@ -520,8 +538,19 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
      * at version {@code 2.0} produces {@code foo-1.0-bar-2.0.tar.gz}, and the text {@code -1.0-}
      * inside that name would otherwise look like a complete, valid version {@code 1.0} to a
      * caller who asked for the wrong one.
+     *
+     * <p>Not {@code private} for exactly one other reason (Greptile's review of this PR):
+     * {@code CodeArtifactPypiController#upload} calls this on the way in, the opposite direction
+     * from every other caller here. pypiserver itself files an upload under the identity this
+     * same boundary logic derives from its filename, never from the multipart form's own
+     * {@code name}/{@code version} fields; those fields are only ever used, until this check
+     * existed, to pick which coordinate the Archived/Disposed guard and the override-clearing
+     * call afterward run against. A form whose fields name an unrelated (unused, never
+     * Archived/Disposed) coordinate while the real filename matches a disposed one would let the
+     * guard see the harmless coordinate, the real upload land under the disposed one regardless,
+     * and the override-clearing call afterward operate on the wrong version too.
      */
-    private static boolean filenameEmbedsVersion(String assetName, String packageName, String version) {
+    static boolean filenameEmbedsVersion(String assetName, String packageName, String version) {
         String normalizedPackageName = normalizePackageName(packageName);
         String marker = "-" + version;
         for (int idx = assetName.indexOf(marker); idx >= 0; idx = assetName.indexOf(marker, idx + 1)) {

@@ -19,6 +19,7 @@ import java.net.URI;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
@@ -37,7 +38,7 @@ class RedshiftDefaultIamRoleIntegrationTest {
         String clusterId = "sdk-default-role";
         String first = "arn:aws:iam::000000000000:role/first";
         String second = "arn:aws:iam::000000000000:role/second";
-        when(containerManager.start(anyString(), anyString(), anyString(), anyString()))
+        when(containerManager.start(anyString(), anyString(), anyString(), anyString(), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("mock-container", clusterId, "localhost", 5432));
         try (RedshiftClient client = RedshiftClient.builder()
                 .endpointOverride(endpoint)

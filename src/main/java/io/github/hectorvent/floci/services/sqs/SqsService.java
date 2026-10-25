@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.sqs;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -740,6 +742,7 @@ public class SqsService implements Resettable, ResourceProvider {
 
         validateMaximumMessageSize(attributes);
         attributes = validateMessageRetentionPeriod(attributes);
+        attributes = compactRedrivePolicies(attributes);
 
         String accountId = regionResolver.getAccountId();
         String queueUrl = buildQueueUrl(region, accountId, queueName);
@@ -752,7 +755,8 @@ public class SqsService implements Resettable, ResourceProvider {
                 Set<String> readOnlyAttrs = Set.of("QueueArn", "CreatedTimestamp", "LastModifiedTimestamp",
                         "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible",
                         "ApproximateNumberOfMessagesDelayed");
-                Map<String, String> effective = new LinkedHashMap<>(existing.getAttributes());
+                // A queue saved by an earlier build can hold a non-compact policy; compare compact forms.
+                Map<String, String> effective = new LinkedHashMap<>(compactRedrivePolicies(existing.getAttributes()));
                 applyDerivedAttributes(effective);
                 for (Map.Entry<String, String> entry : attributes.entrySet()) {
                     if (readOnlyAttrs.contains(entry.getKey())) {
@@ -1131,24 +1135,36 @@ public class SqsService implements Resettable, ResourceProvider {
                     return response;
                 }
 
-                persistDedup(storageKey);
-
-                Message message = new Message(body);
-                message.setSenderId(effectiveSenderId);
-                message.setMessageGroupId(messageGroupId);
-                message.setMessageDeduplicationId(dedupId);
-                message.setSequenceNumber(sequenceCounter.incrementAndGet());
-                message.setAwsTraceHeader(awsTraceHeader);
-                if (effectiveDelaySeconds > 0) {
-                    message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
+                Message message;
+                GuardedMessageQueue messages;
+                try {
+                    persistDedup(storageKey);
+                    message = new Message(body);
+                    message.setSenderId(effectiveSenderId);
+                    message.setMessageGroupId(messageGroupId);
+                    message.setMessageDeduplicationId(dedupId);
+                    message.setSequenceNumber(sequenceCounter.incrementAndGet());
+                    message.setAwsTraceHeader(awsTraceHeader);
+                    if (effectiveDelaySeconds > 0) {
+                        message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
+                    }
+                    if (messageAttributes != null && !messageAttributes.isEmpty()) {
+                        message.getMessageAttributes().putAll(messageAttributes);
+                        message.updateMd5OfMessageAttributes();
+                    }
+                    messages = getOrCreateQueue(storageKey);
+                    messages.addMessage(message);
+                } catch (RuntimeException exception) {
+                    dedupMap.remove(dedupCacheKey, expiry);
+                    try {
+                        persistDedup(storageKey);
+                    } catch (RuntimeException cleanupFailure) {
+                        if (cleanupFailure != exception) {
+                            exception.addSuppressed(cleanupFailure);
+                        }
+                    }
+                    throw exception;
                 }
-                if (messageAttributes != null && !messageAttributes.isEmpty()) {
-                    message.getMessageAttributes().putAll(messageAttributes);
-                    message.updateMd5OfMessageAttributes();
-                }
-
-                GuardedMessageQueue messages = getOrCreateQueue(storageKey);
-                messages.addMessage(message);
                 messages.activity().sent(totalSize, false);
                 deduplicationIdentityCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
                         .putIfAbsent(dedupCacheKey,
@@ -1240,6 +1256,44 @@ public class SqsService implements Resettable, ResourceProvider {
         Map<String, String> normalized = new HashMap<>(attributes);
         normalized.put("MessageRetentionPeriod", String.valueOf(parsed));
         return normalized;
+    }
+
+    private static final ObjectMapper REDRIVE_POLICY_MAPPER =
+            new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
+    /**
+     * AWS stores RedrivePolicy and RedriveAllowPolicy as compact JSON, so a document sent with
+     * whitespace (a trailing newline, pretty-printing) reads back without it. A value that is not
+     * a JSON object is left as supplied.
+     */
+    private static Map<String, String> compactRedrivePolicies(Map<String, String> attributes) {
+        if (attributes == null) {
+            return null;
+        }
+        Map<String, String> compacted = attributes;
+        for (String name : List.of("RedrivePolicy", "RedriveAllowPolicy")) {
+            String value = attributes.get(name);
+            if (value == null || value.isEmpty()) {
+                continue;
+            }
+            String compact;
+            try {
+                JsonNode document = REDRIVE_POLICY_MAPPER.readTree(value);
+                if (document == null || !document.isObject()) {
+                    continue;
+                }
+                compact = REDRIVE_POLICY_MAPPER.writeValueAsString(document);
+            } catch (JsonProcessingException ignored) {
+                continue;
+            }
+            if (!compact.equals(value)) {
+                if (compacted == attributes) {
+                    compacted = new HashMap<>(attributes);
+                }
+                compacted.put(name, compact);
+            }
+        }
+        return compacted;
     }
 
     private static AwsException invalidMessageRetentionPeriod() {
@@ -1659,6 +1713,7 @@ public class SqsService implements Resettable, ResourceProvider {
                         "The specified queue does not exist.", 400));
         validateMaximumMessageSize(attributes);
         attributes = validateMessageRetentionPeriod(attributes);
+        attributes = compactRedrivePolicies(attributes);
         if (attributes != null) {
             for (Map.Entry<String, String> entry : attributes.entrySet()) {
                 if (entry.getValue() == null || entry.getValue().isEmpty()) {

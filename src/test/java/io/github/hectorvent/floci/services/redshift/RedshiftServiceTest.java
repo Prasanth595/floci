@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbApiStreamReader;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
@@ -59,6 +60,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -66,6 +68,136 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 class RedshiftServiceTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void loggingDestinationRegionSurvivesStorageAndRestart(boolean refresh) throws Exception {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        cluster.setClusterStatus("available");
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        ObjectMapper mapper = new ObjectMapper();
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        RedshiftService original = new RedshiftService(sf, cm, config,
+                new RegionResolver("us-west-2", "111111111111"), proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, mapper, null, null);
+        original.enableLogging("warehouse", null, null, "cloudwatch", List.of("connectionlog"));
+
+        Cluster restored = mapper.readValue(mapper.writeValueAsBytes(cluster), Cluster.class);
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(restored));
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "warehouse", restored)));
+        when(cm.getContainer("111111111111", "warehouse")).thenReturn(Optional.of(
+                new RedshiftContainerHandle("container", "warehouse", "localhost", 5432)));
+        CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
+        RedshiftAuditLogPublisher publisher = new RedshiftAuditLogPublisher(logs);
+        RedshiftService restarted = new RedshiftService(sf, cm, config, regionResolver,
+                proxyManager, dockerHostResolver, credentialBroker, secretsManagerService, mapper, null, publisher);
+
+        restarted.onStart(null);
+        if (refresh) {
+            restarted.modifyClusterIamRoles("warehouse", List.of(), List.of());
+        }
+        publisher.publishRegisteredConnection("111111111111", "warehouse", "dev", "alice",
+                "authenticated", "192.0.2.1", 54321);
+
+        verify(logs).putLogEventsForAccount(eq("111111111111"),
+                eq("/aws/redshift/cluster/warehouse/connectionlog"), eq("warehouse"), anyList(), eq("us-west-2"));
+        verify(logs, never()).createLogGroupForAccount(anyString(), anyString(), any(), anyMap(), eq("us-east-1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void activityParameterUpdatesStayWithinTheCallingAccount(boolean reset) {
+        ClusterParameterGroup group = new ClusterParameterGroup("shared", "redshift-1.0", "audit");
+        when(parameterGroupBackend.get("shared")).thenReturn(Optional.of(group));
+        Cluster owned = new Cluster();
+        owned.setClusterIdentifier("owned");
+        owned.setClusterParameterGroupName("shared");
+        owned.setUserActivityLoggingEnabled(reset);
+        Cluster foreign = new Cluster();
+        foreign.setClusterIdentifier("foreign");
+        foreign.setClusterParameterGroupName("shared");
+        foreign.setUserActivityLoggingEnabled(reset);
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "owned", owned),
+                new AccountAwareStorageBackend.AccountEntry<>("222222222222", "foreign", foreign)));
+        when(clusterBackend.scan(any())).thenReturn(List.of(owned));
+
+        if (reset) {
+            service.resetClusterParameterGroup("shared", true, List.of());
+        } else {
+            service.modifyClusterParameterGroup("shared", List.of(new Parameter("enable_user_activity_logging", "true")));
+        }
+
+        assertEquals(!reset, owned.isUserActivityLoggingEnabled());
+        assertEquals(reset, foreign.isUserActivityLoggingEnabled());
+        verify(clusterBackend, never()).putForAccount(eq("222222222222"), anyString(), any());
+    }
+
+    @Test
+    void recoveryProxyFailureDoesNotDestructivelyStopAnAdoptedContainer() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("survivor");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setClusterStatus("available");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "survivor", cluster)));
+        when(cm.adoptOrStart("111111111111", "survivor", "admin", "Secret123"))
+                .thenReturn(new RedshiftContainerHandle("surviving-container", "survivor", "localhost", 5432));
+        doThrow(new IllegalStateException("proxy bind failed")).when(proxyManager).startProxy(
+                anyString(), anyInt(), anyString(), anyInt(), anyString(), anyString(), anyString(), anyString(),
+                any(), anyList(), isNull());
+
+        service.onStart(null);
+
+        assertEquals("unavailable", cluster.getClusterStatus());
+        verify(cm, never()).stop("111111111111", "survivor");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rebootTeardownFailureKeepsDumpAndMarksClusterFailed(boolean proxyFailure) throws Exception {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("partial-stop");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setClusterStatus("available");
+        cluster.setProxyPort(7107);
+        when(clusterBackend.get("partial-stop")).thenReturn(Optional.of(cluster));
+        AtomicReference<Path> dump = new AtomicReference<>();
+        doAnswer(invocation -> {
+            Path path = invocation.getArgument(3, Path.class);
+            Files.writeString(path, "preserved database");
+            dump.set(path);
+            return null;
+        }).when(cm).takeSnapshot(eq("111111111111"), eq("partial-stop"), eq("admin"), any(Path.class));
+        if (proxyFailure) {
+            doThrow(new IllegalStateException("proxy stop failed"))
+                    .when(proxyManager).stopProxy("111111111111:partial-stop");
+        } else {
+            doThrow(new IllegalStateException("log close failed after container removal"))
+                    .when(cm).stop("111111111111", "partial-stop");
+        }
+        try {
+            assertThrows(AwsException.class, () -> service.rebootCluster("partial-stop"));
+            assertTrue(Files.exists(dump.get()), "The pre-reboot dump must survive partial teardown");
+            assertEquals("preserved database", Files.readString(dump.get()));
+            assertEquals("failed", cluster.getClusterStatus());
+            if (proxyFailure) {
+                verify(cm, never()).stop(anyString(), anyString());
+            } else {
+                verify(cm, atLeastOnce()).stop("111111111111", "partial-stop");
+            }
+        } finally {
+            if (dump.get() != null) {
+                Files.deleteIfExists(dump.get());
+            }
+        }
+    }
+
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -419,6 +551,15 @@ class RedshiftServiceTest {
         verify(clusterBackend, atLeastOnce()).flush();
     }
 
+    @Test
+    void createClusterPassesNodeTypeToContainerManager() {
+        when(cm.start("111111111111", "c-ra3", "admin", "pw"))
+                .thenReturn(new RedshiftContainerHandle("c-ra3", "c-ra3", "localhost", 5432));
+        service.createCluster("c-ra3", "ra3.xlplus", "admin", "pw",
+                null, List.of(), List.of(), null);
+        verify(cm).start("111111111111", "c-ra3", "admin", "pw", "dev", "ra3.xlplus");
+    }
+
     private StorageFactory sf;
     private AccountAwareStorageBackend<Cluster> clusterBackend;
     private AccountAwareStorageBackend<Snapshot> snapshotBackend;
@@ -450,6 +591,10 @@ class RedshiftServiceTest {
         snapshotScheduleBackend = mock(AccountAwareStorageBackend.class);
         integrationBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
+        when(cm.start(any(), any(), any(), any(), any(), any())).thenAnswer(inv ->
+                cm.start(inv.getArgument(0), inv.getArgument(1), inv.getArgument(2), inv.getArgument(3)));
+        when(cm.adoptOrStart(any(), any(), any(), any(), any(), any())).thenAnswer(inv ->
+                cm.adoptOrStart(inv.getArgument(0), inv.getArgument(1), inv.getArgument(2), inv.getArgument(3)));
         proxyManager = mock(RedshiftProxyManager.class);
         dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.resolve()).thenReturn("localhost");
@@ -1504,6 +1649,67 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void snapshotRestoreCanManagePasswordAndStoreSubnetGroup() throws Exception {
+        useStatefulClusterStorage();
+        Snapshot snapshot = new Snapshot("managed-backup", "deleted-source", "available", 5439, "admin");
+        snapshot.setMasterPassword("Original123");
+        snapshot.setSqlDump(dumpPath("managed-backup"));
+        when(snapshotBackend.get("managed-backup")).thenReturn(Optional.of(snapshot));
+        when(cm.start("111111111111", "restored-managed", "admin", "Original123"))
+                .thenReturn(new RedshiftContainerHandle("restored", "restored-managed", "localhost", 5432));
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:restored-managed");
+        when(secretsManagerService.createSecret(eq("redshift/restored-managed"), anyString(), isNull(),
+                anyString(), eq("alias/restore-key"), anyList(), eq("redshift"), eq("us-east-1"))).thenReturn(secret);
+
+        Cluster cluster = service.restoreFromClusterSnapshot("restored-managed", "managed-backup", "ra3.large",
+                "restore-subnets", true, "alias/restore-key", "us-east-1");
+
+        assertEquals("restore-subnets", cluster.getClusterSubnetGroupName());
+        assertEquals(secret.getArn(), cluster.getMasterPasswordSecretArn());
+        assertFalse("Original123".equals(cluster.getMasterPassword()));
+        ArgumentCaptor<String> secretValue = ArgumentCaptor.forClass(String.class);
+        verify(secretsManagerService).createSecret(eq("redshift/restored-managed"), secretValue.capture(), isNull(),
+                anyString(), eq("alias/restore-key"), anyList(), eq("redshift"), eq("us-east-1"));
+        assertEquals(cluster.getMasterPassword(), new ObjectMapper().readTree(secretValue.getValue()).path("password").asText());
+        verify(cm).alterUserPassword("111111111111", "restored-managed", "admin", cluster.getMasterPassword());
+    }
+
+    @Test
+    void managedSnapshotRestoreCleansUpWhenSecretCreationFails() {
+        useStatefulClusterStorage();
+        Snapshot snapshot = new Snapshot("managed-backup", "deleted-source", "available", 5439, "admin");
+        snapshot.setMasterPassword("Original123");
+        when(snapshotBackend.get("managed-backup")).thenReturn(Optional.of(snapshot));
+        when(cm.start("111111111111", "restored-managed", "admin", "Original123"))
+                .thenReturn(new RedshiftContainerHandle("restored", "restored-managed", "localhost", 5432));
+        when(secretsManagerService.createSecret(eq("redshift/restored-managed"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1")))
+                .thenThrow(new AwsException("InternalFailure", "secret storage failed", 500));
+
+        assertThrows(AwsException.class, () -> service.restoreFromClusterSnapshot("restored-managed", "managed-backup",
+                "ra3.large", null, true, null, "us-east-1"));
+
+        verify(cm).stop("111111111111", "restored-managed");
+        assertTrue(service.describeClusters(null).isEmpty());
+        assertTrue(service.getSnapshot("managed-backup").isPresent());
+    }
+
+    private void useStatefulClusterStorage() {
+        Map<String, Cluster> stored = new HashMap<>();
+        when(clusterBackend.get(anyString())).thenAnswer(invocation -> Optional.ofNullable(stored.get(invocation.getArgument(0))));
+        when(clusterBackend.scan(any())).thenAnswer(invocation -> new ArrayList<>(stored.values()));
+        doAnswer(invocation -> {
+            stored.put(invocation.getArgument(0), invocation.getArgument(1));
+            return null;
+        }).when(clusterBackend).put(anyString(), any(Cluster.class));
+        doAnswer(invocation -> {
+            stored.remove(invocation.getArgument(0));
+            return null;
+        }).when(clusterBackend).delete(anyString());
+    }
+
+    @Test
     void restoreFromClusterSnapshot() {
         Cluster sourceCluster = new Cluster();
         sourceCluster.setClusterIdentifier("source-cluster");
@@ -1803,8 +2009,9 @@ class RedshiftServiceTest {
         assertEquals("0", parameters.get(0).getParameterValue());
         assertEquals("engine-default", parameters.get(0).getSource());
         assertEquals("integer", parameters.get(0).getDataType());
-        assertEquals("custom", parameters.get(1).getParameterValue());
-        assertEquals("user", parameters.get(1).getSource());
+        assertEquals("false", parameters.get(1).getParameterValue());
+        assertEquals("custom", parameters.get(2).getParameterValue());
+        assertEquals("user", parameters.get(2).getSource());
         verify(parameterGroupBackend, times(2)).flush();
     }
 
@@ -1819,9 +2026,10 @@ class RedshiftServiceTest {
         service.resetClusterParameterGroup("reset-pg", true, List.of());
 
         List<Parameter> parameters = service.describeClusterParameters("reset-pg");
-        assertEquals(2, parameters.size());
+        assertEquals(3, parameters.size());
         assertEquals("0", parameters.get(0).getParameterValue());
-        assertEquals("{}", parameters.get(1).getParameterValue());
+        assertEquals("false", parameters.get(1).getParameterValue());
+        assertEquals("{}", parameters.get(2).getParameterValue());
         assertTrue(parameters.stream().allMatch(parameter -> "engine-default".equals(parameter.getSource())));
         assertEquals("analytics", group.getTags().get("owner"));
         assertEquals("description", group.getDescription());

@@ -766,7 +766,8 @@ public class RdsQueryHandler {
             DbInstance instance = service.modifyDbInstance(
                     id, newPassword, iamEnabled, dbSubnetGroupName,
                     vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                    settings, publiclyAccessible, scaling, deletionProtection);
+                    settings, publiclyAccessible, scaling, deletionProtection,
+                    params.getFirst("DBParameterGroupName"));
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1423,7 +1424,8 @@ public class RdsQueryHandler {
             }
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
                     serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                    manageMasterUserPassword, masterUserSecretKmsKeyId, region);
+                    manageMasterUserPassword, masterUserSecretKmsKeyId,
+                    params.getFirst("DBClusterParameterGroupName"), region);
             if (enableHttpEndpoint != null) {
                 cluster = service.setHttpEndpoint(region, id, enableHttpEndpoint);
             }
@@ -2942,7 +2944,7 @@ public class RdsQueryHandler {
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
         String engineStr = instanceEngine(i);
-        String statusStr = i.getStatus() != null ? statusLabel(i.getStatus()) : "available";
+        String statusStr = statusLabel(reportedStatus(i));
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("DBInstanceIdentifier", i.getDbInstanceIdentifier())
@@ -3143,6 +3145,25 @@ public class RdsQueryHandler {
                 .end("Tag"));
     }
 
+    /**
+     * The cluster's DB cluster parameter group, or the engine's default group when it was created
+     * without one, as AWS reports it. Null when the engine has no default group that
+     * DescribeDBClusterParameterGroups lists.
+     */
+    private String dbClusterParameterGroupName(DbCluster cluster, String engine) {
+        String name = cluster.getParameterGroupName();
+        if (name != null && !name.isBlank()) {
+            return name;
+        }
+        String defaultGroup;
+        try {
+            defaultGroup = "default." + service.expectedClusterParameterGroupFamily(engine, cluster.getEngineVersion());
+        } catch (AwsException e) {
+            return null;
+        }
+        return service.isManagedClusterParameterGroup(defaultGroup) ? defaultGroup : null;
+    }
+
     private String dbClusterXml(DbCluster c) {
         return new XmlBuilder().start("DBCluster").raw(dbClusterInnerXml(c)).end("DBCluster").build();
     }
@@ -3190,8 +3211,12 @@ public class RdsQueryHandler {
                .elem("Status", "active")
              .end("VpcSecurityGroupMembership")
            .end("VpcSecurityGroups")
-           .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
-           .elem("DbClusterResourceId", c.getDbClusterResourceId())
+           .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default");
+        String clusterParameterGroup = dbClusterParameterGroupName(c, engineStr);
+        if (clusterParameterGroup != null) {
+            xml.elem("DBClusterParameterGroup", clusterParameterGroup);
+        }
+        xml.elem("DbClusterResourceId", c.getDbClusterResourceId())
            .elem("DBClusterArn", c.getDbClusterArn());
         if (c.getMasterUserSecretArn() != null && !c.getMasterUserSecretArn().isBlank()) {
             xml.start("MasterUserSecret")
@@ -3435,6 +3460,13 @@ public class RdsQueryHandler {
                 .build();
     }
 
+    /** An available instance whose database refused its parameter group reports incompatible-parameters, as on AWS. */
+    private DbInstanceStatus reportedStatus(DbInstance instance) {
+        DbInstanceStatus status = instance.getStatus() != null ? instance.getStatus() : DbInstanceStatus.AVAILABLE;
+        return status == DbInstanceStatus.AVAILABLE && service.databaseRefusedParameterGroup(instance)
+                ? DbInstanceStatus.INCOMPATIBLE_PARAMETERS : status;
+    }
+
     private String statusLabel(DbInstanceStatus status) {
         return switch (status) {
             case CREATING -> "creating";
@@ -3446,6 +3478,7 @@ public class RdsQueryHandler {
             case STOPPING -> "stopping";
             case STOPPED -> "stopped";
             case STARTING -> "starting";
+            case INCOMPATIBLE_PARAMETERS -> "incompatible-parameters";
         };
     }
 

@@ -8,6 +8,7 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -133,6 +134,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         /** Requests sent to the environment and not reported yet. Guarded by the environment. */
         private int openExchanges;
         private volatile SessionCreds roleCredentials;
+        private volatile String metadataToken;
         private final AtomicInteger inFlight = new AtomicInteger();
         private final AtomicLong lastUsed = new AtomicLong(System.nanoTime());
         private final AtomicBoolean alive = new AtomicBoolean(true);
@@ -267,6 +269,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
     private final LambdaWebExecutionRole executionRole;
+    private final LambdaWebMetadataServer metadata;
     private final LambdaWebLogs logs;
     private final LambdaWebMetrics metrics;
     private final byte[] runtime;
@@ -285,8 +288,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                                        EcrRegistryManager ecrRegistryManager, LambdaWebCode code,
                                        ZipExtractor zipExtractor, LaunchedContainerAwsEnv awsEnv,
                                        LambdaExecutionRoleCredentials executionRoleCredentials,
-                                       LambdaWebExecutionRole executionRole, LambdaWebLogs logs,
-                                       LambdaWebMetrics metrics) {
+                                       LambdaWebExecutionRole executionRole, LambdaWebMetadataServer metadata,
+                                       LambdaWebLogs logs, LambdaWebMetrics metrics) {
         this.config = config;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -298,6 +301,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         this.awsEnv = awsEnv;
         this.executionRoleCredentials = executionRoleCredentials;
         this.executionRole = executionRole;
+        this.metadata = metadata;
         this.logs = logs;
         this.metrics = metrics;
         this.runtime = runtimeScript();
@@ -310,8 +314,9 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
      * for it. The least busy one is taken, the one idle longest on a tie, so requests rotate. When
      * all are full a new one starts. At {@code maxEnvironments} an idle environment of another
      * revision makes room, and without one the request is {@link Throttled}. {@code endpointKey}
-     * names one creation of the endpoint in one region, so a recreated endpoint starts afresh. The
-     * caller releases the environment when the request is over. Blocks on Docker and S3.
+     * names one creation of the endpoint in one region, so a recreated endpoint starts afresh.
+     * {@code region} is the region the environment serves. The caller releases the environment
+     * when the request is over. Blocks on Docker and S3.
      */
     public Environment acquire(String accountId, String region, WebFunction fn, String endpointKey,
                                Integer maxEnvironments, WebFunctionRevision revision) {
@@ -544,9 +549,12 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     }
 
     private void start(Environment environment, String region, WebFunction fn, WebFunctionRevision revision) {
-        if (!executionRole.assumableFor(region, fn.functionArn, revision.serviceConfig.executionRoleArn)) {
+        String homeRegion = AwsArnUtils.parse(fn.functionArn).region();
+        if (!executionRole.assumableFor(homeRegion, fn.functionArn, revision.serviceConfig.executionRoleArn)) {
             throw new StartFailure(LambdaWebErrorPages.CANNOT_ASSUME_ROLE);
         }
+        // Before the session and the token, which a failed start must not leave behind.
+        String metadataApi = metadata.address();
         String accountId = environment.accountId;
         String image = ecrRegistryManager.rewriteImageUri(imageResolver.resolve(revision.buildConfig.runtime));
         String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
@@ -562,9 +570,11 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         if (roleCredentials.isEmpty()) {
             throw new StartFailure(LambdaWebErrorPages.CANNOT_ASSUME_ROLE);
         }
+        String metadataToken = metadata.register(region);
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(name)
-                .withEnv(environment(accountId, region, revision, userEnv, roleCredentials))
+                .withEnv(environment(accountId, region, revision, userEnv, roleCredentials, metadataApi,
+                        metadataToken))
                 .withEntrypoint(List.of("/var/lang/bin/node"))
                 .withCmd(cmd)
                 .withWorkingDir(TASK_DIR)
@@ -582,21 +592,22 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             containerId = lifecycleManager.create(spec);
         } catch (RuntimeException e) {
             roleCredentials.ifPresent(creds -> executionRoleCredentials.unregister(accountId, creds.accessKeyId()));
+            metadata.forget(metadataToken);
             throw e;
         }
         LambdaWebPlatformLog platform = null;
         try {
-            copyCode(containerId, accountId, region, fn, revision);
+            copyCode(containerId, accountId, homeRegion, fn, revision);
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, RUNTIME_DIR, "index.js",
                     runtime, 0644);
             environment.containerId = containerId;
             environment.logStream = LOG_STREAM_DATE.format(Instant.now()) + "/" + fn.functionName + "["
                     + revision.revisionId + "]" + UUID.randomUUID().toString().replace("-", "");
-            environment.logs = logs.open(accountId, region, revision.serviceConfig.logGroup, environment.logStream,
-                    revision.serviceConfig.systemLogLevel);
+            environment.logs = logs.open(accountId, region, homeRegion, revision.serviceConfig.logGroup,
+                    environment.logStream, revision.serviceConfig.systemLogLevel);
             platform = new LambdaWebPlatformLog(environment.logs, region, fn.functionName, revision.revisionId,
                     revision.buildConfig.runtime, revision.serviceConfig.applicationLogLevel,
-                    metrics.environment(accountId, region, fn.functionName));
+                    metrics.environment(accountId, region, homeRegion, fn.functionName));
             environment.platformLog = platform;
             ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             platform.initStart();
@@ -607,6 +618,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
             environment.host = endpoint.host();
             environment.port = endpoint.port();
             environment.roleCredentials = roleCredentials.orElse(null);
+            environment.metadataToken = metadataToken;
             platform.invokeStart(environment.inFlight.get());
             environment.summaries = reaper.scheduleAtFixedRate(() -> summarize(environment),
                     SUMMARY_PERIOD.toMillis(), SUMMARY_PERIOD.toMillis(), TimeUnit.MILLISECONDS);
@@ -631,6 +643,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                 platform.spinDownReport(null, System.nanoTime() - stopping);
             }
             roleCredentials.ifPresent(creds -> executionRoleCredentials.unregister(accountId, creds.accessKeyId()));
+            metadata.forget(metadataToken);
             throw e;
         }
     }
@@ -685,13 +698,18 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     }
 
     private List<String> environment(String accountId, String region, WebFunctionRevision revision,
-                                     Map<String, String> userEnv, Optional<SessionCreds> roleCredentials) {
+                                     Map<String, String> userEnv, Optional<SessionCreds> roleCredentials,
+                                     String metadataApi, String metadataToken) {
         List<String> env = new ArrayList<>();
         env.add("AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:" + APP_PORT);
         env.add("AWS_LAMBDA_INITIALIZATION_TYPE=native-http");
         env.add("AWS_EXECUTION_ENV=AWS_Lambda_" + revision.buildConfig.runtime + "-lite");
         env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + MEMORY_MB);
         env.add("AWS_LAMBDA_LOG_LEVEL=" + revision.serviceConfig.applicationLogLevel);
+        // AWS names the metadata server as the runtime API too, and it answers the runtime paths with 404.
+        env.add("AWS_LAMBDA_METADATA_API=" + metadataApi);
+        env.add("AWS_LAMBDA_METADATA_TOKEN=" + metadataToken);
+        env.add("AWS_LAMBDA_RUNTIME_API=" + metadataApi);
         env.add("AWS_ACCOUNT_ID=" + accountId);
         env.add("NODE_PATH=" + TASK_DIR);
         env.addAll(awsEnv.sdkBaselineEnv(region, Optional.empty(), roleCredentials, accountId));
@@ -704,6 +722,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         if (credentials != null) {
             executionRoleCredentials.unregister(environment.accountId, credentials.accessKeyId());
         }
+        metadata.forget(environment.metadataToken);
     }
 
     /** The code goes in by {@code docker cp}, so it works when Floci itself runs in a container. */

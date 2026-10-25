@@ -39,7 +39,7 @@
 | `DescribeKinesisStreamingDestination` | List Kinesis streaming destinations |
 | `EnableKinesisStreamingDestination` | Enable Kinesis streaming for a table |
 | `DisableKinesisStreamingDestination` | Disable Kinesis streaming for a table |
-| `ExportTableToPointInTime` | Export table data to S3 as gzip NDJSON |
+| `ExportTableToPointInTime` | Export table data, or the changes of a period, to S3 |
 | `CreateGlobalTable` | Make an existing table a global table (2017.11.29) |
 | `DescribeGlobalTable` | Read a global table's replication group |
 | `UpdateGlobalTable` | Add or remove replica regions |
@@ -409,7 +409,7 @@ Deviations from AWS:
 
 ## Export to S3
 
-Export table data to an S3 bucket as gzip-compressed NDJSON (DynamoDB JSON format). As on AWS, the table needs point-in-time recovery:
+Export table data to an S3 bucket as gzip-compressed lines of DynamoDB JSON (`DYNAMODB_JSON`, the default) or Amazon Ion text (`ION`). As on AWS, the table needs point-in-time recovery:
 
 ```bash
 # Create a bucket to receive the export
@@ -440,9 +440,22 @@ aws dynamodb list-exports \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
-The export writes to `s3://<bucket>/<prefix>/AWSDynamoDB/<exportId>/data/` as one or more `.json.gz` files, along with `manifest-summary.json` and `manifest-files.json`, the same layout as real AWS DynamoDB exports.
+The export writes `_started`, `manifest-summary.json`, `manifest-files.json` and an `.md5` file for each manifest to `s3://<bucket>/<prefix>/AWSDynamoDB/<exportId>/`, and the items to a `.json.gz` or `.ion.gz` file in its `data/` folder, the layout AWS uses. AWS writes one data file per partition. Floci writes one. An Ion line is `$ion_1_0 {Item:{...}}`, with sets annotated as `$dynamodb_SS`, `$dynamodb_NS` and `$dynamodb_BS`, and numbers as Ion decimals. As on AWS, every file is a multipart upload of one part, so its ETag ends in `-1`. As on AWS, an `S3Prefix` shorter than 3 characters or longer than 948 UTF-8 bytes is refused, and no slash is added after a prefix that ends with one.
 
 The export holds the items as they were at `ExportTime`, or at the request time when `ExportTime` is not set. As on AWS, `ExportTime` must not be before `EarliestRestorableDateTime` or the table creation, and must not be in the future. A time after `LatestRestorableDateTime` is accepted.
+
+An incremental export writes the items that changed in a period:
+
+```bash
+aws dynamodb export-table-to-point-in-time \
+  --table-arn arn:aws:dynamodb:us-east-1:000000000000:table/Users \
+  --s3-bucket my-exports \
+  --export-type INCREMENTAL_EXPORT \
+  --incremental-export-specification ExportFromTime=2026-01-01T00:00:00Z,ExportToTime=2026-01-01T01:00:00Z,ExportViewType=NEW_AND_OLD_IMAGES \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+The period starts at `ExportFromTime` and ends just before `ExportToTime`, or at the request time when `ExportToTime` is not set. Each line is a record with `Metadata.WriteTimestampMicros`, `Keys`, and the `OldImage` and `NewImage` of the item. `ExportViewType` `NEW_IMAGE` leaves out `OldImage`. An item that ends the period as it started it, such as one inserted and then deleted, gets no record. As on AWS, the images list attribute names and set members in sorted order, and the data files go to the shared `<prefix>/AWSDynamoDB/data/` folder. As on AWS, the period must be at least 15 minutes and at most 24 hours, must not start before the table creation or `EarliestRestorableDateTime`, and must not end in the future. Floci keeps the time of a write in milliseconds, so `WriteTimestampMicros` always ends in `000`.
 
 ## Import from S3
 
@@ -488,7 +501,7 @@ aws dynamodb restore-table-from-backup --backup-arn $BACKUP_ARN \
   --target-table-name UsersRestored --endpoint-url $AWS_ENDPOINT_URL
 ```
 
-`RestoreTableFromBackup` creates a new table with the keys, indexes, billing mode, throughput and encryption of the backup. As on AWS, the new table has no stream, TTL, point-in-time recovery, tags or deletion protection, and its table class is `STANDARD`. The overrides follow AWS. A GSI or LSI override must match a source index by key schema and projection, and a vector index override must match one by name. `BillingModeOverride` `PROVISIONED` needs throughput for the table and for every GSI that is kept.
+`RestoreTableFromBackup` creates a new table with the keys, indexes, billing mode, throughput and encryption of the backup. As on AWS, the new table has no stream, TTL, point-in-time recovery, tags or deletion protection, and its table class is `STANDARD`. The overrides follow AWS. A GSI or LSI override must match a source index by key schema and projection, and a vector index override must match one by name. `BillingModeOverride` `PROVISIONED` needs throughput for the table and for every GSI that is kept. To restore a backup into another region, call `RestoreTableFromBackup` in that region with `SSESpecificationOverride`.
 
 Deviations from AWS: a restore is done before the response is sent. The response still says `CREATING` with `RestoreInProgress: true`, as on AWS, but the table is `ACTIVE` right away. So `BackupInUseException` and `TableInUseException` for a restore in progress never happen. `BackupSizeBytes` is always 0. Backups made by AWS Backup (`BackupType` `AWS_BACKUP`) are not emulated.
 

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -175,6 +176,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     public void clear() {
+        if (aslExecutor != null) {
+            aslExecutor.clearNestedExecutionWaits();
+        }
         historyCache.clear();
         activityQueues.clear();
         Map<String, PendingTask> pending;
@@ -2073,13 +2077,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         }
         try {
             AwsArnUtils.Arn parsed = AwsArnUtils.parse(roleArn);
-            String resource = parsed.resource();
-            if (!"iam".equals(parsed.service())
-                    || !parsed.region().isEmpty()
-                    || parsed.accountId().isBlank()
-                    || resource == null
-                    || !resource.startsWith("role/")
-                    || resource.length() == "role/".length()
+            if (!AwsArnShapes.isIamRole(parsed)
                     || roleArn.chars().anyMatch(Character::isWhitespace)) {
                 throw new IllegalArgumentException("Invalid IAM role ARN");
             }

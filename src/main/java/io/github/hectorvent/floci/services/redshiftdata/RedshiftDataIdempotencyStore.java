@@ -62,10 +62,15 @@ class RedshiftDataIdempotencyStore {
     }
 
     void put(Scope scope, ObjectNode response) {
+        put(scope, response, null);
+    }
+
+    void put(Scope scope, ObjectNode response, String sessionOwner) {
         Receipt receipt = new Receipt();
         receipt.acceptedAt = clock.instant();
         receipt.expiresAt = receipt.acceptedAt.plus(TOKEN_TTL);
         receipt.response = response.deepCopy();
+        receipt.sessionOwner = sessionOwner;
         mutations.readLock().lock();
         try {
             receipts.putAllAtomicallyForAccount(scope.accountId(), Map.of(scope.key(), receipt));
@@ -137,12 +142,14 @@ class RedshiftDataIdempotencyStore {
         Instant acceptedAt;
         Instant expiresAt;
         ObjectNode response;
+        String sessionOwner;
 
         Receipt snapshot() {
             Receipt copy = new Receipt();
             copy.acceptedAt = acceptedAt;
             copy.expiresAt = expiresAt;
             copy.response = response.deepCopy();
+            copy.sessionOwner = sessionOwner;
             return copy;
         }
     }

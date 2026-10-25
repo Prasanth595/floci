@@ -167,14 +167,14 @@ public class RedshiftOperationsTest {
     @Test
     @Order(2)
     void clusterAndSnapshotLifecycle() {
-        when(containerManager.start(any(), eq("cluster-src"), any(), any()))
+        when(containerManager.start(any(), eq("cluster-src"), any(), any(), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c1", "cluster-src", "localhost", 5439));
         doAnswer(invocation -> {
             Path p = invocation.getArgument(3);
             Files.writeString(p, "-- dump sql table test_data;");
             return null;
         }).when(containerManager).takeSnapshot(any(), eq("cluster-src"), eq("admin"), any(Path.class));
-        when(containerManager.start(any(), eq("cluster-restored"), any(), any()))
+        when(containerManager.start(any(), eq("cluster-restored"), any(), any(), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c2", "cluster-restored", "localhost", 5440));
 
         // 1. CreateCluster
@@ -842,7 +842,7 @@ public class RedshiftOperationsTest {
     @Test
     @Order(3)
     void tagLifecycle() {
-        when(containerManager.start(any(), eq("cluster-tags"), any(), any()))
+        when(containerManager.start(any(), eq("cluster-tags"), any(), any(), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c3", "cluster-tags", "localhost", 5441));
 
         given()
@@ -1019,7 +1019,7 @@ public class RedshiftOperationsTest {
     @Test
     @Order(9)
     void snapshotCopyLifecycle() {
-        when(containerManager.start(any(), eq("cluster-copy"), any(), any()))
+        when(containerManager.start(any(), eq("cluster-copy"), any(), any(), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c9", "cluster-copy", "localhost", 5449));
         assertEquals(200, redshift("CreateCluster", "ClusterIdentifier", "cluster-copy", "NodeType", "dc2.large",
                 "MasterUsername", "admin", "MasterUserPassword", "password123").statusCode());
@@ -1098,7 +1098,7 @@ public class RedshiftOperationsTest {
     @Test
     @Order(10)
     void snapshotScheduleLifecycle() {
-        when(containerManager.start(any(), eq("cluster-sched"), any(), any()))
+        when(containerManager.start(any(), eq("cluster-sched"), any(), any(), any(), any()))
                 .thenReturn(new RedshiftContainerHandle("c10", "cluster-sched", "localhost", 5450));
         assertEquals(200, redshift("CreateCluster", "ClusterIdentifier", "cluster-sched", "NodeType", "dc2.large",
                 "MasterUsername", "admin", "MasterUserPassword", "password123").statusCode());

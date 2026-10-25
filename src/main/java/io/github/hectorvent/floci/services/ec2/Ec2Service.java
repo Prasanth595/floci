@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -26,6 +27,8 @@ import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogIns
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
+import io.github.hectorvent.floci.services.ec2.model.DhcpConfiguration;
+import io.github.hectorvent.floci.services.ec2.model.DhcpOptions;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGatewayListResult;
@@ -102,13 +105,19 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
+import io.github.hectorvent.floci.services.resourcegroups.ResourceGroupsService;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -276,6 +285,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // persistent/hybrid/wal modes; see #1297 — CloudFormation persists stacks/exports that
     // reference these EC2 ids, so the ids must survive too)
     private final StorageBackend<String, Vpc> vpcs;
+    private final StorageBackend<String, DhcpOptions> dhcpOptions;
     private final StorageBackend<String, Subnet> subnets;
     private final StorageBackend<String, SecurityGroup> securityGroups;
     private final StorageBackend<String, SecurityGroupRule> securityGroupRules;
@@ -294,6 +304,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     private final StorageBackend<String, NetworkAcl> networkAcls;
     private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
+    private final Map<String, List<PrefixList>> configuredManagedPrefixLists;
     private final StorageBackend<String, TransitGateway> transitGateways;
     private final StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables;
     private final StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments;
@@ -310,6 +321,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private final StorageBackend<String, List<Tag>> tags;
     private final StorageBackend<String, CapacityReservation> capacityReservations;
     private final Object capacityReservationLock = new Object();
+    // Lazily seeded per owner/region, guarded by capacityReservationLock; values remain in storage.
+    private final Map<String, Set<String>> capacityGroupInstanceIds = new HashMap<>();
+    // CDI Instance clashes with the EC2 Instance model imported above.
+    jakarta.enterprise.inject.Instance<ResourceGroupsService> resourceGroupsServices;
     private final StorageBackend<String, Host> hosts;
     private final StorageBackend<String, EgressOnlyInternetGateway> egressOnlyInternetGateways;
     // Serialises a launch onto a host against ModifyHosts/ReleaseHosts, so a host cannot be
@@ -416,6 +431,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         this.testClusterNodeInstanceProvider = provider;
     }
 
+    Map<String, Set<String>> capacityGroupInstanceIdsForTest() {
+        return capacityGroupInstanceIds;
+    }
+
+    boolean holdsCapacityReservationLockForTest() {
+        return Thread.holdsLock(capacityReservationLock);
+    }
+
     void putInstanceForTest(Instance instance) {
         instances.put(key(instance.getRegion(), instance.getInstanceId()), instance);
     }
@@ -479,7 +502,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                       jakarta.enterprise.inject.Instance<VpcRouteTableListener> routeTableListenersInstance,
                       jakarta.enterprise.inject.Instance<Ec2InstanceLaunchListener> instanceLaunchListenersInstance,
                       Ec2EbsEncryptionService ebsEncryptionService,
-                      jakarta.enterprise.inject.Instance<VpcDependencyProvider> vpcDependencyProviders) {
+                      jakarta.enterprise.inject.Instance<VpcDependencyProvider> vpcDependencyProviders,
+                      jakarta.enterprise.inject.Instance<ResourceGroupsService> resourceGroupsServices) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
                 instanceTypeCatalog, storageFactory, requestContextInstance, iamService, volumeBlockDeviceManager);
         this.vpcNetworkManager = vpcNetworkManager;
@@ -488,6 +512,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         this.instanceLaunchListenersInstance = instanceLaunchListenersInstance;
         this.ebsEncryptionService = ebsEncryptionService;
         this.vpcDependencyProviders = vpcDependencyProviders;
+        this.resourceGroupsServices = resourceGroupsServices;
     }
 
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -558,7 +583,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 storageFactory.create("ec2", "ec2-transit-gateway-peering-attachments.json",
                         new TypeReference<Map<String, TransitGatewayPeeringAttachment>>() {}),
                 storageFactory.create("ec2", "ec2-egress-only-internet-gateways.json",
-                        new TypeReference<Map<String, EgressOnlyInternetGateway>>() {}));
+                        new TypeReference<Map<String, EgressOnlyInternetGateway>>() {}),
+                storageFactory.create("ec2", "ec2-dhcp-options.json",
+                        new TypeReference<Map<String, DhcpOptions>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -588,10 +615,43 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
                 vpcs, subnets, securityGroups, securityGroupRules, internetGateways, routeTables, keyPairs,
                 addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags, new InMemoryStorage<>());
+    }
+
+    // Package-private for persistence tests that need the DHCP store to survive a service restart.
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, DhcpOptions> dhcpOptions) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+                vpcs, subnets, securityGroups, securityGroupRules, internetGateways, routeTables, keyPairs,
+                addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
                 natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                null, null, null, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), dhcpOptions);
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
@@ -810,6 +870,56 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                StorageBackend<String, Host> hosts,
                StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments,
                StorageBackend<String, EgressOnlyInternetGateway> egressOnlyInternetGateways) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+                vpcs, subnets, securityGroups, securityGroupRules, internetGateways, routeTables, keyPairs,
+                addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
+                transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
+                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
+                networkInterfaces, capacityReservations, volumeModifications,
+                requestContextInstance, iamService, volumeBlockDeviceManager, hosts,
+                transitGatewayPeeringAttachments, egressOnlyInternetGateways, new InMemoryStorage<>());
+    }
+
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, TransitGateway> transitGateways,
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
+               StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
+               StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections,
+               StorageBackend<String, NetworkInterface> networkInterfaces,
+               StorageBackend<String, CapacityReservation> capacityReservations,
+               StorageBackend<String, VolumeModification> volumeModifications,
+               jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+               IamService iamService,
+               Ec2VolumeBlockDeviceManager volumeBlockDeviceManager,
+               StorageBackend<String, Host> hosts,
+               StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments,
+               StorageBackend<String, EgressOnlyInternetGateway> egressOnlyInternetGateways,
+               StorageBackend<String, DhcpOptions> dhcpOptions) {
         this.hosts = hosts;
         this.egressOnlyInternetGateways = egressOnlyInternetGateways;
         this.transitGatewayPeeringAttachments = transitGatewayPeeringAttachments;
@@ -824,6 +934,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         this.imageCatalog = imageCatalog;
         this.instanceTypeCatalog = instanceTypeCatalog;
         this.vpcs = vpcs;
+        this.dhcpOptions = dhcpOptions;
         this.subnets = subnets;
         this.securityGroups = securityGroups;
         this.securityGroupRules = securityGroupRules;
@@ -851,6 +962,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         this.networkInterfaces = networkInterfaces;
         this.capacityReservations = capacityReservations;
         this.volumeModifications = volumeModifications;
+        this.configuredManagedPrefixLists = loadManagedPrefixListCatalog();
     }
 
     @PostConstruct
@@ -1321,6 +1433,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // VPC and subnets would never come back.
     @Override
     public void clear() {
+        synchronized (capacityReservationLock) {
+            capacityGroupInstanceIds.clear();
+        }
         seededAccountRegions.clear();
         seedDefaultRegionIfEnabled();
     }
@@ -1331,17 +1446,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    private void ensureDefaultDhcpOptions(String region, String ownerAccountId) {
+        String defaultOptionsId = "dopt-default";
+        if (dhcpOptions.get(key(region, defaultOptionsId)).isEmpty()) {
+            DhcpOptions defaultOptions = new DhcpOptions();
+            defaultOptions.setDhcpOptionsId(defaultOptionsId);
+            defaultOptions.setRegion(region);
+            defaultOptions.setOwnerId(ownerAccountId);
+            defaultOptions.setConfigurations(List.of(
+                    new DhcpConfiguration("domain-name", List.of(AwsRegions.ec2PrivateDnsDomain(region))),
+                    new DhcpConfiguration("domain-name-servers", List.of("AmazonProvidedDNS")),
+                    new DhcpConfiguration("ipv6-address-preferred-lease-time", List.of("140"))));
+            dhcpOptions.put(key(region, defaultOptionsId), defaultOptions);
+        }
+    }
+
     public void ensureDefaultResources(String region) {
         String ownerAccountId = callerAccountId();
         String seedScope = ownerAccountId + "::" + region;
         if (!seededAccountRegions.add(seedScope)) {
             return;
         }
+        List<Vpc> existingVpcs = vpcs.scan(k -> k.startsWith(region + "::"));
         // Already provisioned in a previous run and reloaded from persistent storage: the default
         // VPC (and everything else) is present, so don't re-seed and create duplicates (#1297).
-        if (!vpcs.scan(k -> k.startsWith(region + "::")).isEmpty()) {
+        if (!existingVpcs.isEmpty()) {
+            if (existingVpcs.stream().anyMatch(vpc -> "dopt-default".equals(vpc.getDhcpOptionsId()))) {
+                ensureDefaultDhcpOptions(region, ownerAccountId);
+            }
             return;
         }
+        ensureDefaultDhcpOptions(region, ownerAccountId);
         LOG.debugv("Seeding default EC2 resources for region {0}", region);
 
         // Default VPC
@@ -1692,6 +1827,66 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * {@code GatewayVpcEndpointAwsService}); the reversed-suffix names apply to interface endpoints only.
      */
     private List<ManagedPrefixList> awsManagedPrefixLists(String region) {
+        List<ManagedPrefixList> lists = new ArrayList<>(defaultAwsManagedPrefixLists(region));
+        for (PrefixList configured : configuredManagedPrefixLists.getOrDefault(region, List.of())) {
+            lists.add(awsManagedPrefixList(region, configured.getPrefixListId(),
+                    configured.getPrefixListName(), configured.getCidrs()));
+        }
+        return lists;
+    }
+
+    private Map<String, List<PrefixList>> loadManagedPrefixListCatalog() {
+        if (!config.services().ec2().enabled()) {
+            return Map.of();
+        }
+        Optional<String> path = config.services().ec2().managedPrefixListCatalogPath().filter(value -> !value.isBlank());
+        if (path.isEmpty()) {
+            return Map.of();
+        }
+        try (InputStream input = Files.newInputStream(Path.of(path.get()))) {
+            Map<String, List<PrefixList>> catalog = new ObjectMapper().readValue(input, new TypeReference<>() {});
+            if (catalog == null) {
+                throw new IllegalArgumentException("Expected a region-to-prefix-lists object");
+            }
+            for (Map.Entry<String, List<PrefixList>> region : catalog.entrySet()) {
+                if (region.getKey().isBlank() || region.getValue() == null) {
+                    throw new IllegalArgumentException("Expected a nonblank region and a list");
+                }
+                Set<String> ids = new HashSet<>();
+                Set<String> names = new HashSet<>();
+                for (ManagedPrefixList list : defaultAwsManagedPrefixLists(region.getKey())) {
+                    ids.add(list.getPrefixListId());
+                    names.add(list.getPrefixListName());
+                }
+                for (PrefixList list : region.getValue()) {
+                    if (list == null || list.getPrefixListId() == null
+                            || !list.getPrefixListId().matches("pl-(?:[0-9a-f]{8}|[0-9a-f]{17})")
+                            || list.getPrefixListName() == null || list.getPrefixListName().isBlank()
+                            || list.getCidrs() == null || list.getCidrs().isEmpty()
+                            || !ids.add(list.getPrefixListId()) || !names.add(list.getPrefixListName())) {
+                        throw new IllegalArgumentException("Invalid or duplicate prefix list in " + region.getKey());
+                    }
+                    Set<String> canonicalCidrs = new LinkedHashSet<>();
+                    for (String cidr : list.getCidrs()) {
+                        Optional<String> canonical = cidr == null || cidr.contains(":")
+                                ? Optional.empty() : CidrCanonicalizer.canonicalize(cidr);
+                        if (canonical.isEmpty()) {
+                            throw new IllegalArgumentException("Expected an IPv4 prefix list entry in " + region.getKey());
+                        }
+                        if (!canonicalCidrs.add(canonical.get())) {
+                            throw new IllegalArgumentException("Duplicate prefix list entry in " + region.getKey());
+                        }
+                    }
+                    list.setCidrs(List.copyOf(canonicalCidrs));
+                }
+            }
+            return Map.copyOf(catalog);
+        } catch (IOException | IllegalArgumentException error) {
+            throw new IllegalStateException("Invalid EC2 managed prefix list catalog: " + path.get(), error);
+        }
+    }
+
+    private List<ManagedPrefixList> defaultAwsManagedPrefixLists(String region) {
         return List.of(
                 awsManagedPrefixList(region, "pl-63a5400a", "com.amazonaws." + region + ".s3",
                         List.of("52.216.0.0/15", "54.231.0.0/16")),
@@ -1917,6 +2112,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public static String defaultSubnetId(String region, String azSuffix) {
         return "subnet-default-" + region + "-" + azSuffix;
+    }
+
+    public static boolean isModelledAvailabilityZone(String region, String zone) {
+        return Arrays.stream(MODELLED_ZONE_SUFFIXES).anyMatch(suffix -> (region + suffix).equals(zone));
     }
 
     public static String defaultSecurityGroupId(String region) {
@@ -3715,16 +3914,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         LaunchTemplateData.CapacityReservationTarget capacityTarget = capacitySpecification == null ? null
                 : capacitySpecification.getCapacityReservationTarget();
         String capacityTargetId = capacityTarget == null ? null : capacityTarget.getCapacityReservationId();
+        String capacityGroupArn = capacityTarget == null ? null
+                : capacityTarget.getCapacityReservationResourceGroupArn();
         if (!Set.of("open", "none", "capacity-reservations-only").contains(capacityPreference)) {
             throw new AwsException("InvalidParameterValue", "Invalid Capacity Reservation preference.", 400);
         }
-        if (capacityTarget != null && capacityTarget.getCapacityReservationResourceGroupArn() != null) {
-            throw new AwsException("Unsupported", "Capacity Reservation resource group targeting is not supported.", 400);
-        }
-        if ((capacityTargetId != null && "none".equals(capacityPreference))
-                || (spot && (capacityTargetId != null || "capacity-reservations-only".equals(capacityPreference)))) {
+        if ((capacityTargetId != null && capacityGroupArn != null)
+                || ((capacityTargetId != null || capacityGroupArn != null) && "none".equals(capacityPreference))
+                || (spot && (capacityTargetId != null || capacityGroupArn != null
+                        || "capacity-reservations-only".equals(capacityPreference)))) {
             throw new AwsException("InvalidParameterCombination", "Invalid Capacity Reservation target combination.", 400);
         }
+        Set<String> capacityGroupMembers = capacityGroupArn == null ? null
+                : capacityGroupMembers(region, callerAccountId(), capacityGroupArn, true);
         if (privateIpAddress != null && privateIpAddress.isBlank()) {
             privateIpAddress = null;
         }
@@ -3849,7 +4051,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 long available = target == null
                         ? capacityReservations.scan(k -> k.startsWith(region + "::")).stream()
-                                .filter(candidate -> "open".equals(candidate.getInstanceMatchCriteria()))
+                                .filter(candidate -> capacityGroupMembers == null
+                                        ? "open".equals(candidate.getInstanceMatchCriteria())
+                                        : capacityGroupMembers.contains(candidate.getCapacityReservationArn()))
                                 .filter(candidate -> matchesCapacityReservation(requested, candidate))
                                 .mapToLong(CapacityReservation::getAvailableInstanceCount).sum()
                         : target.getAvailableInstanceCount();
@@ -3934,6 +4138,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         inst.setCapacityReservationPlatform(capacityReservationPlatform(region, imageId));
                         inst.setCapacityReservationPreference(capacityTargetId == null ? capacityPreference : null);
                         inst.setCapacityReservationTarget(capacityTargetId);
+                        inst.setCapacityReservationGroupArn(capacityGroupArn);
                         Placement placement = new Placement(az);
                         placement.setHostId(hostId);
                         if (tenancy != null && !tenancy.isBlank()) {
@@ -4157,15 +4362,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private Map<String, List<String>> policyPrefixLists(String region, List<SecurityGroup> groups) {
+        Map<String, ManagedPrefixList> awsLists = awsManagedPrefixLists(region).stream()
+                .collect(Collectors.toMap(ManagedPrefixList::getPrefixListId, Function.identity()));
         Map<String, List<String>> resolved = new LinkedHashMap<>();
         for (SecurityGroup group : groups) {
             Stream.concat(group.getIpPermissions().stream(),
                             group.getIpPermissionsEgress().stream())
                     .flatMap(permission -> permission.getPrefixListIds().stream())
                     .map(PrefixListId::getPrefixListId).distinct()
-                    .forEach(id -> resolved.put(id, managedPrefixLists.get(key(region, id)).isEmpty()
-                            ? List.of() : getManagedPrefixListEntries(region, id, null).stream()
-                            .map(PrefixListEntry::getCidr).toList()));
+                    .forEach(id -> {
+                        ManagedPrefixList list = managedPrefixLists.get(key(region, id))
+                                .orElseGet(() -> awsLists.get(id));
+                        resolved.put(id, list == null ? List.of() : list.currentEntries().stream()
+                                .map(PrefixListEntry::getCidr).toList());
+                    });
         }
         return resolved;
     }
@@ -5768,6 +5978,185 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     // ─── VPCs ──────────────────────────────────────────────────────────────────
 
+    public DhcpOptions createDhcpOptions(String region, List<DhcpConfiguration> configurations) {
+        if (configurations == null || configurations.isEmpty()) {
+            throw new AwsException("MissingParameter", "DhcpConfiguration is required", 400);
+        }
+        Set<String> keys = Set.of("domain-name", "domain-name-servers", "ntp-servers",
+                "netbios-name-servers", "netbios-node-type", "ipv6-address-preferred-lease-time");
+        Set<String> seen = new HashSet<>();
+        List<DhcpConfiguration> validated = new ArrayList<>();
+        for (DhcpConfiguration configuration : configurations) {
+            if (configuration.getKey() == null || !keys.contains(configuration.getKey())
+                    || !seen.add(configuration.getKey()) || configuration.getValues() == null
+                    || configuration.getValues().isEmpty()
+                    || configuration.getValues().stream().anyMatch(value -> value == null || value.isBlank())) {
+                throw new AwsException("InvalidParameterValue", "Invalid DHCP configuration", 400);
+            }
+            String optionKey = configuration.getKey();
+            List<String> values = configuration.getValues();
+            if (Set.of("domain-name-servers", "ntp-servers", "netbios-name-servers").contains(optionKey)) {
+                values = values.stream().flatMap(value -> Arrays.stream(value.split(",", -1)))
+                        .map(String::trim).toList();
+            }
+            if (!validDhcpValues(optionKey, values)) {
+                throw new AwsException("InvalidParameterValue", "Invalid value for DHCP option " + optionKey, 400);
+            }
+            validated.add(new DhcpConfiguration(optionKey, List.copyOf(values)));
+        }
+        DhcpOptions options = new DhcpOptions();
+        options.setDhcpOptionsId("dopt-" + randomHex(17));
+        options.setRegion(region);
+        options.setOwnerId(callerAccountId());
+        options.setConfigurations(validated);
+        dhcpOptions.put(key(region, options.getDhcpOptionsId()), options);
+        return options;
+    }
+
+    private boolean validDhcpValues(String optionKey, List<String> values) {
+        if (values.isEmpty() || values.stream().anyMatch(String::isBlank)) {
+            return false;
+        }
+        return switch (optionKey) {
+            case "domain-name-servers" -> values.size() <= 4 &&
+                    (values.equals(List.of("AmazonProvidedDNS")) || values.stream().allMatch(this::isLiteralIp));
+            case "ntp-servers" -> values.size() <= 8 && values.stream().allMatch(this::isLiteralIp)
+                    && values.stream().filter(value -> !value.contains(":")).count() <= 4
+                    && values.stream().filter(value -> value.contains(":")).count() <= 4;
+            case "netbios-name-servers" -> values.size() <= 4 && values.stream().allMatch(this::isLiteralIp);
+            case "netbios-node-type" -> values.size() == 1 && Set.of("1", "2", "4", "8").contains(values.getFirst());
+            case "ipv6-address-preferred-lease-time" -> values.size() == 1 && validIpv6LeaseTime(values.getFirst());
+            default -> true;
+        };
+    }
+
+    private boolean isLiteralIp(String value) {
+        try {
+            InetAddress.ofLiteral(value);
+            return true;
+        } catch (IllegalArgumentException invalid) {
+            return false;
+        }
+    }
+
+    private boolean validIpv6LeaseTime(String value) {
+        try {
+            long seconds = Long.parseLong(value);
+            return seconds >= 140 && seconds <= Integer.MAX_VALUE;
+        } catch (NumberFormatException invalid) {
+            return false;
+        }
+    }
+
+    public PaginatedResult<DhcpOptions> describeDhcpOptions(String region, List<String> ids,
+            List<Map.Entry<String, List<String>>> filters, int maxResults, String nextToken) {
+        ensureDefaultResources(region);
+        requireSupportedFilters(filterNames(filters), Set.of("dhcp-options-id", "owner-id", "key", "value",
+                "tag-key", "tag-value"));
+        if (maxResults != 0 && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidMaxResults", "MaxResults must be between 5 and 1000", 400);
+        }
+        if (maxResults != 0 && !ids.isEmpty()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "DhcpOptionsId cannot be used with MaxResults", 400);
+        }
+        String afterId = decodeDhcpOptionsToken(nextToken);
+        List<DhcpOptions> all = new ArrayList<>(dhcpOptions.scan(k -> k.startsWith(region + "::")));
+        all.sort(Comparator.comparing(DhcpOptions::getDhcpOptionsId));
+        for (String id : ids) {
+            getRequiredDhcpOptions(region, id);
+        }
+        List<DhcpOptions> matching = all.stream()
+                .filter(options -> ids.isEmpty() || ids.contains(options.getDhcpOptionsId()))
+                .filter(options -> filters.stream().allMatch(filter -> matchesDhcpOptionsFilter(region, options, filter)))
+                .filter(options -> afterId == null || options.getDhcpOptionsId().compareTo(afterId) > 0)
+                .toList();
+        int end = maxResults == 0 ? matching.size() : Math.min(matching.size(), maxResults);
+        return new PaginatedResult<>(matching.subList(0, end),
+                end < matching.size() ? encodeDhcpOptionsToken(matching.get(end - 1).getDhcpOptionsId()) : null);
+    }
+
+    private String encodeDhcpOptionsToken(String lastId) {
+        return Base64.getEncoder().encodeToString(lastId.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String decodeDhcpOptionsToken(String token) {
+        if (token == null || token.isEmpty()) {
+            return null;
+        }
+        try {
+            String id = new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
+            if (!id.matches("dopt-(default|[0-9a-f]{17})")) {
+                throw new IllegalArgumentException("Invalid DHCP options cursor");
+            }
+            return id;
+        } catch (IllegalArgumentException invalid) {
+            throw new AwsException("InvalidParameterValue", "Invalid NextToken", 400);
+        }
+    }
+
+    private boolean matchesDhcpOptionsFilter(String region, DhcpOptions options,
+            Map.Entry<String, List<String>> filter) {
+        List<String> values = filter.getValue();
+        String name = filter.getKey();
+        List<Tag> resourceTags = resourceTags(region, options.getDhcpOptionsId());
+        if (name.startsWith("tag:")) {
+            return resourceTags.stream().anyMatch(tag -> name.substring(4).equals(tag.getKey())
+                    && matchesFilterValue(values, tag.getValue()));
+        }
+        return switch (name) {
+            case "dhcp-options-id" -> matchesFilterValue(values, options.getDhcpOptionsId());
+            case "owner-id" -> matchesFilterValue(values, options.getOwnerId());
+            case "key" -> options.getConfigurations().stream()
+                    .anyMatch(configuration -> matchesFilterValue(values, configuration.getKey()));
+            case "value" -> options.getConfigurations().stream()
+                    .flatMap(configuration -> configuration.getValues().stream())
+                    .anyMatch(value -> matchesFilterValue(values, value));
+            case "tag-key" -> resourceTags.stream().anyMatch(tag -> matchesFilterValue(values, tag.getKey()));
+            case "tag-value" -> resourceTags.stream().anyMatch(tag -> matchesFilterValue(values, tag.getValue()));
+            default -> false;
+        };
+    }
+
+    public void associateDhcpOptions(String region, String dhcpOptionsId, String vpcId) {
+        if (dhcpOptionsId == null || dhcpOptionsId.isBlank()) {
+            throw new AwsException("MissingParameter", "DhcpOptionsId is required", 400);
+        }
+        if (vpcId == null || vpcId.isBlank()) {
+            throw new AwsException("MissingParameter", "VpcId is required", 400);
+        }
+        synchronized (attachmentTopologyLock(region)) {
+            Vpc vpc = getRequiredVpc(region, vpcId);
+            if (!"default".equals(dhcpOptionsId)) {
+                getRequiredDhcpOptions(region, dhcpOptionsId);
+            }
+            vpc.setDhcpOptionsId(dhcpOptionsId);
+            vpcs.put(key(region, vpcId), vpc);
+        }
+    }
+
+    public void deleteDhcpOptions(String region, String dhcpOptionsId) {
+        if (dhcpOptionsId == null || dhcpOptionsId.isBlank()) {
+            throw new AwsException("MissingParameter", "DhcpOptionsId is required", 400);
+        }
+        synchronized (attachmentTopologyLock(region)) {
+            getRequiredDhcpOptions(region, dhcpOptionsId);
+            if (vpcs.scan(k -> k.startsWith(region + "::")).stream()
+                    .anyMatch(vpc -> dhcpOptionsId.equals(vpc.getDhcpOptionsId()))) {
+                throw new AwsException("DependencyViolation",
+                        "The DHCP options set is associated with a VPC", 400);
+            }
+            dhcpOptions.delete(key(region, dhcpOptionsId));
+            removeTags(region, dhcpOptionsId);
+        }
+    }
+
+    private DhcpOptions getRequiredDhcpOptions(String region, String dhcpOptionsId) {
+        return dhcpOptions.get(key(region, dhcpOptionsId))
+                .orElseThrow(() -> new AwsException("InvalidDhcpOptionsID.NotFound",
+                        "The DHCP options ID '" + dhcpOptionsId + "' does not exist", 400));
+    }
+
     public Vpc createVpc(String region, String cidrBlock, boolean isDefault) {
         return createVpc(region, cidrBlock, isDefault, false);
     }
@@ -5799,6 +6188,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         rejectOutOfRangePrefix(cidrBlock, "InvalidVpc.Range");
         rejectReservedVpcRange(cidrBlock);
         ensureDefaultResources(region);
+        ensureDefaultDhcpOptions(region, callerAccountId());
         String vpcId = "vpc-" + randomHex(8);
         Vpc vpc = new Vpc();
         vpc.setVpcId(vpcId);
@@ -6999,9 +7389,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private String resolveSubnetZoneName(String region, String availabilityZone, String availabilityZoneId) {
         if (!isSet(availabilityZoneId)) {
             String zoneName = isSet(availabilityZone) ? availabilityZone : region + "a";
-            boolean zoneExists = Arrays.stream(MODELLED_ZONE_SUFFIXES)
-                    .anyMatch(suffix -> zoneName.equals(region + suffix));
-            if (!zoneExists) {
+            if (!isModelledAvailabilityZone(region, zoneName)) {
                 throw new AwsException("InvalidParameterValue",
                         "Value (" + zoneName + ") for parameter availabilityZone is invalid. Subnets can "
                                 + "currently only be created in the following availability zones: "
@@ -7080,8 +7468,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         subnet.setRegion(region);
         subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, ownerAccountId, "subnet/" + subnetId).toString());
         if (ipv6CidrBlock != null && !ipv6CidrBlock.isBlank()) {
+            String canonicalIpv6CidrBlock = CidrCanonicalizer.canonicalize(ipv6CidrBlock)
+                    .filter(cidr -> cidr.contains(":")).orElse(ipv6CidrBlock);
             subnet.getIpv6CidrBlockAssociationSet().add(new VpcIpv6CidrBlockAssociation(
-                    "subnet-cidr-assoc-" + randomHex(17), ipv6CidrBlock, null));
+                    "subnet-cidr-assoc-" + randomHex(17), canonicalIpv6CidrBlock, null));
         }
         // The conflict scan and the store must be one step under the VPC's lock, or two
         // overlapping creates in flight together both pass the scan before either is stored.
@@ -9742,6 +10132,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         switch (prefix.group(1)) {
             case "i" -> getRequiredInstance(region, resourceId);
             case "vpc" -> getRequiredVpc(region, resourceId);
+            case "dopt" -> getRequiredDhcpOptions(region, resourceId);
             case "subnet" -> requireSubnet(region, resourceId);
             case "sg" -> getRequiredSecurityGroup(region, resourceId);
             case "sgr" -> requireFound(!describeSecurityGroupRules(region, List.of(), List.of(resourceId)).isEmpty(),
@@ -9862,6 +10253,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList) {
         validateTagTargets(region, resourceIds);
         validateUserTagKeys(tagList);
+        deleteResourceTags(region, resourceIds, tagList);
+    }
+
+    /** Service-owned tag cleanup, separate from the public EC2 DeleteTags operation. */
+    public void deleteSystemTag(String region, List<String> resourceIds, String tagKey, String tagValue) {
+        deleteResourceTags(region, resourceIds, List.of(new Tag(tagKey, tagValue)));
+    }
+
+    private void deleteResourceTags(String region, List<String> resourceIds, List<Tag> tagList) {
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {
             withTopologyLockIfNeeded(region, resourceId, () -> {
@@ -10281,9 +10681,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private void reconcileCapacityMembership(String region) {
+        List<CapacityReservation> reconciled = new ArrayList<>();
         Map<String, CapacityReservation> changed = new LinkedHashMap<>();
         for (CapacityReservation stored : capacityReservations.scan(k -> k.startsWith(region + "::"))) {
             CapacityReservation updated = new CapacityReservation(stored);
+            reconciled.add(updated);
             boolean expired = "active".equals(updated.getState()) && updated.getEndDate() != null
                     && !updated.getEndDate().isAfter(Instant.now());
             if (expired) {
@@ -10298,9 +10700,66 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 changed.put(key(region, updated.getCapacityReservationId()), updated);
             }
         }
+        List<CapacityReservation> available = reconciled.stream()
+                .filter(reservation -> "active".equals(reservation.getState())
+                        && reservation.getAvailableInstanceCount() > 0).toList();
+        List<Instance> groupInstances = capacityGroupInstances(region);
+        if (!available.isEmpty()) {
+            Set<String> associated = new HashSet<>();
+            for (CapacityReservation reservation : reconciled) {
+                associated.addAll(reservation.getInstanceIds());
+            }
+            Map<String, Set<String>> membersByGroup = new HashMap<>();
+            for (Instance instance : groupInstances) {
+                if (instance.getState() == null || !"running".equals(instance.getState().getName())
+                        || instance.isSpot() || instance.getCapacityReservationGroupArn() == null
+                        || instance.getCapacityReservationTarget() != null
+                        || !Objects.equals(callerAccountId(), instance.getOwnerId())
+                        || associated.contains(instance.getInstanceId())) {
+                    continue;
+                }
+                Set<String> groupMembers = membersByGroup.computeIfAbsent(instance.getCapacityReservationGroupArn(),
+                        arn -> capacityGroupMembers(region, instance.getOwnerId(), arn, false));
+                CapacityReservation selected = available.stream()
+                        .filter(reservation -> groupMembers.contains(reservation.getCapacityReservationArn()))
+                        .filter(reservation -> reservation.getAvailableInstanceCount() > 0)
+                        .filter(reservation -> matchesCapacityReservation(instance, reservation)).findFirst().orElse(null);
+                if (selected != null) {
+                    selected.getInstanceIds().add(instance.getInstanceId());
+                    selected.setAvailableInstanceCount(selected.getAvailableInstanceCount() - 1);
+                    associated.add(instance.getInstanceId());
+                    changed.put(key(region, selected.getCapacityReservationId()), selected);
+                }
+            }
+        }
         if (!changed.isEmpty()) {
             persistCapacityMembership(changed);
         }
+    }
+
+    private List<Instance> capacityGroupInstances(String region) {
+        String account = callerAccountId();
+        Set<String> ids = capacityGroupInstanceIds.computeIfAbsent(account + "::" + region, ignored -> {
+            Set<String> seeded = new HashSet<>();
+            for (Instance instance : instances.scan(k -> k.startsWith(region + "::"))) {
+                if (instance.getCapacityReservationGroupArn() != null && account.equals(instance.getOwnerId())) {
+                    seeded.add(instance.getInstanceId());
+                }
+            }
+            return seeded;
+        });
+        List<Instance> candidates = new ArrayList<>();
+        ids.removeIf(id -> {
+            Instance instance = instances.get(key(region, id)).orElse(null);
+            if (instance == null || instance.getCapacityReservationGroupArn() == null
+                    || !account.equals(instance.getOwnerId())
+                    || (instance.getState() != null && "terminated".equals(instance.getState().getName()))) {
+                return true;
+            }
+            candidates.add(instance);
+            return false;
+        });
+        return candidates;
     }
 
     private boolean holdsCapacity(Instance instance) {
@@ -10310,6 +10769,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     void acquireCapacity(String region, List<Instance> admitted) {
         synchronized (capacityReservationLock) {
+            Set<String> groupInstances = capacityGroupInstanceIds.get(callerAccountId() + "::" + region);
+            if (groupInstances != null) {
+                for (Instance instance : admitted) {
+                    if (instance.getCapacityReservationGroupArn() != null) {
+                        groupInstances.add(instance.getInstanceId());
+                    }
+                }
+            }
             reconcileCapacityMembership(region);
             List<CapacityReservation> candidates = capacityReservations.scan(k -> k.startsWith(region + "::"))
                     .stream().map(CapacityReservation::new).toList();
@@ -10323,9 +10790,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     continue;
                 }
                 String target = instance.getCapacityReservationTarget();
+                Set<String> groupMembers = instance.getCapacityReservationGroupArn() == null ? null
+                        : capacityGroupMembers(region, instance.getOwnerId(),
+                                instance.getCapacityReservationGroupArn(), false);
                 CapacityReservation selected = candidates.stream()
-                        .filter(r -> target == null ? "open".equals(r.getInstanceMatchCriteria())
-                                : target.equals(r.getCapacityReservationId()))
+                        .filter(r -> groupMembers != null ? groupMembers.contains(r.getCapacityReservationArn())
+                                : target == null ? "open".equals(r.getInstanceMatchCriteria())
+                                        : target.equals(r.getCapacityReservationId()))
                         .filter(r -> matchesCapacityReservation(instance, r))
                         .filter(r -> r.getAvailableInstanceCount() > 0).findFirst().orElse(null);
                 if (selected == null) {
@@ -10381,6 +10852,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         capacityReservationZone(instance.getRegion(), reservation))
                 && Objects.equals(instance.getPlacement().getTenancy(), reservation.getTenancy())
                 && Objects.equals(instance.getCapacityReservationPlatform(), reservation.getInstancePlatform());
+    }
+
+    private Set<String> capacityGroupMembers(String region, String account, String arn, boolean launching) {
+        if (resourceGroupsServices == null || !resourceGroupsServices.isResolvable()) {
+            throw new AwsException("Unsupported", "Capacity Reservation resource groups are unavailable.", 400);
+        }
+        try {
+            return Set.copyOf(resourceGroupsServices.get().capacityReservationMembers(region, account, arn));
+        } catch (AwsException error) {
+            if ("NotFoundException".equals(error.getErrorCode()) && !launching) {
+                return Set.of();
+            }
+            if (Set.of("NotFoundException", "BadRequestException").contains(error.getErrorCode())) {
+                throw new AwsException("InvalidParameterValue", "The Capacity Reservation group ARN is invalid.", 400);
+            }
+            throw error;
+        }
     }
 
     /**
@@ -10451,6 +10939,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     if ("running".equals(instance.getState().getName()) && !instance.isSpot()
                             && "open".equals(instance.getCapacityReservationPreference())
                             && instance.getCapacityReservationTarget() == null
+                            && instance.getCapacityReservationGroupArn() == null
                             && !associated.contains(instance.getInstanceId())
                             && matchesCapacityReservation(instance, reservation)) {
                         reservation.getInstanceIds().add(instance.getInstanceId());
@@ -10592,9 +11081,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     "Value (" + count + ") for parameter Quantity is invalid.", 400);
         }
         validateHostSettings(autoPlacement, hostRecovery, hostMaintenance);
-        boolean zoneExists = Arrays.stream(MODELLED_ZONE_SUFFIXES)
-                .anyMatch(suffix -> availabilityZone.equals(region + suffix));
-        if (!zoneExists) {
+        if (!isModelledAvailabilityZone(region, availabilityZone)) {
             throw new AwsException("InvalidParameterValue",
                     "Invalid availability zone: [" + availabilityZone + "]", 400);
         }
@@ -10896,8 +11383,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * makes the CreateSubnet overlap check see the real network. In every case it is also why the
      * Describe calls echo back the canonical form: the stored resource never holds anything else.
      *
-     * <p>Only IPv4 blocks are rewritten. DestinationIpv6CidrBlock and the IPv6 blocks of VPCs and
-     * subnets are left untouched, as is DestinationPrefixListId, which is an opaque ID, not a CIDR.
+     * <p>This helper rewrites only IPv4 blocks. IPv6 values and DestinationPrefixListId, which is
+     * an opaque ID rather than a CIDR, are returned unchanged.
      * A null block (an IPv6-only subnet) is returned as is.
      *
      * <p>A block that is not a well-formed "IPv4/prefix" is returned unchanged: this method does
@@ -12224,6 +12711,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             az.put("zoneName", zoneName);
             az.put("state", "available");
             az.put("regionName", region);
+            az.put("networkBorderGroup", region);
             az.put("zoneId", AvailabilityZoneIds.forZoneName(region, zoneName));
             az.put("zoneType", "availability-zone");
             az.put("optInStatus", "opt-in-not-required");

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.DomainNames;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.dns.DnsLookupHelper;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -83,7 +84,7 @@ public class Route53Service implements Resettable {
                 r53.defaultNameserver2(),
                 r53.defaultNameserver3(),
                 r53.defaultNameserver4()
-        );
+        ).stream().map(Route53Service::delegationName).toList();
         this.defaultAccountId = config.defaultAccountId();
         this.regionResolver = regionResolver;
         this.ec2Service = ec2Service;
@@ -869,7 +870,7 @@ public class Route53Service implements Resettable {
         if (deadline == null) {
             return false;
         }
-        if (System.nanoTime() >= deadline) {
+        if (mutationTimeNanos() >= deadline) {
             busyUntilNanos.remove(zoneId, deadline);
             return false;
         }
@@ -880,13 +881,26 @@ public class Route53Service implements Resettable {
         if (vpcAssociationControlPlaneDelayMs <= 0) {
             return;
         }
-        busyUntilNanos.put(zoneId, System.nanoTime()
+        busyUntilNanos.put(zoneId, mutationTimeNanos()
                 + TimeUnit.MILLISECONDS.toNanos(vpcAssociationControlPlaneDelayMs));
+    }
+
+    long mutationTimeNanos() {
+        return System.nanoTime();
     }
 
     public static String normalizeName(String name) {
         if (name == null || name.isEmpty()) return name;
         return name.endsWith(".") ? name : name + ".";
+    }
+
+    /**
+     * A configured nameserver as the delegation set lists it: without surrounding whitespace, which
+     * the config does not trim, and without the final dot, as Route 53 lists it. {@code strip()}
+     * also removes the Unicode spaces that {@code trim()} keeps.
+     */
+    private static String delegationName(String configured) {
+        return DnsLookupHelper.normalizeTarget(configured.strip());
     }
 
     public static String normalizeRecordName(String name) {
@@ -932,7 +946,7 @@ public class Route53Service implements Resettable {
         soa.setType("SOA");
         soa.setTtl(900L);
         soa.setRecords(List.of(new ResourceRecord(
-                nameServers.get(0) + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400")));
+                normalizeName(nameServers.get(0)) + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400")));
         records.add(soa);
 
         ResourceRecordSet ns = new ResourceRecordSet();
@@ -940,7 +954,7 @@ public class Route53Service implements Resettable {
         ns.setType("NS");
         ns.setTtl(172800L);
         ns.setRecords(nameServers.stream()
-                .map(n -> new ResourceRecord(n + "."))
+                .map(n -> new ResourceRecord(normalizeName(n)))
                 .toList());
         records.add(ns);
 

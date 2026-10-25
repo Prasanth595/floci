@@ -120,6 +120,13 @@ public class EmrServerlessService {
         app.setNetworkConfiguration(request.getNetworkConfiguration());
         app.setImageConfiguration(request.getImageConfiguration());
         app.setWorkerTypeSpecifications(request.getWorkerTypeSpecifications());
+        app.setMonitoringConfiguration(request.getMonitoringConfiguration());
+        app.setRuntimeConfiguration(request.getRuntimeConfiguration());
+        app.setSchedulerConfiguration(request.getSchedulerConfiguration());
+        app.setDiskEncryptionConfiguration(request.getDiskEncryptionConfiguration());
+        app.setInteractiveConfiguration(request.getInteractiveConfiguration());
+        app.setIdentityCenterConfiguration(request.getIdentityCenterConfiguration());
+        app.setJobLevelCostAllocationConfiguration(request.getJobLevelCostAllocationConfiguration());
 
         storage.put(id, app);
         return app;

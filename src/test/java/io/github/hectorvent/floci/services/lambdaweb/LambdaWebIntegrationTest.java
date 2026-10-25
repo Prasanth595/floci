@@ -56,7 +56,7 @@ class LambdaWebIntegrationTest {
     @BeforeAll
     void seedCode() {
         LambdaWebRoles.trustLambda(iamService, ROLE);
-        s3Service.createBucket(BUCKET, "us-east-1");
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
         s3Service.putObject(BUCKET, KEY, LambdaWebZips.indexJs(""), "application/zip", Map.of());
     }
 
@@ -364,6 +364,21 @@ class LambdaWebIntegrationTest {
                 .then().statusCode(404)
                 .header("X-Amzn-Errortype", "ResourceNotFoundException")
                 .body("message", equalTo("The endpoint global does not exist."));
+
+        // The regional domains of a PerRegion endpoint share one id, and the home one leads.
+        String home = given().contentType("application/json")
+                .body("{\"endpointName\": \"per\", \"endpointType\": \"PerRegion\", \"regions\": [\"us-west-2\"],"
+                        + " \"authType\": \"ApplicationManaged\","
+                        + " \"revisionWeights\": [{\"revisionId\": \"" + revision1 + "\", \"weight\": 100}]}")
+                .when().put(endpoints)
+                .then().statusCode(202)
+                .body("domainName", matchesPattern("[a-z0-9]{16}\\.001\\.lambda-web\\.us-east-1\\..+"))
+                .extract().path("domainName");
+        given().when().get(endpoints + "/per")
+                .then().statusCode(200)
+                .body("regionalEndpoints.us-east-1.domainName", equalTo(home))
+                .body("regionalEndpoints.us-west-2.domainName", equalTo(home.replace(".us-east-1.", ".us-west-2.")));
+        given().when().delete(endpoints + "/per").then().statusCode(204);
     }
 
     @Test
@@ -571,6 +586,18 @@ class LambdaWebIntegrationTest {
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(409)
                 .body("message", equalTo("The function " + ARN + " already exists."));
+        given().contentType("application/json")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/us-west-2/lambda/aws4_request")
+                .body("""
+                        {"functionName": "%s",
+                         "revisionConfig": {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s"}},
+                         "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
+                                            "authType": "ApplicationManaged"}}
+                        """.formatted(FN, BUILD.replace("nodejs24.x", "nodejs22.x"), ROLE))
+                .when().put(BASE + "/web-functions")
+                .then().statusCode(409)
+                .body("message", equalTo("A function named " + FN + " already exists in the account. Function names"
+                        + " must be unique across all regions in an account."));
         given().when().get(BASE + "/web-functions/does-not-exist")
                 .then().statusCode(404)
                 .body("message", equalTo("The function arn:aws:lambda:us-east-1:000000000000:web-function/does-not-exist"
@@ -721,6 +748,42 @@ class LambdaWebIntegrationTest {
                 .body("state", equalTo("Failed"))
                 .body("stateReason", equalTo("Uncompressed code size 536870913 bytes exceeds the maximum allowed size"
                         + " of 536870912 bytes"));
+
+        given().when().delete(BASE + "/web-functions/" + fn).then().statusCode(204);
+    }
+
+    @Test
+    @Order(13)
+    void anActiveRevisionPastFiftyDeletesTheOldestUnusedOne() {
+        String fn = FN + "-many";
+        String first = given().contentType("application/json")
+                .body("""
+                        {"functionName": "%s",
+                         "revisionConfig": {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s"}},
+                         "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
+                                            "authType": "ApplicationManaged", "autoDeploymentMode": "LatestRevision"}}
+                        """.formatted(fn, BUILD, ROLE))
+                .when().put(BASE + "/web-functions")
+                .then().statusCode(202)
+                .extract().path("revision.revisionId");
+        String revision = """
+                {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s"}}
+                """.formatted(BUILD, ROLE);
+        for (int i = 0; i < 50; i++) {
+            given().contentType("application/json").body(revision)
+                    .when().post(BASE + "/web-functions/" + fn + "/revisions")
+                    .then().statusCode(202);
+        }
+
+        given().contentType("application/json").body("{}")
+                .when().post(BASE + "/web-functions/" + fn + "/list-revisions")
+                .then().statusCode(200)
+                .body("revisions", hasSize(50))
+                .body("nextToken", nullValue());
+        given().when().get(BASE + "/web-functions/" + fn + "/revisions/" + first)
+                .then().statusCode(404)
+                .header("X-Amzn-Errortype", "ResourceNotFoundException")
+                .body("message", equalTo("The revision " + first + " does not exist."));
 
         given().when().delete(BASE + "/web-functions/" + fn).then().statusCode(204);
     }
