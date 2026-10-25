@@ -320,6 +320,15 @@ public class GlueService {
         return securityConfigurationStore.scan(key -> key.startsWith(prefix));
     }
 
+    public Page<SecurityConfiguration> getSecurityConfigurations(String region, Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 200)) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and 200", 400);
+        }
+        List<SecurityConfiguration> configurations = new ArrayList<>(getSecurityConfigurations(region));
+        configurations.sort(Comparator.comparing(SecurityConfiguration::getName));
+        return paginate(configurations, maxResults, nextToken);
+    }
+
     private static String securityConfigurationKey(String region, String name) {
         return region + ":" + name;
     }
