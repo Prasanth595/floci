@@ -189,7 +189,7 @@ class RedshiftDataOperationsTest {
         awaitFinished(batch);
 
         assertThat(describe(batch).queryParameters()).containsExactlyInAnyOrder(id, payload);
-        assertThat(data.getStatementResult(request -> request.id(batch)).records().getFirst().getFirst().stringValue())
+        assertThat(data.getStatementResult(request -> request.id(batch)).records().get(0).get(0).stringValue())
                 .isEqualTo("O'Reilly :literal");
     }
 
