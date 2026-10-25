@@ -212,7 +212,7 @@ public class KinesisEventSourcePoller implements Resettable {
         }
 
         Map<String, Object> result = kinesisService.getRecordsForAccount(
-                esm.getAccountId(), iterator, Math.min(esm.getBatchSize(), bisectLimit(esm, batchKey)),
+                esm.getAccountId(), iterator, Math.min(esm.getBatchSize(), StreamBatchFailures.bisectLimit(esm, bisectLimits, batchKey)),
                 esm.getRegion());
         List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
 
@@ -295,9 +295,7 @@ public class KinesisEventSourcePoller implements Resettable {
         // function is not retried at once.
         long now = clock.getAsLong();
         List<KinesisRecord> failed = failedRecords(records, matched, outcome.lowestFailedIndex());
-        // Splitting a failed batch does not consume the retry quota, as on AWS.
-        if (invokeResult.getFunctionError() != null && Boolean.TRUE.equals(esm.getBisectBatchOnFunctionError())
-                && failed.size() > 1
+        if (StreamBatchFailures.splitsOnFunctionError(esm, invokeResult, failed.size())
                 && !StreamBatchFailures.maximumRecordAgeExceeded(esm, failed.get(0).getApproximateArrivalTimestamp(), now)) {
             bisect(esm, shardId, retryKey, records.size());
             return;
@@ -355,16 +353,10 @@ public class KinesisEventSourcePoller implements Resettable {
         if (!stillActive(esm)) {
             return;
         }
-        int limit = (fetched + 1) / 2;
+        int limit = StreamBatchFailures.splitBatchSize(fetched);
         bisectLimits.put(retryKey, limit);
         LOG.infov("Kinesis ESM {0}: function error on {1} record(s) of shard {2}, bisecting to {3}",
                 esm.getUuid(), fetched, shardId, limit);
-    }
-
-    private int bisectLimit(EventSourceMapping esm, String key) {
-        return Boolean.TRUE.equals(esm.getBisectBatchOnFunctionError())
-                ? bisectLimits.getOrDefault(key, Integer.MAX_VALUE)
-                : Integer.MAX_VALUE;
     }
 
     private record CheckpointOutcome(String checkpoint, int lowestFailedIndex) {}
