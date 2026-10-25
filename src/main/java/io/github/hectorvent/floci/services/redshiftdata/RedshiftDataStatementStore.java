@@ -164,11 +164,6 @@ class RedshiftDataStatementStore {
 
     @RegisterForReflection
     @JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY)
-    record StoredParameter(String name, String value) {
-    }
-
-    @RegisterForReflection
-    @JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY)
     static final class StoredStatement {
         String id;
         String sql;
@@ -193,7 +188,6 @@ class RedshiftDataStatementStore {
         ArrayNode columnMetadata;
         List<ArrayNode> rows;
         List<StoredStatement> subStatements;
-        List<StoredParameter> queryParameters;
         String accountId;
         String region;
         String resourceArn;
@@ -235,7 +229,6 @@ class RedshiftDataStatementStore {
             copy.hasResultSet = hasResultSet;
             copy.resultRows = resultRows;
             copy.resultSize = resultSize;
-            copy.queryParameters = queryParameters == null ? null : List.copyOf(queryParameters);
             if (withResults) {
                 copy.columnMetadata = columnMetadata;
                 copy.rows = rows == null ? null : List.copyOf(rows);

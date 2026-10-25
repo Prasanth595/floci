@@ -22,7 +22,6 @@ import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultRequ
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultResponse;
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultV2Response;
 import software.amazon.awssdk.services.redshiftdata.model.ResultFormatString;
-import software.amazon.awssdk.services.redshiftdata.model.SqlParameter;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 import software.amazon.awssdk.services.redshiftdata.model.SubStatementData;
 import software.amazon.awssdk.services.redshiftdata.model.ValidationException;
@@ -136,25 +135,6 @@ class RedshiftDataOperationsTest {
     }
 
     @Test
-    @DisplayName("named SQL parameters are bound through the SDK model")
-    void parameterizedStatementBindsSqlParameters() throws Exception {
-        String id = data.executeStatement(ExecuteStatementRequest.builder()
-                .clusterIdentifier(clusterId)
-                .database(DATABASE)
-                .dbUser(USERNAME)
-                .sql("SELECT CAST(:value AS INTEGER) + 1 AS result")
-                .parameters(SqlParameter.builder().name("value").value("41").build())
-                .waitTimeSeconds(30)
-                .build()).id();
-
-        GetStatementResultResponse result = data.getStatementResult(request -> request.id(id));
-        assertThat(result.records()).hasSize(1);
-        assertThat(result.records().get(0).get(0).longValue()).isEqualTo(42L);
-        assertThat(describe(id).queryParameters()).containsExactly(
-                SqlParameter.builder().name("value").value("41").build());
-    }
-
-    @Test
     @DisplayName("batch response and child statement results round trip through the SDK")
     void batchResultsExposeChildStatements() throws Exception {
         String id = data.batchExecuteStatement(BatchExecuteStatementRequest.builder()
@@ -162,8 +142,8 @@ class RedshiftDataOperationsTest {
                 .database(DATABASE)
                 .dbUser(USERNAME)
                 .sqls("SELECT 11 AS value", "SELECT 22 AS value")
+                .waitTimeSeconds(30)
                 .build()).id();
-        awaitFinished(id);
 
         DescribeStatementResponse batch = describe(id);
         assertThat(batch.status()).isEqualTo(StatusString.FINISHED);
@@ -202,9 +182,9 @@ class RedshiftDataOperationsTest {
     void resultV2SupportsCsvRecords() throws Exception {
         String id = data.executeStatement(request -> request.clusterIdentifier(clusterId).database(DATABASE)
                 .dbUser(USERNAME).resultFormat(ResultFormatString.CSV)
-                .sql("SELECT 1 AS id, 'a' AS name UNION ALL SELECT 2, 'b'"))
+                .sql("SELECT 1 AS id, 'a' AS name UNION ALL SELECT 2, 'b'")
+                .waitTimeSeconds(30))
                 .id();
-        awaitFinished(id);
 
         GetStatementResultV2Response result = data.getStatementResultV2(request -> request.id(id));
         assertThat(result.resultFormat()).isEqualTo(ResultFormatString.CSV);
@@ -310,10 +290,9 @@ class RedshiftDataOperationsTest {
         String statementName = TestFixtures.uniqueName("rsdata_list");
         for (int value = 1; value <= 3; value++) {
             int queryValue = value;
-            String id = data.executeStatement(request -> request.clusterIdentifier(clusterId).database(DATABASE)
-                    .dbUser(USERNAME).statementName(statementName).sql("SELECT " + queryValue))
-                    .id();
-            awaitFinished(id);
+            data.executeStatement(request -> request.clusterIdentifier(clusterId).database(DATABASE)
+                    .dbUser(USERNAME).statementName(statementName).sql("SELECT " + queryValue)
+                    .waitTimeSeconds(30));
         }
 
         List<String> statementIds = data.listStatementsPaginator(request -> request.clusterIdentifier(clusterId)
