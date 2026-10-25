@@ -415,12 +415,13 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
      * {@code updateUsagePlan} when one of its own mutating calls fails. When the update created the
      * plan because the one at the prior physical id was gone, the created plan is deleted and the
      * resource names the prior id again. Otherwise the name, description, stages, throttle, quota and
-     * tags are put back, written only when the live plan differs from the snapshot, so an update that
-     * failed before it changed anything writes nothing. With no snapshot on the resource the update
-     * changed nothing, since every mutating call is preceded by the snapshot or followed by the
-     * creation record, so there is nothing to undo. A plan deleted since the update fails the
-     * rollback with NotFoundException, and the stack reports the rollback as failed. A usage plan key
-     * keeps the default, which answers false.
+     * tags are put back with one restore, which runs under the service's patch lock and is written
+     * whether or not the plan already matches the snapshot: a comparison read outside that lock could
+     * mix two revisions of the plan. With no snapshot on the resource the update changed nothing,
+     * since every mutating call is preceded by the snapshot or followed by the creation record, so
+     * there is nothing to undo. A plan deleted since the update fails the rollback with
+     * NotFoundException, and the stack reports the rollback as failed. A usage plan key keeps the
+     * default, which answers false.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -453,16 +454,12 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
             return true;
         }
         String id = snapshot.path("id").asText();
-        UsagePlan live = apiGatewayService.getUsagePlan(region, id);
         String name = snapshotText(snapshot, "name");
         String description = snapshotText(snapshot, "description");
         UsagePlan.Limits limits = MAPPER.convertValue(snapshot.path("limits"), UsagePlan.Limits.class);
         Map<String, String> tags = new HashMap<>();
         snapshot.path("tags").properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
-        if (!Objects.equals(name, live.getName()) || !Objects.equals(description, live.getDescription())
-                || !limits.equals(live.limits()) || !tags.equals(live.getTags())) {
-            apiGatewayService.restoreUsagePlan(region, id, name, description, limits, tags);
-        }
+        apiGatewayService.restoreUsagePlan(region, id, name, description, limits, tags);
         resource.getAttributes().remove(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR);
         return true;
     }

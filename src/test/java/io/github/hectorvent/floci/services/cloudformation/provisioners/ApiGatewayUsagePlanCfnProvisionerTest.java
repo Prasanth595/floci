@@ -644,8 +644,10 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
         assertEquals("platinum", stored.getName());
     }
 
+    // The provisioner does not compare the plan with its snapshot first: a read outside the service's
+    // patch lock could mix two revisions, so it always restores, which is idempotent and runs under it.
     @Test
-    void aRollbackWritesNothingWhenThePlanAlreadyMatchesItsSnapshot() {
+    void aRollbackRestoresThePlanEvenWhenItAlreadyMatchesItsSnapshot() {
         UsagePlan stored = originalPlan();
         storeHolds(stored);
         StackResource r = resource(PLAN, "Plan", "plan-1");
@@ -659,7 +661,8 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(r));
 
-        verify(apiGateway, never()).restoreUsagePlan(any(), any(), any(), any(), any(), anyMap());
+        verify(apiGateway).restoreUsagePlan(REGION, "plan-1", "gold", null, ORIGINAL_LIMITS, Map.of("stack", "v1"));
+        assertOriginal(stored);
         assertFalse(r.getAttributes().containsKey(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR));
     }
 
@@ -779,6 +782,8 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
         StackResource r = resource(PLAN, "Plan", "plan-1");
         provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
         doThrow(NOT_FOUND).when(apiGateway).getUsagePlan(REGION, "plan-1");
+        doThrow(NOT_FOUND).when(apiGateway).restoreUsagePlan(eq(REGION), eq("plan-1"), any(), any(), any(),
+                anyMap());
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
 
