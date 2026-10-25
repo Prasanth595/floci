@@ -1334,33 +1334,21 @@ public class SecretsManagerService implements ResourceProvider {
                     throw new AwsException("InvalidRequestException",
                             "A previous rotation isn't complete. That rotation will be reattempted.", 400);
                 }
+                throwIfManagedRelease(secret.getArn());
+                managedRotationTokens.put(secret.getArn(), managedToken);
+                managedReleases.add(secret.getArn());
             }
-            managedRotator.reserve(secret.getArn(), region);
         }
 
-        boolean managedReservationAcquired = managedToken != null && managedRotator != null;
+        boolean managedReservationAcquired = false;
         try {
+            if (managedToken != null && managedRotator != null) {
+                managedRotator.reserve(secret.getArn(), region);
+                managedReservationAcquired = true;
+            }
             synchronized (lockFor(secret.getArn())) {
                 if (managedToken != null && managedRotator != null) {
-                    Secret latest = resolveSecret(secret.getArn(), region);
-                    SecretVersion existing = latest.getVersions() == null ? null : latest.getVersions().get(managedToken);
-                    if (existing != null) {
-                        throw new AwsException("InvalidRequestException",
-                                "The supplied ClientRequestToken already identifies a completed rotation.", 400);
-                    }
-                    String activeToken = managedRotationTokens.get(secret.getArn());
-                    if (activeToken != null) {
-                        if (activeToken.equals(managedToken)) {
-                            return latest;
-                        }
-                        throw new AwsException("InvalidRequestException",
-                                "A previous rotation isn't complete. That rotation will be reattempted.", 400);
-                    }
-                    if (managedReleases.contains(secret.getArn())) {
-                        throw new AwsException("InvalidRequestException",
-                                "The secret's managed credentials are being released. Try again after the release completes.", 400);
-                    }
-                    secret = latest;
+                    secret = resolveSecret(secret.getArn(), region);
                 }
                 SecretVersion pendingVersion = findVersionByStage(secret, "AWSPENDING");
                 if (pendingVersion != null) {
@@ -1384,12 +1372,15 @@ public class SecretsManagerService implements ResourceProvider {
                 // on success would leave the background sweep retrying it on every tick forever.
                 secret.setNextRotationDate(computeNextRotationDate(secret.getRotationRules(), Instant.now()));
                 persist(secret, region);
-                if (managedToken != null && managedRotator != null) {
-                    managedRotationTokens.put(secret.getArn(), managedToken);
-                    managedReleases.add(secret.getArn());
-                }
             }
         } catch (RuntimeException e) {
+            if (managedToken != null && managedRotator != null) {
+                synchronized (lockFor(secret.getArn())) {
+                    if (managedRotationTokens.remove(secret.getArn(), managedToken)) {
+                        managedReleases.remove(secret.getArn());
+                    }
+                }
+            }
             if (managedReservationAcquired) {
                 managedRotator.release(secret.getArn(), region);
             }

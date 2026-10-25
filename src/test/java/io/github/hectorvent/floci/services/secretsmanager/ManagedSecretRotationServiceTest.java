@@ -11,6 +11,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
@@ -24,10 +27,11 @@ class ManagedSecretRotationServiceTest {
     @Test
     void rotatesOwnerAndPublishesRequestedVersionExactlyOnce() throws Exception {
         AtomicInteger changes = new AtomicInteger();
+        CountDownLatch firstRelease = new CountDownLatch(1);
         ManagedSecretRotator owner = owner(rotation -> rotation.commit(() -> {
             changes.incrementAndGet();
             return "new-password";
-        }, () -> fail("unexpected rollback")));
+        }, () -> fail("unexpected rollback")), firstRelease::countDown);
         SecretsManagerService service = service(owner);
         try {
             Secret original = create(service);
@@ -40,6 +44,7 @@ class ManagedSecretRotationServiceTest {
             assertEquals(previous, service.getSecretValue(original.getArn(), null, "AWSPREVIOUS", REGION).getVersionId());
             service.rotateSecret(original.getArn(), token, null, null, true, REGION);
             assertEquals(1, changes.get());
+            assertTrue(firstRelease.await(5, TimeUnit.SECONDS));
             String secondToken = UUID.randomUUID().toString();
             service.rotateSecret(original.getArn(), secondToken, null, null, true, REGION);
             await(() -> secondToken.equals(service.describeSecret(original.getArn(), REGION).getCurrentVersionId()));
@@ -47,6 +52,114 @@ class ManagedSecretRotationServiceTest {
             service.rotateSecret(original.getArn(), token, null, null, true, REGION);
             assertEquals(secondToken, service.describeSecret(original.getArn(), REGION).getCurrentVersionId());
             assertEquals(2, changes.get());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void sameTokenRetryDuringReservationDoesNotReserveOrRotateTwice() throws Exception {
+        CountDownLatch reserving = new CountDownLatch(1);
+        CountDownLatch finishReservation = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        AtomicInteger reservations = new AtomicInteger();
+        AtomicInteger changes = new AtomicInteger();
+        ManagedSecretRotator owner = new ManagedSecretRotator() {
+            public boolean supports(String arn, String region) {
+                return true;
+            }
+
+            public void reserve(String arn, String region) {
+                if (reservations.incrementAndGet() != 1) {
+                    throw new AwsException("InvalidRequestException", "Owner already reserved", 400);
+                }
+                reserving.countDown();
+                try {
+                    assertTrue(finishReservation.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            }
+
+            public void rotate(String arn, String region, Rotation rotation) {
+                rotation.commit(() -> {
+                    changes.incrementAndGet();
+                    return "new-password";
+                }, () -> fail("unexpected rollback"));
+            }
+
+            public void release(String arn, String region) {
+                released.countDown();
+            }
+        };
+        SecretsManagerService service = service(owner);
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Secret original = create(service);
+            String token = UUID.randomUUID().toString();
+            Future<Secret> first = executor.submit(() -> service.rotateSecret(
+                    original.getArn(), token, null, rules(), true, REGION));
+            try {
+                assertTrue(reserving.await(5, TimeUnit.SECONDS));
+                assertDoesNotThrow(() -> service.rotateSecret(original.getArn(), token, null, rules(), true, REGION));
+                assertThrows(AwsException.class, () -> service.rotateSecret(original.getArn(),
+                        UUID.randomUUID().toString(), null, rules(), true, REGION));
+                assertThrows(AwsException.class, () -> service.putSecretValue(
+                        original.getArn(), "other", null, null, REGION, null));
+            } finally {
+                finishReservation.countDown();
+            }
+            first.get(5, TimeUnit.SECONDS);
+            assertTrue(released.await(5, TimeUnit.SECONDS));
+            assertDoesNotThrow(() -> service.rotateSecret(original.getArn(), token, null, rules(), true, REGION));
+            assertEquals(1, reservations.get());
+            assertEquals(1, changes.get());
+            assertEquals(token, service.describeSecret(original.getArn(), REGION).getCurrentVersionId());
+        } finally {
+            finishReservation.countDown();
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void failedReservationAllowsCredentialUpdatesAndSameTokenRetry() throws Exception {
+        AtomicInteger reservations = new AtomicInteger();
+        AtomicInteger releases = new AtomicInteger();
+        CountDownLatch released = new CountDownLatch(1);
+        SecretsManagerService service = service(new ManagedSecretRotator() {
+            public boolean supports(String arn, String region) {
+                return true;
+            }
+
+            public void reserve(String arn, String region) {
+                if (reservations.incrementAndGet() == 1) {
+                    throw new AwsException("InvalidRequestException", "Owner unavailable", 400);
+                }
+            }
+
+            public void rotate(String arn, String region, Rotation rotation) {
+                rotation.commit(() -> "new-password", () -> fail("unexpected rollback"));
+            }
+
+            public void release(String arn, String region) {
+                releases.incrementAndGet();
+                released.countDown();
+            }
+        });
+        try {
+            Secret original = create(service);
+            String token = UUID.randomUUID().toString();
+            assertThrows(AwsException.class, () -> service.rotateSecret(
+                    original.getArn(), token, null, rules(), true, REGION));
+            assertEquals(0, releases.get());
+            assertFalse(service.describeSecret(original.getArn(), REGION).isRotationEnabled());
+            assertDoesNotThrow(() -> service.putSecretValue(original.getArn(), "updated-password", null, null,
+                    REGION, null));
+            service.rotateSecret(original.getArn(), token, null, rules(), true, REGION);
+            assertTrue(released.await(5, TimeUnit.SECONDS));
+            assertEquals(2, reservations.get());
+            assertEquals(1, releases.get());
+            assertEquals(token, service.describeSecret(original.getArn(), REGION).getCurrentVersionId());
         } finally {
             service.shutdown();
         }
