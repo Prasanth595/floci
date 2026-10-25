@@ -137,6 +137,8 @@ public class LambdaWebIamAuth {
         Map<String, List<String>> context = resourceContext(target);
         context.putAll(IamConditionContextResolver.serviceCallContext(principal, endpointArn, target.accountId(),
                 distributionArn, AwsArnUtils.parse(distributionArn).accountId()));
+        // The endpoint ARN names the home region, not the region that serves.
+        context.put("aws:RequestedRegion", List.of(target.servingRegion()));
         String policy = target.function().policy;
         boolean allowed = evaluator.evaluateServicePrincipal(isBlank(policy) ? null : List.of(policy), principal,
                 ACTION, endpointArn, context) == Decision.ALLOW;

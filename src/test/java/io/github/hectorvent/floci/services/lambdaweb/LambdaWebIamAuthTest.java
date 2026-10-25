@@ -280,10 +280,27 @@ class LambdaWebIamAuthTest {
         assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
     }
 
+    @Test
+    void underEnforcementCloudFrontRequestsTheRegionThatServes() {
+        when(config.services().iam().enforcementEnabled()).thenReturn(true);
+        Map<String, String> signature = iamAuth.cloudFrontSignature(DISTRIBUTION_ARN);
+        String allow = cloudFrontStatement("Allow", "aws:SourceArn", DISTRIBUTION_ARN);
+        function.policy = cloudFrontPolicy(allow, cloudFrontStatement("Deny", "aws:RequestedRegion", "us-west-2"));
+        assertTrue(allowsCloudFront(signature));
+        assertFalse(allowsCloudFront(signature, WEST_HOST, "us-west-2"));
+        function.policy = cloudFrontPolicy(allow, cloudFrontStatement("Deny", "aws:RequestedRegion", "us-east-1"));
+        assertFalse(allowsCloudFront(signature));
+        assertTrue(allowsCloudFront(signature, WEST_HOST, "us-west-2"));
+    }
+
     private boolean allowsCloudFront(Map<String, String> signature) {
-        MultiMap headers = MultiMap.caseInsensitiveMultiMap().add("Host", HOST).addAll(signature);
+        return allowsCloudFront(signature, HOST, "us-east-1");
+    }
+
+    private boolean allowsCloudFront(Map<String, String> signature, String host, String servingRegion) {
+        MultiMap headers = MultiMap.caseInsensitiveMultiMap().add("Host", host).addAll(signature);
         return iamAuth.allows(new Inbound("POST", "/", null, headers, MultiMap.caseInsensitiveMultiMap()),
-                new WebFunctionTarget(ACCOUNT, "us-east-1", function, endpoint, "us-east-1"));
+                new WebFunctionTarget(ACCOUNT, "us-east-1", function, endpoint, servingRegion));
     }
 
     private static String cloudFrontPolicy(String... statements) {
