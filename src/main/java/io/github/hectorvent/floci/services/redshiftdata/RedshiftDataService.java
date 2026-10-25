@@ -1007,8 +1007,13 @@ public class RedshiftDataService implements Resettable {
             // JDBC exposes the first result of an entry; later commands still affect transaction audit state.
             RedshiftDataStatementStore.StoredStatement result = i == 0 ? sub : new RedshiftDataStatementStore.StoredStatement();
             try {
-                runOnConnection(result, connection, commands.get(i), Map.of(), context, execution, false);
-                userChanges.complete(commands.get(i));
+                String command = commands.get(i);
+                if (RedshiftAuditSql.isCommit(command)) {
+                    execution.commit(() -> runOnConnection(result, connection, command, Map.of(), context, execution, false));
+                } else {
+                    runOnConnection(result, connection, command, Map.of(), context, execution, false);
+                }
+                userChanges.complete(command);
             } finally {
                 duration += result.durationNanos;
                 sub.durationNanos = duration;

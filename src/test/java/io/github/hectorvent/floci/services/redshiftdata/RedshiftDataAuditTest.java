@@ -7,9 +7,11 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import org.awaitility.Awaitility;
 import org.h2.Driver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
@@ -17,16 +19,74 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class RedshiftDataAuditTest {
+
+    @ParameterizedTest
+    @CsvSource({"COMMIT,false", "END,false", "COMMIT,true", "END,true",
+            "/* outer /* inner */ comment */ COMMIT WORK,true"})
+    void explicitBatchCommitRejectsCancellationDuringAndAfterCommit(String command, boolean sameEntry) throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            Connection connection = fixture.mockSuccessfulBackend();
+            PreparedStatement create = mock(PreparedStatement.class);
+            PreparedStatement commit = mock(PreparedStatement.class);
+            PreparedStatement tail = mock(PreparedStatement.class);
+            CountDownLatch committing = new CountDownLatch(1);
+            CountDownLatch releaseCommit = new CountDownLatch(1);
+            CountDownLatch runningTail = new CountDownLatch(1);
+            CountDownLatch releaseTail = new CountDownLatch(1);
+            when(connection.prepareStatement(anyString())).thenAnswer(invocation -> {
+                String sql = invocation.getArgument(0);
+                return sql.contains("CREATE USER") ? create : sql.contains("SELECT") ? tail : commit;
+            });
+            when(commit.execute()).thenAnswer(invocation -> {
+                committing.countDown();
+                assertTrue(releaseCommit.await(5, TimeUnit.SECONDS));
+                return false;
+            });
+            when(tail.execute()).thenAnswer(invocation -> {
+                runningTail.countDown();
+                assertTrue(releaseTail.await(5, TimeUnit.SECONDS));
+                return false;
+            });
+            ObjectNode request = fixture.request("unused");
+            request.remove("WaitTimeSeconds");
+            ArrayNode sqls = request.putArray("Sqls").add("CREATE USER alice");
+            if (sameEntry) {
+                sqls.add(command + "; SELECT 1");
+            } else {
+                sqls.add(command).add("SELECT 1");
+            }
+            String id = fixture.service.batchExecuteStatement(request, "us-east-1").path("Id").asText();
+            ObjectNode identifier = fixture.mapper.createObjectNode().put("Id", id);
+            try {
+                assertTrue(committing.await(5, TimeUnit.SECONDS));
+                assertFalse(fixture.service.cancelStatement(identifier).path("Status").asBoolean(),
+                        "cancellation must be rejected while an explicit commit is running");
+                releaseCommit.countDown();
+                assertTrue(runningTail.await(5, TimeUnit.SECONDS));
+                assertFalse(fixture.service.cancelStatement(identifier).path("Status").asBoolean(),
+                        "cancellation must be rejected after an explicit commit succeeds");
+            } finally {
+                releaseCommit.countDown();
+                releaseTail.countDown();
+            }
+            Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertEquals("FINISHED", fixture.service.describeStatement(identifier).path("Status").asText()));
+            assertEquals(List.of("alice"), fixture.loggedUsers());
+        }
+    }
 
     @Test
     void commentedUserDdlProducesUserAndActivityRecords() throws Exception {

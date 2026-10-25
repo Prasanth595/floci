@@ -135,6 +135,11 @@ public final class RedshiftAuditSql {
         return statements;
     }
 
+    public static boolean isCommit(String sql) {
+        List<Token> tokens = tokens(sql);
+        return !tokens.isEmpty() && (tokens.getFirst().keyword("COMMIT") || tokens.getFirst().keyword("END"));
+    }
+
     public static List<UserChange> userChanges(String sql) {
         List<Token> tokens = tokens(sql);
         if (tokens.size() < 3 || !tokens.get(1).keyword("USER")) {
