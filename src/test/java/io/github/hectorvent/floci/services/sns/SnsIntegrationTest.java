@@ -435,7 +435,8 @@ class SnsIntegrationTest {
             .statusCode(200)
             .body("Attributes.SubscriptionArn", equalTo(subscriptionArn))
             .body("Attributes.Protocol", equalTo("sqs"))
-            .body("Attributes.TopicArn", equalTo(topicArn));
+            .body("Attributes.TopicArn", equalTo(topicArn))
+            .body("Attributes", not(hasKey("FilterPolicyScope")));
     }
 
     @Test

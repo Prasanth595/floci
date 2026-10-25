@@ -1498,7 +1498,11 @@ public class SnsService implements Resettable, ResourceProvider {
         attrs.put("RawMessageDelivery", attrs.getOrDefault("RawMessageDelivery", "false"));
         attrs.putIfAbsent("PendingConfirmation", "false");
         attrs.putIfAbsent("ConfirmationWasAuthenticated", "false");
-        attrs.putIfAbsent("FilterPolicyScope", "MessageAttributes");
+        // AWS reports the default scope only alongside a filter policy.
+        String filterPolicy = attrs.get("FilterPolicy");
+        if (filterPolicy != null && !filterPolicy.isEmpty()) {
+            attrs.putIfAbsent("FilterPolicyScope", "MessageAttributes");
+        }
         attrs.remove("ConfirmationToken");
         return attrs;
     }
