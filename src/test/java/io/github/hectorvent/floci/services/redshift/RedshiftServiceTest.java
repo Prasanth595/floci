@@ -711,6 +711,31 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void managedMasterSecretRotationChangesTheClusterAndProxyPassword() throws Exception {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("managed-cluster");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("OldPassword123");
+        cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-managed");
+        cluster.setClusterStatus("available");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "managed-cluster", cluster)));
+
+        AtomicReference<String> secretValue = new AtomicReference<>();
+        assertTrue(service.supports(cluster.getMasterPasswordSecretArn(), "us-east-1"));
+        service.rotate(cluster.getMasterPasswordSecretArn(), "us-east-1", (changeBackend, rollbackBackend) ->
+                secretValue.set(changeBackend.get()));
+
+        verify(cm).alterUserPassword(eq("111111111111"), eq("managed-cluster"), eq("admin"),
+                argThat(password -> !"OldPassword123".equals(password)));
+        verify(proxyManager).updateMasterPassword(eq("111111111111:managed-cluster"),
+                argThat(password -> !"OldPassword123".equals(password)));
+        assertNotNull(secretValue.get());
+        assertEquals(cluster.getMasterPassword(), new ObjectMapper().readTree(secretValue.get())
+                .path("password").asText());
+    }
+
+    @Test
     void managedMasterPasswordRollsBackClusterWhenSecretCreationFails() {
         when(cm.start(eq("111111111111"), eq("failed-managed-cluster"), eq("admin"), anyString()))
                 .thenReturn(new RedshiftContainerHandle("container", "failed-managed-cluster", "localhost", 5432));

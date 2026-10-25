@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotSchedule;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.ManagedSecretRotator;
 import io.github.hectorvent.floci.services.secretsmanager.RandomPasswordGenerator;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -59,7 +60,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class RedshiftService {
+public class RedshiftService implements ManagedSecretRotator {
     private static final Logger LOG = Logger.getLogger(RedshiftService.class);
 
     // The group every cluster starts on until one is named.
@@ -890,6 +891,47 @@ public class RedshiftService {
         } catch (RuntimeException e) {
             throw new AwsException("InternalFailure", "Failed to encode managed master secret", 500);
         }
+    }
+
+    @Override
+    public boolean supports(String secretArn, String region) {
+        if (!AwsArnUtils.isArn(secretArn) || !region.equals(AwsArnUtils.parse(secretArn).region())) {
+            return false;
+        }
+        return clusters.scanAllAccountEntries(key -> true).stream()
+                .anyMatch(entry -> secretArn.equals(entry.value().getMasterPasswordSecretArn()));
+    }
+
+    @Override
+    public void rotate(String secretArn, String region, ManagedSecretRotator.Rotation rotation) {
+        AccountAwareStorageBackend.AccountEntry<Cluster> entry = clusters.scanAllAccountEntries(key -> true).stream()
+                .filter(candidate -> secretArn.equals(candidate.value().getMasterPasswordSecretArn()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The Redshift cluster for this managed secret no longer exists.", 400));
+        Cluster cluster = entry.value();
+        if (!"available".equals(cluster.getClusterStatus())) {
+            throw new AwsException("InvalidRequestException",
+                    "The Redshift cluster must be available to rotate its master password.", 400);
+        }
+        String oldPassword = cluster.getMasterPassword();
+        String newPassword = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
+        rotation.commit(() -> {
+            containerManager.alterUserPassword(entry.accountId(), cluster.getClusterIdentifier(),
+                    cluster.getMasterUsername(), newPassword);
+            proxyManager.updateMasterPassword(relayKey(entry.accountId(), cluster.getClusterIdentifier()), newPassword);
+            cluster.setMasterPassword(newPassword);
+            clusters.putForAccount(entry.accountId(), cluster.getClusterIdentifier(), cluster);
+            clusters.flush();
+            return managedMasterSecret(cluster, newPassword);
+        }, () -> {
+            containerManager.alterUserPassword(entry.accountId(), cluster.getClusterIdentifier(),
+                    cluster.getMasterUsername(), oldPassword);
+            proxyManager.updateMasterPassword(relayKey(entry.accountId(), cluster.getClusterIdentifier()), oldPassword);
+            cluster.setMasterPassword(oldPassword);
+            clusters.putForAccount(entry.accountId(), cluster.getClusterIdentifier(), cluster);
+            clusters.flush();
+        });
     }
 
     public Cluster describeLoggingStatus(String clusterIdentifier) {

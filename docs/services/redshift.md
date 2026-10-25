@@ -269,7 +269,9 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 - `ManageMasterPassword` creates a Redshift-owned Secrets Manager secret. The secret contains the
   managed username, password, endpoint, port, and database name. `MasterPasswordSecretKmsKeyId`
   selects the KMS key used for the secret metadata and is validated through KMS. Switching managed
-  password mode or its KMS key in place is not implemented.
+  password mode or its KMS key in place is not implemented. `RotateSecret` and scheduled rotation
+  update both the cluster's master password and its secret value; rotation requires an available
+  cluster and does not use a Lambda function.
 - Snapshot restoration has the same limitations as `RestoreFromClusterSnapshot`: snapshots are
   local SQL dumps, not cross-account backups or a full Redshift engine image.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
@@ -695,5 +697,6 @@ These views expose the documented Redshift column names, types, and ordering map
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
 - A cluster using `ManageMasterPassword` keeps its generated password in sync with the
   Redshift-owned Secrets Manager secret. Updating `MasterUserPassword` through `ModifyCluster`
-  updates the current secret version as well.
+  updates the current secret version as well. Service-managed `RotateSecret` and scheduled rotation
+  change the backend password and publish the matching secret version without invoking Lambda.
 - IAM database authentication over the wire, and `sslmode=verify-full` against the self-signed proxy certificate.
