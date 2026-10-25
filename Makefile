@@ -59,7 +59,7 @@ PREFIX ?= $(HOME)/.local
 
 .DEFAULT_GOAL := help
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
-        docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test \
+        docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test rename-test \
         slr-check slr-table slr-audit slr-test \
         aws-data-sync aws-data-check aws-data-test \
         iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
@@ -197,6 +197,9 @@ partition-audit: ## Print the per-package table of remaining partition literals
 
 partition-test: ## Run the partition tooling's unit tests
 	$(PYTHON) -m pytest tools/partition -q
+
+rename-test: ## Run the package rename tool's unit tests (tools/rename, reuses the partition lexer)
+	$(PYTHON) -m pytest tools/rename -q
 
 slr-check: ## CI gate: the service-linked role table must match the vendored AWS data
 	@$(PYTHON) tools/slr/service_linked_roles.py --check || { \
