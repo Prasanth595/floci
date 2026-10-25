@@ -21,6 +21,8 @@ import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import javax.crypto.Cipher;
@@ -47,6 +49,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -334,6 +337,61 @@ class CognitoCustomEmailSenderTest {
         assertEquals("Unable to encrypt CustomEmailSender/CustomSMSSender code using the configured KMS Key",
                 pending.getMessage());
         verify(lambda, never()).invoke(anyString(), anyString(), any(byte[].class), any());
+    }
+
+    /** The disabled-key capture on #6207 keeps the whole update, in either attribute order. */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aKeyThatCannotEncryptKeepsTheWholeAttributeUpdate(boolean emailFirst) {
+        UserPool pool = pool(Map.of("KMSKeyID", keyArn, "CustomEmailSender", sender()), List.of("email"));
+        UserPoolClient client = client(pool);
+        service.adminCreateUser(pool.getId(), "alice",
+                Map.of("email", "alice@example.com", "email_verified", "true", "name", "Original"), null);
+        service.adminSetUserPassword(pool.getId(), "alice", "Passw0rd!", true);
+        String token = signIn(client, "alice", "Passw0rd!");
+        kms.disableKey(keyArn, REGION);
+        Map<String, String> attributes = new LinkedHashMap<>();
+        if (emailFirst) {
+            attributes.put("email", "alice@example.org");
+        }
+        attributes.put("name", "Renamed");
+        if (!emailFirst) {
+            attributes.put("email", "alice@example.org");
+        }
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> service.updateUserAttributes(token, attributes));
+
+        Map<String, String> stored = service.adminGetUser(pool.getId(), "alice").getAttributes();
+        assertAll(
+                () -> assertEquals("CodeDeliveryFailureException", failure.getErrorCode()),
+                () -> assertEquals("Caller needs to enable the configured KMS Key", failure.getMessage()),
+                () -> assertEquals("alice@example.org", stored.get("email")),
+                () -> assertEquals("false", stored.get("email_verified")),
+                () -> assertEquals("Renamed", stored.get("name")));
+    }
+
+    @Test
+    void anUndeliveredAttributeUpdateCodeCanBeRequestedAgain() throws Exception {
+        UserPool pool = pool(Map.of("KMSKeyID", keyArn, "CustomEmailSender", sender()), List.of("email"));
+        UserPoolClient client = client(pool);
+        service.adminCreateUser(pool.getId(), "alice",
+                Map.of("email", "alice@example.com", "email_verified", "true"), null);
+        service.adminSetUserPassword(pool.getId(), "alice", "Passw0rd!", true);
+        String token = signIn(client, "alice", "Passw0rd!");
+        kms.disableKey(keyArn, REGION);
+        assertThrows(AwsException.class,
+                () -> service.updateUserAttributes(token, Map.of("email", "alice@example.org")));
+        kms.enableKey(keyArn, REGION);
+
+        service.getUserAttributeVerificationCode(token, "email");
+
+        Map<String, Object> verification = senderEvent();
+        assertEquals("CustomEmailSender_VerifyUserAttribute", verification.get("triggerSource"));
+        assertEquals("alice@example.org",
+                ((Map<?, ?>) request(verification).get("userAttributes")).get("email"));
+        service.verifyUserAttribute(token, "email", decrypt(request(verification)).plaintext());
+        assertEquals("true", service.adminGetUser(pool.getId(), "alice").getAttributes().get("email_verified"));
     }
 
     /**
