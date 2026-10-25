@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Clock;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,7 +29,7 @@ class StepFunctionsListExecutionsFilterTest {
     @BeforeEach
     void setUp() {
         service = mock(StepFunctionsService.class);
-        handler = new StepFunctionsJsonHandler(service, mapper);
+        handler = new StepFunctionsJsonHandler(service, mapper, Clock.systemUTC());
         when(service.listExecutions(ARN)).thenReturn(
                 List.of("RUNNING", "SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED").stream()
                         .map(status -> {
