@@ -133,6 +133,7 @@ public class LambdaWebService implements Resettable {
     private static final String DOMAIN_SHARD = "001";
     private static final int DOMAIN_ID_LENGTH = 16;
     private static final int DEFAULT_PAGE_SIZE = 50;
+    static final int REVISION_CLEANUP_TARGET = 50;
     private static final String LOWERCASE_ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
 
     private final RegionResolver regionResolver;
@@ -444,10 +445,41 @@ public class LambdaWebService implements Resettable {
                     endpoint.updatedAt = now();
                 }
             }
+            List<String> cleanedUp = revision.failureReason == null ? cleanUpRevisions(fn, revision) : List.of();
             fn.updatedAt = now();
             persist(region, fn);
+            String accountId = AwsArnUtils.parse(fn.functionArn).accountId();
+            cleanedUp.forEach(id -> code.deleteRevision(accountId, region, functionName, id));
             return copy(revision, WebFunctionRevision.class);
         }
+    }
+
+    /**
+     * AWS deletes the oldest revisions that no endpoint uses, Failed ones too, once one becomes Active
+     * while the function has more than 50.
+     */
+    private static List<String> cleanUpRevisions(WebFunction fn, WebFunctionRevision activated) {
+        List<WebFunctionRevision> unused = fn.revisions.values().stream()
+                .filter(r -> r != activated && endpointsUsing(fn, r.revisionId).isEmpty())
+                .sorted(Comparator.comparing((WebFunctionRevision r) -> r.createdAt))
+                .toList();
+        List<String> deleted = new ArrayList<>();
+        for (WebFunctionRevision old : unused) {
+            if (fn.revisions.size() <= REVISION_CLEANUP_TARGET) {
+                break;
+            }
+            fn.revisions.remove(old.revisionId);
+            deleted.add(old.revisionId);
+        }
+        return deleted;
+    }
+
+    private static List<String> endpointsUsing(WebFunction fn, String revisionId) {
+        return fn.endpoints.values().stream()
+                .filter(e -> e.revisionWeights.stream().anyMatch(w -> w.revisionId.equals(revisionId)))
+                .map(e -> e.endpointName)
+                .sorted()
+                .toList();
     }
 
     public WebFunctionRevision getRevision(String region, String functionNameOrArn, String revisionIdOrArn) {
@@ -485,11 +517,7 @@ public class LambdaWebService implements Resettable {
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             WebFunctionRevision revision = revision(fn, revisionId);
-            List<String> using = fn.endpoints.values().stream()
-                    .filter(e -> e.revisionWeights.stream().anyMatch(w -> w.revisionId.equals(revision.revisionId)))
-                    .map(e -> e.endpointName)
-                    .sorted()
-                    .toList();
+            List<String> using = endpointsUsing(fn, revision.revisionId);
             if (!using.isEmpty()) {
                 throw new AwsException("ConflictException", "The revision " + revision.revisionId
                         + " cannot be deleted because the endpoints " + using

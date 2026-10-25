@@ -751,4 +751,40 @@ class LambdaWebIntegrationTest {
 
         given().when().delete(BASE + "/web-functions/" + fn).then().statusCode(204);
     }
+
+    @Test
+    @Order(13)
+    void anActiveRevisionPastFiftyDeletesTheOldestUnusedOne() {
+        String fn = FN + "-many";
+        String first = given().contentType("application/json")
+                .body("""
+                        {"functionName": "%s",
+                         "revisionConfig": {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s"}},
+                         "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
+                                            "authType": "ApplicationManaged", "autoDeploymentMode": "LatestRevision"}}
+                        """.formatted(fn, BUILD, ROLE))
+                .when().put(BASE + "/web-functions")
+                .then().statusCode(202)
+                .extract().path("revision.revisionId");
+        String revision = """
+                {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s"}}
+                """.formatted(BUILD, ROLE);
+        for (int i = 0; i < 50; i++) {
+            given().contentType("application/json").body(revision)
+                    .when().post(BASE + "/web-functions/" + fn + "/revisions")
+                    .then().statusCode(202);
+        }
+
+        given().contentType("application/json").body("{}")
+                .when().post(BASE + "/web-functions/" + fn + "/list-revisions")
+                .then().statusCode(200)
+                .body("revisions", hasSize(50))
+                .body("nextToken", nullValue());
+        given().when().get(BASE + "/web-functions/" + fn + "/revisions/" + first)
+                .then().statusCode(404)
+                .header("X-Amzn-Errortype", "ResourceNotFoundException")
+                .body("message", equalTo("The revision " + first + " does not exist."));
+
+        given().when().delete(BASE + "/web-functions/" + fn).then().statusCode(204);
+    }
 }
