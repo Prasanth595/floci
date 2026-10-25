@@ -149,6 +149,23 @@ class ElbV2ServiceTest {
         verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
     }
 
+    /**
+     * A {@code Type} outside the model's enum is refused, as AWS refuses it, before anything is looked up or
+     * stored, rather than read as an Application Load Balancer.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"other", "Application", ""})
+    void aLoadBalancerOfATypeOutsideTheEnumIsRefused(String type) {
+        AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
+                "unknown-type", null, type, null, List.of("subnet-a", "subnet-b"), List.of(), Map.of()));
+        assertEquals("ValidationError", refusal.getErrorCode());
+        assertEquals("1 validation error detected: Value '" + type + "' at 'type' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [application, network, gateway]", refusal.getMessage());
+        assertEquals(400, refusal.getHttpStatus());
+        assertTrue(service.describeLoadBalancers(REGION, null, null, null, null).isEmpty());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
+    }
+
     /** A Network or Gateway Load Balancer can be in a single Availability Zone. */
     @ParameterizedTest
     @ValueSource(strings = {"network", "gateway"})
