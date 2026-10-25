@@ -2515,6 +2515,36 @@ class LambdaServiceTest {
     }
 
     @Test
+    void asyncReactiveSync_deploysAnUploadToANewSourceWhileTheOldOneIsStillQueued() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
+                reactiveS3SyncConfig(true, true));
+        String name = "reactive-new-source-" + UUID.randomUUID();
+        when(s3.openObject("code-bucket", "old.zip", null)).thenReturn(heldObject(zipWithBody("v1")));
+        when(s3.openObject("code-bucket", "new.zip", null))
+                .thenReturn(heldObject(zipWithBody("v2")))
+                .thenReturn(heldObject(zipWithBody("v3")));
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "old.zip"));
+        LambdaFunction latest = syncingService.createFunction(REGION, request);
+
+        // Holding the function's lock keeps the old source's sync queued behind it.
+        synchronized (syncingService.lockForConcurrencyOp(latest.getFunctionArn())) {
+            syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "old.zip"));
+            syncingService.updateFunctionCode(REGION, name, Map.of("S3Bucket", "code-bucket", "S3Key", "new.zip"));
+            syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "new.zip"));
+            assertEquals("InProgress", syncingService.lastUpdateStatus(latest));
+        }
+
+        verify(warmPool, timeout(5000)).pushCodeUpdate(latest);
+        awaitLastUpdateStatus(syncingService, latest, "Successful");
+        verify(s3, times(1)).openObject("code-bucket", "old.zip", null);
+        verify(s3, times(2)).openObject("code-bucket", "new.zip", null);
+        assertEquals("v3", Files.readString(Path.of(latest.getCodeLocalPath()).resolve("index.js")).trim());
+    }
+
+    @Test
     void failedReactiveSync_reportsFailedUntilTheNextCodeUpdate() throws Exception {
         S3Service s3 = mock(S3Service.class);
         WarmPool warmPool = mock(WarmPool.class);

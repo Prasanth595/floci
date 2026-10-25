@@ -187,8 +187,8 @@ public class LambdaService implements ResourceProvider {
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     private final StorageFactory storageFactory;
     private final LambdaLayerService layerService;
-    private final Set<String> queuedReactiveSyncs = ConcurrentHashMap.newKeySet();
-    private final Set<String> runningReactiveSyncs = ConcurrentHashMap.newKeySet();
+    private final Map<String, PendingReactiveSync> pendingReactiveSyncs = new ConcurrentHashMap<>();
+    private final Map<String, Integer> runningReactiveSyncs = new ConcurrentHashMap<>();
     private final Map<String, String> failedReactiveSyncs = new ConcurrentHashMap<>();
     private final Ec2Service ec2Service;
     /** Null in the constructors tests use, exactly as the other optional collaborators above are. */
@@ -4169,54 +4169,75 @@ public class LambdaService implements ResourceProvider {
                 syncFromS3(fn, event.bucketName(), event.key(), region);
                 continue;
             }
-            // A queued sync reads the object when it starts, so it already covers this upload.
+            // The newest upload replaces any source still waiting, and a queued sync reads its object
+            // when it starts, so one queued sync per function covers every upload before it. The
+            // uploader's account goes with it: S3 resolves the bucket in the caller's account, and
+            // the background thread has no request of its own.
             String functionArn = fn.getFunctionArn();
-            if (queuedReactiveSyncs.add(functionArn)) {
-                String accountId = ownerAccount(fn);
+            PendingReactiveSync source = new PendingReactiveSync(regionResolver.getAccountId(),
+                    event.bucketName(), event.key());
+            if (pendingReactiveSyncs.put(functionArn, source) == null) {
+                String ownerAccountId = ownerAccount(fn);
                 String functionName = fn.getFunctionName();
-                REACTIVE_SYNC_THREADS.execute(() -> syncQueued(accountId, region, functionName, functionArn,
-                        event.bucketName(), event.key()));
+                REACTIVE_SYNC_THREADS.execute(() -> syncQueued(ownerAccountId, region, functionName, functionArn));
             }
         }
     }
 
     /** Re-reads the function, which may have been redeployed or deleted while the sync was queued. */
-    private void syncQueued(String accountId, String region, String functionName, String functionArn,
-                            String bucketName, String key) {
-        synchronized (lockForConcurrencyOp(functionArn)) {
-            queuedReactiveSyncs.remove(functionArn);
-            functionStore.getForAccount(accountId, region, functionName)
-                    .ifPresent(fn -> syncFromS3(fn, bucketName, key, region));
+    private void syncQueued(String ownerAccountId, String region, String functionName, String functionArn) {
+        // Marked running before the pending source is taken, so the function never reports neither.
+        runningReactiveSyncs.merge(functionArn, 1, Integer::sum);
+        try {
+            synchronized (lockForConcurrencyOp(functionArn)) {
+                PendingReactiveSync source = pendingReactiveSyncs.remove(functionArn);
+                if (source == null) {
+                    return;
+                }
+                RequestScopes.runAs(source.accountId(), () ->
+                        functionStore.getForAccount(ownerAccountId, region, functionName)
+                                .ifPresent(fn -> deployFromS3(fn, source.bucketName(), source.key(), region)));
+            }
+        } finally {
+            runningReactiveSyncs.computeIfPresent(functionArn, (arn, count) -> count == 1 ? null : count - 1);
         }
     }
 
     private void syncFromS3(LambdaFunction fn, String bucketName, String key, String region) {
-        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
-            if (fn.isHotReload()) {
-                return;
+        String functionArn = fn.getFunctionArn();
+        runningReactiveSyncs.merge(functionArn, 1, Integer::sum);
+        try {
+            synchronized (lockForConcurrencyOp(functionArn)) {
+                deployFromS3(fn, bucketName, key, region);
             }
-            if (bucketName.equals(fn.getS3Bucket()) && key.equals(fn.getS3Key())) {
-                LOG.infov("Reactive S3 Sync: updating function {0} from s3://{1}/{2}",
-                        fn.getFunctionName(), bucketName, key);
-                runningReactiveSyncs.add(fn.getFunctionArn());
-                try {
-                    try (DeploymentPackage zip = readS3Package(fn, bucketName, key, region)) {
-                        extractZipCodePackage(fn, zip, region);
-                    }
-                    fn.setLastModified(Instant.now().toEpochMilli());
-                    fn.setRevisionId(UUID.randomUUID().toString());
-                    functionStore.saveForAccount(ownerAccount(fn), region, fn);
+        } finally {
+            runningReactiveSyncs.computeIfPresent(functionArn, (arn, count) -> count == 1 ? null : count - 1);
+        }
+    }
 
-                    // Push to warm workers
-                    warmPool.pushCodeUpdate(fn);
-                    failedReactiveSyncs.remove(fn.getFunctionArn());
-                } catch (Exception e) {
-                    LOG.warnv("Failed reactive sync for function {0}: {1}", fn.getFunctionName(), e.getMessage());
-                    failedReactiveSyncs.put(fn.getFunctionArn(), "Reactive S3 sync from s3://" + bucketName
-                            + "/" + key + " failed: " + e.getMessage());
-                } finally {
-                    runningReactiveSyncs.remove(fn.getFunctionArn());
+    /** Callers hold the function's lock. */
+    private void deployFromS3(LambdaFunction fn, String bucketName, String key, String region) {
+        if (fn.isHotReload()) {
+            return;
+        }
+        if (bucketName.equals(fn.getS3Bucket()) && key.equals(fn.getS3Key())) {
+            LOG.infov("Reactive S3 Sync: updating function {0} from s3://{1}/{2}",
+                    fn.getFunctionName(), bucketName, key);
+            try {
+                try (DeploymentPackage zip = readS3Package(fn, bucketName, key, region)) {
+                    extractZipCodePackage(fn, zip, region);
                 }
+                fn.setLastModified(Instant.now().toEpochMilli());
+                fn.setRevisionId(UUID.randomUUID().toString());
+                functionStore.saveForAccount(ownerAccount(fn), region, fn);
+
+                // Push to warm workers
+                warmPool.pushCodeUpdate(fn);
+                failedReactiveSyncs.remove(fn.getFunctionArn());
+            } catch (Exception e) {
+                LOG.warnv("Failed reactive sync for function {0}: {1}", fn.getFunctionName(), e.getMessage());
+                failedReactiveSyncs.put(fn.getFunctionArn(), "Reactive S3 sync from s3://" + bucketName
+                        + "/" + key + " failed: " + e.getMessage());
             }
         }
     }
@@ -4231,7 +4252,8 @@ public class LambdaService implements ResourceProvider {
             return "Successful";
         }
         String functionArn = fn.getFunctionArn();
-        if (queuedReactiveSyncs.contains(functionArn) || runningReactiveSyncs.contains(functionArn)) {
+        // Pending first: a sync marks itself running before it takes the pending source.
+        if (pendingReactiveSyncs.containsKey(functionArn) || runningReactiveSyncs.containsKey(functionArn)) {
             return "InProgress";
         }
         return failedReactiveSyncs.containsKey(functionArn) ? "Failed" : "Successful";
@@ -4248,5 +4270,8 @@ public class LambdaService implements ResourceProvider {
 
     private boolean reactiveS3SyncAsync() {
         return config != null && config.services().lambda().reactiveS3Sync().async();
+    }
+
+    private record PendingReactiveSync(String accountId, String bucketName, String key) {
     }
 }
