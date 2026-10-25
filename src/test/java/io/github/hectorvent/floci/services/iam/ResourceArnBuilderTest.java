@@ -1368,9 +1368,9 @@ class ResourceArnBuilderTest {
     /**
      * A {@code ReEncrypt} never reads a {@code KeyId}: its source is the key that encrypted the
      * ciphertext when the request names no {@code SourceKeyId}, so a {@code KeyId} naming
-     * another key cannot choose the key the request is authorized against. This is the gap the
-     * review on the enforcement PR describes: a caller allowed on the claimed key only submits
-     * another key's ciphertext and has it re-encrypted under the allowed one.
+     * another key cannot choose the key the request is authorized against. A caller allowed
+     * on the claimed key only could otherwise submit another key's ciphertext and have it
+     * re-encrypted under the allowed one.
      */
     @Test
     void kmsReEncryptNamesTheSourceTheHandlerDecryptsWithNotAKeyId() {

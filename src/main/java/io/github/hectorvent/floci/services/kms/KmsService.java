@@ -601,10 +601,7 @@ public class KmsService implements ResourceProvider {
 
         // Token-based retirement: scan all grants in the region for matching token
         if (hasToken) {
-            String prefix = region + "::";
-            KmsGrant found = grantStore.scan(k -> k.startsWith(prefix)).stream()
-                    .filter(g -> grantToken.equals(g.getGrantToken()))
-                    .findFirst()
+            KmsGrant found = findGrantByToken(grantToken, region)
                     .orElseThrow(() -> new AwsException("NotFoundException",
                             "Grant not found for the given grant token", 400));
 
@@ -2231,10 +2228,7 @@ public class KmsService implements ResourceProvider {
      */
     public Optional<String> findGrantKeyArn(String grantToken, String grantId, String region) {
         if (grantToken != null && !grantToken.isBlank()) {
-            String prefix = region + "::";
-            return grantStore.scan(k -> k.startsWith(prefix)).stream()
-                    .filter(grant -> grantToken.equals(grant.getGrantToken()))
-                    .findFirst()
+            return findGrantByToken(grantToken, region)
                     .map(KmsGrant::getKeyArn)
                     .filter(arn -> !arn.isBlank());
         }
@@ -2244,6 +2238,14 @@ public class KmsService implements ResourceProvider {
         return grantStore.get(region + "::" + grantId)
                 .map(KmsGrant::getKeyArn)
                 .filter(arn -> !arn.isBlank());
+    }
+
+    /** The grant a token names in a region, from the same scan the token-based retirement uses. */
+    private Optional<KmsGrant> findGrantByToken(String grantToken, String region) {
+        String prefix = region + "::";
+        return grantStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(grant -> grantToken.equals(grant.getGrantToken()))
+                .findFirst();
     }
 
     /**

@@ -142,10 +142,10 @@ class KmsKeyArnEnforcementIntegrationTest {
     }
 
     /**
-     * The review's attack on ReEncrypt: a caller allowed on one key submits ciphertext another,
-     * denied key encrypted and carries a KeyId naming the allowed one, which the handler never
-     * reads. The source the request is authorized against is the key that encrypted the
-     * ciphertext, so the denied key's data does not come out re-encrypted under the allowed one.
+     * A caller allowed on one key submits ciphertext another, denied key encrypted and
+     * carries a KeyId naming the allowed one, which the handler never reads. The source the
+     * request is authorized against is the key that encrypted the ciphertext, so the denied
+     * key's data does not come out re-encrypted under the allowed one.
      */
     @Test
     void aReEncryptIsAuthorizedAgainstTheKeyThatEncryptedTheCiphertextNotAKeyIdItCarries() {

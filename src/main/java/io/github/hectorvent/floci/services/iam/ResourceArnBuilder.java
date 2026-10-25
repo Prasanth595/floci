@@ -1761,14 +1761,14 @@ public class ResourceArnBuilder {
                                              String partition) {
         String grantToken = body.path("GrantToken").asText(null);
         if (grantToken != null && !grantToken.isBlank()) {
-            String grantKey = grantKeyArn(body, region);
+            String grantKey = grantKeyArn(grantToken, body.path("GrantId").asText(null), region);
             return grantKey == null
                     ? List.of(keyWildcard(region, accountId, partition))
                     : List.of(grantKey);
         }
         Set<String> resources = new LinkedHashSet<>();
         resources.add(keyTarget(body, "KeyId", region, accountId, partition));
-        String grantKey = grantKeyArn(body, region);
+        String grantKey = grantKeyArn(grantToken, body.path("GrantId").asText(null), region);
         if (grantKey != null) {
             resources.add(grantKey);
         }
@@ -1779,17 +1779,15 @@ public class ResourceArnBuilder {
      * The keys a {@code RevokeGrant} acts on: the key its {@code KeyId} names, which the
      * handler resolves, and the key the grant its {@code GrantId} names belongs to, which the
      * handler deletes. They coincide for a request naming a grant on its own key, and naming
-     * both closes the pair that names one key while revoking another key's grant.
+     * both closes the pair that names one key while revoking another key's grant. The
+     * handler never reads a {@code GrantToken} on {@code RevokeGrant}, so the grant resolves
+     * by its {@code GrantId} alone.
      */
     private List<String> revokeGrantTargets(JsonNode body, String region, String accountId,
                                              String partition) {
         Set<String> resources = new LinkedHashSet<>();
         resources.add(keyTarget(body, "KeyId", region, accountId, partition));
-        String grantKey = kmsService == null
-                ? null
-                : kmsService.get()
-                        .findGrantKeyArn(null, body.path("GrantId").asText(null), region)
-                        .orElse(null);
+        String grantKey = grantKeyArn(null, body.path("GrantId").asText(null), region);
         if (grantKey != null) {
             resources.add(grantKey);
         }
@@ -1797,13 +1795,12 @@ public class ResourceArnBuilder {
     }
 
     /** The stored ARN of the key the request's grant belongs to, or null when none resolves. */
-    private String grantKeyArn(JsonNode body, String region) {
+    private String grantKeyArn(String grantToken, String grantId, String region) {
         if (kmsService == null) {
             return null;
         }
         return kmsService.get()
-                .findGrantKeyArn(body.path("GrantToken").asText(null),
-                        body.path("GrantId").asText(null), region)
+                .findGrantKeyArn(grantToken, grantId, region)
                 .orElse(null);
     }
 
