@@ -5057,7 +5057,8 @@ public class DynamoDbService {
         Map<String, JsonNode> liveItems = tableItems != null ? tableItems : Map.of();
         List<JsonNode> snapshot = incrementalExport
                 ? DynamoDbExportRecords.records(pointInTimeRecovery.changesBetween(regionResolver.getAccountId(),
-                        storageKey, liveItems, exportFromTime, exportToTime), table,
+                        storageKey, liveItems, exportFromTime, exportToTime,
+                        (itemKey, read) -> withItemLock(storageKey, itemKey, read)), table,
                         "NEW_IMAGE".equals(incremental.viewType()))
                 : pointInTimeRecovery.itemsAt(regionResolver.getAccountId(), storageKey, liveItems, time);
 
