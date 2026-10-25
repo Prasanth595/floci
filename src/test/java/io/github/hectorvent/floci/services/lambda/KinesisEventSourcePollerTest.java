@@ -705,6 +705,64 @@ class KinesisEventSourcePollerTest {
         assertEquals(2, record.at("/requestContext/approximateInvokeCount").asInt());
     }
 
+    /**
+     * "BisectBatchOnFunctionError, which splits a failed batch into two smaller batches, isolating bad records
+     * [...] Splitting batches doesn't consume the retry quota." With no retries left, only the bad record is
+     * discarded; the records around it are delivered.
+     */
+    @Test
+    void bisectingSplitsAFailedBatchUntilOnlyTheBadRecordIsDiscarded() throws Exception {
+        stubShard("s1", "s2", "s3", "s4");
+        List<byte[]> events = failInvocationsContaining("s3");
+        EventSourceMapping esm = esmWithOnFailure(0, QUEUE_ARN);
+        esm.setBisectBatchOnFunctionError(true);
+
+        for (int poll = 0; poll < 5; poll++) {
+            pollOnce(esm);
+        }
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1", "s2"), List.of("s3", "s4"),
+                List.of("s3"), List.of("s4")), invokedSequences(events));
+        assertEquals("s4", checkpoint(esm));
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqsService, times(1)).sendMessage(eq(QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        JsonNode record = MAPPER.readTree(body.getValue());
+        assertEquals("RetryAttemptsExhausted", record.at("/requestContext/condition").asText());
+        assertEquals(1, record.at("/requestContext/approximateInvokeCount").asInt());
+        assertBatchInfo(record, "s3", "s3", "2026-10-20T12:07:28.012Z", "2026-10-20T12:07:28.012Z", 1);
+    }
+
+    @Test
+    void aFailedBatchIsNotSplitWithoutBisectBatchOnFunctionError() throws Exception {
+        stubShard("s1", "s2", "s3", "s4");
+        List<byte[]> events = failInvocationsContaining("s3");
+        EventSourceMapping esm = esmWithOnFailure(0, QUEUE_ARN);
+
+        pollOnce(esm);
+
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4")), invokedSequences(events));
+        assertEquals("s4", checkpoint(esm), "the whole batch is discarded");
+    }
+
+    @Test
+    void aBatchOlderThanMaximumRecordAgeIsDiscardedRatherThanSplit() throws Exception {
+        stubShard("s1", "s2");
+        List<byte[]> events = failInvocationsContaining("s2");
+        EventSourceMapping esm = esmWithOnFailure(null, QUEUE_ARN);
+        esm.setBisectBatchOnFunctionError(true);
+        esm.setMaximumRecordAgeInSeconds(60);
+        clock.set(FIRST_ARRIVAL.plusSeconds(61).toEpochMilli());
+
+        pollOnce(esm);
+
+        assertEquals(1, events.size());
+        assertEquals("s2", checkpoint(esm));
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqsService, times(1)).sendMessage(eq(QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        assertEquals("MaximumRecordAgeExceeded",
+                MAPPER.readTree(body.getValue()).at("/requestContext/condition").asText());
+    }
+
     @Test
     void failedBatchIsNotRetriedBeforeItsDoublingBackoffElapses() throws Exception {
         stubShard("s1");
