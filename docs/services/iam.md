@@ -154,6 +154,23 @@ outside 1 to 1000. `PathPrefix` and `Scope` filter before paging, and roles and 
 policies are listed in name order so a `Marker` resumes where the previous page stopped.
 `ListPolicies` does not yet apply `OnlyAttached` or `PolicyUsageFilter`.
 
+The declared constraints on the managed-policy family are read from the model rather than from a
+hand-written check, `tools/aws/regen_iam_shapes.py` vendoring them for `GetPolicy`, `DeletePolicy`,
+`CreatePolicyVersion`, `GetPolicyVersion`, `DeletePolicyVersion`, `SetDefaultPolicyVersion` and the
+six attach and detach operations. A `PolicyArn` is held to `arnType`'s 20 to 2048 characters, a
+`VersionId` to `policyVersionIdType`'s pattern, a `PolicyDocument` to its 1 to 131072 characters and
+its pattern, and each principal name to its own bound, which for a role is the 1 to 64 characters of
+`[\w+=,.@-]` this service already answered. The check runs ahead of the operation, so a value that
+breaks a constraint is a 400 `ValidationError` where it used to reach the store and answer
+`NoSuchEntity` 404, the ordering the rest of this package already follows. A member sent empty is a
+member the request carries, so it breaks its own constraints rather than reading as absent, and a
+member breaking two of them is reported twice, as a `ServiceSpecificCredentialId` breaking both of
+its own already is. That is the one place the wording moves rather than only the status: a name sent
+empty breaks its minimum and its pattern at once, so these operations report both, where the
+hand-written check the rest of the service still uses stops at the first and reports the minimum
+alone. A boolean member publishes no constraint to hold it to, so a `SetAsDefault` that is neither
+`true` nor `false` reaches the operation, which reads anything but `true` as false.
+
 ### Permission Boundaries
 
 | Action | Description |

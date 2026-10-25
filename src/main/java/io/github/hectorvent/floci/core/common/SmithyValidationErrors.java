@@ -104,6 +104,12 @@ public final class SmithyValidationErrors {
                 + "Member must have length greater than or equal to " + min;
     }
 
+    /** The violation for a string that does not match the pattern its shape declares. */
+    public static String pattern(String path, String value, String pattern) {
+        return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: " + pattern;
+    }
+
     /** The violation for a value outside its enum, listing the allowed values in the model's order. */
     public static String notInEnum(String value, String path, List<String> allowed) {
         return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: "
