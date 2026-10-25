@@ -22,12 +22,14 @@ import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
 import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -47,11 +49,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.endsWith;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -61,6 +68,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class DynamoDbServiceTest {
+
+    private static final String USERS_ARN = "arn:aws:dynamodb:us-east-1:000000000000:table/Users";
 
     private DynamoDbService service;
     private ObjectMapper mapper;
@@ -4504,6 +4513,90 @@ class DynamoDbServiceTest {
 
         assertEquals("TableNotFoundException", e.getErrorCode());
         assertEquals("Table not found: " + tableArn, e.getMessage());
+    }
+
+    @Test
+    void exportAbortsTheUploadOfAFileItCannotWrite() {
+        S3Service s3 = mock(S3Service.class);
+        MultipartUpload upload = new MultipartUpload("bucket", "_started", "application/octet-stream");
+        when(s3.initiateMultipartUpload(eq("bucket"), anyString(), eq("application/octet-stream"))).thenReturn(upload);
+        when(s3.uploadPart(eq("bucket"), anyString(), eq(upload.getUploadId()), eq(1), any(byte[].class)))
+                .thenThrow(new AwsException("InternalError", "We encountered an internal error. Please try again.", 500));
+        DynamoDbService svc = inlineExportService(s3);
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket"), null, "us-east-1")
+                .getExportArn();
+
+        verify(s3).abortMultipartUpload(eq("bucket"), endsWith("/_started"), eq(upload.getUploadId()));
+        assertEquals("FAILED", svc.describeExport(exportArn).getExportStatus());
+    }
+
+    @Test
+    void exportPutsItsFilesUnderThePrefix() {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        String longest = "a".repeat(948);
+
+        String slashed = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", "ends-with/"),
+                null, "us-east-1").getExportArn();
+        svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", longest), null, "us-east-1");
+
+        String slashedId = slashed.substring(slashed.lastIndexOf('/') + 1);
+        verify(s3).initiateMultipartUpload("bucket", "ends-with/AWSDynamoDB/" + slashedId + "/_started",
+                "application/octet-stream");
+        assertEquals("COMPLETED", svc.describeExport(slashed).getExportStatus());
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        verify(s3, atLeastOnce()).initiateMultipartUpload(eq("bucket"), keys.capture(), eq("application/octet-stream"));
+        assertEquals(1024, keys.getAllValues().stream().filter(key -> key.startsWith(longest))
+                .mapToInt(key -> key.getBytes(StandardCharsets.UTF_8).length).max().orElseThrow());
+    }
+
+    @Test
+    void ionExportWritesIonLines() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        svc.putItem("Users", mapper.readTree("{\"userId\": {\"S\": \"u1\"}, \"total\": {\"N\": \"150\"}}"), "us-east-1");
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", "exports-ion",
+                "ExportFormat", "ION"), null, "us-east-1").getExportArn();
+
+        ExportDescription described = svc.describeExport(exportArn);
+        assertEquals("COMPLETED", described.getExportStatus());
+        assertEquals("ION", described.getExportFormat());
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<byte[]> parts = ArgumentCaptor.forClass(byte[].class);
+        verify(s3, atLeastOnce()).uploadPart(eq("bucket"), keys.capture(), anyString(), eq(1), parts.capture());
+        String dir = "exports-ion/AWSDynamoDB/" + exportArn.substring(exportArn.lastIndexOf('/') + 1) + "/";
+        List<String> uploadedKeys = keys.getAllValues();
+        String dataKey = uploadedKeys.stream().filter(key -> key.endsWith(".ion.gz")).findFirst().orElseThrow();
+        assertTrue(dataKey.matches(dir + "data/[a-z2-7]{26}\\.ion\\.gz"), dataKey);
+        byte[] dataFile = parts.getAllValues().get(uploadedKeys.indexOf(dataKey));
+        try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(dataFile))) {
+            assertEquals("$ion_1_0 {Item:{userId:\"u1\",total:15d1}}\n", new String(gzip.readAllBytes(), StandardCharsets.UTF_8));
+        }
+        byte[] summary = parts.getAllValues().get(uploadedKeys.indexOf(dir + "manifest-summary.json"));
+        assertEquals("ION", mapper.readTree(summary).get("outputFormat").asText());
+    }
+
+    /** A bucket that takes every upload, each completing with a one-part ETag. */
+    private static S3Service exportBucket() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.initiateMultipartUpload(eq("bucket"), anyString(), eq("application/octet-stream")))
+                .thenAnswer(invocation -> new MultipartUpload("bucket", invocation.getArgument(1), "application/octet-stream"));
+        when(s3.completeMultipartUpload(eq("bucket"), anyString(), anyString(), eq(List.of(1)), isNull(), isNull()))
+                .thenReturn(new S3Object("bucket", "file", new byte[0], "application/octet-stream", "\"0123-1\""));
+        return s3;
+    }
+
+    /** Runs each export on the calling thread, with Users created and point-in-time recovery on. */
+    private DynamoDbService inlineExportService(S3Service s3) {
+        DynamoDbService svc = new DynamoDbService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, s3, mapper, 0, 0, 0, clock, Runnable::run);
+        svc.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        svc.updateContinuousBackups("Users", true, null, "us-east-1");
+        return svc;
     }
 
     @Test

@@ -2388,6 +2388,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // Centralized root access management (org-scoped, IAM Query endpoint)
     // =========================================================================
 
+    // The toggles themselves. Who may read or move them, and which organization's record they
+    // belong to, is CentralRootAccess: it is the caller of all five and the only one that should
+    // be, these having no caller check of their own.
+
     /** Currently-enabled centralized root features, in enablement order. Empty for a fresh org. */
     public List<String> listOrganizationsFeatures() {
         return new ArrayList<>(currentRootFeatures().getEnabledFeatures());
@@ -2854,8 +2858,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static void validatePassword(String password, String member) {
         if (password == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at '" + member
-                            + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(member));
         }
         if (!LOGIN_PROFILE_PASSWORD_PATTERN.matcher(password).matches()) {
             throw SmithyValidationErrors.validationError(
@@ -2928,8 +2931,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at 'properties' failed to "
-                            + "satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("properties"));
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -3937,19 +3939,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * that matches nothing gets {@code NoSuchEntity}. Different mistakes, different answers.
      *
      * <p>The API Reference publishes a length of 20 to 128 as well as the pattern, so both are
-     * checked, and both are reported when both are broken, in the order it prints them. The
-     * pattern message is the one recorded against AWS; the length wording is the form AWS uses for
-     * a member carrying both bounds, which {@link #validatePassword} spells the same
-     * way.
+     * checked, and both are reported when both are broken, in the order it prints them.
+     *
+     * <p>Each message names the one bound the value broke, rather than both at once: every
+     * recorded IAM length violation reads that way, "Member must have length less than or equal to
+     * 64" for a user name over 64 and "Member must have length greater than or equal to 20" for an
+     * ARN under 20, and a short id told about a 128-character ceiling it is nowhere near would be
+     * reporting a constraint it did not break. The pattern message is the one recorded against
+     * AWS.
      */
     private void requireCredentialIdFormat(String credentialId) {
         String id = credentialId == null ? "" : credentialId;
         List<String> violations = new ArrayList<>();
-        if (id.length() < SERVICE_CREDENTIAL_ID_MIN_LENGTH
-                || id.length() > SERVICE_CREDENTIAL_ID_MAX_LENGTH) {
-            violations.add("Member must have length less than or equal to "
-                    + SERVICE_CREDENTIAL_ID_MAX_LENGTH + " and greater than or equal to "
+        if (id.length() < SERVICE_CREDENTIAL_ID_MIN_LENGTH) {
+            violations.add("Member must have length greater than or equal to "
                     + SERVICE_CREDENTIAL_ID_MIN_LENGTH);
+        } else if (id.length() > SERVICE_CREDENTIAL_ID_MAX_LENGTH) {
+            violations.add("Member must have length less than or equal to "
+                    + SERVICE_CREDENTIAL_ID_MAX_LENGTH);
         }
         if (!SERVICE_CREDENTIAL_ID_PATTERN.matcher(id).matches()) {
             violations.add("Member must satisfy regular expression pattern: [\\w]+");
@@ -5252,6 +5259,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 }
                 return sessionTokenContext(session);
             }
+            if (isAccountRootArn(session.getRoleArn())) {
+                // A privileged session (AssumeRoot) acts as the member account's root user, which
+                // no identity policy grants and none denies: collecting role policies for a root
+                // ARN finds none, which would refuse everything. What scopes it is its task
+                // policy, and the five AWS publishes for the purpose carry Deny statements only,
+                // so it is read beside the root's own allow-all rather than as a session policy,
+                // where an intersection with nothing to allow would refuse everything too.
+                return new CallerContext(session.getSessionPolicyDocument() == null
+                        ? List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY)
+                        : List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY, session.getSessionPolicyDocument()),
+                        null, null);
+            }
             List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
             String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());
             return new CallerContext(identityPolicies, session.getSessionPolicyDocument(), boundaryDoc);
@@ -5520,6 +5539,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                             null));
                 }
                 return issuingUser(session).map(IamService::callerForUser);
+            }
+            if (isAccountRootArn(roleArn)) {
+                // A privileged session (AssumeRoot) is the member account's root user, not an
+                // assumed role: the ARN it reports is the root ARN it was minted for, and its
+                // aws:userid is the account id, as the account root's always is.
+                return Optional.of(new CallerArns(roleArn, roleArn, CallerArns.TYPE_ACCOUNT,
+                        AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId()), null));
             }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
             String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());

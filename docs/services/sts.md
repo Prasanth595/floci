@@ -15,6 +15,50 @@
 | `DecodeAuthorizationMessage` | Decode an encoded authorization failure message |
 | `GetDelegatedAccessToken` | Exchange a delegation request's trade-in token for temporary credentials |
 | `GetAccessKeyInfo` | Returns the account an access key ID belongs to |
+| `AssumeRoot` | Opens a privileged session on a member account of the organization |
+
+## Privileged Root Sessions
+
+`AssumeRoot` returns "short term credentials you can use to perform privileged tasks on a member
+account in your organization". The session acts as that member account's root user, which no
+identity policy grants or denies, scoped by the `TaskPolicyArn` the request names: the five AWS
+managed policies the model names for it, under `arn:aws:iam::aws:policy/root-task/`, each deny
+everything they do not name, so the policy is the whole of the session's bound. Whose policy it is
+counts as much as where it sits: a customer-managed policy can carry the same path, and installing
+one would bound the session by whatever that document allows, so only AWS's own are accepted and
+anything else is refused.
+
+The caller has to be able to manage root access: the management account or a delegated
+administrator for IAM, in an organization with All features and trusted access for IAM enabled, and
+with `RootSessions` on. The target has to be a member account other than the management account,
+privileged tasks being what the management account performs on members. `DurationSeconds` is 0 to
+900 and defaults to 900, "the maximum session duration of 900 seconds (15 minutes)".
+
+Four things are deviations rather than readings, since the operation models only
+`RegionDisabledException` and `ExpiredTokenException`:
+
+- Every caller, target and feature refusal is `AccessDenied` 403, and a task policy outside the
+  root-task path is a `ValidationError`, which is the shape every other member violation answers.
+- "You cannot use root user credentials to call sts:AssumeRoot" is the guide's rule; what is
+  decided here is which credential that means. Both the one resolving to a root ARN, a privileged
+  session opening another among them, and the bare 12-digit account-id key are refused, the latter
+  because the enforcement filter already reads it as "floci's account-root principal, never an IAM
+  user's key". A privileged session is therefore opened by an IAM user or role of the management
+  account, as on AWS, rather than by the account itself.
+- "The global endpoint is not supported for AssumeRoot" is refused when the request arrives on the
+  partition's global STS host. A request to a local host carries no such name, and the signing
+  region cannot tell the two apart, so there is nothing to refuse there.
+- `SessionTokenSize` is answered as the length of the token issued, and `MinimumSessionTokenSize`
+  pads it to at least the size asked for, held to the 0 to 4096 the model declares, "The value must
+  not exceed 4,096 bytes", since the size asked for is the size materialized. Out of that range is
+  a `ValidationError` and a value that is no integer an `InvalidParameterValue`, the pair
+  `DurationSeconds` already answers. `SessionTokenUtilization` is not answered: the model documents
+  neither member, so only the one with an obvious meaning is filled.
+
+The audit reads the `IAMAuditRootUserCredentials` task policy allows name the member account's root
+user when they are called with no `UserName`, which is what that policy's own `arn:aws:iam::*:root`
+asks for. Floci keeps no user record for a root user, so those reads answer `NoSuchEntity` rather
+than the credentials report AWS returns.
 
 ## Access Key Info
 
@@ -94,6 +138,8 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates 
 (`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
 forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs;
 and an explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching `sts:AssumeRole`.
+The caller's own identity policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
+allow assuming one role and not another. Other STS actions are evaluated against `*`, whatever `RoleArn` they carry.
 
 The caller is the account that owns the request's credentials, whether they sign the
 `Authorization` header or a presigned query string: an IAM user's or a role session's access key
@@ -113,9 +159,6 @@ when its condition matches.
 - **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,
   `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not in the request context, so a condition
   on them does not match, and `sts:TagSession` and `sts:SetSourceIdentity` are not checked.
-- **The caller's own permission is checked against `*`.** The caller's identity policy must allow
-  `sts:AssumeRole`, but it is evaluated for resource `*` rather than the role's ARN, so a policy
-  that names the role in `Resource` does not grant it.
 
 ## Web Identity Validation (IRSA)
 

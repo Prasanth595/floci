@@ -107,8 +107,7 @@ public class AutoScalingService implements PassedRoleLookup {
             "GroupAndWarmPoolDesiredCapacity", "GroupAndWarmPoolTotalCapacity");
     public static final String METRICS_GRANULARITY = "1Minute";
     static final String MISSING_GRANULARITY_MESSAGE =
-            "1 validation error detected: Value null at 'granularity' failed to satisfy constraint: "
-                    + "Member must not be null";
+            SmithyValidationErrors.message(List.of(SmithyValidationErrors.notNull("granularity")));
     public static final String INVALID_GRANULARITY_MESSAGE =
             "Granularity must be 1Minute. 1Minute is the only valid value.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
@@ -1200,8 +1199,7 @@ public class AutoScalingService implements PassedRoleLookup {
     private static void validateLifecycleHookName(String hookName) {
         if (hookName == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at 'lifecycleHookName' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNull("lifecycleHookName"));
         }
         if (hookName.length() > 255) {
             throw SmithyValidationErrors.validationError(
@@ -1627,7 +1625,7 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
-    private static void validateCapacityReservationSpecification(CapacityReservationSpecification specification) {
+    static void validateCapacityReservationSpecification(CapacityReservationSpecification specification) {
         if (specification == null) {
             return;
         }
@@ -1637,6 +1635,10 @@ public class AutoScalingService implements PassedRoleLookup {
         }
         if ("none".equals(preference) && specification.hasTarget()) {
             throw new AwsException("ValidationError", CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE, 400);
+        }
+        if (specification.getCapacityReservationIds().size()
+                + specification.getCapacityReservationResourceGroupArns().size() > 1) {
+            throw new AwsException("ValidationError", "Specify only one Capacity Reservation target.", 400);
         }
         for (String id : specification.getCapacityReservationIds()) {
             if (id == null || id.isEmpty() || id.length() > 255

@@ -33,6 +33,90 @@ class ElbV2IntegrationTest {
     private static String ruleArn1;
     private static String ruleArn2;
 
+    @ParameterizedTest
+    @CsvSource({"RegisterTargets", "DeregisterTargets", "DescribeTargetHealth"})
+    void targetPortErrorsAggregateBeforeLookup(String action) {
+        given().header("Authorization", AUTH)
+                .formParam("Action", action)
+                .formParam("TargetGroupArn", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+                        + "targetgroup/aggregate-missing/0000000000000000")
+                .formParam("Targets.member.1.Id", "10.0.0.10")
+                .formParam("Targets.member.1.Port", "80")
+                .formParam("Targets.member.2.Id", "10.0.0.10")
+                .formParam("Targets.member.2.Port", "65536")
+                .formParam("Targets.member.3.Id", "10.0.0.10")
+                .formParam("Targets.member.3.Port", "65537")
+                .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo("2 validation errors detected: "
+                        + "Value '65536' at 'targets.2.member.port' failed to satisfy constraint: "
+                        + "Member must have value less than or equal to 65535; "
+                        + "Value '65537' at 'targets.3.member.port' failed to satisfy constraint: "
+                        + "Member must have value less than or equal to 65535"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"CreateListener,0", "CreateListener,65536", "ModifyListener,0", "ModifyListener,65536"})
+    void listenerPortValidationPrecedesLookup(String action, int port) {
+        String constraint = port == 0 ? "greater than or equal to 1" : "less than or equal to 65535";
+        given().header("Authorization", AUTH)
+                .formParam("Action", action)
+                .formParam("LoadBalancerArn", "missing-balancer")
+                .formParam("ListenerArn", "missing-listener")
+                .formParam("Protocol", "HTTP")
+                .formParam("Port", port)
+                .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value '" + port
+                        + "' at 'port' failed to satisfy constraint: Member must have value " + constraint));
+    }
+
+    @Test
+    void gatewayListenerPortRejectionsPreservePortlessListener() {
+        String gatewayArn = given().header("Authorization", AUTH)
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "gateway-listener-port")
+                .formParam("Type", "gateway")
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .when().post("/").then().statusCode(200)
+                .extract().path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+        try {
+            given().header("Authorization", AUTH)
+                    .formParam("Action", "CreateListener").formParam("LoadBalancerArn", gatewayArn)
+                    .formParam("Protocol", "GENEVE").formParam("Port", 6081)
+                    .when().post("/").then().statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("InvalidConfigurationRequest"));
+            given().header("Authorization", AUTH)
+                    .formParam("Action", "DescribeListeners").formParam("LoadBalancerArn", gatewayArn)
+                    .when().post("/").then().statusCode(200)
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.size()", equalTo(0));
+            String gatewayListener = given().header("Authorization", AUTH)
+                    .formParam("Action", "CreateListener").formParam("LoadBalancerArn", gatewayArn)
+                    .formParam("Protocol", "GENEVE")
+                    .when().post("/").then().statusCode(200)
+                    .extract().path("CreateListenerResponse.CreateListenerResult.Listeners.member.ListenerArn");
+            given().header("Authorization", AUTH)
+                    .formParam("Action", "ModifyListener").formParam("ListenerArn", gatewayListener)
+                    .formParam("Protocol", "TCP").formParam("Port", 6081)
+                    .when().post("/").then().statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("InvalidConfigurationRequest"));
+            given().header("Authorization", AUTH)
+                    .formParam("Action", "DescribeListeners").formParam("ListenerArns.member.1", gatewayListener)
+                    .when().post("/").then().statusCode(200)
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.Protocol", equalTo("GENEVE"))
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.Port.size()", equalTo(0));
+            given().header("Authorization", AUTH)
+                    .formParam("Action", "ModifyListener").formParam("ListenerArn", gatewayListener)
+                    .when().post("/").then().statusCode(200)
+                    .body("ModifyListenerResponse.ModifyListenerResult.Listeners.member.Protocol", equalTo("GENEVE"))
+                    .body("ModifyListenerResponse.ModifyListenerResult.Listeners.member.Port.size()", equalTo(0));
+        } finally {
+            given().header("Authorization", AUTH)
+                    .formParam("Action", "DeleteLoadBalancer").formParam("LoadBalancerArn", gatewayArn)
+                    .when().post("/").then().statusCode(200);
+        }
+    }
+
     // ── Load Balancers ────────────────────────────────────────────────────────
 
     @Test
@@ -750,6 +834,9 @@ class ElbV2IntegrationTest {
         given()
                 .formParam("Action", "CreateTargetGroup")
                 .formParam("Name", "my-test-tg")
+                .formParam("Protocol", "HTTP")
+                .formParam("Port", "81")
+                .formParam("VpcId", "vpc-00000001")
                 .header("Authorization", AUTH)
             .when()
                 .post("/")

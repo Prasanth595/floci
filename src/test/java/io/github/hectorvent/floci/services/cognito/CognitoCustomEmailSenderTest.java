@@ -250,6 +250,7 @@ class CognitoCustomEmailSenderTest {
         assertEquals("CustomEmailSender_Authentication", event.get("triggerSource"));
         // Measured (eu-west-1, 2026-10-20): a sign-in code's event carries no ClientMetadata, though
         // InitiateAuth sends one.
+        assertTrue(request(event).containsKey("clientMetadata"));
         assertNull(request(event).get("clientMetadata"));
 
         Map<String, Object> result = service.respondToAuthChallenge(client.getClientId(), "EMAIL_OTP",

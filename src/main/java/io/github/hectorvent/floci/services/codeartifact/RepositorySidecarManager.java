@@ -218,6 +218,25 @@ public interface RepositorySidecarManager {
     }
 
     /**
+     * Marks that {@code repositoryContainerId} is about to be used for {@link
+     * #listPackageVersions}, called by {@code CodeArtifactService} right after it resolves that
+     * id and before it does anything else with it. Resolving the id and entering {@link
+     * #listPackageVersions} are two separate statements there, with a concurrent repository
+     * delete's cleanup able to run in between them; pairing this with {@link #endUse} in a
+     * {@code try}/{@code finally} around the whole {@link #listPackageVersions} call closes that
+     * window the same way {@code PypiserverSidecarClient} already closes the narrower one inside
+     * the call itself. Default is a no-op: only a sidecar whose own concurrency bookkeeping dies
+     * with the container (pypiserver) has anything here to protect; one with no such bookkeeping,
+     * or (Maven) a container that is never torn down, does not.
+     */
+    default void beginUse(String repositoryContainerId) {
+    }
+
+    /** Marks the end of one {@link #beginUse}. Default is a no-op, for the same reason. */
+    default void endUse(String repositoryContainerId) {
+    }
+
+    /**
      * This format's own preferred "default display" version for a package, independent of publish
      * recency, for {@code ListPackageVersions}' {@code defaultDisplayVersion}. {@code empty()} by
      * default: every sidecar Floci currently backs besides npm has no such separate preference of

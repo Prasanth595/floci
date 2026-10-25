@@ -28,11 +28,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +45,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -3411,6 +3414,108 @@ class CodeArtifactServiceTest {
             assertEquals("1.0.0", result.versions().get(0).version());
             assertEquals("Published", result.versions().get(0).status());
         }
+    }
+
+    /**
+     * {@code ensureFormatContainerId} resolves {@code repoId} and {@code listPackageVersions}
+     * itself is called in two separate statements, with a concurrent repository delete's cleanup
+     * able to run in between them; {@code beginUse}/{@code endUse} must bracket that gap, not
+     * just the sidecar call itself, or a delete racing exactly there would leave a permit cached
+     * for a container that is already gone with nothing left to ever clean it up.
+     */
+    @Test
+    void listPackageVersionsBracketsThePypiserverCallWithBeginUseAndEndUse() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("pypi");
+        when(pypiserverClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+
+        service.listPackageVersions(REGION, "dom", null, "repo", "pypi", null, "my-pkg", null, null, null, null,
+                null);
+
+        InOrder order = inOrder(pypiserverClient);
+        order.verify(pypiserverClient).beginUse(repoId);
+        order.verify(pypiserverClient).listPackageVersions(repoId, "dom", "repo", null, "my-pkg");
+        order.verify(pypiserverClient).endUse(repoId);
+    }
+
+    @Test
+    void listPackageVersionsCallsEndUseEvenWhenTheSidecarCallFails() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("pypi");
+        doThrow(new IllegalStateException("sidecar unreachable")).when(pypiserverClient)
+                .listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"));
+
+        assertThrows(IllegalStateException.class, () -> service.listPackageVersions(REGION, "dom", null, "repo",
+                "pypi", null, "my-pkg", null, null, null, null, null));
+
+        verify(pypiserverClient).endUse(repoId);
+    }
+
+    /**
+     * {@code listPackageVersions} and {@code deleteRepository} can never interleave: resolving
+     * {@code repoId} and calling {@code beginUse} happen under the same lock {@code
+     * deleteRepository} holds for its own sidecar cleanup. Parks {@code beginUse} while it still
+     * holds that lock, confirms a concurrently-started delete cannot even begin until it is
+     * released, then confirms the delete's {@code release} call never runs until {@code beginUse}
+     * has returned.
+     */
+    @Test
+    void listPackageVersionsNeverRegistersUseWhileADeleteIsStillCleaningUpTheSameRepository()
+            throws InterruptedException {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        List<String> events = new CopyOnWriteArrayList<>();
+        CountDownLatch beginUseStarted = new CountDownLatch(1);
+        CountDownLatch beginUseMayFinish = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            events.add("beginUse-start");
+            beginUseStarted.countDown();
+            beginUseMayFinish.await(5, TimeUnit.SECONDS);
+            events.add("beginUse-end");
+            return null;
+        }).when(pypiserverClient).beginUse(anyString());
+        doAnswer(invocation -> {
+            events.add("release");
+            return null;
+        }).when(pypiserverClient).release(anyString());
+
+        AtomicReference<Throwable> listingFailure = new AtomicReference<>();
+        Thread lister = new Thread(() -> {
+            try {
+                service.listPackageVersions(REGION, "dom", null, "repo", "pypi", null, "my-pkg", null, null, null,
+                        null, null);
+            } catch (Throwable t) {
+                listingFailure.set(t);
+            }
+        });
+        lister.start();
+        assertTrue(beginUseStarted.await(5, TimeUnit.SECONDS), "expected listPackageVersions to reach beginUse "
+                + "while still holding the service's lock");
+
+        Thread deleter = new Thread(() -> service.deleteRepository(REGION, "dom", null, "repo"));
+        deleter.start();
+        deleter.join(200);
+        assertTrue(deleter.isAlive(), "expected deleteRepository to block trying to acquire the service's lock "
+                + "while listPackageVersions still holds it inside beginUse");
+        assertFalse(events.contains("release"), "expected deleteRepository to not have reached its sidecar "
+                + "release call while listPackageVersions still holds the lock");
+
+        beginUseMayFinish.countDown();
+        lister.join(5_000);
+        deleter.join(5_000);
+
+        assertTrue(listingFailure.get() == null || listingFailure.get() instanceof AwsException,
+                "expected listPackageVersions to either succeed or fail with a real error, got "
+                        + listingFailure.get());
+        int beginUseEndIndex = events.indexOf("beginUse-end");
+        int releaseIndex = events.indexOf("release");
+        assertTrue(beginUseEndIndex != -1 && releaseIndex != -1 && releaseIndex > beginUseEndIndex,
+                "expected the delete's release call to only ever run after beginUse had fully finished; recorded "
+                        + "order was " + events);
     }
 
     @Test

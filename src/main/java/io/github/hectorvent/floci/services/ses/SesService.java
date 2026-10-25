@@ -379,13 +379,17 @@ public class SesService {
 
     private String validateEnvelope(SendEmailRequest request) {
         String source = request.source();
-        if (!request.hasRecipients()) {
-            throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
-        }
+        requireRecipients(request);
         String effectiveConfigSet = resolveDefaultConfigurationSet(request.configurationSetName(), source,
                 request.region());
         configSetService.validateForSending(effectiveConfigSet, request.region());
         return effectiveConfigSet;
+    }
+
+    private static void requireRecipients(SendEmailRequest request) {
+        if (!request.hasRecipients()) {
+            throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
+        }
     }
 
     private String sendSimpleEmail(SendEmailRequest request, EmailContent.Simple content, String effectiveConfigSet) {
@@ -1131,20 +1135,58 @@ public class SesService {
 
     /**
      * The tenant send gate (Phase 4): resolves the tenant with the send-flavored not-found wording,
-     * then requires every resource the send uses to be associated with it. The tenant's
-     * SendingStatus is not checked — no API can move it off ENABLED, so the DISABLED gate is not
-     * emulated. Placement is probe-confirmed: request-shape validation (a missing Content, an empty
-     * inline template, a missing FromEmailAddress on Simple, the bulk template-content checks) runs
-     * before the tenant lookup, while the recipient checks, the raw MIME-From derivation, and
-     * identity verification all lose to the tenant 404.
+     * refuses a tenant whose sending is DISABLED, then requires every resource the send uses to be
+     * associated with it. Placement is probe-confirmed: request-shape validation (a missing Content,
+     * an empty inline template, a missing FromEmailAddress on Simple, the bulk template-content
+     * checks) runs before the tenant lookup, while the recipient checks, the raw MIME-From
+     * derivation, and identity verification all lose to the tenant 404. The DISABLED refusal also
+     * beats identity verification, the association check and a raw message's missing recipients,
+     * but an unknown configuration set named by the request is reported before it, and so are the
+     * address and recipient checks of a Simple or Template send, which goes through the overload
+     * that takes its envelope.
      */
     public void checkTenantSendAccess(String tenantName, String fromEmailAddress,
                                       String configurationSetName, String templateName,
                                       String accountId, String region) {
+        checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName, templateName, accountId,
+                region, null, configurationSetName);
+    }
+
+    /**
+     * The send gate for SendBulkEmail, which refuses a DISABLED tenant before it looks up the
+     * configuration set, unlike SendEmail. A request in which no entry names a recipient skips the
+     * gate altogether, even for an unknown tenant: each entry is answered on its own instead
+     * (probe-confirmed).
+     */
+    public void checkTenantBulkSendAccess(String tenantName, String fromEmailAddress,
+                                          String configurationSetName, String templateName,
+                                          List<BulkEmailEntry> entries, String accountId, String region) {
+        if (!anyBulkRecipient(entries)) {
+            return;
+        }
+        checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName, templateName, accountId,
+                region, null, null);
+    }
+
+    /**
+     * The send gate for a Simple or Template send, whose envelope SES validates before it refuses a
+     * DISABLED tenant: a malformed address and a request with no recipient are reported first
+     * (probe-confirmed), while a tenant that may send still meets the gate before them.
+     */
+    public void checkTenantSendAccess(SendEmailRequest envelope, String templateName, String accountId) {
+        checkTenantSendAccess(envelope.tenantName(), envelope.source(), envelope.configurationSetName(),
+                templateName, accountId, envelope.region(), envelope, envelope.configurationSetName());
+    }
+
+    private void checkTenantSendAccess(String tenantName, String fromEmailAddress,
+                                       String configurationSetName, String templateName,
+                                       String accountId, String region, SendEmailRequest envelope,
+                                       String configurationSetBeforeRefusal) {
         if (tenantName == null) {
             return;
         }
         Tenant tenant = tenantService.tenantForSending(tenantName, region, accountId);
+        requireSendingEnabled(tenant, configurationSetBeforeRefusal, region, envelope);
         String arnPrefix = "arn:" + AwsRegions.partitionFor(region) + ":ses:" + region + ":" + accountId + ":";
         List<SesTenantService.AssociationResource> used = new ArrayList<>();
         if (fromEmailAddress != null && !fromEmailAddress.isBlank()) {
@@ -1175,7 +1217,8 @@ public class SesService {
      * the effective sender comes from the MIME {@code From} header, the same derivation
      * {@code sendRawEmail} applies, so the gate must resolve it the same way before checking.
      * {@code hasDestination} says whether the request named any recipient; when it did not and the
-     * MIME To, Cc and Bcc headers are empty too, only the tenant's existence is checked.
+     * MIME To, Cc and Bcc headers are empty too, only the tenant's existence and sending status
+     * are checked.
      */
     public void checkTenantRawSendAccess(String tenantName, String fromEmailAddress,
                                          String rawMessage, boolean hasDestination,
@@ -1184,10 +1227,12 @@ public class SesService {
             return;
         }
         SmtpRelay.RawMessageHeaders headers = SmtpRelay.parseRawHeaders(rawMessage);
-        // AWS checks that the tenant exists, then reports a message with no recipients anywhere
-        // ahead of the association gate (probe-confirmed), so that error is left to sendRawEmail.
+        // AWS checks that the tenant exists and may send, then reports a message with no recipients
+        // anywhere ahead of the association gate (probe-confirmed), so that error is left to
+        // sendRawEmail.
         if (!hasDestination && SendEmailRequest.recipients(headers.to(), headers.cc(), headers.bcc()).isEmpty()) {
-            tenantService.tenantForSending(tenantName, region, accountId);
+            requireSendingEnabled(tenantService.tenantForSending(tenantName, region, accountId),
+                    firstNonBlank(configurationSetName, headers.configurationSet()), region, null);
             return;
         }
         String effectiveSource = fromEmailAddress;
@@ -1199,6 +1244,22 @@ public class SesService {
         checkTenantSendAccess(tenantName, effectiveSource,
                 firstNonBlank(configurationSetName, headers.configurationSet()), null,
                 accountId, region);
+    }
+
+    private void requireSendingEnabled(Tenant tenant, String configurationSetName, String region,
+                                       SendEmailRequest envelope) {
+        if (!"DISABLED".equals(tenant.sendingStatus())) {
+            return;
+        }
+        if (envelope != null) {
+            SesAddressSyntax.requireEnvelope(envelope);
+            requireRecipients(envelope);
+        }
+        if (configurationSetName != null && !configurationSetName.isBlank()) {
+            configSetService.get(configurationSetName, region);
+        }
+        throw new AwsException("MessageRejected", "Sending disabled for <" + tenant.tenantArn()
+                + ">. For more information, please check the resource configuration and status.", 400);
     }
 
     // The gate names the identity the way AWS did in the probed error: the exact address identity
@@ -1647,6 +1708,17 @@ public class SesService {
         }
     }
 
+    // Probe-confirmed: both bulk sends count the destinations before the stored template lookup,
+    // v2 also before the configuration set and tenant lookups, and v2 answers an empty list with
+    // the same message. The v1 order against the configuration set has not been probed.
+    static void requireBulkDestinationCount(int count) {
+        if (count < 1 || count > MAX_BULK_DESTINATIONS) {
+            throw new AwsException("InvalidParameterValue",
+                    "You must specify at least 1 destination, and no more than "
+                            + MAX_BULK_DESTINATIONS + " destinations", 400);
+        }
+    }
+
     // SES refuses the send outright for an attachment type it does not accept, unlike the content
     // scan, which accepts the message and rejects it afterwards.
     private static void rejectBlockedAttachments(Message parsed) {
@@ -1661,16 +1733,8 @@ public class SesService {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
         requireInlineTemplateContent(template.subject(), template.textPart(), template.htmlPart());
-        if (request.entries() == null || request.entries().isEmpty()) {
-            throw new AwsException("InvalidParameterValue",
-                    "At least one destination entry is required.", 400);
-        }
+        requireBulkDestinationCount(sizeOf(request.entries()));
         configSetService.validateForSending(request.configurationSetName(), request.region());
-        if (request.entries().size() > MAX_BULK_DESTINATIONS) {
-            throw new AwsException("MessageRejected",
-                    "Number of destinations (" + request.entries().size() + ") exceeds the maximum of "
-                            + MAX_BULK_DESTINATIONS + ".", 400);
-        }
         for (BulkEmailEntry entry : request.entries()) {
             int recipientCount = sizeOf(entry.toAddresses())
                     + sizeOf(entry.ccAddresses())
@@ -1682,11 +1746,18 @@ public class SesService {
             }
         }
 
-        boolean requestHasRecipient = request.entries().stream().anyMatch(SesService::hasNonNullRecipient);
+        // When no entry names a recipient, SES answers every entry the same, whatever its lists hold
+        // (probe-confirmed for null elements, empty lists and an empty Destination).
+        if (!anyBulkRecipient(request.entries())) {
+            return request.entries().stream()
+                    .map(entry -> BulkEmailEntryResult.failure(BulkEmailEntryResult.Status.INVALID_PARAMETER,
+                            "Destination cannot be empty"))
+                    .toList();
+        }
         List<BulkEmailEntryResult> results = new ArrayList<>(request.entries().size());
         for (BulkEmailEntry entry : request.entries()) {
             try {
-                SesAddressSyntax.requireBulkDestination(entry, request.replyToAddresses(), requestHasRecipient);
+                SesAddressSyntax.requireBulkDestination(entry, request.replyToAddresses());
                 JsonNode merged = mergeTemplateData(template.templateData(), entry.replacementTemplateData());
                 List<MessageTag> mergedTags = mergeEmailTags(request.defaultEmailTags(), entry.replacementEmailTags());
                 List<MessageHeader> mergedHeaders = mergeHeaders(template.headers(), entry.replacementHeaders());
@@ -1723,8 +1794,9 @@ public class SesService {
         return results;
     }
 
-    private static boolean hasNonNullRecipient(BulkEmailEntry entry) {
-        return Stream.of(entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses())
+    private static boolean anyBulkRecipient(List<BulkEmailEntry> entries) {
+        return entries.stream()
+                .flatMap(entry -> Stream.of(entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses()))
                 .filter(Objects::nonNull)
                 .flatMap(List::stream)
                 .anyMatch(Objects::nonNull);

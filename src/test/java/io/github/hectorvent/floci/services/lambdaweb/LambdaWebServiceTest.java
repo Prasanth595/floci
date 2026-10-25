@@ -70,10 +70,15 @@ class LambdaWebServiceTest {
     }
 
     private LambdaWebService service(StorageFactory storage, String baseUrl, S3Service s3Service) {
+        return service(storage, baseUrl, s3Service, mock(LambdaWebExecutionRole.class));
+    }
+
+    private LambdaWebService service(StorageFactory storage, String baseUrl, S3Service s3Service,
+                                     LambdaWebExecutionRole executionRole) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config,
-                s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null);
+                s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null, executionRole);
         service.initializeStorage();
         return service;
     }
@@ -84,6 +89,12 @@ class LambdaWebServiceTest {
         build.putObject("codeConfig").putObject("s3Object").put("bucket", "code").put("key", "app.zip");
         build.putObject("runtimeConfig").put("runtime", "nodejs24.x");
         config.putObject("serviceConfig").put("executionRoleArn", ROLE).put("timeoutSeconds", timeoutSeconds);
+        return config;
+    }
+
+    private ObjectNode revisionConfig(String executionRoleArn) {
+        ObjectNode config = revisionConfig(30);
+        ((ObjectNode) config.get("serviceConfig")).put("executionRoleArn", executionRoleArn);
         return config;
     }
 
@@ -274,6 +285,43 @@ class LambdaWebServiceTest {
         update.putObject("throttleConfig").put("rateLimit", 150);
         assertEquals("ResourceNotFoundException",
                 error(() -> service.updateEndpoint(REGION, "missing", "dev", update)).getErrorCode());
+    }
+
+    @Test
+    void executionRoleIsCheckedInTheOrderAwsChecksIt() {
+        String missingRole = "arn:aws:iam::000000000000:role/missing";
+        LambdaWebExecutionRole executionRole = mock(LambdaWebExecutionRole.class);
+        doThrow(new AwsException("ValidationException", "cannot be assumed", 400))
+                .when(executionRole).requireAssumable(REGION, missingRole);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", null, executionRole);
+        service.createFunction(REGION, createRequest("app"));
+
+        ObjectNode otherAccount = revisionConfig("arn:aws:iam::111122223333:role/web");
+        ((ObjectNode) otherAccount.get("serviceConfig")).putObject("environmentVariables").put("AWS_REGION", "x");
+        assertEquals("Invalid function name or ARN 'bad.name'",
+                message(() -> service.createRevision(REGION, "bad.name", otherAccount)));
+        AwsException denied = error(() -> service.createRevision(REGION, "missing", otherAccount));
+        assertEquals("AccessDeniedException", denied.getErrorCode());
+        assertEquals(403, denied.getHttpStatus());
+        assertEquals("Cross-account pass role is not allowed.", denied.getMessage());
+
+        ObjectNode reserved = revisionConfig(missingRole);
+        ((ObjectNode) reserved.get("serviceConfig")).putObject("environmentVariables").put("AWS_REGION", "x");
+        assertEquals("The environmentVariables cannot contain reserved keys. The request specified the reserved keys"
+                + " [AWS_REGION].", message(() -> service.createRevision(REGION, "app", reserved)));
+
+        ObjectNode runtime = revisionConfig(missingRole);
+        ((ObjectNode) runtime.path("buildConfig").path("runtimeConfig")).put("runtime", "nodejs22.x");
+        assertEquals("cannot be assumed", message(() -> service.createRevision(REGION, "missing", runtime)));
+        assertEquals("cannot be assumed", message(() -> service.createRevision(REGION, "app", runtime)));
+
+        ObjectNode existing = createRequest("app");
+        existing.set("revisionConfig", revisionConfig(missingRole));
+        assertEquals("cannot be assumed", message(() -> service.createFunction(REGION, existing)));
+        ObjectNode multiRegion = createRequest("other");
+        multiRegion.set("revisionConfig", revisionConfig(missingRole));
+        ((ObjectNode) multiRegion.get("endpointConfig")).put("endpointType", "MultiRegion");
+        assertEquals("cannot be assumed", message(() -> service.createFunction(REGION, multiRegion)));
     }
 
     @Test
@@ -601,6 +649,28 @@ class LambdaWebServiceTest {
         assertTrue(service.endpointDomain("nope.001.lambda-web.us-east-1.floci.example").isEmpty());
         service.deleteEndpoint(REGION, "app", "dev");
         assertTrue(service.endpointDomain(host).isEmpty(), "a deleted endpoint's domain is gone");
+    }
+
+    @Test
+    void theGlobalDomainIsServedInTheDefaultRegionWhenTheEndpointHasIt() {
+        LambdaWebService service = service();
+        service.createFunction("us-west-2", createRequest("app"));
+        String revisionId = service.getEndpoint("us-west-2", "app", "dev").revisionWeights.get(0).revisionId;
+        String near = service.createEndpoint("us-west-2", "app", multiRegion("near", revisionId, REGION)).domainName;
+        String far = service.createEndpoint("us-west-2", "app", multiRegion("far", revisionId, "eu-west-1")).domainName;
+
+        LambdaWebService.WebFunctionTarget target = service.locate(near).orElseThrow();
+        assertEquals("us-west-2", target.region());
+        assertEquals(REGION, target.servingRegion());
+        assertEquals("us-west-2", service.locate(far).orElseThrow().servingRegion());
+    }
+
+    private ObjectNode multiRegion(String name, String revisionId, String region) {
+        ObjectNode request = mapper.createObjectNode().put("endpointName", name).put("endpointType", "MultiRegion")
+                .put("authType", "ApplicationManaged");
+        request.putArray("regions").add(region);
+        request.putArray("revisionWeights").addObject().put("revisionId", revisionId).put("weight", 100);
+        return request;
     }
 
     @Test
