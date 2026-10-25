@@ -72,6 +72,14 @@ class RequestResourceMembersTest {
     }
 
     @Test
+    void connectionsAndApiDestinationsAreOfTypesWhoseServiceMintsAnIdAfterTheirName() {
+        Map<String, ArnFormat> events = RequestResourceMembers.table().formats().get("events");
+        assertTrue(events.get("connection").minted());
+        assertTrue(events.get("api-destination").minted());
+        assertFalse(events.get("event-bus").minted());
+    }
+
+    @Test
     void aMalformedTableFailsToLoad() {
         assertThrows(IllegalStateException.class, () -> parse("{\"operations\":{}}"));
         // An operation of a namespace the file does not read.
@@ -81,7 +89,7 @@ class RequestResourceMembersTest {
         String formats = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\"}}";
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"other\"],\"arn\":\"Arn\"}")));
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"type\":\"thing\",\"fill\":{\"Other\":\"Name\"}}")));
-        assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"a.b\"}")));
+        assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"a.b.c\"}")));
         assertThrows(IllegalStateException.class, () -> parse(
                 "{\"namespaces\":{\"a\":[]},\"arnFormats\":{\"a\":{\"thing\":\"*\"}},\"operations\":{\"a:Op\":{\"resources\":[]}}}"));
         // A type made under a parent whose format it does not extend by one id.
@@ -92,6 +100,13 @@ class RequestResourceMembersTest {
                     + "{\"resources\":[],\"creates\":[{\"type\":\"part\",\"parent\":\"thing\",\"arn\":\"ThingArn\"}]}}}"),
                     part);
         }
+        // A member past one structure, or a structure's member filling a variable.
+        assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].B.ThingArn\"}")));
+        assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A[].Name\"}}")));
+        assertEquals(List.of(new Resource(List.of("thing"), new Member("A", true, new Member("ThingArns", true)), Map.of(),
+                Map.of(), Map.of(), Map.of(), Map.of(), null, null)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
+                .operations().get("a:Op"));
         // An ARN read before more than one character.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"before\":\"##\"}")));
@@ -106,8 +121,30 @@ class RequestResourceMembersTest {
                 + ",\"unqualified\":{\"a\":[\"other\"]},\"operations\":{\"a:Op\":{\"resources\":[]}}}"));
         assertThrows(IllegalStateException.class, () -> parse("{\"namespaces\":{\"a\":[]}," + formats
                 + ",\"unqualified\":{\"a\":\"thing\"},\"operations\":{\"a:Op\":{\"resources\":[]}}}"));
+        // A type given a minted id that has no format, whose format does not end in its one variable, or not a list.
+        String parts = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\","
+                + "\"part\":\"arn:${Partition}:a:${Region}:${Account}:part/${ThingName}/${PartId}\"}}";
+        for (String bad : List.of("{\"a\":[\"other\"]}", "{\"a\":[\"part\"]}", "{\"a\":\"thing\"}")) {
+            assertThrows(IllegalStateException.class, () -> parse("{\"namespaces\":{\"a\":[]}," + parts
+                    + ",\"mintedIds\":" + bad + ",\"operations\":{\"a:Op\":{\"resources\":[]}}}"), bad);
+        }
+        assertTrue(parseUnchecked("{\"namespaces\":{\"a\":[]}," + parts + ",\"mintedIds\":{\"a\":[\"thing\"]},"
+                + "\"operations\":{\"a:Op\":{\"resources\":[]}}}").formats().get("a").get("thing").minted());
+        // A member read when absent as no value, or as an ARN of a type with no format or of more than one variable.
+        for (String bad : List.of("\"absent\":{\"Bus\":\"\"}", "\"absent\":{\"Bus[]\":\"default\"}",
+                "\"arnOf\":{\"Bus\":\"other\"}", "\"arnOf\":{\"Bus\":\"part\"}", "\"unless\":{\"Bus\":[]}")) {
+            assertThrows(IllegalStateException.class, () -> parse(document("\"arnFormats\":{\"a\":{"
+                    + "\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\","
+                    + "\"part\":\"arn:${Partition}:a:${Region}:${Account}:part/${ThingName}/${PartId}\"}}",
+                    "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}," + bad + "}")), bad);
+        }
+        assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)),
+                Map.of(), Map.of("Bus", List.of("default")), Map.of("Bus", "default"), Map.of("Bus", "thing"), null, null)),
+                parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
+                        + "\"unless\":{\"Bus\":[\"default\"]},\"absent\":{\"Bus\":\"default\"},"
+                        + "\"arnOf\":{\"Bus\":\"thing\"}}")).operations().get("a:Op"));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Names", true)), Map.of(),
-                        new Member("registryId", false), null)),
+                        Map.of(), Map.of(), Map.of(), new Member("registryId", false), null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Names[]\"},"
                         + "\"account\":\"registryId\"}")).operations().get("a:Op"));
     }
@@ -126,7 +163,8 @@ class RequestResourceMembersTest {
                     ArnFormat format = table.formats().get(namespace).get(resource.types().getFirst());
                     String arn = example(format.format());
                     String account = resource.account() != null ? "111122223333" : "000000000000";
-                    String expected = resource.arn() != null ? arn : expected(format.format(), resource, account);
+                    String expected = resource.arn() != null ? arn
+                            : expected(format.format(), resource, account) + (format.minted() ? "/*" : "");
                     ObjectNode body = MAPPER.createObjectNode();
                     StringBuilder form = new StringBuilder("Action=" + name);
                     Map<Member, String> values = resource.arn() != null ? Map.of(resource.arn(), arn)
@@ -141,13 +179,8 @@ class RequestResourceMembersTest {
                         }
                     });
                     given.forEach((member, value) -> {
-                        if (member.list()) {
-                            body.putArray(member.name()).add(value);
-                            form.append('&').append(member.name()).append(".member.1=").append(encoded(value));
-                        } else {
-                            body.put(member.name(), value);
-                            form.append('&').append(member.name()).append('=').append(encoded(value));
-                        }
+                        put(body, member, value);
+                        form.append('&').append(parameter(member)).append('=').append(encoded(value));
                     });
                     assertEquals(List.of(expected), RequestResources.of(operation.getKey(), json(body.toString()),
                             "aws", "us-east-1", "000000000000"), body.toString());
@@ -180,6 +213,25 @@ class RequestResourceMembersTest {
                     assertTrue(RequestResources.created(operation.getKey(), form(form), "aws", "us-east-1",
                             "000000000000").contains(expected), form);
                 })));
+    }
+
+    /** The value at the member's path in a body: in its list's first element, and in its field's structure. */
+    private static void put(ObjectNode body, Member member, String value) {
+        if (member.field() == null) {
+            if (member.list()) {
+                body.putArray(member.name()).add(value);
+            } else {
+                body.put(member.name(), value);
+            }
+        } else {
+            put(member.list() ? body.putArray(member.name()).addObject() : body.putObject(member.name()), member.field(), value);
+        }
+    }
+
+    /** The form parameter of the member's path, its lists' first elements. */
+    private static String parameter(Member member) {
+        String name = member.name() + (member.list() ? ".member.1" : "");
+        return member.field() == null ? name : name + "." + parameter(member.field());
     }
 
     /** An ARN of the format in the test's partition, Region and account, each other variable {@code x}. */

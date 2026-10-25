@@ -1424,11 +1424,14 @@ the status, not just the request's content type.
 A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
 Pipes, Aurora DSQL, EKS, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
-Step Functions and Amazon Cognito user pools they come from a table generated from AWS's Service
+Step Functions, EventBridge and Amazon Cognito user pools they come from a table generated from AWS's Service
 Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
-of a type the action acts on, or members filling the variables of a type's format. A variable the
+of a type the action acts on, or members filling the variables of a type's format. A member holding
+an ARN may be one inside a structure or inside each of a list's structures: `SetRulePriorities` is
+checked on the rules its `RulePriorities` name, and `CreateStateMachineAlias` on the state machine
+its routing configuration's versions are of. A variable the
 request does not fill is `*`, as the service mints a new resource's id, so `CreateTargetGroup` is
 checked on `targetgroup/<Name>/*`; a v2 `CreateLoadBalancer` is checked on the load balancer of its
 `Type`, `loadbalancer/app/<Name>/*` when it gives none, and one of a `Type` outside `application`,
@@ -1443,7 +1446,16 @@ selects the registry its handler acts in, so `repository/<name>` is checked in t
 `registryId` that is no account id names no repository, while a null one is the caller's, as ECR
 reads it. `StartExecution` and
 `StartSyncExecution` take Step Functions Local's `<stateMachineArn>#<test case>` and run the
-machine before the `#`, so that machine is the one checked. A state machine's version or alias
+machine before the `#`, so that machine is the one checked. An EventBridge rule is on the event bus
+its request's `EventBusName` names, by name or by ARN, and on the default bus when it names none
+or gives a null, whose rules are `rule/<name>`, with no bus; a bus ARN of another account, the
+default bus's included, names that account's rule, checked as given and as the caller's own, which
+Floci acts on, and one leaving its account and Region empty names the caller's. `DescribeEventBus`
+naming no bus is checked on `event-bus/default`. A connection or an API destination, whose ARN
+EventBridge follows with an id it mints after the name, `connection/<name>/<id>`, is checked on
+the ARN it is stored under when the request names it, and on `connection/<name>/*` when there is
+none yet, as for its create. EventBridge V2's API, which Floci does not serve, is not read. A
+state machine's version or alias
 (`stateMachine:<name>:<qualifier>`) is checked on the state machine's ARN, as Step Functions
 authorizes it, so a grant or a deny on `stateMachine:<name>` covers its versions and aliases, and
 an execution started through one is the state machine's. An ARN naming another account or

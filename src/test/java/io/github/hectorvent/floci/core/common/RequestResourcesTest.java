@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -213,6 +214,114 @@ class RequestResourcesTest {
                 json("{\"stateMachineArn\":\"" + MACHINE + ":PROD\"}")));
         String execution = "arn:aws:states:us-east-1:000000000000:execution:orders:run-1";
         assertEquals(List.of(execution), of("states:DescribeExecution", json("{\"executionArn\":\"" + execution + "\"}")));
+    }
+
+    /**
+     * An ARN inside a structure, or inside each of a list's structures, names its resource as a top-level one does:
+     * {@code SetRulePriorities} acts on the rules its priorities name, read to the first element without one, as
+     * its handler loops, and an alias acts on the state machine its versions are of.
+     */
+    @Test
+    void anArnInsideAStructureNamesItsResource() {
+        String prefix = "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener-rule/app/web/abc/def/";
+        assertEquals(List.of(prefix + "1", prefix + "2"), of("elasticloadbalancing:SetRulePriorities", form(
+                "Action=SetRulePriorities&RulePriorities.member.1.RuleArn=" + prefix + "1&RulePriorities.member.1.Priority=5"
+                        + "&RulePriorities.member.2.RuleArn=" + prefix + "2&RulePriorities.member.2.Priority=6"
+                        + "&RulePriorities.member.3.Priority=7&RulePriorities.member.4.RuleArn=" + prefix + "4")));
+        assertEquals(List.of(prefix + "1"), of("elasticloadbalancing:SetRulePriorities",
+                json("{\"RulePriorities\":[{\"RuleArn\":\"" + prefix + "1\"},\"" + prefix + "2\",{\"Priority\":1}]}")));
+        assertEquals(List.of(MACHINE), of("states:CreateStateMachineAlias", json("{\"name\":\"PROD\","
+                + "\"routingConfiguration\":[{\"stateMachineVersionArn\":\"" + MACHINE + ":1\",\"weight\":90},"
+                + "{\"stateMachineVersionArn\":\"" + MACHINE + ":2\",\"weight\":10}]}")));
+        assertEquals(List.of(MACHINE), of("states:UpdateStateMachineAlias", json("{\"stateMachineAliasArn\":\""
+                + MACHINE + ":PROD\",\"routingConfiguration\":[{\"stateMachineVersionArn\":\"" + MACHINE + ":2\"}]}")));
+        // An ARN there of a type the action does not act on is not checked: a rule's target group.
+        String listener = "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/web/abc/def";
+        assertEquals(List.of(listener), of("elasticloadbalancing:CreateRule", form("Action=CreateRule&ListenerArn="
+                + listener + "&Actions.member.1.Type=forward&Actions.member.1.TargetGroupArn="
+                + "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/web/1")));
+    }
+
+    /**
+     * An EventBridge rule is on the event bus its request names, by name or ARN, or on the default one when it names
+     * none, whose rules have no bus in their ARN; a bus of another account names that account's rule, as given and
+     * as the caller's own, which Floci acts on.
+     */
+    @Test
+    void aRuleIsOnTheEventBusItsRequestNames() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule", json("{\"Name\":\"r\"}")));
+        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"default\"}")));
+        assertEquals(List.of(events + "rule/orders/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"orders\"}")));
+        assertEquals(List.of(events + "rule/orders/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"" + events + "event-bus/orders\"}")));
+        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"" + events + "event-bus/default\"}")));
+        assertEquals(List.of("arn:aws:events:eu-west-1:111122223333:rule/orders/r",
+                "arn:aws:events:us-east-1:111122223333:rule/orders/r", "arn:aws:events:eu-west-1:000000000000:rule/orders/r",
+                events + "rule/orders/r"), of("events:DescribeRule", json("{\"Name\":\"r\",\"EventBusName\":"
+                + "\"arn:aws:events:eu-west-1:111122223333:event-bus/orders\"}")));
+        // A target's rule is named by Rule.
+        assertEquals(List.of(events + "rule/orders/r"), of("events:PutTargets", json("{\"Rule\":\"r\","
+                + "\"EventBusName\":\"orders\",\"Targets\":[{\"Id\":\"1\",\"Arn\":\"arn:aws:sqs:us-east-1:000000000000:q\"}]}")));
+        // A request naming no event bus describes the default one.
+        assertEquals(List.of(events + "event-bus/default"), of("events:DescribeEventBus", json("{}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus", json("{\"Name\":\"orders\"}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus",
+                json("{\"Name\":\"" + events + "event-bus/orders\"}")));
+    }
+
+    /**
+     * A rule on another account's default event bus is that account's, checked as the caller's too, and a bus ARN
+     * leaving its account and Region empty, or a null bus, names the caller's, which the handler acts on.
+     */
+    @Test
+    void aRuleIsOnTheEventBusItsHandlerActsOn() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        assertEquals(List.of("arn:aws:events:us-east-1:111122223333:rule/r", events + "rule/r"),
+                of("events:DescribeRule", json("{\"Name\":\"r\",\"EventBusName\":"
+                + "\"arn:aws:events:us-east-1:111122223333:event-bus/default\"}")));
+        assertEquals(List.of(events + "rule/orders/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"arn:aws:events:::event-bus/orders\"}")));
+        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":null}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus",
+                json("{\"Name\":\"arn:aws:events:::event-bus/orders\"}")));
+        assertEquals(List.of(events + "event-bus/default"), of("events:DescribeEventBus", json("{\"Name\":null}")));
+    }
+
+    /**
+     * A connection or an API destination, whose ARN EventBridge follows with an id it mints after the name, is the
+     * one stored under the name the request gives, and has that id open when none is or nothing looks it up.
+     */
+    @Test
+    void aResourceWhoseIdItsServiceMintsIsTheOneStoredUnderItsName() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        StoredResourceArns stored = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "events";
+            }
+
+            @Override
+            public Optional<String> find(String type, String name, String region) {
+                return "web".equals(name) && "us-east-1".equals(region) ? Optional.of(events + type + "/web/1234")
+                        : Optional.empty();
+            }
+        };
+        assertEquals(List.of(events + "connection/web/1234"), RequestResources.of("events:DescribeConnection",
+                json("{\"Name\":\"web\"}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(events + "api-destination/web/1234"), RequestResources.of(
+                "events:DescribeApiDestination", json("{\"Name\":\"web\"}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(events + "connection/other/*"), RequestResources.of("events:DescribeConnection",
+                json("{\"Name\":\"other\"}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(events + "connection/web/*"), of("events:DescribeConnection", json("{\"Name\":\"web\"}")));
+        // A create names the connection it uses by its ARN, the id given, and has its own id open.
+        assertEquals(List.of(events + "connection/web/1234", events + "api-destination/new/*"), RequestResources.of(
+                "events:CreateApiDestination", json("{\"Name\":\"new\",\"ConnectionArn\":\"" + events
+                + "connection/web/1234\"}"), "aws", "us-east-1", "000000000000", stored));
     }
 
     /** A request value is a name, so a {@code ${...}} in it is kept, not read as a variable of the format. */

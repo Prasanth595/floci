@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -60,7 +61,7 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class EventBridgeService implements ResourceProvider {
+public class EventBridgeService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
     private static final int MAX_LIST_LIMIT = 100;
@@ -1580,6 +1581,24 @@ public class EventBridgeService implements ResourceProvider {
         connectionStore.put(key, connection);
         LOG.infov("Created connection: {0} with authorization type {1}", name, authorizationType);
         return connection;
+    }
+
+    @Override
+    public String namespace() {
+        return "events";
+    }
+
+    /**
+     * The ARN of the caller's connection or API destination of the name in the Region, which follows the name with
+     * the id it was minted with, as its handlers look it up.
+     */
+    @Override
+    public Optional<String> find(String type, String name, String region) {
+        return switch (type) {
+            case "connection" -> connectionStore.get(connectionKey(region, name)).map(Connection::getConnectionArn);
+            case "api-destination" -> apiDestinationStore.get(apiDestinationKey(region, name)).map(ApiDestination::getArn);
+            default -> Optional.empty();
+        };
     }
 
     public Connection describeConnection(String name, String region) {

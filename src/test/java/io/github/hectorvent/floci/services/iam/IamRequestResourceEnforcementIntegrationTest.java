@@ -40,6 +40,7 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";
     private static final String ELB = "arn:aws:elasticloadbalancing:" + REGION + ":" + ACCOUNT + ":";
+    private static final String EVENTS = "arn:aws:events:" + REGION + ":" + ACCOUNT + ":";
     /** The AWS Load Balancer Controller's create, tag-on-create and listener statements (its policy v2.14.0). */
     private static final String CONTROLLER_CREATE = "{\"Effect\":\"Allow\",\"Action\":[\"elasticloadbalancing:CreateLoadBalancer\","
             + "\"elasticloadbalancing:CreateTargetGroup\"],\"Resource\":\"*\","
@@ -225,13 +226,9 @@ class IamRequestResourceEnforcementIntegrationTest {
     @Test
     void aVersionOrAnAliasIsCheckedOnItsStateMachine() {
         String arn = createStateMachine("res-alias-" + suffix());
-        String version = admin("states").header("X-Amz-Target", "AWSStepFunctions.PublishStateMachineVersion")
-                .contentType("application/x-amz-json-1.0").body("{\"stateMachineArn\":\"" + arn + "\"}")
-                .post("/").then().statusCode(200).extract().path("stateMachineVersionArn");
-        String alias = admin("states").header("X-Amz-Target", "AWSStepFunctions.CreateStateMachineAlias")
-                .contentType("application/x-amz-json-1.0").body("{\"name\":\"PROD\",\"routingConfiguration\":"
-                        + "[{\"stateMachineVersionArn\":\"" + version + "\",\"weight\":100}]}")
-                .post("/").then().statusCode(200).extract().path("stateMachineAliasArn");
+        String version = publishVersion(arn);
+        String alias = createAlias(ADMIN, version).statusCode(200)
+                .extract().path("stateMachineAliasArn");
         assertEquals(arn + ":PROD", alias);
 
         User user = user("res-alias");
@@ -245,6 +242,136 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "\"Resource\":\"" + arn + "\"}");
         refusedJson(startExecution(user, alias), "states:StartExecution");
         refusedJson(startExecution(user, version), "states:StartExecution");
+    }
+
+    /**
+     * An alias is created on the state machine its routing configuration's versions are of, so a grant on that
+     * machine allows it and one on another does not.
+     */
+    @Test
+    void anAliasIsCreatedOnTheStateMachineItsVersionsAreOf() {
+        String arn = createStateMachine("res-new-alias-" + suffix());
+        String version = publishVersion(arn);
+        User user = user("res-new-alias");
+        user.policy(allowOn("states:CreateStateMachineAlias", arn + "-other"));
+        refusedJson(createAlias(user.accessKeyId(), version), "states:CreateStateMachineAlias");
+        user.policy(allowOn("states:CreateStateMachineAlias", arn));
+        createAlias(user.accessKeyId(), version).statusCode(200);
+    }
+
+    /** {@code SetRulePriorities} is checked on the rules its priorities name. */
+    @Test
+    void rulePrioritiesAreCheckedOnTheRulesTheyName() {
+        String rule = ELB + "listener-rule/app/res-none/0123456789abcdef/0123456789abcdef/0123456789abcdef";
+        User user = user("res-priorities");
+        user.policy(allowOn("elasticloadbalancing:SetRulePriorities", rule));
+        setRulePriority(user, rule).statusCode(400).body(containsString("RuleNotFound"));
+        refused(setRulePriority(user, rule.replace("0123456789abcdef/0123456789abcdef/0123456789abcdef",
+                "0123456789abcdef/0123456789abcdef/fedcba9876543210")), "elasticloadbalancing:SetRulePriorities");
+    }
+
+    /**
+     * An EventBridge rule is checked on the rule its request names, on the event bus it names by name or ARN, or on
+     * the default one when it names none, whose rules have no bus in their ARN, as EventBridge mints them.
+     */
+    @Test
+    void aRuleIsCheckedOnTheEventBusItsRequestNames() {
+        String bus = "res-bus-" + suffix();
+        String name = "res-rule-" + suffix();
+        admin("events").header("X-Amz-Target", "AWSEvents.CreateEventBus").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + bus + "\"}").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("events").header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + bus + "\"}").post("/"));
+        String custom = putRule(name, ",\"EventBusName\":\"" + bus + "\"");
+        String onDefault = putRule(name, "");
+        assertEquals(EVENTS + "rule/" + bus + "/" + name, custom);
+        assertEquals(EVENTS + "rule/" + name, onDefault);
+
+        User user = user("res-rule");
+        user.policy(allowOn("events:DescribeRule", custom));
+        describeRule(user, name, ",\"EventBusName\":\"" + bus + "\"").statusCode(200);
+        describeRule(user, name, ",\"EventBusName\":\"" + EVENTS + "event-bus/" + bus + "\"").statusCode(200);
+        refusedJson(describeRule(user, name, ""), "events:DescribeRule");
+
+        user.policy(allowOn("events:DescribeRule", onDefault));
+        describeRule(user, name, "").statusCode(200);
+        describeRule(user, name, ",\"EventBusName\":\"default\"").statusCode(200);
+        refusedJson(describeRule(user, name, ",\"EventBusName\":\"" + bus + "\""), "events:DescribeRule");
+    }
+
+    /**
+     * A bus ARN leaving its account and Region empty names the caller's bus, and a null bus the default one, as the
+     * handler reads them, so a deny on the caller's rules holds.
+     */
+    @Test
+    void aDenyHoldsOnTheRuleOfTheBusTheHandlerActsOn() {
+        String bus = "res-bus-" + suffix();
+        String name = "res-rule-" + suffix();
+        admin("events").header("X-Amz-Target", "AWSEvents.CreateEventBus").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + bus + "\"}").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("events").header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + bus + "\"}").post("/"));
+        String custom = putRule(name, ",\"EventBusName\":\"" + bus + "\"");
+        String onDefault = putRule(name, "");
+        String noAccount = ",\"EventBusName\":\"arn:aws:events:::event-bus/" + bus + "\"";
+
+        User user = user("res-rule-deny");
+        user.policy(allowOn("events:DescribeRule", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"events:DescribeRule\","
+                + "\"Resource\":[\"" + custom + "\",\"" + onDefault + "\"]}");
+        refusedJson(describeRule(user, name, noAccount), "events:DescribeRule");
+        refusedJson(describeRule(user, name, ",\"EventBusName\":null"), "events:DescribeRule");
+        describeRule(user, name + "-other", noAccount).statusCode(400)
+                .body(containsString("ResourceNotFoundException"));
+        describeRule(user, name + "-other", ",\"EventBusName\":null").statusCode(400)
+                .body(containsString("ResourceNotFoundException"));
+    }
+
+    /**
+     * A connection or an API destination named by its name is checked on the ARN EventBridge stored it under, which
+     * follows the name with the id it minted, so a grant on that ARN or on {@code <name>/*} allows it, one on the
+     * name alone does not, and a deny on that ARN holds.
+     */
+    @Test
+    void aConnectionNamedByItsNameIsCheckedOnTheArnItWasMintedUnder() {
+        String name = "res-conn-" + suffix();
+        String connection = admin("events").header("X-Amz-Target", "AWSEvents.CreateConnection")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + name + "\",\"AuthorizationType\":\"API_KEY\","
+                        + "\"AuthParameters\":{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"k\",\"ApiKeyValue\":\"v\"}}}")
+                .post("/").then().statusCode(200).extract().path("ConnectionArn");
+        cleanup.register(() -> admin("events").header("X-Amz-Target", "AWSEvents.DeleteConnection")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + name + "\"}").post("/"));
+        String destination = admin("events").header("X-Amz-Target", "AWSEvents.CreateApiDestination")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + name + "\",\"ConnectionArn\":\""
+                        + connection + "\",\"InvocationEndpoint\":\"https://example.com/hook\",\"HttpMethod\":\"POST\"}")
+                .post("/").then().statusCode(200).extract().path("ApiDestinationArn");
+        cleanup.register(() -> admin("events").header("X-Amz-Target", "AWSEvents.DeleteApiDestination")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + name + "\"}").post("/"));
+        assertTrue(connection.startsWith(EVENTS + "connection/" + name + "/"), connection);
+        assertTrue(destination.startsWith(EVENTS + "api-destination/" + name + "/"), destination);
+
+        User user = user("res-conn");
+        user.policy(allowOn("events:DescribeConnection", connection));
+        describeByName(user, "DescribeConnection", name).statusCode(200);
+        user.policy(allowOn("events:DescribeConnection", EVENTS + "connection/" + name + "/*"));
+        describeByName(user, "DescribeConnection", name).statusCode(200);
+        user.policy(allowOn("events:DescribeConnection", EVENTS + "connection/" + name));
+        refusedJson(describeByName(user, "DescribeConnection", name), "events:DescribeConnection");
+        user.policy(allowOn("events:DescribeConnection", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"events:DescribeConnection\",\"Resource\":\"" + connection + "\"}");
+        refusedJson(describeByName(user, "DescribeConnection", name), "events:DescribeConnection");
+        user.policy(allowOn("events:DescribeApiDestination", destination));
+        describeByName(user, "DescribeApiDestination", name).statusCode(200);
+        refusedJson(describeByName(user, "DescribeApiDestination", name + "-other"), "events:DescribeApiDestination");
+    }
+
+    /** A request naming no event bus describes the default one, so it is checked on that bus. */
+    @Test
+    void anEventBusRequestNamingNoneIsCheckedOnTheDefaultOne() {
+        User user = user("res-default-bus");
+        user.policy(allowOn("events:DescribeEventBus", EVENTS + "event-bus/default"));
+        user.json("events", "AWSEvents.DescribeEventBus", "1.1").body("{}").post("/").then().statusCode(200);
+        refusedJson(user.json("events", "AWSEvents.DescribeEventBus", "1.1").body("{\"Name\":\"res-other\"}").post("/")
+                .then(), "events:DescribeEventBus");
     }
 
     @Test
@@ -374,6 +501,45 @@ class IamRequestResourceEnforcementIntegrationTest {
         cleanup.register(() -> admin("states").header("X-Amz-Target", "AWSStepFunctions.DeleteStateMachine")
                 .contentType("application/x-amz-json-1.0").body("{\"stateMachineArn\":\"" + arn + "\"}").post("/"));
         return arn;
+    }
+
+    /** Puts a rule of the name on the bus {@code bus} names, a JSON member or none, and gives its ARN. */
+    private String putRule(String name, String bus) {
+        String arn = admin("events").header("X-Amz-Target", "AWSEvents.PutRule").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + name + "\",\"ScheduleExpression\":\"rate(1 hour)\"" + bus + "}")
+                .post("/").then().statusCode(200).extract().path("RuleArn");
+        cleanup.register(() -> admin("events").header("X-Amz-Target", "AWSEvents.DeleteRule")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + name + "\"" + bus + "}").post("/"));
+        return arn;
+    }
+
+    private static ValidatableResponse describeByName(User user, String operation, String name) {
+        return user.json("events", "AWSEvents." + operation, "1.1").body("{\"Name\":\"" + name + "\"}").post("/").then();
+    }
+
+    private static ValidatableResponse describeRule(User user, String name, String bus) {
+        return user.json("events", "AWSEvents.DescribeRule", "1.1").body("{\"Name\":\"" + name + "\"" + bus + "}")
+                .post("/").then();
+    }
+
+    private static String publishVersion(String arn) {
+        return admin("states").header("X-Amz-Target", "AWSStepFunctions.PublishStateMachineVersion")
+                .contentType("application/x-amz-json-1.0").body("{\"stateMachineArn\":\"" + arn + "\"}")
+                .post("/").then().statusCode(200).extract().path("stateMachineVersionArn");
+    }
+
+    /** An alias {@code PROD} routing every execution to the version. */
+    private static ValidatableResponse createAlias(String accessKeyId, String version) {
+        return given().header("Authorization", auth(accessKeyId, "states"))
+                .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachineAlias")
+                .contentType("application/x-amz-json-1.0").body("{\"name\":\"PROD\",\"routingConfiguration\":"
+                        + "[{\"stateMachineVersionArn\":\"" + version + "\",\"weight\":100}]}").post("/").then();
+    }
+
+    private static ValidatableResponse setRulePriority(User user, String rule) {
+        return user.query("elasticloadbalancing", "SetRulePriorities").formParam("Version", "2015-12-01")
+                .formParam("RulePriorities.member.1.RuleArn", rule).formParam("RulePriorities.member.1.Priority", "5")
+                .post("/").then();
     }
 
     private static ValidatableResponse describeStateMachine(User user, String arn) {

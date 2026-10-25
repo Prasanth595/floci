@@ -106,6 +106,27 @@ def test_a_create_of_a_child_of_a_type_its_action_acts_on_names_it_from_the_pare
     assert r.creates_for("svc:CreateListener", ["loadbalancer/app/"], LISTENERS, members("RoleArn")) == []
 
 
+def test_an_arn_inside_a_structure_or_a_lists_structures_is_read_by_its_path():
+    shapes = {"String": {"type": "string"}, "Strings": {"type": "list", "member": {"shape": "String"}},
+              "Priority": {"type": "structure", "members": {"RuleArn": {"shape": "String"}, "Priority": {"shape": "String"},
+                                                            "TargetArns": {"shape": "Strings"}}},
+              "Priorities": {"type": "list", "member": {"shape": "Priority"}},
+              "Config": {"type": "structure", "members": {"RoleArn": {"shape": "String"}, "Name": {"shape": "String"}}},
+              "In": {"type": "structure", "members": {"RulePriorities": {"shape": "Priorities"}, "Config": {"shape": "Config"},
+                                                      "ListenerArn": {"shape": "String"}}}}
+    models = {"svc": {"metadata": {"protocol": "query"}, "operations": {"SetRulePriorities": {"input": {"shape": "In"}}},
+                      "shapes": shapes}}
+    found = r.request_members(models, "SetRulePriorities")
+    assert found == {"RulePriorities[].RuleArn": "RulePriorities[].RuleArn",
+                     "RulePriorities[].TargetArns": "RulePriorities[].TargetArns[]", "Config.RoleArn": "Config.RoleArn",
+                     "ListenerArn": "ListenerArn"}
+    # Each holds the ARN of any type the action acts on, as a top-level one does, and neither holds the type
+    # the way a top-level member named for it does, nor names the parent of a create.
+    resources = r.resources_for("svc:SetRulePriorities", ["thing"], FORMATS, found)
+    assert {"types": ["thing"], "arn": "RulePriorities[].RuleArn"} in resources
+    assert r.creates_for("svc:CreateThing", ["thing"], FORMATS, {"Parts[].ThingArn": "Parts[].ThingArn"}) == []
+
+
 def test_stems_drop_the_suffixes_names_carry():
     assert r.stem("TargetGroupArns") == "targetgroup"
     assert r.stem("DBInstanceIdentifier") == "dbinstance"
@@ -141,6 +162,8 @@ def corrections(monkeypatch):
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "CORRECTIONS", {})
     monkeypatch.setattr(r, "UNQUALIFIED", {})
+    monkeypatch.setattr(r, "MINTED_IDS", {})
+    monkeypatch.setattr(r, "CLIENTS_NOT_READ", {})
     return monkeypatch
 
 
@@ -206,6 +229,52 @@ def test_a_type_checked_without_a_qualifier_is_recorded_and_must_be_one_the_file
         r.build(DOCUMENTS, "test", tmp_path, "botocore test")
 
 
+def test_a_type_whose_service_mints_an_id_after_its_name_is_recorded_and_must_be_one_the_file_reads(corrections, tmp_path):
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
+    corrections.setattr(r, "MINTED_IDS", {"svc:thing": "its service follows the name with an id it mints"})
+    document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    assert document["mintedIds"] == {"svc": ["thing"]}
+    assert r.validate(document) == [] and r.derive(document, tmp_path) == []
+    # A hand edit no longer matches, and a type the file has no format for fails the build.
+    document["mintedIds"] = {}
+    assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
+    corrections.setattr(r, "MINTED_IDS", {"svc:gone": "no longer there"})
+    with pytest.raises(ValueError, match="svc:gone"):
+        r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+
+
+def test_a_client_not_read_gives_no_members_and_aws_listing_it_is_no_untrue_claim(corrections, tmp_path):
+    corrections.setattr(r, "CLIENTS_NOT_READ", {"svcv2": "a second API Floci does not serve"})
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
+                            "svcv2": model({"GetThing": {"ThingArn": "String"}})})
+    documents = [dict(DOCUMENTS[0], Operations=[dict(op, SDK=op["SDK"] + [{"Name": "svcv2", "Package": "Boto3"}])
+                                                for op in DOCUMENTS[0]["Operations"]])] + DOCUMENTS[1:]
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert document["namespaces"] == {"svc": ["svc"]} and document["clientsNotRead"] == {"svcv2": "a second API Floci does not serve"}
+    assert document["operations"]["svc:GetThing"]["resources"] == [{"type": "thing", "fill": {"ThingName": "ThingName"}}]
+    assert r.validate(document) == [] and r.derive(document, tmp_path) == []
+    upstream = r.checked_actions(documents)
+    assert r.verify_against(document, upstream, {"svc": {"thing": FORMATS["thing"]}}) == ([], [])
+    document["clientsNotRead"] = {}
+    assert len(r.derive(document, tmp_path)) == 1
+
+
+def test_a_member_taking_an_arn_before_a_name_is_read_as_the_variable_of_that_types_arn():
+    shapes = {"String": {"type": "string"},
+              "BusNameOrArn": {"type": "string", "pattern": "(arn:aws[\\w-]*:svc:[a-z]+-[a-z]+-[\\w-]+:[0-9]{12}:bus\\/)?[/\\.\\-_A-Za-z0-9]+"},
+              "In": {"type": "structure", "members": {"Name": {"shape": "String"}, "BusName": {"shape": "BusNameOrArn"}}}}
+    models = {"svc": {"metadata": {"protocol": "json"}, "operations": {"PutRule": {"input": {"shape": "In"}}}, "shapes": shapes}}
+    assert r.name_or_arn_members(models, "PutRule") == {"BusName": "bus"}
+    formats = {"bus": "arn:${Partition}:svc:${Region}:${Account}:bus/${BusName}",
+               "rule": "arn:${Partition}:svc:${Region}:${Account}:rule/${BusName}/${RuleName}"}
+    assert r.named_by("bus", formats) == "bus" and r.named_by("rule", formats) is None
+    rules = [{"type": "rule", "fill": {"BusName": "BusName", "RuleName": "Name"}},
+             {"type": "rule", "fill": {"RuleName": "Name"}, "when": {"BusName": ["default"]}},
+             {"types": ["rule"], "arn": "RuleArn"}]
+    assert r.with_arn_of(rules, formats, {"BusName": "bus"}) == [
+        dict(rules[0], arnOf={"BusName": "bus"}), dict(rules[1], arnOf={"BusName": "bus"}), rules[2]]
+
+
 def test_a_correction_for_an_operation_the_file_does_not_read_fails(corrections, tmp_path):
     corrections.setattr(r, "CORRECTIONS", {"svc:Gone": ([], "no longer there")})
     with pytest.raises(ValueError, match="svc:Gone"):
@@ -213,9 +282,10 @@ def test_a_correction_for_an_operation_the_file_does_not_read_fails(corrections,
 
 
 def good_document() -> dict:
-    return {"namespaces": {"svc": ["svc"]}, "handBuilt": ["hand"], "notCovered": {"later": "a later batch"},
+    return {"namespaces": {"svc": ["svc"]}, "clientsNotRead": {"svcv2": "not served"}, "handBuilt": ["hand"],
+            "notCovered": {"later": "a later batch"},
             "otherNamespaces": ["other"], "arnFormats": {"svc": {"thing": FORMATS["thing"], "group": FORMATS["group"]}},
-            "unqualified": {"svc": ["thing"]},
+            "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]},
             "operations": {
                 "svc:A": {"action": "svc:A", "types": ["thing"], "resources": [{"types": ["thing"], "arn": "ThingArn"}]},
                 "svc:B": {"action": "svc:B", "types": ["group"], "resources": [{"type": "group", "fill": {"GroupName": "Names[]"}}]},
@@ -227,6 +297,9 @@ def test_a_well_formed_document_validates():
     document = good_document()
     document["operations"]["svc:B"]["resources"][0]["when"] = {"Type": ["application", None]}
     document["operations"]["svc:B"]["resources"][0]["account"] = "registryId"
+    document["operations"]["svc:B"]["resources"][0]["unless"] = {"Bus": ["default"]}
+    document["operations"]["svc:B"]["resources"][0]["absent"] = {"Bus": "default"}
+    document["operations"]["svc:B"]["resources"][0]["arnOf"] = {"Bus": "thing"}
     document["operations"]["svc:A"]["resources"][0]["before"] = "#"
     assert r.validate(document) == []
     assert r.validate(with_a_create()) == []
@@ -241,7 +314,9 @@ def with_a_create() -> dict:
 
 @pytest.mark.parametrize("change, problem", [
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(types=["pool"]), "not resource types"),
-    (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b"), "no member"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b.c"), "no member"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a[][]"), "no member"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Groups[].Name"), "no variables"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(Other="Name"), "no variables"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupId="Ids[]"), "more than one list"),
     (lambda d: d["operations"]["svc:A"].update(action="other:A"), "no action of its namespace"),
@@ -259,10 +334,22 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(account="a.b"), "no account of its ARN"),
     (lambda d: d["arnFormats"]["svc"].update(group="arn:${Partition}:svc:::group/${GroupName}")
      or d["operations"]["svc:B"]["resources"][0].update(account="registryId"), "no account of its ARN"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(unless={"Type": []}), "no member's values"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(absent={"Bus": ""}), "absent members"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(absent={"Bus[]": "default"}), "absent members"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(arnOf={"Bus": "pool"}), "types of one variable"),
+    (lambda d: d["arnFormats"]["svc"].update(group="arn:${Partition}:svc:${Region}:${Account}:group/${GroupName}/${Id}")
+     or d["operations"]["svc:B"]["resources"][0].update(arnOf={"Bus": "group"}), "types of one variable"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(unless={"Type": ["a"]}), "neither an ARN member"),
+    (lambda d: d["clientsNotRead"].update(svcv2=""), "clientsNotRead"),
     (lambda d: d.update(unqualified={"svc": ["pool"]}), "unqualified"),
     (lambda d: d.update(unqualified={"other": ["thing"]}), "unqualified"),
     (lambda d: d.update(unqualified={"svc": []}), "unqualified"),
     (lambda d: d.pop("unqualified"), "unqualified"),
+    (lambda d: d.update(mintedIds={"svc": ["group"]}), "mintedIds"),
+    (lambda d: d.update(mintedIds={"other": ["thing"]}), "mintedIds"),
+    (lambda d: d.update(mintedIds={"svc": []}), "mintedIds"),
+    (lambda d: d.pop("mintedIds"), "mintedIds"),
 ])
 def test_a_malformed_document_is_rejected(change, problem):
     document = good_document()
@@ -301,7 +388,9 @@ def test_every_correction_is_the_vendored_entry_of_an_operation_the_file_reads()
     assert r.CORRECTIONS
     for operation, (resources, reason) in r.CORRECTIONS.items():
         assert operation in operations and reason, operation
-        assert operations[operation]["resources"] == resources, operation
+        # A resource's account and the ARNs its members may give are botocore's, on top of the correction.
+        assert [{key: value for key, value in resource.items() if key not in ("account", "arnOf")}
+                for resource in operations[operation]["resources"]] == resources, operation
 
 
 def test_a_correction_gives_the_operation_its_resources(corrections):
@@ -326,6 +415,20 @@ def test_the_vendored_file_is_well_formed():
     # StartExecution's name is the execution's, so only its state machine ARN is read, up to a test case's #.
     assert operations["states:StartExecution"]["resources"] == [
         {"types": ["statemachine"], "arn": "stateMachineArn", "before": "#"}]
+    # An ARN inside a structure or each of a list's structures.
+    assert operations["elasticloadbalancing:SetRulePriorities"]["resources"] == [
+        {"types": ["listener-rule/app", "listener-rule/net"], "arn": "RulePriorities[].RuleArn"}]
+    assert operations["states:CreateStateMachineAlias"]["resources"] == [
+        {"types": ["statemachine"], "arn": "routingConfiguration[].stateMachineVersionArn"}]
+    # An EventBridge rule is on the bus EventBusName names, by name or ARN, or the default one when it names none.
+    assert operations["events:DescribeRule"]["resources"] == [
+        {"type": "rule-on-default-event-bus", "fill": {"RuleName": "Name"}, "when": {"EventBusName": ["default"]},
+         "absent": {"EventBusName": "default"}, "arnOf": {"EventBusName": "event-bus"}},
+        {"type": "rule-on-custom-event-bus", "fill": {"EventBusName": "EventBusName", "RuleName": "Name"},
+         "unless": {"EventBusName": ["default"]}, "absent": {"EventBusName": "default"}, "arnOf": {"EventBusName": "event-bus"}}]
+    assert operations["events:DescribeEventBus"]["resources"] == [
+        {"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"}, "arnOf": {"Name": "event-bus"}}]
+    assert document["namespaces"]["events"] == ["events"] and "eventbridgev2" in document["clientsNotRead"]
     # A state machine's version or alias is checked on the state machine.
     assert document["unqualified"] == {"states": ["statemachine"]}
     # A listener is made under a load balancer, and a rule under a listener.

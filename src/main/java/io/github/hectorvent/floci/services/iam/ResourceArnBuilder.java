@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RequestResources;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.kms.KmsService;
@@ -75,19 +76,34 @@ public class ResourceArnBuilder {
     private final Instance<EksService> eksService;
     /** Looked up lazily for the same reason, to resolve a key named by an id, an alias or an ARN to its stored ARN. */
     private final Instance<KmsService> kmsService;
+    /**
+     * Looked up lazily for the same reason, to read the ARN a resource the request-resources table names by a name
+     * its service follows with a minted id is stored under.
+     */
+    private final Instance<StoredResourceArns> storedResourceArns;
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
                               Instance<SecretsManagerService> secretsManagerService,
                               Instance<LambdaMicrovmsService> microvmsService,
                               Instance<EksService> eksService,
-                              Instance<KmsService> kmsService) {
+                              Instance<KmsService> kmsService,
+                              Instance<StoredResourceArns> storedResourceArns) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
         this.secretsManagerService = secretsManagerService;
         this.microvmsService = microvmsService;
         this.eksService = eksService;
         this.kmsService = kmsService;
+        this.storedResourceArns = storedResourceArns;
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              Instance<SecretsManagerService> secretsManagerService,
+                              Instance<LambdaMicrovmsService> microvmsService,
+                              Instance<EksService> eksService,
+                              Instance<KmsService> kmsService) {
+        this(objectMapper, iamService, secretsManagerService, microvmsService, eksService, kmsService, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -173,13 +189,27 @@ public class ResourceArnBuilder {
     /**
      * The resources a request of a namespace this builder has no branch for names, from the vendored table of
      * request resources (see {@link RequestResources}); {@code *} when it names none, or the operation is not one
-     * of the namespace.
+     * of the namespace. A resource whose service mints an id after its name is the one the namespace's
+     * {@link StoredResourceArns} finds under that name.
      */
-    private static List<String> namedResources(String credentialScope, String operation, ContainerRequestContext ctx,
-                                               String region, String accountId, String partition) {
+    private List<String> namedResources(String credentialScope, String operation, ContainerRequestContext ctx,
+                                        String region, String accountId, String partition) {
         List<String> named = operation == null || !operation.startsWith(credentialScope + ":") ? List.of()
-                : RequestResources.of(operation, ctx, partition, region, accountId);
+                : RequestResources.of(operation, ctx, partition, region, accountId, storedResourceArns(credentialScope));
         return named.isEmpty() ? List.of("*") : named;
+    }
+
+    /** The registered finder of the namespace's stored ARNs; null when there is none. */
+    private StoredResourceArns storedResourceArns(String namespace) {
+        if (storedResourceArns == null || storedResourceArns.isUnsatisfied()) {
+            return null;
+        }
+        for (StoredResourceArns stored : storedResourceArns) {
+            if (stored.namespace().equals(namespace)) {
+                return stored;
+            }
+        }
+        return null;
     }
 
     private String buildResourceGroupArn(ContainerRequestContext ctx, String region, String accountId) {
