@@ -21,8 +21,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -187,5 +190,41 @@ class ApiGatewayUsagePlanServiceTest {
         assertNull(plan.getDescription());
         assertEquals(limits, plan.limits());
         assertEquals(Map.of("stack", "v1"), plan.getTags());
+    }
+
+    // A CloudFormation update snapshots the plan through this read, so a patch landing halfway through it
+    // would leave a snapshot mixing two revisions. The patch has to wait until the reader returns: the
+    // reader holds on until the patch's thread is blocked or the patch is done, so a slow start cannot
+    // pass for a wait.
+    @Test
+    void aPatchWaitsForAReadOfThePlanToFinish() throws Exception {
+        ApiGatewayService service = service();
+        String planId = service.createUsagePlan(REGION, Map.of("name", "before")).getId();
+        AtomicReference<Thread> worker = new AtomicReference<>();
+        CountDownLatch started = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<UsagePlan> patch = service.readUsagePlan(REGION, planId, plan -> {
+                Future<UsagePlan> pending = executor.submit(() -> {
+                    worker.set(Thread.currentThread());
+                    started.countDown();
+                    return service.updateUsagePlan(REGION, planId,
+                            List.of(Map.of("op", "replace", "path", "/name", "value", "after")));
+                });
+                assertTrue(assertDoesNotThrow(() -> started.await(5, TimeUnit.SECONDS)),
+                        "the patch never started");
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (worker.get().getState() != Thread.State.BLOCKED && !pending.isDone()
+                        && System.nanoTime() < deadline) {
+                    Thread.onSpinWait();
+                }
+                assertFalse(pending.isDone(), "the patch finished while the plan was being read");
+                assertEquals(Thread.State.BLOCKED, worker.get().getState());
+                assertEquals("before", plan.getName());
+                return pending;
+            });
+
+            assertEquals("after", patch.get(5, TimeUnit.SECONDS).getName());
+            assertEquals("after", service.getUsagePlan(REGION, planId).getName());
+        }
     }
 }

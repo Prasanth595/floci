@@ -10,12 +10,15 @@ import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -31,6 +34,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -53,6 +57,15 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
     private final ApiGatewayService apiGateway = mock(ApiGatewayService.class);
     private final ApiGatewayUsagePlanCfnProvisioner provisioner = new ApiGatewayUsagePlanCfnProvisioner(apiGateway);
     private final ObjectMapper mapper = new ObjectMapper();
+
+    /** The locked read hands its reader the plan {@code getUsagePlan} is stubbed with. */
+    @BeforeEach
+    void readTheStubbedPlan() {
+        when(apiGateway.readUsagePlan(any(), any(), any())).thenAnswer(inv -> {
+            Function<UsagePlan, Object> reader = inv.getArgument(2);
+            return reader.apply(apiGateway.getUsagePlan(inv.getArgument(0), inv.getArgument(1)));
+        });
+    }
 
     private ProvisionContext ctx() {
         return ctx(null);
@@ -706,6 +719,30 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
         String reason = r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
         assertTrue(reason != null && reason.contains("plan-1") && reason.contains("store write failed again"),
                 String.valueOf(reason));
+    }
+
+    // The snapshot is the plan read under the service's patch lock before the first write, not the
+    // provisioner's earlier lookup: here a patch renamed the plan between the two, and the rollback
+    // puts back the revision the locked read saw.
+    @Test
+    void theSnapshotIsTheRevisionReadUnderThePatchLockBeforeTheFirstWrite() {
+        UsagePlan stored = originalPlan();
+        storeHolds(stored);
+        UsagePlan patched = originalPlan();
+        patched.setName("renamed-by-a-patch");
+        doAnswer(inv -> {
+            Function<UsagePlan, Object> reader = inv.getArgument(2);
+            return reader.apply(patched);
+        }).when(apiGateway).readUsagePlan(eq(REGION), eq("plan-1"), any());
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+
+        provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
+
+        InOrder order = inOrder(apiGateway);
+        order.verify(apiGateway).readUsagePlan(eq(REGION), eq("plan-1"), any());
+        order.verify(apiGateway).updateUsagePlan(eq(REGION), eq("plan-1"), anyList());
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertEquals("renamed-by-a-patch", stored.getName());
     }
 
     // An attempt that failed after its snapshot may have changed the plan, so the engine keeps it for

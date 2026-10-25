@@ -139,7 +139,8 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
         Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
         boolean tagsChanged = !ReservedTags.stripApiGatewayReservedTags(desiredTags).equals(existing.getTags());
         if (!patches.isEmpty() || limitsChanged || tagsChanged) {
-            snapshotBeforeUpdate(r, existing, ctx.region());
+            r.getAttributes().put(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR, apiGatewayService.readUsagePlan(
+                    ctx.region(), existing.getId(), plan -> snapshot(plan, ctx.region())));
         }
 
         UsagePlan plan = existing;
@@ -171,21 +172,22 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
     }
 
     /**
-     * Keeps the name, description, stages with their method throttles, throttle, quota and tags the
-     * plan has before an in-place update changes them, so {@link #rollbackUpdate} can put them back.
+     * The name, description, stages with their method throttles, throttle, quota and tags the plan
+     * has before an in-place update changes them, so {@link #rollbackUpdate} can put them back.
      * Written as text before the first mutating call, because the service updates the stored plan in
-     * place.
+     * place, and built inside {@link ApiGatewayService#readUsagePlan} so a concurrent patch cannot
+     * land halfway through it.
      */
-    private static void snapshotBeforeUpdate(StackResource r, UsagePlan existing, String region) {
+    private static String snapshot(UsagePlan plan, String region) {
         ObjectNode snapshot = MAPPER.createObjectNode();
         snapshot.put("region", region);
-        snapshot.put("id", existing.getId());
-        snapshot.put("name", existing.getName());
-        snapshot.put("description", existing.getDescription());
-        snapshot.set("limits", MAPPER.valueToTree(existing.limits()));
+        snapshot.put("id", plan.getId());
+        snapshot.put("name", plan.getName());
+        snapshot.put("description", plan.getDescription());
+        snapshot.set("limits", MAPPER.valueToTree(plan.limits()));
         ObjectNode tags = snapshot.putObject("tags");
-        existing.getTags().forEach(tags::put);
-        r.getAttributes().put(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+        plan.getTags().forEach(tags::put);
+        return snapshot.toString();
     }
 
     /**

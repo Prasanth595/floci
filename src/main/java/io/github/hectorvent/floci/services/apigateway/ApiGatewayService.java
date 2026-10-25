@@ -80,6 +80,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
@@ -1545,6 +1546,13 @@ public class ApiGatewayService implements ResourceProvider {
     public UsagePlan getUsagePlan(String region, String usagePlanId) {
         return usagePlanStore.get(usagePlanKey(region, usagePlanId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid Usage Plan ID specified", 404));
+    }
+
+    /** Reads the stored plan under the lock patches hold, so the reader sees one revision of it. */
+    public <T> T readUsagePlan(String region, String usagePlanId, Function<UsagePlan, T> reader) {
+        synchronized (usagePlanLock) {
+            return reader.apply(getUsagePlan(region, usagePlanId));
+        }
     }
 
     public UsagePlan updateUsagePlan(String region, String usagePlanId, List<Map<String, String>> patchOperations) {
