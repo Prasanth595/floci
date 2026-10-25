@@ -1004,6 +1004,8 @@ public class LambdaService implements ResourceProvider {
         warmPool.drainEnvironment(fn);
 
         functionStore.save(region, fn);
+        // LastUpdateStatus reports the last update of either kind, so this one replaces a failed sync's.
+        failedReactiveSyncs.remove(fn.getFunctionArn());
         LOG.infov("Updated configuration for function: {0}", functionName);
         return fn;
     }

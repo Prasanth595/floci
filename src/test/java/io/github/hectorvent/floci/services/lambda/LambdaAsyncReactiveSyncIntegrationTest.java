@@ -1,0 +1,97 @@
+package io.github.hectorvent.floci.services.lambda;
+
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
+import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayOutputStream;
+import java.security.MessageDigest;
+import java.time.Duration;
+import java.util.Base64;
+import java.util.Map;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
+import static org.hamcrest.Matchers.equalTo;
+
+/**
+ * With asynchronous reactive S3 sync, the re-deploy runs on a background thread with no request of
+ * its own, so it must read the object in the uploader's account rather than the default one.
+ */
+@QuarkusTest
+@TestProfile(LambdaAsyncReactiveSyncIntegrationTest.AsyncReactiveSyncProfile.class)
+class LambdaAsyncReactiveSyncIntegrationTest {
+
+    private static final String ACCOUNT = "000000000021";
+    private static final String S3_AUTH =
+            "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20260215/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc";
+    private static final String LAMBDA_AUTH =
+            "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20260215/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=abc";
+    private static final String BUCKET = "async-reactive-sync-bucket";
+    private static final String KEY = "function.zip";
+    private static final String FN = "async-reactive-sync-fn";
+
+    public static class AsyncReactiveSyncProfile implements QuarkusTestProfile {
+        @Override
+        public Map<String, String> getConfigOverrides() {
+            return Map.of("floci.services.lambda.reactive-s3-sync.async", "true");
+        }
+    }
+
+    @Test
+    void uploadFromANonDefaultAccountRedeploysTheFunctionInTheBackground() throws Exception {
+        byte[] v1 = makeZip("v1");
+        byte[] v2 = makeZip("v2");
+        given().header("Authorization", S3_AUTH).when().put("/" + BUCKET).then().statusCode(200);
+        given().header("Authorization", S3_AUTH).body(v1).when().put("/" + BUCKET + "/" + KEY).then().statusCode(200);
+        given()
+            .header("Authorization", LAMBDA_AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::%s:role/role",
+                    "Handler": "index.handler",
+                    "Code": {
+                        "S3Bucket": "%s",
+                        "S3Key": "%s"
+                    }
+                }
+                """.formatted(FN, ACCOUNT, BUCKET, KEY))
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(201)
+            .body("CodeSha256", equalTo(sha256(v1)));
+
+        given().header("Authorization", S3_AUTH).body(v2).when().put("/" + BUCKET + "/" + KEY).then().statusCode(200);
+
+        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100)).untilAsserted(() ->
+            given()
+                .header("Authorization", LAMBDA_AUTH)
+            .when()
+                .get("/2015-03-31/functions/" + FN + "/configuration")
+            .then()
+                .statusCode(200)
+                .body("LastUpdateStatus", equalTo("Successful"))
+                .body("CodeSha256", equalTo(sha256(v2))));
+    }
+
+    private static byte[] makeZip(String body) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("index.js"));
+            zos.write(("exports.handler = async (e) => ({ body: '" + body + "' });").getBytes());
+            zos.closeEntry();
+        }
+        return baos.toByteArray();
+    }
+
+    private static String sha256(byte[] data) throws Exception {
+        return Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(data));
+    }
+}

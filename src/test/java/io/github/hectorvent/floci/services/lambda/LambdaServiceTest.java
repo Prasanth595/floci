@@ -2571,6 +2571,29 @@ class LambdaServiceTest {
         assertNull(syncingService.lastUpdateStatusReason(latest));
     }
 
+    @Test
+    void failedReactiveSync_isClearedByAConfigurationUpdate() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
+                reactiveS3SyncConfig(true, false));
+        String name = "reactive-failed-config-" + UUID.randomUUID();
+        when(s3.openObject("code-bucket", "function.zip", null))
+                .thenReturn(heldObject(zipWithBody("v1")))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
+        LambdaFunction latest = syncingService.createFunction(REGION, request);
+        syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "function.zip"));
+        assertEquals("Failed", syncingService.lastUpdateStatus(latest));
+
+        syncingService.updateFunctionConfiguration(REGION, name,
+                Map.of("Environment", Map.of("Variables", Map.of("STAGE", "ci"))));
+
+        assertEquals("Successful", syncingService.lastUpdateStatus(latest));
+        assertNull(syncingService.lastUpdateStatusReason(latest));
+    }
+
     private static EmulatorConfig reactiveS3SyncConfig(boolean enabled, boolean async) {
         EmulatorConfig cfg = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig svc = mock(EmulatorConfig.ServicesConfig.class);

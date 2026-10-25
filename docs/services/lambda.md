@@ -307,8 +307,9 @@ aws lambda invoke --function-name my-function out.json
 Uploads that arrive while a re-deploy is running are coalesced: the next re-deploy reads the
 object as it is when it starts, so a burst of uploads costs at most one more. A re-deploy that
 fails, for example because the object is not a valid ZIP, leaves the previous code in place and
-reports `LastUpdateStatus` `Failed` with a `LastUpdateStatusReason`, until the next successful
-re-deploy or `UpdateFunctionCode`. The status is kept in memory and is not persisted.
+reports `LastUpdateStatus` `Failed` with a `LastUpdateStatusReason` until the function's next
+successful update: a re-deploy, `UpdateFunctionCode` or `UpdateFunctionConfiguration`, since the
+status describes the last update of either kind. The status is kept in memory and is not persisted.
 
 ## Hot-Reload via Bind Mount
 
