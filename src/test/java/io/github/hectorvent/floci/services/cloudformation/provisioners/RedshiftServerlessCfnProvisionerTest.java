@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService.NamespaceUpdateSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.WorkgroupSettings;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
@@ -32,9 +33,11 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -136,6 +139,56 @@ class RedshiftServerlessCfnProvisionerTest {
         verify(service).createNamespace(eq("my-ns"), eq("admin"), eq("Secret123"), eq("analytics"), isNull(),
                 isNull(), anyList(), anyList(), tags.capture(), eq(REGION));
         assertEquals(Map.of("env", "dev"), tags.getValue());
+    }
+
+    @Test
+    void namespaceRollbackRetainsSnapshotOnFailureAndRestoresAttributesOnRetry() throws Exception {
+        Namespace previous = namespace("existing-ns");
+        previous.setAdminUserPassword("Original123!");
+        previous.setAdminPasswordSecretArn(ADMIN_SECRET_ARN);
+        NamespaceUpdateSnapshot snapshot = new NamespaceUpdateSnapshot(previous, null);
+        when(service.getNamespace("existing-ns", REGION)).thenReturn(previous);
+        when(service.snapshotNamespaceUpdate("existing-ns", REGION)).thenReturn(snapshot);
+        when(service.reconcileNamespace(eq("existing-ns"), any(), any(), any(), any(), anyList(), anyList(),
+                eq(false), any(), eq(REGION))).thenReturn(namespace("existing-ns"));
+        StackResource resource = resource(NAMESPACE_TYPE, "existing-ns");
+        resource.getAttributes().put("Namespace.AdminPasswordSecretArn", ADMIN_SECRET_ARN);
+        Map<String, String> previousAttributes = Map.copyOf(resource.getAttributes());
+        provisioner.provision(resource, mapper.readTree("""
+                {"NamespaceName":"existing-ns", "AdminUserPassword":"Changed123!", "ManageAdminPassword":false}
+                """), ctx("existing-ns"));
+
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+        doThrow(new IllegalStateException("Backend unavailable")).when(service).restoreNamespaceUpdate(any(), eq(REGION));
+        assertThrows(IllegalStateException.class, () -> provisioner.rollbackUpdate(resource));
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+        doNothing().when(service).restoreNamespaceUpdate(any(), eq(REGION));
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals(previousAttributes, resource.getAttributes());
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+        ArgumentCaptor<NamespaceUpdateSnapshot> restored = ArgumentCaptor.forClass(NamespaceUpdateSnapshot.class);
+        verify(service, times(2)).restoreNamespaceUpdate(restored.capture(), eq(REGION));
+        assertEquals("Original123!", restored.getValue().namespace().getAdminUserPassword());
+        assertEquals(ADMIN_SECRET_ARN, restored.getValue().namespace().getAdminPasswordSecretArn());
+    }
+
+    @Test
+    void committedNamespaceUpdateClearsRollbackSnapshot() throws Exception {
+        Namespace previous = namespace("existing-ns");
+        when(service.getNamespace("existing-ns", REGION)).thenReturn(previous);
+        when(service.snapshotNamespaceUpdate("existing-ns", REGION))
+                .thenReturn(new NamespaceUpdateSnapshot(previous, null));
+        when(service.reconcileNamespace(eq("existing-ns"), any(), any(), any(), any(), anyList(), anyList(),
+                eq(false), any(), eq(REGION))).thenReturn(previous);
+        StackResource resource = resource(NAMESPACE_TYPE, "existing-ns");
+        provisioner.provision(resource, mapper.readTree("{\"NamespaceName\":\"existing-ns\"}"), ctx("existing-ns"));
+
+        assertTrue(provisioner.completeUpdate(resource).complete());
+        provisioner.clearUpdate(resource);
+
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+        assertFalse(provisioner.rollbackUpdate(resource));
     }
 
     @Test

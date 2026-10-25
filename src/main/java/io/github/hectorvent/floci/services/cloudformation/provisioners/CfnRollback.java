@@ -34,6 +34,10 @@ public final class CfnRollback {
      */
     public static final String UPDATE_ROLLBACK_FAILURE_ATTR = "__FlociUpdateRollbackFailure";
 
+    /** The namespace, credentials, secret and attributes overwritten by a Serverless namespace update. */
+    public static final String REDSHIFT_SERVERLESS_NAMESPACE_UPDATE_SNAPSHOT_ATTR =
+            "__FlociRedshiftServerlessNamespaceUpdateSnapshot";
+
     /**
      * Holds the configuration a pipe carried before the update in flight mutated it, so a failed
      * stack update can put it back. Written by {@code PipesCfnProvisioner} before its first

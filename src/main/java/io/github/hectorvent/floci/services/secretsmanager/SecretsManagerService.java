@@ -1188,6 +1188,17 @@ public class SecretsManagerService implements ResourceProvider {
         }
     }
 
+    /** Restores the exact service-owned secret, including its ARN and version labels, during rollback. */
+    public void restoreManagedSecret(Secret snapshot, String region) {
+        if (snapshot.getOwningService() == null) {
+            throw new IllegalArgumentException("A managed secret snapshot must have an owning service");
+        }
+        synchronized (lockFor(snapshot.getArn())) {
+            throwIfManagedRelease(snapshot.getArn());
+            persist(snapshot, region);
+        }
+    }
+
     public Secret restoreSecret(String secretId, String region) {
         Secret secret = resolveSecret(secretId, region);
         String storageKey = regionKey(region, secret.getName());

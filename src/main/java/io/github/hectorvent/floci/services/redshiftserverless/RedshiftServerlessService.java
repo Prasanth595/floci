@@ -15,7 +15,9 @@ import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
 import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.quarkus.runtime.StartupEvent;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -430,6 +432,33 @@ public class RedshiftServerlessService implements Resettable {
         return updated;
     }
 
+    @RegisterForReflection
+    public record NamespaceUpdateSnapshot(Namespace namespace, Secret secret) {}
+
+    public synchronized NamespaceUpdateSnapshot snapshotNamespaceUpdate(String namespaceName, String region) {
+        Namespace current = new Namespace(getNamespace(namespaceName, region));
+        Secret secret = current.getAdminPasswordSecretArn() == null ? null
+                : requireAdminSecrets().snapshot(current, region);
+        return new NamespaceUpdateSnapshot(current, secret);
+    }
+
+    /** Restores a CloudFormation update's credentials without generating a new password or secret ARN. */
+    public synchronized void restoreNamespaceUpdate(NamespaceUpdateSnapshot snapshot, String region) {
+        Namespace previous = new Namespace(snapshot.namespace());
+        Namespace current = getNamespace(previous.getNamespaceName(), region);
+        if (snapshot.secret() != null) {
+            requireAdminSecrets().restore(snapshot.secret(), region);
+        }
+        if (!Objects.equals(current.getAdminUserPassword(), previous.getAdminUserPassword())) {
+            applyNewAdminPassword(current, previous.getAdminUserPassword(), region);
+        }
+        if (current.getAdminPasswordSecretArn() != null
+                && !Objects.equals(current.getAdminPasswordSecretArn(), previous.getAdminPasswordSecretArn())) {
+            requireAdminSecrets().delete(current, region);
+        }
+        namespaces.put(storageKey(region, previous.getNamespaceName()), previous);
+    }
+
     public synchronized Namespace deleteNamespace(String namespaceName, String region) {
         Namespace current = getNamespace(namespaceName, region);
         Namespace deleted = new Namespace(current);
@@ -674,26 +703,34 @@ public class RedshiftServerlessService implements Resettable {
                     + namespaceName + ".");
         }
         Namespace namespace = getNamespace(namespaceName, region);
+        Runnable restoreCredentials = () -> restoreSnapshotCredentials(namespace, snapshot, manageAdminPassword,
+                adminPasswordSecretKmsKeyId, region);
         if (snapshot.getSqlDump() != null && hasLiveRuntime(workgroup)) {
             Path dump = trustedDump(snapshot, region).filter(Files::exists).orElseThrow(() -> new AwsException(
                     "InternalServerException", "The data of snapshot " + snapshotName + " is no longer available.",
                     500));
             runtime.restoreSnapshot(workgroups.accountId(), region, workgroupName, workgroup.getMasterUsername(),
-                    namespace.getDbName(), dump);
+                    namespace.getDbName(), dump, restoreCredentials);
+        } else {
+            restoreCredentials.run();
         }
-        Namespace restored = new Namespace(namespace);
-        restored.setStatus("AVAILABLE");
+        return new RestoreResult(getNamespace(namespaceName, region), snapshot);
+    }
+
+    private void restoreSnapshotCredentials(Namespace namespace, RedshiftServerlessSnapshot snapshot,
+                                            Boolean manageAdminPassword, String adminPasswordSecretKmsKeyId,
+                                            String region) {
         if (Boolean.TRUE.equals(manageAdminPassword)) {
-            restored = applyNamespaceUpdate(namespaceName, null, null, null, null, null, null,
+            applyNamespaceUpdate(namespace.getNamespaceName(), null, null, null, null, null, null,
                     true, adminPasswordSecretKmsKeyId, region, false, true);
-            restored.setStatus("AVAILABLE");
         } else if (snapshot.getAdminUserPassword() != null) {
-            restored = applyNamespaceUpdate(namespaceName, snapshot.getAdminUsername(), snapshot.getAdminUserPassword(),
+            applyNamespaceUpdate(namespace.getNamespaceName(), snapshot.getAdminUsername(), snapshot.getAdminUserPassword(),
                     null, null, null, null, false, null, region, false, false);
+        } else {
+            Namespace restored = new Namespace(namespace);
             restored.setStatus("AVAILABLE");
+            namespaces.put(storageKey(region, namespace.getNamespaceName()), restored);
         }
-        namespaces.put(storageKey(region, namespaceName), restored);
-        return new RestoreResult(restored, snapshot);
     }
 
     public record RestoreResult(Namespace namespace, RedshiftServerlessSnapshot snapshot) {}

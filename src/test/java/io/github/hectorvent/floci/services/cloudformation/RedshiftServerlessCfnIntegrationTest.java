@@ -3,12 +3,17 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessRuntime;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
+import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -100,12 +105,49 @@ class RedshiftServerlessCfnIntegrationTest {
     @InjectMock
     RedshiftServerlessRuntime runtime;
 
+    @Inject
+    RedshiftServerlessService serverless;
+
+    @Inject
+    SecretsManagerService secrets;
+
     @BeforeEach
     void stubRuntime() {
         when(runtime.generatePassword()).thenReturn("Generated123");
         when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
                 any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
                 .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
+    }
+
+    @Test
+    void failedStackUpdateRestoresManagedCredentialsAndOriginalSecret() {
+        cloudFormation("CreateStack", "32");
+        String created = describeStacks("CREATE_COMPLETE");
+        String arn = outputValue(created, "NsSecretArn");
+        Namespace original = serverless.getNamespace(NAMESPACE, "us-east-1");
+        Secret originalSecret = secrets.describeSecret(arn, "us-east-1");
+        String originalVersion = originalSecret.getCurrentVersionId();
+        String originalValue = secrets.getSecretValue(arn, null, null, "us-east-1").getSecretString();
+        try {
+            String update = TEMPLATE.replace("\"ManageAdminPassword\": true",
+                    "\"ManageAdminPassword\": false, \"AdminUserPassword\": \"Changed123!\"");
+            given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                    .formParam("Action", "UpdateStack").formParam("StackName", STACK)
+                    .formParam("TemplateBody", update)
+                    .formParam("Parameters.member.1.ParameterKey", "Capacity")
+                    .formParam("Parameters.member.1.ParameterValue", "0")
+                    .when().post("/").then().statusCode(200);
+            CfnStackWaits.awaitStatus(STACK, "UPDATE_ROLLBACK_COMPLETE");
+
+            Namespace restored = serverless.getNamespace(NAMESPACE, "us-east-1");
+            assertEquals(arn, restored.getAdminPasswordSecretArn());
+            assertEquals(original.getAdminUserPassword(), restored.getAdminUserPassword());
+            assertEquals(originalVersion, secrets.describeSecret(arn, "us-east-1").getCurrentVersionId());
+            assertEquals(originalValue, secrets.getSecretValue(arn, null, null, "us-east-1").getSecretString());
+        } finally {
+            cloudFormation("DeleteStack", null);
+            CfnStackWaits.awaitStackDeleted(STACK);
+        }
     }
 
     @Test

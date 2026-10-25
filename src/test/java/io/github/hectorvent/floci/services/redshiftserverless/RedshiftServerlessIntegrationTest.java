@@ -257,6 +257,10 @@ class RedshiftServerlessIntegrationTest {
     @Test
     void snapshotLifecycleIsVisibleThroughSeparateReads() {
         doAnswer(invocation -> {
+            invocation.getArgument(6, Runnable.class).run();
+            return null;
+        }).when(runtime).restoreSnapshot(any(), any(), any(), any(), any(), any(), any());
+        doAnswer(invocation -> {
             Files.writeString(invocation.getArgument(5, Path.class), "-- dump");
             return null;
         }).when(runtime).takeSnapshot(any(), any(), any(), any(), any(), any());
