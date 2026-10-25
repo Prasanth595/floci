@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -6042,12 +6043,21 @@ public class S3Service implements Resettable, ResourceProvider {
         throw new AwsException("AccessControlListNotSupported", "The bucket does not allow ACLs", 400);
     }
 
+    /**
+     * Whether an {@code x-amz-grant-full-control} header grants the owner alone, which ownership
+     * enforcement tolerates. The owner is named by its canonical user ID, the form S3 reports
+     * and clients echo back; the account ID form is still accepted for grants written when
+     * Floci reported the account itself.
+     */
     private static boolean isOnlyOwnerFullControlGrant(String ownerAccount, String header) {
         if (isBlank(header)) {
             return false;
         }
+        String canonicalId = AwsCanonicalUserId.forAccount(ownerAccount);
         for (String grantee : header.split(",", -1)) {
-            if (!("id=\"" + ownerAccount + "\"").equals(grantee.trim())) {
+            String token = grantee.trim();
+            if (!("id=\"" + canonicalId + "\"").equals(token)
+                    && !("id=\"" + ownerAccount + "\"").equals(token)) {
                 return false;
             }
         }
@@ -6448,17 +6458,18 @@ public class S3Service implements Resettable, ResourceProvider {
         LOG.infov("Restored object: {0}/{1} (stub)", bucketName, key);
     }
 
-    private static String defaultAclXml(String id, String displayName) {
+    private static String defaultAclXml(String ownerAccount, String displayName) {
+        String canonicalId = AwsCanonicalUserId.forAccount(ownerAccount);
         return new XmlBuilder()
                 .start("AccessControlPolicy")
                   .start("Owner")
-                    .elem("ID", id)
+                    .elem("ID", canonicalId)
                     .elem("DisplayName", displayName)
                   .end("Owner")
                   .start("AccessControlList")
                     .start("Grant")
                       .raw("<Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\">")
-                        .elem("ID", id)
+                        .elem("ID", canonicalId)
                         .elem("DisplayName", displayName)
                       .raw("</Grantee>")
                       .elem("Permission", "FULL_CONTROL")
@@ -6688,7 +6699,8 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static String ownerFullControlGrant(String ownerAccount) {
-        return canonicalUserGrant(ownerAccount, DEFAULT_OWNER_DISPLAY_NAME, "FULL_CONTROL");
+        return canonicalUserGrant(AwsCanonicalUserId.forAccount(ownerAccount),
+                DEFAULT_OWNER_DISPLAY_NAME, "FULL_CONTROL");
     }
 
     private static String canonicalUserGrant(String id, String displayName, String permission) {
@@ -6718,7 +6730,7 @@ public class S3Service implements Resettable, ResourceProvider {
         XmlBuilder xml = new XmlBuilder()
                 .start("AccessControlPolicy")
                 .start("Owner")
-                .elem("ID", ownerAccount)
+                .elem("ID", AwsCanonicalUserId.forAccount(ownerAccount))
                 .elem("DisplayName", DEFAULT_OWNER_DISPLAY_NAME)
                 .end("Owner")
                 .start("AccessControlList");
