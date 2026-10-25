@@ -862,7 +862,16 @@ public class RedshiftDataService implements Resettable {
         }
         List<String> sqls = new ArrayList<>();
         for (JsonNode n : sqlsNode) {
-            sqls.add(n.asText());
+            String sql = n.asText();
+            List<String> statements = RedshiftAuditSql.statements(sql);
+            if (statements.size() > 1) {
+                throw new AwsException("ValidationException", "Each Sqls entry must contain a single SQL statement.", 400);
+            }
+            if (!statements.isEmpty() && RedshiftAuditSql.isTransactionControl(statements.getFirst())) {
+                throw new AwsException("ValidationException",
+                        "Transaction control statements are not supported in BatchExecuteStatement.", 400);
+            }
+            sqls.add(sql);
         }
 
         ResolvedTarget resolved = resolveTarget(request, region, owner);

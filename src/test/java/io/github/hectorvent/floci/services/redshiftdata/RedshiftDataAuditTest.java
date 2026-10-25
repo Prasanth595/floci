@@ -3,11 +3,14 @@ package io.github.hectorvent.floci.services.redshiftdata;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -45,6 +48,46 @@ class RedshiftDataAuditTest {
             fixture.batch("CREATE USER bob PASSWORD 'secret'", "SELECT * FROM missing", "SELECT 3");
             assertEquals(2, fixture.records("useractivitylog").size());
             assertTrue(fixture.records("userlog").isEmpty(), fixture.events.toString());
+        }
+    }
+
+    @Test
+    void batchRejectsSavepointRollbackBeforeCreatingUsersOrAuditRecords() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> fixture.batch("SAVEPOINT s", "CREATE USER bob PASSWORD 'secret'", "ROLLBACK TO s"));
+            assertEquals("ValidationException", error.getErrorCode());
+            assertTrue(fixture.events.isEmpty());
+            verifyNoInteractions(fixture.factory);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "BEGIN", "START /* transaction */ TRANSACTION", "COMMIT", "END", "ROLLBACK", "ABORT",
+            "SAVEPOINT s", "RELEASE SAVEPOINT s", "ROLLBACK WORK TO SAVEPOINT s", "PREPARE TRANSACTION 'txn'",
+            "/* outer /* nested */ comment */ SAVEPOINT s", "-- comment\n rOlLbAcK To s",
+            "CREATE USER bob PASSWORD 'secret'; ROLLBACK", "SELECT 1; -- comment\rROLLBACK",
+            "; ROLLBACK", "; /* empty statement */ SAVEPOINT s;"
+    })
+    void batchValidatesEveryStatementBeforeExecutingAnySql(String sql) throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> fixture.batch("CREATE USER alice PASSWORD 'secret'", sql));
+            assertEquals("ValidationException", error.getErrorCode());
+            assertTrue(fixture.events.isEmpty());
+            verifyNoInteractions(fixture.factory);
+        }
+    }
+
+    @Test
+    void transactionKeywordsInsideCommentsAndLiteralsDoNotRejectBatch() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            ObjectNode response = fixture.batch("/* ROLLBACK */ SELECT 'SAVEPOINT s; COMMIT'", "SELECT 2");
+            ObjectNode description = fixture.service.describeStatement(fixture.mapper.createObjectNode()
+                    .put("Id", response.path("Id").asText()));
+            assertEquals("FINISHED", description.path("Status").asText(), description.toString());
+            assertEquals(2, fixture.records("useractivitylog").size());
         }
     }
 
@@ -158,14 +201,14 @@ class RedshiftDataAuditTest {
                     .put("WaitTimeSeconds", 5), "us-east-1");
         }
 
-        private void batch(String... sqls) {
+        private ObjectNode batch(String... sqls) {
             ObjectNode request = request("unused");
             request.remove("Sql");
             ArrayNode statements = request.putArray("Sqls");
             for (String sql : sqls) {
                 statements.add(sql);
             }
-            service.batchExecuteStatement(request, "us-east-1");
+            return service.batchExecuteStatement(request, "us-east-1");
         }
 
         @Override

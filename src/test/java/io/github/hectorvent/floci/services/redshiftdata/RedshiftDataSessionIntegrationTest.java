@@ -134,6 +134,16 @@ class RedshiftDataSessionIntegrationTest {
         assertThrows(ResourceNotFoundException.class, () -> data.executeStatement(r -> r.waitTimeSeconds(30).sessionId(created.sessionId()).sql("SELECT 3")));
     }
 
+    @Test
+    void sdkRejectsBatchTransactionCommandsBeforeOpeningAConnection() {
+        ValidationException error = assertThrows(ValidationException.class, () -> data.batchExecuteStatement(r -> r
+                .clusterIdentifier("warehouse").dbUser("admin").database("dev")
+                .sqls("SAVEPOINT s", "CREATE USER bob PASSWORD 'secret'", "ROLLBACK TO s")));
+
+        assertEquals(400, error.statusCode());
+        verifyNoInteractions(factory);
+    }
+
     private RedshiftDataClient client(String key, Region region) {
         return RedshiftDataClient.builder().endpointOverride(endpoint).region(region)
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(key, "test"))).build();

@@ -108,6 +108,18 @@ public final class RedshiftAuditSql {
         return changes;
     }
 
+    public static boolean isTransactionControl(String sql) {
+        List<Token> tokens = tokens(sql);
+        if (tokens.isEmpty() || tokens.getFirst().kind() != Kind.WORD) {
+            return false;
+        }
+        return switch (tokens.getFirst().text().toUpperCase(Locale.ROOT)) {
+            case "BEGIN", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT", "RELEASE" -> true;
+            case "START", "PREPARE" -> tokens.size() > 1 && tokens.get(1).keyword("TRANSACTION");
+            default -> false;
+        };
+    }
+
     public static Savepoint savepoint(String sql) {
         List<Token> tokens = tokens(sql);
         if (tokens.size() < 2) {
