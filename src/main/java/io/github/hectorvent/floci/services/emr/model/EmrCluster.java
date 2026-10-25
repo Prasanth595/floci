@@ -11,7 +11,7 @@ import java.util.Map;
 /**
  * An EMR cluster (job flow). State machine:
  * STARTING → BOOTSTRAPPING → RUNNING → WAITING (and back to RUNNING for added steps), then
- * → TERMINATING → TERMINATED.
+ * → TERMINATING → TERMINATED, or TERMINATED_WITH_ERRORS when a failed step ended it.
  * Steps, instance groups and fleets are stored as nested lists. Complex sub-structures
  * (ec2 attributes, applications, configurations) are stored as raw JSON strings.
  */

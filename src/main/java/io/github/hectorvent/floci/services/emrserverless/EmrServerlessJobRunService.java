@@ -507,10 +507,12 @@ public class EmrServerlessJobRunService implements Resettable {
         // The runs live in storage, which the reset has already wiped.
     }
 
-    // Whether a run's driver may still start: a cancelled run is past it, and so is one a reset removed.
-    private synchronized boolean waitingToStart(String jobRunId, long launchedIn) {
+    // Whether a run's driver may still start, or go on: a cancelled run is past it, and so is one a reset removed.
+    private synchronized boolean stillGoing(String jobRunId, long launchedIn) {
         return launchedIn == generation && store.get(jobRunId)
-                .map(record -> STATE_SCHEDULED.equals(record.getJobRun().getState())).orElse(false);
+                .map(record -> STATE_SCHEDULED.equals(record.getJobRun().getState())
+                        || STATE_RUNNING.equals(record.getJobRun().getState()))
+                .orElse(false);
     }
 
     private synchronized void driverStarted(String jobRunId, long launchedIn) {
@@ -859,7 +861,7 @@ public class EmrServerlessJobRunService implements Resettable {
         @Override
         public boolean cancelled() {
             return !RequestScopes.callAs(job.accountId(), job.region(),
-                    () -> waitingToStart(job.runId(), launchedIn));
+                    () -> stillGoing(job.runId(), launchedIn));
         }
     }
 }

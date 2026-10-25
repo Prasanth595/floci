@@ -446,6 +446,8 @@ class EmrServerlessJobRunServiceTest {
         String afterReset = service.startJobRun(applicationId, request(null, null)).getJobRunId();
         runNext();
         assertEquals("SUCCESS", store.get(afterReset).orElseThrow().getJobRun().getState());
+        // A running driver goes on, and the runner stops one whose run the reset removed.
+        assertEquals(List.of(false, true, false, false), runner.cancelledAsRunning);
     }
 
     @Test
@@ -471,6 +473,8 @@ class EmrServerlessJobRunServiceTest {
         final List<Job> jobs = new ArrayList<>();
         final Set<String> stopped = new HashSet<>();
         final List<String> driversStarted = new ArrayList<>();
+        // What progress.cancelled() said once the driver ran, and again after whileRunning.
+        final List<Boolean> cancelledAsRunning = new ArrayList<>();
         Outcome outcome = Outcome.exitedWith(0);
         Runnable whileRunning = () -> { };
         Runnable whileTimingOut = () -> { };
@@ -484,7 +488,9 @@ class EmrServerlessJobRunServiceTest {
             }
             driversStarted.add(job.runId());
             progress.started();
+            cancelledAsRunning.add(progress.cancelled());
             whileRunning.run();
+            cancelledAsRunning.add(progress.cancelled());
             if (outcome.timedOut()) {
                 progress.timedOut();
                 whileTimingOut.run();
@@ -495,6 +501,11 @@ class EmrServerlessJobRunServiceTest {
         @Override
         public void stop(String runId) {
             stopped.add(runId);
+        }
+
+        @Override
+        public void removeLeftoverDrivers(String service) {
+            // A test's drivers live no longer than its runs.
         }
     }
 }

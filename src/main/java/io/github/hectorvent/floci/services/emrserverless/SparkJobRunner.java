@@ -25,6 +25,12 @@ public interface SparkJobRunner {
      */
     void stop(String runId);
 
+    /**
+     * Removes the drivers of {@code service}'s runs an earlier Floci process left running, which no thread
+     * follows any more. The service calls it before any run of its own can start.
+     */
+    void removeLeftoverDrivers(String service);
+
     /** What a run tells the service, and asks it, while it goes. */
     interface Progress {
 
@@ -34,7 +40,10 @@ public interface SparkJobRunner {
         /** The run has passed its timeout, and its driver is about to be stopped. */
         void timedOut();
 
-        /** Whether the run was cancelled, or is gone, so that its driver must not start. */
+        /**
+         * Whether the run was cancelled, or is gone, as after a reset: its driver must not start, and one
+         * that runs is stopped.
+         */
         boolean cancelled();
     }
 

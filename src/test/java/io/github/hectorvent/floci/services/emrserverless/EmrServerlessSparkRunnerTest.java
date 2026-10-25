@@ -190,6 +190,21 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aRunningDriverWhoseRunIsGoneIsStoppedAtTheNextLook() {
+        EmrServerlessSparkRunner runner = runner();
+        // A reset removes the run while its driver runs: not cancelled before the driver starts, nor at the
+        // first look at it, then gone. Left to itself, the driver would run on for four more looks, then exit.
+        when(progress.cancelled()).thenReturn(false, false, false, true);
+        when(docker.inspectContainerCmd("driver").exec().getState().getRunning())
+                .thenReturn(true, true, true, true, true, false);
+
+        SparkJobRunner.Outcome outcome = runner.run(job(Duration.ZERO), progress);
+
+        assertTrue(outcome.stopped());
+        verify(lifecycle).stopAndRemove("driver", null, 0);
+    }
+
+    @Test
     void aStopAfterTheRunHasEndedIsDropped() {
         EmrServerlessSparkRunner runner = runner();
         SparkJobRunner.Job job = job(Duration.ZERO);

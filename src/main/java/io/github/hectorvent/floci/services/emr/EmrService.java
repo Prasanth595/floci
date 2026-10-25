@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -21,6 +22,10 @@ import io.github.hectorvent.floci.services.emr.model.EmrInstanceFleet;
 import io.github.hectorvent.floci.services.emr.model.EmrInstanceGroup;
 import io.github.hectorvent.floci.services.emr.model.EmrStep;
 import io.github.hectorvent.floci.services.emr.model.SecurityConfiguration;
+import io.github.hectorvent.floci.services.emrserverless.EmrServerlessSparkRunner;
+import io.github.hectorvent.floci.services.emrserverless.SparkJobRunner;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -35,6 +40,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +48,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -50,16 +57,21 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * EMR management-plane business logic. Nothing runs: clusters and steps go through the states of
+ * EMR management-plane business logic. Clusters and steps go through the states of
  * {@link EmrClusterLifecycle}, timed by {@code cluster-startup-delay-seconds},
  * {@code step-duration-seconds} and {@code cluster-termination-delay-seconds}, all 0 by default, which
  * makes a cluster ready, and a step complete, before the call that started it returns. A call brings
  * each cluster it reads up to the time it is made, and the service wakes at each cluster's next
  * change, so the change's event goes out without anyone asking. Events are published once the call
  * that made the change no longer holds the service.
+ *
+ * <p>In the default {@code immediate} runner mode nothing runs. In the {@code docker} one each step
+ * runs, in a container of its own, from when it goes RUNNING until its Spark driver exits, on a thread
+ * of its own that ends the step under the service's lock: COMPLETED on exit code 0, FAILED otherwise,
+ * with its ActionOnFailure taken.
  */
 @ApplicationScoped
-public class EmrService {
+public class EmrService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(EmrService.class);
     private static final String UPPER_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -69,6 +81,9 @@ public class EmrService {
     private static final String JOB_FLOW_SHUT_DOWN =
             "A job flow that is shutting down, terminated, or finished may not be modified.";
     private static final ObjectMapper SNAPSHOT_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
+    private static final String RUNNER_DOCKER = "docker";
+    // The service a step's driver belongs to, which names it and labels it.
+    private static final String SERVICE = "emr";
 
     private final AccountAwareStorageBackend<EmrCluster> clusterStore;
     private final StorageBackend<String, SecurityConfiguration> secConfigStore;
@@ -81,6 +96,18 @@ public class EmrService {
     private final Wakeups wakeups;
     // Each cluster's next wakeup, by account and id, so a call that reads a cluster does not add another.
     private final Map<String, Instant> wakeupsDue = new ConcurrentHashMap<>();
+    // The docker runner mode's; null in the immediate one.
+    private final SparkJobRunner sparkRunner;
+    private final Executor stepExecutor;
+    private final IamService iamService;
+    // Where a step's driver runs: image-template, with the release label for %s, and docker-network; null when
+    // not set.
+    private final String imageTemplate;
+    private final String dockerNetwork;
+    // The steps a thread is running, by account and id; a RUNNING container step not here was left by a restart.
+    private final Set<String> executing = new HashSet<>();
+    // Raised by each reset, so a step's thread from before it writes nothing back after the wipe.
+    private long generation;
 
     private static final Set<String> COMPUTE_LIMITS_UNIT_TYPES = Set.of("InstanceFleetUnits", "Instances", "VCPU");
     private static final Set<String> SCALING_STRATEGIES = Set.of("DEFAULT", "ADVANCED");
@@ -142,13 +169,22 @@ public class EmrService {
 
     @Inject
     public EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                      EmrEventPublisher eventPublisher) {
+                      EmrEventPublisher eventPublisher, EmrServerlessSparkRunner sparkRunner, IamService iamService) {
         this(storageFactory, config, regionResolver, eventPublisher, Clock.systemUTC(),
-                Wakeups.timer(Clock.systemUTC()));
+                Wakeups.timer(Clock.systemUTC()),
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? sparkRunner : null,
+                Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-step-", 0).factory()),
+                iamService);
     }
 
     EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                EmrEventPublisher eventPublisher, Clock clock, Wakeups wakeups) {
+        this(storageFactory, config, regionResolver, eventPublisher, clock, wakeups, null, Runnable::run, null);
+    }
+
+    EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+               EmrEventPublisher eventPublisher, Clock clock, Wakeups wakeups, SparkJobRunner sparkRunner,
+               Executor stepExecutor, IamService iamService) {
         this.clusterStore = storageFactory.create("emr", "emr-clusters.json",
                 new TypeReference<Map<String, EmrCluster>>() {});
         this.secConfigStore = storageFactory.create("emr", "emr-security-configs.json",
@@ -158,15 +194,29 @@ public class EmrService {
         this.regionResolver = regionResolver;
         this.eventPublisher = eventPublisher;
         this.defaultReleaseLabel = config.services().emr().defaultReleaseLabel();
+        this.sparkRunner = sparkRunner;
+        this.stepExecutor = stepExecutor;
+        this.iamService = iamService;
+        this.imageTemplate = config.services().emr().imageTemplate().orElse(null);
+        this.dockerNetwork = config.services().emr().dockerNetwork().orElse(null);
         this.lifecycle = new EmrClusterLifecycle(config.services().emr().clusterStartupDelaySeconds(),
                 config.services().emr().stepDurationSeconds(),
-                config.services().emr().clusterTerminationDelaySeconds(), eventPublisher);
+                config.services().emr().clusterTerminationDelaySeconds(), eventPublisher,
+                sparkRunner != null ? new ContainerSteps() : null);
         this.clock = clock;
         this.wakeups = wakeups;
-        // After a restart, a stored cluster with a change still to come wakes the service as before.
+        // Before any step of this process can start, the next step a restarted cluster's wakeup below starts
+        // included: a driver an earlier process left belongs to a step read as FAILED, and the sweep removes
+        // every driver of this deployment it finds.
+        if (sparkRunner != null && config.services().emr().reconcileContainersOnStartup()) {
+            sparkRunner.removeLeftoverDrivers(SERVICE);
+        }
+        // After a restart, a stored cluster with a change still to come wakes the service as before, and one
+        // with a step a container ran, which no thread runs any more, wakes it at once to fail that step.
         for (AccountAwareStorageBackend.AccountEntry<EmrCluster> entry
                 : clusterStore.scanAllAccountEntries(k -> true)) {
-            Instant due = lifecycle.nextChange(entry.value());
+            Instant due = sparkRunner != null && hasContainerStepRunning(entry.value())
+                    ? clock.instant() : lifecycle.nextChange(entry.value());
             if (due != null) {
                 wakeAt(entry.accountId(), entry.value(), due);
             }
@@ -182,6 +232,24 @@ public class EmrService {
     @PreDestroy
     void shutdown() {
         wakeups.close();
+        if (stepExecutor instanceof ExecutorService executor) {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * A reset has begun: the steps' threads from before it write nothing more, so the storage wipe that
+     * follows leaves none of their clusters behind. Its teardown has already stopped their drivers.
+     */
+    @Override
+    public synchronized void beforeReset() {
+        generation++;
+        executing.clear();
+    }
+
+    @Override
+    public void clear() {
+        // The clusters live in storage, which the reset has already wiped.
     }
 
     // ──────────────────────────── Cluster lifecycle ────────────────────────────
@@ -933,7 +1001,7 @@ public class EmrService {
         if (EmrClusterLifecycle.TERMINATING.equals(cluster.getState())) {
             throw shuttingDown.get();
         }
-        if (EmrClusterLifecycle.TERMINATED.equals(cluster.getState())) {
+        if (EmrClusterLifecycle.isTerminated(cluster.getState())) {
             throw invalid("Cluster " + cluster.getId() + " is terminated.");
         }
     }
@@ -978,7 +1046,7 @@ public class EmrService {
     /** Shutting down or ended: "A job flow that is shutting down, terminated, or finished may not be modified." */
     private static boolean isShutDown(EmrCluster cluster) {
         return EmrClusterLifecycle.TERMINATING.equals(cluster.getState())
-                || EmrClusterLifecycle.TERMINATED.equals(cluster.getState());
+                || EmrClusterLifecycle.isTerminated(cluster.getState());
     }
 
     /** The only states in which a cluster's instance groups and fleets may be modified. */
@@ -1017,13 +1085,192 @@ public class EmrService {
         return SNAPSHOT_MAPPER.convertValue(cluster, EmrCluster.class);
     }
 
-    /** The cluster as it stands now: every change due by now made, stored if there was one. */
+    /**
+     * The cluster as it stands now: every change due by now made, stored if there was one. A step a
+     * container ran that no thread runs any more, since Floci stopped while it ran, is FAILED.
+     */
     private EmrCluster settle(EmrCluster cluster) {
-        if (lifecycle.advance(cluster, now(), regionOf(cluster))) {
+        boolean interrupted = failInterruptedSteps(cluster);
+        if (lifecycle.advance(cluster, now(), regionOf(cluster)) || interrupted) {
             clusterStore.put(cluster.getId(), cluster);
         }
         wakeForNextChange(cluster);
         return cluster;
+    }
+
+    private boolean failInterruptedSteps(EmrCluster cluster) {
+        if (sparkRunner == null) {
+            return false;
+        }
+        boolean failed = false;
+        for (EmrStep step : List.copyOf(cluster.getSteps())) {
+            if (runsInContainer(step) && !executing.contains(stepKey(regionResolver.getAccountId(), step.getId()))) {
+                lifecycle.stepEnded(cluster, step, EmrSparkSteps.INTERRUPTED, now(), regionOf(cluster));
+                failed = true;
+            }
+        }
+        return failed;
+    }
+
+    private static boolean hasContainerStepRunning(EmrCluster cluster) {
+        return cluster.getSteps().stream().anyMatch(EmrService::runsInContainer);
+    }
+
+    private static boolean runsInContainer(EmrStep step) {
+        return EmrClusterLifecycle.RUNNING.equals(step.getState()) && step.isRunInContainer();
+    }
+
+    private static String stepKey(String accountId, String stepId) {
+        return accountId + "/" + stepId;
+    }
+
+    /**
+     * The role a step's driver runs as: the step's runtime role, or else the role of the cluster's EC2
+     * instance profile, its {@code JobFlowRole}, given by name or ARN; null when IAM knows neither, and the
+     * driver then has the account's placeholder credentials. The guide's "Runtime roles for Amazon EMR
+     * steps": without them, clusters "ran Amazon EMR jobs or queries with permissions based on the IAM
+     * policy attached to the instance profile that you used to launch the cluster".
+     */
+    private String executionRole(EmrCluster cluster, EmrStep step, String accountId) {
+        if (step.getExecutionRoleArn() != null) {
+            return step.getExecutionRoleArn();
+        }
+        String profile = cluster.getJobFlowRole();
+        if (profile == null || iamService == null) {
+            return null;
+        }
+        return iamService.findInstanceProfile(accountId, profile.substring(profile.lastIndexOf('/') + 1))
+                .filter(found -> found.getRoleNames() != null && found.getRoleNames().size() == 1)
+                .flatMap(found -> iamService.findRole(accountId, found.getRoleNames().getFirst()))
+                .map(IamRole::getArn)
+                .orElse(null);
+    }
+
+    /**
+     * Ends a step its thread ran, COMPLETED when {@code failure} is null and FAILED otherwise, unless a
+     * reset came since it started or the step is no longer RUNNING: cancelled, or on a cluster that ended.
+     */
+    private void stepEnded(StepLaunch launch, String failure) {
+        if (launch.launchedIn() != generation) {
+            return;
+        }
+        // Read while the step still counts as running, so it is not taken for one a restart left.
+        Optional<EmrCluster> found = findCluster(launch.clusterId());
+        executing.remove(stepKey(launch.accountId(), launch.stepId()));
+        EmrStep step = found.flatMap(cluster -> cluster.getSteps().stream()
+                .filter(candidate -> launch.stepId().equals(candidate.getId())).findFirst()).orElse(null);
+        if (step == null || !EmrClusterLifecycle.RUNNING.equals(step.getState())) {
+            return;
+        }
+        EmrCluster cluster = found.get();
+        lifecycle.stepEnded(cluster, step, failure, now(), regionOf(cluster));
+        store(cluster);
+        LOG.infov("EMR step {0} of cluster {1} ended {2}", step.getId(), cluster.getId(), step.getState());
+    }
+
+    /**
+     * A step's driver was stopped. A cancel, or its cluster's end, has ended the step already. One still
+     * RUNNING was stopped by Floci itself, by a reset's teardown or its shutdown, and is left as it is, still
+     * counted as running: the reset wipes it, a restart fails it, and its ActionOnFailure, which could start
+     * the next step after the teardown has passed, is not taken now.
+     */
+    private void driverStopped(StepLaunch launch) {
+        if (!stillRunning(launch)) {
+            executing.remove(stepKey(launch.accountId(), launch.stepId()));
+        }
+    }
+
+    /**
+     * Why a step whose driver ended this way, by itself or before it could start, failed, or null when it
+     * did not. No source gives AWS's wording for these; they are Floci's.
+     */
+    private static String failureOf(SparkJobRunner.Outcome outcome) {
+        if (outcome.exitCode() != null) {
+            return outcome.exitCode() == 0 ? null : "The Spark driver exited with code " + outcome.exitCode() + ".";
+        }
+        return "The step could not start: " + outcome.failure();
+    }
+
+    // Whether a step's driver may still start, or go on: one cancelled, on a cluster that ended, or a reset
+    // removed, is past it.
+    private synchronized boolean stillRunning(StepLaunch launch) {
+        return launch.launchedIn() == generation && clusterStore.get(launch.clusterId()).stream()
+                .flatMap(cluster -> cluster.getSteps().stream())
+                .anyMatch(step -> launch.stepId().equals(step.getId())
+                        && EmrClusterLifecycle.RUNNING.equals(step.getState()));
+    }
+
+    /** A step handed to a thread: whose it is, where, and under which reset. */
+    private record StepLaunch(String accountId, String region, String clusterId, String stepId, long launchedIn) {}
+
+    /** Starts each step a cluster runs on a thread of its own, which ends the step once it is done. */
+    private final class ContainerSteps implements EmrClusterLifecycle.StepExecution {
+
+        @Override
+        public void start(EmrCluster cluster, EmrStep step, String region) {
+            String accountId = regionResolver.getAccountId();
+            List<String> application = EmrSparkSteps.application(step);
+            SparkJobRunner.Job job = application == null ? null : new SparkJobRunner.Job(SERVICE, step.getId(),
+                    accountId, region, cluster.getReleaseLabel(), imageTemplate, dockerNetwork,
+                    executionRole(cluster, step, accountId),
+                    EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER), application,
+                    Duration.ZERO);
+            StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation);
+            executing.add(stepKey(accountId, step.getId()));
+            stepExecutor.execute(() -> runStep(job, launch));
+        }
+
+        @Override
+        public void stop(EmrStep step) {
+            sparkRunner.stop(step.getId());
+        }
+    }
+
+    // A step's thread: its driver runs to its end, or the step fails at once when Floci does not run its kind.
+    private void runStep(SparkJobRunner.Job job, StepLaunch launch) {
+        String failure;
+        if (job == null) {
+            failure = EmrSparkSteps.NOT_RUN;
+        } else {
+            SparkJobRunner.Outcome outcome;
+            try {
+                outcome = sparkRunner.run(job, new StepProgress(launch));
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "EMR step {0} could not run", launch.stepId());
+                outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage());
+            }
+            if (outcome.stopped()) {
+                RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> driverStopped(launch)));
+                return;
+            }
+            failure = failureOf(outcome);
+        }
+        RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> stepEnded(launch, failure)));
+    }
+
+    /** What a step's thread asks the service while its driver goes: a step has no timeout to report. */
+    private final class StepProgress implements SparkJobRunner.Progress {
+
+        private final StepLaunch launch;
+
+        StepProgress(StepLaunch launch) {
+            this.launch = launch;
+        }
+
+        @Override
+        public void started() {
+            // The step has been RUNNING since it started; the driver's start changes nothing a caller sees.
+        }
+
+        @Override
+        public void timedOut() {
+            // A step runs until its driver ends.
+        }
+
+        @Override
+        public boolean cancelled() {
+            return !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillRunning(launch));
+        }
     }
 
     /** Stores a cluster a call changed, once every change that falls due by now is made. */

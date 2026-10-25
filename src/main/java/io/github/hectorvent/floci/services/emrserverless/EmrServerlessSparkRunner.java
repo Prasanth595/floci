@@ -179,6 +179,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * service calls this before it hands a run to {@link #run}, so every driver of this deployment it
      * finds is a leftover.
      */
+    @Override
     public void removeLeftoverDrivers(String service) {
         String owner = ContainerStorageHelper.ownerIdentity(config);
         ContainerStorageHelper.LabelAliases aliases = ContainerStorageHelper.CONTAINER_LABEL_ALIASES;
@@ -301,15 +302,16 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
 
     /**
      * How the running driver ends: with its exit code, by a stop, or at the run's timeout, which
-     * {@code progress} hears before the driver is stopped. A stop is read at every look, so it ends the
-     * run whether or not the driver would ever exit by itself, as a STREAMING run's does not, and run()
-     * then removes the driver. Each look at the container is one short control-plane call, so a run
-     * holds no Docker connection while its driver runs.
+     * {@code progress} hears before the driver is stopped. A stop, and a run {@code progress} reports
+     * cancelled or gone, are read at every look, so they end the run whether or not the driver would ever
+     * exit by itself, as a STREAMING run's does not, and run() then removes the driver: one a run started
+     * while a reset's teardown was passing is stopped once the reset has removed its run. Each look at the
+     * container is one short control-plane call, so a run holds no Docker connection while its driver runs.
      */
     private Outcome awaitEnd(String containerId, Job job, Launch launch, Progress progress)
             throws InterruptedException {
         Instant deadline = job.timeout().isZero() ? null : clock.instant().plus(job.timeout());
-        while (!launch.stopRequested) {
+        while (!launch.stopRequested && !progress.cancelled()) {
             InspectContainerResponse.ContainerState state =
                     lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec().getState();
             if (!Boolean.TRUE.equals(state.getRunning())) {
