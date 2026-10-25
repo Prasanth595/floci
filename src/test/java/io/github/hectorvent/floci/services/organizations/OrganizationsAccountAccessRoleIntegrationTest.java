@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.organizations;
 
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.OrganizationsRequests;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
@@ -30,9 +32,6 @@ import static org.hamcrest.Matchers.notNullValue;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class OrganizationsAccountAccessRoleIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String TARGET_PREFIX = "AWSOrganizationsV20161128.";
-
     private static final String MANAGEMENT_ACCOUNT = "666666666666";
 
     private String memberAccountId;
@@ -44,18 +43,10 @@ class OrganizationsAccountAccessRoleIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    private RequestSpecification organizations(String action, String body) {
-        return given()
-                .header("Authorization", authorization(MANAGEMENT_ACCOUNT, "organizations"))
-                .header("X-Amz-Target", TARGET_PREFIX + action)
-                .contentType(CONTENT_TYPE)
-                .body(body);
-    }
-
     private RequestSpecification sts(String roleArn) {
         return given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", authorization(MANAGEMENT_ACCOUNT, "sts"))
+                .header("Authorization", EnforcementFixtures.auth(MANAGEMENT_ACCOUNT, "sts"))
                 .formParam("Action", "AssumeRole")
                 .formParam("RoleArn", roleArn)
                 .formParam("RoleSessionName", "management-check");
@@ -64,20 +55,15 @@ class OrganizationsAccountAccessRoleIntegrationTest {
     private RequestSpecification iamAsMember(String accountId, String action, String roleName) {
         return given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", authorization(accountId, "iam"))
+                .header("Authorization", EnforcementFixtures.auth(accountId, "iam"))
                 .formParam("Action", action)
                 .formParam("RoleName", roleName);
-    }
-
-    private static String authorization(String accountId, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accountId
-                + "/20261024/us-east-1/" + service + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
 
     @Test
     @Order(1)
     void createOrganizationAsManagementAccount() {
-        organizations("CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+        OrganizationsRequests.request(MANAGEMENT_ACCOUNT, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
         .when()
             .post("/")
         .then()
@@ -88,7 +74,7 @@ class OrganizationsAccountAccessRoleIntegrationTest {
     @Test
     @Order(2)
     void createAccountReportsSuccess() {
-        JsonPath response = organizations("CreateAccount",
+        JsonPath response = OrganizationsRequests.request(MANAGEMENT_ACCOUNT, "CreateAccount",
                 "{\"Email\":\"member@example.com\",\"AccountName\":\"Member\"}")
         .when()
             .post("/")
@@ -105,7 +91,7 @@ class OrganizationsAccountAccessRoleIntegrationTest {
     @Test
     @Order(3)
     void describeCreateAccountStatusStillReportsSucceeded() {
-        organizations("DescribeCreateAccountStatus",
+        OrganizationsRequests.request(MANAGEMENT_ACCOUNT, "DescribeCreateAccountStatus",
                 "{\"CreateAccountRequestId\":\"" + createAccountRequestId + "\"}")
         .when()
             .post("/")
@@ -149,7 +135,7 @@ class OrganizationsAccountAccessRoleIntegrationTest {
 
         given()
                 .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", authorization(memberAccountId, "iam"))
+                .header("Authorization", EnforcementFixtures.auth(memberAccountId, "iam"))
                 .formParam("Action", "ListAttachedRolePolicies")
                 .formParam("RoleName", "OrganizationAccountAccessRole")
         .when()
@@ -173,7 +159,7 @@ class OrganizationsAccountAccessRoleIntegrationTest {
     @Test
     @Order(6)
     void createAccountWithACustomRoleNameProvisionsThatName() {
-        customRoleAccountId = organizations("CreateAccount",
+        customRoleAccountId = OrganizationsRequests.request(MANAGEMENT_ACCOUNT, "CreateAccount",
                 "{\"Email\":\"custom@example.com\",\"AccountName\":\"Custom\",\"RoleName\":\"TeamAccessRole\"}")
         .when()
             .post("/")
@@ -202,32 +188,48 @@ class OrganizationsAccountAccessRoleIntegrationTest {
 
     @Test
     @Order(7)
-    void anInvalidRoleNameIsRejected() {
-        organizations("CreateAccount",
+    void aRoleNameWithTheReservedPrefixIsRejectedWithItsReason() {
+        OrganizationsRequests.request(MANAGEMENT_ACCOUNT, "CreateAccount",
                 "{\"Email\":\"bad@example.com\",\"AccountName\":\"Bad\",\"RoleName\":\"AWSServiceRoleForOrganizations\"}")
         .when()
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidInputException"));
+            .body("__type", equalTo("InvalidInputException"))
+            .body("Reason", equalTo("INVALID_ROLE_NAME"));
+    }
+
+    @Test
+    @Order(8)
+    void aRoleNameOffThePatternIsRejectedWithItsReason() {
+        OrganizationsRequests.request(MANAGEMENT_ACCOUNT, "CreateAccount",
+                "{\"Email\":\"bad@example.com\",\"AccountName\":\"Bad\",\"RoleName\":\"bad name\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidInputException"))
+            .body("Reason", equalTo("INVALID_PATTERN"));
     }
 
     @Test
     @Order(90)
     void tearDownOrganization() {
-        organizations("RemoveAccountFromOrganization", "{\"AccountId\":\"" + memberAccountId + "\"}")
+        OrganizationsRequests.request(MANAGEMENT_ACCOUNT, "RemoveAccountFromOrganization",
+                "{\"AccountId\":\"" + memberAccountId + "\"}")
         .when()
             .post("/")
         .then()
             .statusCode(200);
 
-        organizations("RemoveAccountFromOrganization", "{\"AccountId\":\"" + customRoleAccountId + "\"}")
+        OrganizationsRequests.request(MANAGEMENT_ACCOUNT, "RemoveAccountFromOrganization",
+                "{\"AccountId\":\"" + customRoleAccountId + "\"}")
         .when()
             .post("/")
         .then()
             .statusCode(200);
 
-        organizations("DeleteOrganization", "{}")
+        OrganizationsRequests.request(MANAGEMENT_ACCOUNT, "DeleteOrganization", "{}")
         .when()
             .post("/")
         .then()

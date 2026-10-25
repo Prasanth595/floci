@@ -11,6 +11,8 @@ import software.amazon.awssdk.services.organizations.model.CreateAccountState;
 import software.amazon.awssdk.services.organizations.model.CreateAccountStatus;
 import software.amazon.awssdk.services.organizations.model.Handshake;
 import software.amazon.awssdk.services.organizations.model.HandshakeState;
+import software.amazon.awssdk.services.organizations.model.InvalidInputException;
+import software.amazon.awssdk.services.organizations.model.InvalidInputExceptionReason;
 import software.amazon.awssdk.services.organizations.model.Organization;
 import software.amazon.awssdk.services.organizations.model.OrganizationFeatureSet;
 import software.amazon.awssdk.services.organizations.model.OrganizationalUnit;
@@ -126,6 +128,14 @@ public class OrganizationsTest {
                                 .roleSessionName("compat-access-role"))
                         .credentials().accessKeyId()).startsWith("ASIA");
             }
+
+            // 4c. The RoleName the reference refuses, with the Reason member an SDK caller reads.
+            assertThatThrownBy(() -> client.createAccount(r -> r
+                            .email("compat-bad@example.com").accountName("CompatBad")
+                            .roleName("AWSServiceRoleForOrganizations")))
+                    .isInstanceOfSatisfying(InvalidInputException.class, error ->
+                            assertThat(error.reason())
+                                    .isEqualTo(InvalidInputExceptionReason.INVALID_ROLE_NAME));
 
             Account member = client.describeAccount(r -> r.accountId(memberAccountId)).account();
             assertThat(member.email()).isEqualTo("compat-dev@example.com");

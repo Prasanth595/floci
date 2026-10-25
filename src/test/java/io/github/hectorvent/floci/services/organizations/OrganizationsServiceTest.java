@@ -136,11 +136,17 @@ class OrganizationsServiceTest {
     void createAccountWithAnInvalidRoleNameIsRejected() {
         service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
 
-        for (String roleName : List.of("bad name", "", "x".repeat(65), "AWSServiceRoleForOrganizations")) {
+        for (String roleName : List.of("bad name", "", "x".repeat(65))) {
             AwsException error = assertThrows(AwsException.class, () -> service.createAccount(
                     MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, roleName, false));
             assertEquals("InvalidInputException", error.getErrorCode());
+            assertEquals("INVALID_PATTERN", error.getExtendedData().get("Reason"));
         }
+
+        AwsException reserved = assertThrows(AwsException.class, () -> service.createAccount(
+                MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, "AWSServiceRoleForOrganizations", false));
+        assertEquals("InvalidInputException", reserved.getErrorCode());
+        assertEquals("INVALID_ROLE_NAME", reserved.getExtendedData().get("Reason"));
     }
 
     @Test

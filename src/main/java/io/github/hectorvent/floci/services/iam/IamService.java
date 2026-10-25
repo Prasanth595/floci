@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -1224,38 +1225,39 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /**
      * Creates the account access role AWS Organizations preconfigures in a member account it
      * just created ({@code CreateAccount}'s {@code RoleName}, default
-     * {@code OrganizationAccountAccessRole}), in that account's own namespace: the management
-     * account is the caller here, so {@link #createRole} would file the role under the
-     * caller's partition instead of the new account's.
+     * {@code OrganizationAccountAccessRole}), in that account's own namespace: the
+     * management account is the caller here, so the whole creation runs inside
+     * {@link RequestScopes#callAs(String, Supplier)} as the new account, and
+     * {@link #createRole} and {@link #attachRolePolicy} validate the name, mint the ARN
+     * and store the role the way every other IAM role goes.
      *
      * <p>The role matches the one AWS creates: it trusts the management account, through the
      * account-root principal AWS's generated trust policy names, and carries the
      * {@code AdministratorAccess} AWS-managed policy. The account is fresh, so the name
      * cannot collide; a role that is there anyway is returned rather than failing an account
-     * creation AWS would have completed.
+     * creation AWS would have completed: {@link #createRole} answers
+     * {@code EntityAlreadyExists} for it, that one error is caught here, and anything
+     * else propagates.
      */
     public IamRole provisionAccountAccessRole(String accountId, String roleName, String managementAccountId) {
-        validateRoleName(roleName);
-        synchronized (resourceNameLock) {
-            Optional<IamRole> existing = findRole(accountId, roleName);
-            if (existing.isPresent()) {
-                return existing.get();
+        String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"" + regionResolver.buildGlobalArn("iam", managementAccountId, "root")
+                + "\"},\"Action\":\"sts:AssumeRole\"}]}";
+        String administratorAccess = AwsManagedPolicies.arnPrefix(regionResolver.getPartition())
+                + "/AdministratorAccess";
+        return RequestScopes.callAs(accountId, () -> {
+            try {
+                IamRole role = createRole(roleName, "/", trustPolicy, null, 0, null);
+                attachRolePolicy(roleName, administratorAccess);
+                LOG.infov("Created account access role {0} in account {1}", roleName, accountId);
+                return role;
+            } catch (AwsException alreadyExists) {
+                if (!"EntityAlreadyExists".equals(alreadyExists.getErrorCode())) {
+                    throw alreadyExists;
+                }
+                return getRole(roleName);
             }
-            String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                    + "\"Principal\":{\"AWS\":\"" + regionResolver.buildGlobalArn("iam", managementAccountId, "root")
-                    + "\"},\"Action\":\"sts:AssumeRole\"}]}";
-            IamRole role = new IamRole("AROA" + randomId(16), roleName, "/",
-                    regionResolver.buildGlobalArn("iam", accountId, "role/" + roleName), trustPolicy);
-            role.getAttachedPolicyArns().add(
-                    AwsManagedPolicies.arnPrefix(regionResolver.getPartition()) + "/AdministratorAccess");
-            if (roles instanceof AccountAwareStorageBackend<IamRole> aware) {
-                aware.putForAccount(accountId, roleName, role);
-            } else {
-                roles.put(roleName, role);
-            }
-            LOG.infov("Created account access role {0} in account {1}", roleName, accountId);
-            return role;
-        }
+        });
     }
 
     /**

@@ -2093,21 +2093,33 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
      * CreateAccount's optional RoleName, when sent: the pattern the reference publishes
      * ({@code [\w+=,.@-]{1,64}}) plus the reserved prefix its InvalidInputException reasons
      * list refuses (INVALID_ROLE_NAME: a role name can't begin with AWSServiceRoleFor). An
-     * absent name is the caller saying "default", so it passes and is defaulted later.
+     * absent name is the caller saying "default", so it passes and is defaulted later. The
+     * reference answers a value off the pattern with INVALID_PATTERN, and both reasons ride
+     * the error's Reason member, which the SDKs read off InvalidInputException.
      */
     private void validateAccountAccessRoleName(String roleName) {
         if (roleName == null) {
             return;
         }
-        if (!ACCOUNT_ACCESS_ROLE_NAME_PATTERN.matcher(roleName).matches()
-                || roleName.startsWith(AWS_SERVICE_ROLE_PREFIX)) {
-            throw invalidInput("RoleName must be 1-64 characters matching [\\w+=,.@-] "
-                    + "and must not begin with AWSServiceRoleFor.");
+        if (!ACCOUNT_ACCESS_ROLE_NAME_PATTERN.matcher(roleName).matches()) {
+            throw invalidInput("RoleName must be 1-64 characters matching [\\w+=,.@-].", "INVALID_PATTERN");
+        }
+        if (roleName.startsWith(AWS_SERVICE_ROLE_PREFIX)) {
+            throw invalidInput("RoleName can't begin with the reserved prefix AWSServiceRoleFor.",
+                    "INVALID_ROLE_NAME");
         }
     }
 
     private static AwsException invalidInput(String message) {
         return new AwsException("InvalidInputException", message, 400);
+    }
+
+    /**
+     * {@link #invalidInput(String)} carrying a Reason member, the way CreateAccount's
+     * reference reports its InvalidInputException causes.
+     */
+    private static AwsException invalidInput(String message, String reason) {
+        return new AwsException("InvalidInputException", message, 400, Map.of("Reason", reason));
     }
 
     private static AwsException accessDenied(String message) {
