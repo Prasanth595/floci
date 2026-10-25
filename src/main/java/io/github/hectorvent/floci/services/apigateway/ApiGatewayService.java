@@ -1640,6 +1640,24 @@ public class ApiGatewayService implements ResourceProvider {
         }
     }
 
+    /**
+     * Sets a usage plan's name, description, stages, throttle, quota and tags to exactly the given
+     * values, a null description included, which no patch can set. It is for putting back the plan
+     * as it was before a failed CloudFormation update changed it.
+     */
+    public UsagePlan restoreUsagePlan(String region, String usagePlanId, String name, String description,
+                                      UsagePlan.Limits limits, Map<String, String> tags) {
+        synchronized (usagePlanLock) {
+            UsagePlan plan = getUsagePlan(region, usagePlanId);
+            plan.setName(name);
+            plan.setDescription(description);
+            plan.applyLimits(limits);
+            plan.setTags(new HashMap<>(tags));
+            usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+            return plan;
+        }
+    }
+
     public void tagUsagePlan(String region, String usagePlanId, Map<String, String> tags) {
         ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
         Map<String, String> merged = new HashMap<>(getUsagePlan(region, usagePlanId).getTags());

@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -164,5 +165,27 @@ class ApiGatewayUsagePlanServiceTest {
             }
         }
         assertEquals(0, resurrected, "plans a patch wrote back after they were deleted");
+    }
+
+    // A failed CloudFormation update is undone with every value it had, a description it lacked included.
+    @Test
+    void restoreSetsEveryValueOfThePlanANullDescriptionIncluded() {
+        ApiGatewayService service = service();
+        String planId = service.createUsagePlan(REGION, Map.of("name", "restored", "tags", Map.of("stack", "v1")))
+                .getId();
+        service.updateUsagePlan(REGION, planId, List.of(
+                Map.of("op", "replace", "path", "/name", "value", "renamed"),
+                Map.of("op", "replace", "path", "/description", "value", "added")));
+        UsagePlan.Limits limits = new UsagePlan.Limits(
+                List.of(new UsagePlan.ApiStage("api", "v1", Map.of("/pets/GET", new UsagePlan.Throttle(3, 1.0)))),
+                new UsagePlan.Throttle(10, 5.0), new UsagePlan.Quota(100, 0, "DAY"));
+
+        service.restoreUsagePlan(REGION, planId, "restored", null, limits, Map.of("stack", "v1"));
+
+        UsagePlan plan = service.getUsagePlan(REGION, planId);
+        assertEquals("restored", plan.getName());
+        assertNull(plan.getDescription());
+        assertEquals(limits, plan.limits());
+        assertEquals(Map.of("stack", "v1"), plan.getTags());
     }
 }

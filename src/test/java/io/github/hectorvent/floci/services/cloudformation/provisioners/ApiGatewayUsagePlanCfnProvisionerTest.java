@@ -19,16 +19,22 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /** The API Gateway usage plan CFN provisioner in isolation, against a mocked {@link ApiGatewayService}. */
@@ -39,6 +45,10 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
     private static final String PLAN_KEY = "AWS::ApiGateway::UsagePlanKey";
     private static final AwsException NOT_FOUND =
             new AwsException("NotFoundException", "Usage Plan not found", 404);
+    /** Stage api1:dev throttling /pets/GET at 10/5.0, throttle 20/10.0, quota 1000/0/MONTH. */
+    private static final UsagePlan.Limits ORIGINAL_LIMITS = new UsagePlan.Limits(
+            List.of(new UsagePlan.ApiStage("api1", "dev", Map.of("/pets/GET", new UsagePlan.Throttle(10, 5.0)))),
+            new UsagePlan.Throttle(20, 10.0), new UsagePlan.Quota(1000, 0, "MONTH"));
 
     private final ApiGatewayService apiGateway = mock(ApiGatewayService.class);
     private final ApiGatewayUsagePlanCfnProvisioner provisioner = new ApiGatewayUsagePlanCfnProvisioner(apiGateway);
@@ -483,5 +493,231 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
         doThrow(new AwsException("NotFoundException", "Usage Plan Key not found", 404))
                 .when(apiGateway).deleteUsagePlanKey(REGION, "plan-1", "gone");
         assertDoesNotThrow(() -> provisioner.delete(PLAN_KEY, "gone:plan-1", REGION));
+    }
+
+    // ──────────────────────────── Update rollback ────────────────────────────
+
+    /** plan-1 "gold" with no description, tag stack=v1 and {@link #ORIGINAL_LIMITS}. */
+    private static UsagePlan originalPlan() {
+        UsagePlan plan = plan("plan-1", "gold", null, Map.of("stack", "v1"));
+        plan.applyLimits(ORIGINAL_LIMITS);
+        return plan;
+    }
+
+    /** A template that changes every value of {@link #originalPlan}. */
+    private ObjectNode changedPlanProps() {
+        ObjectNode props = planProps("platinum", "new", "v2", "api1:prod");
+        props.putObject("Throttle").put("BurstLimit", "30").put("RateLimit", "15");
+        props.putObject("Quota").put("Limit", "50").put("Offset", "1").put("Period", "WEEK");
+        return props;
+    }
+
+    /**
+     * Stubs the plan's lookups and writes the way the in-memory store behaves: every call sees the one
+     * stored plan object, and a write changes that object in place.
+     */
+    private void storeHolds(UsagePlan stored) {
+        when(apiGateway.getUsagePlan(REGION, stored.getId())).thenReturn(stored);
+        when(apiGateway.updateUsagePlan(eq(REGION), eq(stored.getId()), anyList())).thenAnswer(inv -> {
+            List<Map<String, String>> ops = inv.getArgument(2);
+            for (Map<String, String> op : ops) {
+                switch (op.get("path")) {
+                    case "/name" -> stored.setName(op.get("value"));
+                    case "/description" -> stored.setDescription(op.get("value"));
+                    default -> throw new IllegalArgumentException(op.toString());
+                }
+            }
+            return stored;
+        });
+        when(apiGateway.replaceUsagePlanLimits(eq(REGION), eq(stored.getId()), any())).thenAnswer(inv -> {
+            stored.applyLimits(inv.getArgument(2));
+            return stored;
+        });
+        when(apiGateway.replaceUsagePlanTags(eq(REGION), eq(stored.getId()), anyMap())).thenAnswer(inv -> {
+            Map<String, String> tags = inv.getArgument(2);
+            stored.setTags(new HashMap<>(tags));
+            return stored;
+        });
+        when(apiGateway.restoreUsagePlan(eq(REGION), eq(stored.getId()), any(), any(), any(), anyMap()))
+                .thenAnswer(inv -> {
+                    stored.setName(inv.getArgument(2));
+                    stored.setDescription(inv.getArgument(3));
+                    stored.applyLimits(inv.getArgument(4));
+                    Map<String, String> tags = inv.getArgument(5);
+                    stored.setTags(new HashMap<>(tags));
+                    return stored;
+                });
+    }
+
+    private static void assertOriginal(UsagePlan plan) {
+        assertEquals("gold", plan.getName());
+        assertNull(plan.getDescription());
+        assertEquals(ORIGINAL_LIMITS, plan.limits());
+        assertEquals(Map.of("stack", "v1"), plan.getTags());
+    }
+
+    @Test
+    void anUpdateSnapshotsThePlanBeforeItChangesIt() throws Exception {
+        storeHolds(originalPlan());
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+
+        provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
+
+        JsonNode snapshot = mapper.readTree(r.getAttributes().get(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR));
+        assertEquals(REGION, snapshot.path("region").asText());
+        assertEquals("plan-1", snapshot.path("id").asText());
+        assertEquals("gold", snapshot.path("name").asText());
+        assertTrue(snapshot.path("description").isNull(), snapshot.toString());
+        assertEquals(ORIGINAL_LIMITS, mapper.convertValue(snapshot.path("limits"), UsagePlan.Limits.class));
+        assertEquals(Map.of("stack", "v1"), mapper.convertValue(snapshot.path("tags"), Map.class));
+    }
+
+    @Test
+    void aFailedStackUpdatePutsThePlanBackAsItWas() {
+        UsagePlan stored = originalPlan();
+        storeHolds(stored);
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+        provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
+        assertEquals("platinum", stored.getName());
+        clearInvocations(apiGateway);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(apiGateway).restoreUsagePlan(REGION, "plan-1", "gold", null, ORIGINAL_LIMITS, Map.of("stack", "v1"));
+        assertOriginal(stored);
+        assertFalse(r.getAttributes().containsKey(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    // A patch cannot set a description back to none; the service's replace of /description writes "".
+    @Test
+    void aRollbackRemovesADescriptionThePlanDidNotHave() {
+        UsagePlan stored = originalPlan();
+        storeHolds(stored);
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+        ObjectNode describedOnly = planProps("gold", "new", "v1");
+        describedOnly.set("ApiStages", mapper.valueToTree(List.of(Map.of("ApiId", "api1", "Stage", "dev",
+                "Throttle", Map.of("/pets/GET", Map.of("BurstLimit", "10", "RateLimit", "5.0"))))));
+        describedOnly.putObject("Throttle").put("BurstLimit", "20").put("RateLimit", "10.0");
+        describedOnly.putObject("Quota").put("Limit", "1000").put("Period", "MONTH");
+        provisioner.provision(r, describedOnly, ctx("plan-1"));
+        assertEquals("new", stored.getDescription());
+        clearInvocations(apiGateway);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertNull(stored.getDescription());
+        verify(apiGateway, never()).updateUsagePlan(any(), any(), anyList());
+    }
+
+    @Test
+    void aRollbackWithoutASnapshotTouchesNothing() {
+        assertTrue(provisioner.rollbackUpdate(resource(PLAN, "Plan", "plan-1")));
+        verifyNoInteractions(apiGateway);
+    }
+
+    @Test
+    void aSnapshotFromAnEarlierUpdateIsReplacedSoAnUnchangedUpdateLeavesNothingToUndo() {
+        UsagePlan stored = originalPlan();
+        storeHolds(stored);
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+        // An earlier update that changed the plan and committed, then one that changes nothing.
+        provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
+        provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
+        clearInvocations(apiGateway);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verifyNoInteractions(apiGateway);
+        assertEquals("platinum", stored.getName());
+    }
+
+    @Test
+    void aRollbackWritesNothingWhenThePlanAlreadyMatchesItsSnapshot() {
+        UsagePlan stored = originalPlan();
+        storeHolds(stored);
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+        provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
+        UsagePlan original = originalPlan();
+        stored.setName(original.getName());
+        stored.setDescription(original.getDescription());
+        stored.applyLimits(original.limits());
+        stored.setTags(original.getTags());
+        clearInvocations(apiGateway);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(apiGateway, never()).restoreUsagePlan(any(), any(), any(), any(), any(), anyMap());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aFailedStackUpdateDeletesThePlanItCreatedInPlaceOfOneDeletedOutOfBand() {
+        when(apiGateway.getUsagePlan(REGION, "gone")).thenThrow(NOT_FOUND);
+        when(apiGateway.createUsagePlan(eq(REGION), anyMap())).thenReturn(plan("plan-2", "gold", null, Map.of()));
+        StackResource r = resource(PLAN, "Plan", "gone");
+        r.getAttributes().put("Id", "gone");
+        provisioner.provision(r, planProps("gold", null, null), ctx("gone"));
+        assertEquals("plan-2", r.getPhysicalId());
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(apiGateway).deleteUsagePlan(REGION, "plan-2");
+        assertEquals("gone", r.getPhysicalId());
+        assertEquals("gone", r.getAttributes().get("Id"));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aFailedWriteDuringTheUpdatePutsTheWholePlanBack() {
+        UsagePlan stored = originalPlan();
+        storeHolds(stored);
+        RuntimeException failure = new IllegalStateException("store write failed");
+        // The limits change the stored plan and then fail to save, as a failing store write does.
+        doAnswer(inv -> {
+            stored.applyLimits(inv.getArgument(2));
+            throw failure;
+        }).when(apiGateway).replaceUsagePlanLimits(eq(REGION), eq("plan-1"), any());
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> provisioner.provision(r, changedPlanProps(), ctx("plan-1")));
+
+        assertSame(failure, thrown);
+        verify(apiGateway).restoreUsagePlan(REGION, "plan-1", "gold", null, ORIGINAL_LIMITS, Map.of("stack", "v1"));
+        assertOriginal(stored);
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void aFailedUndoOfAFailedUpdateMarksTheRollbackFailed() {
+        storeHolds(originalPlan());
+        RuntimeException failure = new IllegalStateException("store write failed");
+        doThrow(failure).when(apiGateway).replaceUsagePlanTags(eq(REGION), eq("plan-1"), anyMap());
+        RuntimeException restoreFailure = new IllegalStateException("store write failed again");
+        doThrow(restoreFailure).when(apiGateway).restoreUsagePlan(eq(REGION), eq("plan-1"), any(), any(), any(),
+                anyMap());
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> provisioner.provision(r, changedPlanProps(), ctx("plan-1")));
+
+        assertSame(failure, thrown);
+        assertTrue(List.of(thrown.getSuppressed()).contains(restoreFailure));
+        String reason = r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
+        assertTrue(reason != null && reason.contains("plan-1") && reason.contains("store write failed again"),
+                String.valueOf(reason));
+    }
+
+    @Test
+    void aRollbackOfAPlanDeletedSinceTheUpdateFails() {
+        storeHolds(originalPlan());
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+        provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
+        doThrow(NOT_FOUND).when(apiGateway).getUsagePlan(REGION, "plan-1");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertEquals("NotFoundException", e.getErrorCode());
+        assertTrue(r.getAttributes().containsKey(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR));
     }
 }

@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeType;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
@@ -27,8 +30,9 @@ import java.util.Set;
  *
  * <p>A usage plan's {@code Ref} and {@code Fn::GetAtt Id} are the plan id. Every plan property is
  * mutable, so an update patches the name and description in place and replaces the API stages,
- * throttle and quota together when any of them changes. Throttle and quota are stored and reported,
- * not enforced.
+ * throttle and quota together when any of them changes. The values the plan had are kept on the
+ * resource so a failed stack update can put them all back. Throttle and quota are stored and
+ * reported, not enforced.
  *
  * <p>A usage plan key's {@code Ref} and {@code Fn::GetAtt Id} are {@code <keyId>:<usagePlanId>},
  * as on AWS. All three of its properties are createOnly, so a change to any of them is refused as a
@@ -42,6 +46,7 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
     private static final String USAGE_PLAN = "AWS::ApiGateway::UsagePlan";
     private static final String USAGE_PLAN_KEY = "AWS::ApiGateway::UsagePlanKey";
     private static final String NOT_FOUND = "NotFoundException";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String KEY_ID_SEPARATOR = ":";
     /** The registry schema's only allowed KeyType. */
     private static final String API_KEY_TYPE = "API_KEY";
@@ -73,6 +78,8 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
     // ──────────────────────────── UsagePlan ────────────────────────────
 
     private void provisionUsagePlan(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR);
         if (ctx.isUpdate()) {
             // An update re-invokes provision with the prior physical id. Creating unconditionally
             // would mint a second plan on every update and orphan the first, which then outlives
@@ -93,6 +100,21 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
         request.put("tags", ctx.resolveTags(props, "Tags"));
 
         recordPlan(r, apiGatewayService.createUsagePlan(ctx.region(), request));
+        if (ctx.isUpdate()) {
+            recordCreatedByUpdate(r, ctx);
+        }
+    }
+
+    /**
+     * Records that this update created the plan because the one at the prior physical id was gone,
+     * so {@link #rollbackUpdate} can delete it and name the prior id again.
+     */
+    private static void recordCreatedByUpdate(StackResource r, ProvisionContext ctx) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", ctx.region());
+        snapshot.put("createdId", r.getPhysicalId());
+        snapshot.put("priorId", ctx.priorPhysicalId());
+        r.getAttributes().put(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
     private void updateUsagePlan(StackResource r, UsagePlan existing, JsonNode props, ProvisionContext ctx) {
@@ -109,22 +131,61 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
             // The service rejects a null patch value, so a dropped Description clears to "".
             patches.add(patch("replace", "/description", description == null ? "" : description));
         }
-        UsagePlan plan = patches.isEmpty()
-                ? existing
-                : apiGatewayService.updateUsagePlan(ctx.region(), existing.getId(), patches);
         // ApiStages, Throttle and Quota belong to the template outright, so what it no longer lists comes
         // off the plan. They are replaced together, and only when one of them changed.
-        if (!desiredLimits.equals(plan.limits())) {
-            plan = apiGatewayService.replaceUsagePlanLimits(ctx.region(), plan.getId(), desiredLimits);
-        }
-
+        boolean limitsChanged = !desiredLimits.equals(existing.limits());
         // The stored tags never include the reserved id-override keys (createUsagePlan strips them),
         // so the comparison ignores them too; the service strips them again on the way in.
         Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
-        if (!ReservedTags.stripApiGatewayReservedTags(desiredTags).equals(plan.getTags())) {
-            plan = apiGatewayService.replaceUsagePlanTags(ctx.region(), plan.getId(), desiredTags);
+        boolean tagsChanged = !ReservedTags.stripApiGatewayReservedTags(desiredTags).equals(existing.getTags());
+        if (!patches.isEmpty() || limitsChanged || tagsChanged) {
+            snapshotBeforeUpdate(r, existing, ctx.region());
+        }
+
+        UsagePlan plan = existing;
+        try {
+            if (!patches.isEmpty()) {
+                plan = apiGatewayService.updateUsagePlan(ctx.region(), existing.getId(), patches);
+            }
+            if (limitsChanged) {
+                plan = apiGatewayService.replaceUsagePlanLimits(ctx.region(), existing.getId(), desiredLimits);
+            }
+            if (tagsChanged) {
+                plan = apiGatewayService.replaceUsagePlanTags(ctx.region(), existing.getId(), desiredTags);
+            }
+        } catch (RuntimeException failure) {
+            // The stack skips rollbackUpdate for a resource whose own update failed, so undo it here.
+            try {
+                rollbackUpdate(r);
+            } catch (RuntimeException restoreFailure) {
+                r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                        "Could not roll back the update of usage plan " + existing.getId() + ": "
+                                + restoreFailure.getMessage());
+                if (restoreFailure != failure) {
+                    failure.addSuppressed(restoreFailure);
+                }
+            }
+            throw failure;
         }
         recordPlan(r, plan);
+    }
+
+    /**
+     * Keeps the name, description, stages with their method throttles, throttle, quota and tags the
+     * plan has before an in-place update changes them, so {@link #rollbackUpdate} can put them back.
+     * Written as text before the first mutating call, because the service updates the stored plan in
+     * place.
+     */
+    private static void snapshotBeforeUpdate(StackResource r, UsagePlan existing, String region) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("id", existing.getId());
+        snapshot.put("name", existing.getName());
+        snapshot.put("description", existing.getDescription());
+        snapshot.set("limits", MAPPER.valueToTree(existing.limits()));
+        ObjectNode tags = snapshot.putObject("tags");
+        existing.getTags().forEach(tags::put);
+        r.getAttributes().put(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
     /**
@@ -323,6 +384,69 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
         patch.put("path", path);
         patch.put("value", value);
         return patch;
+    }
+
+    /**
+     * Undoes a usage plan update from the snapshot on the resource, and is also called by
+     * {@code updateUsagePlan} when one of its own mutating calls fails. When the update created the
+     * plan because the one at the prior physical id was gone, the created plan is deleted and the
+     * resource names the prior id again. Otherwise the name, description, stages, throttle, quota and
+     * tags are put back, written only when the live plan differs from the snapshot, so an update that
+     * failed before it changed anything writes nothing. With no snapshot on the resource the update
+     * changed nothing, since every mutating call is preceded by the snapshot or followed by the
+     * creation record, so there is nothing to undo. A plan deleted since the update fails the
+     * rollback with NotFoundException, and the stack reports the rollback as failed. A usage plan key
+     * keeps the default, which answers false.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (!USAGE_PLAN.equals(resource.getResourceType())) {
+            return false;
+        }
+        // The snapshot is spent only once the restore succeeded: a restore that throws leaves it in
+        // place for the next attempt instead of reporting a rollback that never happened.
+        String raw = resource.getAttributes().get(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return true;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the usage plan update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        String region = snapshot.path("region").asText();
+        String createdId = snapshotText(snapshot, "createdId");
+        if (createdId != null) {
+            // Deleted before the resource names the prior id again, so a failed delete leaves the
+            // resource naming the created plan and deleting the stack still removes it.
+            delete(USAGE_PLAN, createdId, region);
+            String priorId = snapshot.path("priorId").asText();
+            resource.setPhysicalId(priorId);
+            resource.getAttributes().put("Id", priorId);
+            resource.getAttributes().remove(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR);
+            return true;
+        }
+        String id = snapshot.path("id").asText();
+        UsagePlan live = apiGatewayService.getUsagePlan(region, id);
+        String name = snapshotText(snapshot, "name");
+        String description = snapshotText(snapshot, "description");
+        UsagePlan.Limits limits = MAPPER.convertValue(snapshot.path("limits"), UsagePlan.Limits.class);
+        Map<String, String> tags = new HashMap<>();
+        snapshot.path("tags").properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
+        if (!Objects.equals(name, live.getName()) || !Objects.equals(description, live.getDescription())
+                || !limits.equals(live.limits()) || !tags.equals(live.getTags())) {
+            apiGatewayService.restoreUsagePlan(region, id, name, description, limits, tags);
+        }
+        resource.getAttributes().remove(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    /** A snapshotted string, or null when the plan carried none. */
+    private static String snapshotText(JsonNode snapshot, String field) {
+        JsonNode value = snapshot.get(field);
+        return value == null || value.isNull() ? null : value.asText();
     }
 
     /** Without this the plan, or the key's membership in it, outlives the stack. */

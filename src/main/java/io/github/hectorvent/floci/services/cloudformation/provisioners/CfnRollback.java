@@ -166,6 +166,15 @@ public final class CfnRollback {
     public static final String API_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociApiKeyUpdateSnapshot";
 
     /**
+     * Holds the name, description, stages with their method throttles, throttle, quota and tags a
+     * usage plan carried before an in-place update changed them, or the plan an update created because
+     * the one the stack held was gone, so a failed stack update can put the plan back or delete the
+     * created one. Written by {@code ApiGatewayUsagePlanCfnProvisioner} before its first in-place
+     * mutating call or right after that creation, and spent by its {@code rollbackUpdate}.
+     */
+    public static final String USAGE_PLAN_UPDATE_SNAPSHOT_ATTR = "__FlociUsagePlanUpdateSnapshot";
+
+    /**
      * Holds the role, object prefixes, tagging action and tags a GuardDuty Malware Protection plan
      * carried before an in-place update changed them, or the plan an update created because the one
      * the stack held was gone, so a failed stack update can put the plan back or delete the created
