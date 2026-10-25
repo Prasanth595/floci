@@ -1131,24 +1131,36 @@ public class SqsService implements Resettable, ResourceProvider {
                     return response;
                 }
 
-                persistDedup(storageKey);
-
-                Message message = new Message(body);
-                message.setSenderId(effectiveSenderId);
-                message.setMessageGroupId(messageGroupId);
-                message.setMessageDeduplicationId(dedupId);
-                message.setSequenceNumber(sequenceCounter.incrementAndGet());
-                message.setAwsTraceHeader(awsTraceHeader);
-                if (effectiveDelaySeconds > 0) {
-                    message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
+                Message message;
+                GuardedMessageQueue messages;
+                try {
+                    persistDedup(storageKey);
+                    message = new Message(body);
+                    message.setSenderId(effectiveSenderId);
+                    message.setMessageGroupId(messageGroupId);
+                    message.setMessageDeduplicationId(dedupId);
+                    message.setSequenceNumber(sequenceCounter.incrementAndGet());
+                    message.setAwsTraceHeader(awsTraceHeader);
+                    if (effectiveDelaySeconds > 0) {
+                        message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
+                    }
+                    if (messageAttributes != null && !messageAttributes.isEmpty()) {
+                        message.getMessageAttributes().putAll(messageAttributes);
+                        message.updateMd5OfMessageAttributes();
+                    }
+                    messages = getOrCreateQueue(storageKey);
+                    messages.addMessage(message);
+                } catch (RuntimeException exception) {
+                    dedupMap.remove(dedupCacheKey, expiry);
+                    try {
+                        persistDedup(storageKey);
+                    } catch (RuntimeException cleanupFailure) {
+                        if (cleanupFailure != exception) {
+                            exception.addSuppressed(cleanupFailure);
+                        }
+                    }
+                    throw exception;
                 }
-                if (messageAttributes != null && !messageAttributes.isEmpty()) {
-                    message.getMessageAttributes().putAll(messageAttributes);
-                    message.updateMd5OfMessageAttributes();
-                }
-
-                GuardedMessageQueue messages = getOrCreateQueue(storageKey);
-                messages.addMessage(message);
                 messages.activity().sent(totalSize, false);
                 deduplicationIdentityCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>())
                         .putIfAbsent(dedupCacheKey,
