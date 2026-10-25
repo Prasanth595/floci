@@ -22,6 +22,7 @@ import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultRequ
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultResponse;
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultV2Response;
 import software.amazon.awssdk.services.redshiftdata.model.ResultFormatString;
+import software.amazon.awssdk.services.redshiftdata.model.SqlParameter;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 import software.amazon.awssdk.services.redshiftdata.model.SubStatementData;
 import software.amazon.awssdk.services.redshiftdata.model.ValidationException;
@@ -132,6 +133,25 @@ class RedshiftDataOperationsTest {
         assertThat(result.columnMetadata()).extracting("name").containsExactly("id", "name");
         assertThat(result.records().get(0).get(0).longValue()).isEqualTo(1L);
         assertThat(result.records().get(0).get(1).stringValue()).isEqualTo("a");
+    }
+
+    @Test
+    @DisplayName("named SQL parameters are bound through the SDK model")
+    void parameterizedStatementBindsSqlParameters() throws Exception {
+        String id = data.executeStatement(ExecuteStatementRequest.builder()
+                .clusterIdentifier(clusterId)
+                .database(DATABASE)
+                .dbUser(USERNAME)
+                .sql("SELECT CAST(:value AS INTEGER) + 1 AS result")
+                .parameters(SqlParameter.builder().name("value").value("41").build())
+                .waitTimeSeconds(30)
+                .build()).id();
+
+        GetStatementResultResponse result = data.getStatementResult(request -> request.id(id));
+        assertThat(result.records()).hasSize(1);
+        assertThat(result.records().get(0).get(0).longValue()).isEqualTo(42L);
+        assertThat(describe(id).queryParameters()).containsExactly(
+                SqlParameter.builder().name("value").value("41").build());
     }
 
     @Test
