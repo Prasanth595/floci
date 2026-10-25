@@ -378,17 +378,10 @@ public class LambdaExecutorService implements Resettable {
                 requestId, payload, deadlineMs, fn.getFunctionArn(),
                 new CompletableFuture<>());
         invocation.setClientContext(clientContext);
-        // A runtime that has never polled /next is still in its Init phase, which runs from its
-        // container's start for the Init budget. The function's Timeout restarts when the invocation
-        // is dispatched (PendingInvocation#prepareForDispatch).
         RuntimeApiServer runtimeApiServer = handle.getRuntimeApiServer();
         boolean initializing = !runtimeApiServer.hasRuntimePolled();
-        long dispatchWaitMs = (fn.getTimeout() + RUNTIME_DISPATCH_GRACE_SECONDS) * 1000L;
-        if (initializing) {
-            long startedAtMs = runtimeApiServer.getContainerStartedAtMs();
-            long sinceStartMs = startedAtMs > 0 ? Math.max(0, System.currentTimeMillis() - startedAtMs) : 0;
-            dispatchWaitMs = Math.max(initTimeoutSeconds * 1000L - sinceStartMs, dispatchWaitMs);
-        }
+        long dispatchWaitMs = dispatchWaitMs(fn.getTimeout(), initializing,
+                runtimeApiServer.getContainerStartedAtMs(), System.currentTimeMillis());
         try {
             runtimeApiServer.enqueue(invocation);
 
@@ -423,6 +416,21 @@ public class LambdaExecutorService implements Resettable {
             return new InvokeResult(200, "Unhandled",
                     buildErrorPayload(cause.getMessage(), "InvocationError"), null, requestId);
         }
+    }
+
+    /**
+     * How long an invocation waits for its runtime to take it. A runtime that has never polled /next
+     * is still in its Init phase, which runs from its container's start for the Init budget; once the
+     * runtime polls, only the function's Timeout and a dispatch grace apply. The Timeout itself
+     * restarts when the invocation is dispatched (PendingInvocation#prepareForDispatch).
+     */
+    long dispatchWaitMs(int timeoutSeconds, boolean initializing, long containerStartedAtMs, long nowMs) {
+        long dispatchWaitMs = (timeoutSeconds + RUNTIME_DISPATCH_GRACE_SECONDS) * 1000L;
+        if (!initializing) {
+            return dispatchWaitMs;
+        }
+        long sinceStartMs = containerStartedAtMs > 0 ? Math.max(0, nowMs - containerStartedAtMs) : 0;
+        return Math.max(initTimeoutSeconds * 1000L - sinceStartMs, dispatchWaitMs);
     }
 
     /**
