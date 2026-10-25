@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.DomainNames;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.dns.DnsLookupHelper;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -891,11 +892,11 @@ public class Route53Service implements Resettable {
 
     /**
      * A configured nameserver as the delegation set lists it: without surrounding whitespace, which
-     * the config does not trim, and without the final dot, as Route 53 lists it.
+     * the config does not trim, and without the final dot, as Route 53 lists it. {@code strip()}
+     * also removes the Unicode spaces that {@code trim()} keeps.
      */
     private static String delegationName(String configured) {
-        String name = configured.strip();
-        return name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
+        return DnsLookupHelper.normalizeTarget(configured.strip());
     }
 
     public static String normalizeRecordName(String name) {

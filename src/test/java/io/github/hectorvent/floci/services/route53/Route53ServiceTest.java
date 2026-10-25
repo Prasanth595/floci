@@ -75,7 +75,7 @@ class Route53ServiceTest {
     }
 
     @ParameterizedTest(name = "configured names ending in {0}")
-    @ValueSource(strings = {"", ".", " ", ".\t"})
+    @ValueSource(strings = {"", ".", " ", ".\t", ".\u2003"})
     void defaultApexRecordsUseAbsoluteNamesAndTheDelegationSetDoesNot(String nameserverSuffix) {
         Route53Service service = newService(nameserverSuffix);
         String zoneId = service.createHostedZone("authority.example", "authority", null, null).zone().getId();
@@ -91,7 +91,7 @@ class Route53ServiceTest {
     }
 
     @ParameterizedTest(name = "configured names ending in {0}")
-    @ValueSource(strings = {"", ".", " ", ".\t"})
+    @ValueSource(strings = {"", ".", " ", ".\t", ".\u2003"})
     void apexNsQueryIsAnswered(String nameserverSuffix) {
         Route53Service service = newService(nameserverSuffix);
         service.createHostedZone("authority.example", "authority", null, null);
