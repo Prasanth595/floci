@@ -708,6 +708,34 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
                 String.valueOf(reason));
     }
 
+    // An attempt that failed after its snapshot may have changed the plan, so the engine keeps it for
+    // rollbackUpdate; one without a snapshot changed nothing and the engine puts the previous resource back.
+    @Test
+    void aFailedUpdateIsKeptForItsRollbackOnlyWhileItHasASnapshot() {
+        storeHolds(originalPlan());
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+        assertFalse(provisioner.retainsFailedUpdateState(r));
+
+        provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
+        assertTrue(provisioner.retainsFailedUpdateState(r));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertFalse(provisioner.retainsFailedUpdateState(r));
+    }
+
+    @Test
+    void aCommittedUpdateDropsItsSnapshot() {
+        storeHolds(originalPlan());
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+        provisioner.provision(r, changedPlanProps(), ctx("plan-1"));
+
+        UpdateCleanupResult result = provisioner.completeUpdate(r);
+
+        assertFalse(result.applicable());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(provisioner.retainsFailedUpdateState(r));
+    }
+
     @Test
     void aRollbackOfAPlanDeletedSinceTheUpdateFails() {
         storeHolds(originalPlan());

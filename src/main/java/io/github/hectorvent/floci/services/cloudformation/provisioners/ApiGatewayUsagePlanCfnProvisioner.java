@@ -387,6 +387,28 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
     }
 
     /**
+     * An update that failed after its snapshot may already have changed the plan, and its own undo
+     * may have failed too, so the engine keeps this attempt for {@link #rollbackUpdate} instead of
+     * putting the previous resource back over it and losing the snapshot. A failure before the
+     * snapshot changed nothing and is left to the engine.
+     */
+    @Override
+    public boolean retainsFailedUpdateState(StackResource resource) {
+        return resource.getAttributes().containsKey(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    /**
+     * The engine calls this for every resource once a stack update commits, so the snapshot is
+     * dropped here: the update committed and nothing will roll it back, and a snapshot left behind
+     * would make a later failure keep its attempt and restore stale values.
+     */
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.USAGE_PLAN_UPDATE_SNAPSHOT_ATTR);
+        return UpdateCleanupResult.notApplicable();
+    }
+
+    /**
      * Undoes a usage plan update from the snapshot on the resource, and is also called by
      * {@code updateUsagePlan} when one of its own mutating calls fails. When the update created the
      * plan because the one at the prior physical id was gone, the created plan is deleted and the

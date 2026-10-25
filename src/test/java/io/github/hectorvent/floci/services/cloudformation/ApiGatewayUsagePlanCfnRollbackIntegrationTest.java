@@ -1,13 +1,16 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -17,12 +20,17 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 
 /**
  * Stack updates of an {@code AWS::ApiGateway::UsagePlan} that a later resource fails, so the update
  * rolls back. Asserts that the plan's name, description, stages with their method throttles,
- * throttle, quota and tags come back as they were, and that a plan the update created in place of
- * one deleted out of band is deleted again.
+ * throttle, quota and tags come back as they were, that a plan the update created in place of one
+ * deleted out of band is deleted again, and that a plan whose failed update could not be undone at
+ * once is put back by ContinueUpdateRollback.
  */
 @QuarkusTest
 class ApiGatewayUsagePlanCfnRollbackIntegrationTest {
@@ -55,6 +63,9 @@ class ApiGatewayUsagePlanCfnRollbackIntegrationTest {
                 "GenerateSecretString": {"PasswordLength": 32}
               }
             }""";
+
+    @InjectSpy
+    ApiGatewayService apiGatewayService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -122,6 +133,61 @@ class ApiGatewayUsagePlanCfnRollbackIntegrationTest {
         given().when().get("/usageplans").then()
             .statusCode(200)
             .body("item.name", not(hasItem(name)));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    // The plan's own write fails after changing it, and the provisioner's undo fails once too, so the stack
+    // stops in UPDATE_ROLLBACK_FAILED with the plan holding the failed update's values. The retry must put
+    // them back rather than report a rollback that restored nothing.
+    @Test
+    void continueUpdateRollbackPutsBackAPlanWhoseFailedUpdateCouldNotBeUndoneAtOnce() {
+        String stack = "apigw-usageplan-cfn-retry-it";
+        String original = """
+            "UsagePlanName": "apigw-usageplan-retry-original",
+            "Throttle": {"BurstLimit": 10, "RateLimit": 5},
+            "Quota": {"Limit": 1000, "Period": "MONTH"}""";
+        cloudFormation(stack, "CreateStack", PLAN_TEMPLATE.formatted(original, ""));
+        String planId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PlanRef");
+
+        Mockito.doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new IllegalStateException("simulated write failure");
+        }).doCallRealMethod().when(apiGatewayService).replaceUsagePlanLimits(anyString(), eq(planId), any());
+        Mockito.doThrow(new IllegalStateException("simulated restore failure")).doCallRealMethod()
+                .when(apiGatewayService).restoreUsagePlan(anyString(), eq(planId), any(), any(), any(), anyMap());
+
+        String changed = """
+            "UsagePlanName": "apigw-usageplan-retry-changed",
+            "Throttle": {"BurstLimit": 20, "RateLimit": 8},
+            "Quota": {"Limit": 50, "Period": "WEEK"}""";
+        cloudFormation(stack, "UpdateStack", PLAN_TEMPLATE.formatted(changed, ""));
+        describeStacks(stack, "UPDATE_ROLLBACK_FAILED");
+        getUsagePlan(planId)
+            .statusCode(200)
+            .body("name", equalTo("apigw-usageplan-retry-changed"))
+            .body("quota.limit", equalTo(50));
+
+        cloudFormation(stack, "ContinueUpdateRollback", null);
+        assertEquals(planId, outputValue(describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE"), "PlanRef"));
+        getUsagePlan(planId)
+            .statusCode(200)
+            .body("name", equalTo("apigw-usageplan-retry-original"))
+            .body("throttle.burstLimit", equalTo(10))
+            .body("throttle.rateLimit", equalTo(5.0f))
+            .body("quota.limit", equalTo(1000))
+            .body("quota.period", equalTo("MONTH"));
+
+        // An update that only changes an output commits afterwards, and leaves the plan as it is.
+        cloudFormation(stack, "UpdateStack", PLAN_TEMPLATE.formatted(original, "")
+                .replace("\"PlanRef\": {\"Value\": {\"Ref\": \"Plan\"}}",
+                        "\"PlanRef\": {\"Value\": {\"Ref\": \"Plan\"}}, \"Extra\": {\"Value\": \"x\"}"));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        getUsagePlan(planId)
+            .statusCode(200)
+            .body("name", equalTo("apigw-usageplan-retry-original"))
+            .body("quota.limit", equalTo(1000));
 
         cloudFormation(stack, "DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(stack);
