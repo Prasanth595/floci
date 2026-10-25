@@ -11,9 +11,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.function.Function;
 
 /**
@@ -23,7 +21,8 @@ import java.util.function.Function;
 final class DynamoDbSetOrder {
 
     private static final List<String> SET_TYPES = List.of("SS", "NS", "BS");
-    private static final Comparator<String> STRINGS = DynamoDbSetOrder::compareCodePoints;
+
+    private record Keyed<K>(JsonNode member, K key) {}
 
     private DynamoDbSetOrder() {}
 
@@ -32,12 +31,11 @@ final class DynamoDbSetOrder {
         if (!members.isArray()) {
             return members;
         }
-        List<String> texts = new ArrayList<>();
-        members.forEach(member -> texts.add(member.asText()));
-        texts.sort(comparatorFor(setType));
-        ArrayNode result = JsonNodeFactory.instance.arrayNode();
-        texts.forEach(result::add);
-        return result;
+        return switch (setType) {
+            case "NS" -> sortedBy(members, DynamoDbSetOrder::numberOf, Comparator.naturalOrder());
+            case "BS" -> sortedBy(members, DynamoDbSetOrder::bytesOf, Arrays::compareUnsigned);
+            default -> sortedBy(members, DynamoDbSetOrder::utf8Of, Arrays::compareUnsigned);
+        };
     }
 
     /** Reorders every set in the attributes in place, through maps and lists. */
@@ -67,34 +65,23 @@ final class DynamoDbSetOrder {
         }
     }
 
-    private static Comparator<String> comparatorFor(String setType) {
-        return switch (setType) {
-            case "NS" -> byKey(DynamoDbSetOrder::numberOf, Comparator.naturalOrder());
-            case "BS" -> byKey(DynamoDbSetOrder::bytesOf, Arrays::compareUnsigned);
-            default -> STRINGS;
-        };
-    }
-
-    private static <K> Comparator<String> byKey(Function<String, K> key, Comparator<K> order) {
-        Map<String, K> keys = new HashMap<>();
-        return Comparator.comparing(text -> keys.computeIfAbsent(text, key), order);
-    }
-
-    // String.compareTo orders by UTF-16 unit, which puts a supplementary character
-    // before U+E000..U+FFFF. DynamoDB orders by code point.
-    private static int compareCodePoints(String left, String right) {
-        int i = 0;
-        int j = 0;
-        while (i < left.length() && j < right.length()) {
-            int leftPoint = left.codePointAt(i);
-            int rightPoint = right.codePointAt(j);
-            if (leftPoint != rightPoint) {
-                return Integer.compare(leftPoint, rightPoint);
-            }
-            i += Character.charCount(leftPoint);
-            j += Character.charCount(rightPoint);
+    private static <K> ArrayNode sortedBy(JsonNode members, Function<String, K> key, Comparator<K> order) {
+        List<Keyed<K>> keyed = new ArrayList<>(members.size());
+        for (JsonNode member : members) {
+            keyed.add(new Keyed<>(member, key.apply(member.asText())));
         }
-        return Integer.compare(left.length() - i, right.length() - j);
+        keyed.sort(Comparator.comparing(Keyed::key, order));
+        ArrayNode result = JsonNodeFactory.instance.arrayNode(keyed.size());
+        for (Keyed<K> entry : keyed) {
+            result.add(entry.member());
+        }
+        return result;
+    }
+
+    // UTF-8 byte order is code point order. String.compareTo is not: it orders by
+    // UTF-16 unit, which puts a supplementary character before U+E000..U+FFFF.
+    private static byte[] utf8Of(String text) {
+        return text.getBytes(StandardCharsets.UTF_8);
     }
 
     // Number syntax and base64 are checked when a request is read. A member that
@@ -111,7 +98,7 @@ final class DynamoDbSetOrder {
         try {
             return Base64.getDecoder().decode(base64);
         } catch (IllegalArgumentException ignored) {
-            return base64.getBytes(StandardCharsets.UTF_8);
+            return utf8Of(base64);
         }
     }
 }
