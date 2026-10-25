@@ -309,6 +309,29 @@ class SqsServiceTest {
     }
 
     @Test
+    void createQueue_recreateMatchesASavedNonCompactRedrivePolicy() {
+        String region = "eu-west-1";
+        InMemoryStorage<String, Queue> store = new InMemoryStorage<>();
+        SqsService service = new SqsService(store, 30, 1048576, BASE_URL, clock);
+        Queue dlq = service.createQueue("saved-redrive-dlq", null, region);
+        String dlqArn = service.getQueueAttributes(dlq.getQueueUrl(), List.of("QueueArn"), region).get("QueueArn");
+        String original = "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":3}\n";
+        Queue queue = service.createQueue("saved-redrive", Map.of("RedrivePolicy", original), region);
+
+        // A queue persisted by a build that stored the policy as sent, whitespace included.
+        String storageKey = store.keys().stream()
+                .filter(key -> key.endsWith("/saved-redrive"))
+                .findFirst().orElseThrow();
+        Queue stored = store.get(storageKey).orElseThrow();
+        stored.getAttributes().put("RedrivePolicy", original);
+        store.put(storageKey, stored);
+
+        Queue same = service.createQueue("saved-redrive", Map.of("RedrivePolicy", original), region);
+        assertEquals(queue.getQueueUrl(), same.getQueueUrl(),
+                "Resending the original CreateQueue request must not conflict with the saved queue");
+    }
+
+    @Test
     void createQueue_acceptsTheAwsCeilingWhenTheConfiguredMaximumIsLower() {
         String region = "eu-west-1";
         SqsService service = new SqsService(new InMemoryStorage<>(), 30, 131072, BASE_URL, clock);

@@ -755,7 +755,8 @@ public class SqsService implements Resettable, ResourceProvider {
                 Set<String> readOnlyAttrs = Set.of("QueueArn", "CreatedTimestamp", "LastModifiedTimestamp",
                         "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible",
                         "ApproximateNumberOfMessagesDelayed");
-                Map<String, String> effective = new LinkedHashMap<>(existing.getAttributes());
+                // A queue saved by an earlier build can hold a non-compact policy; compare compact forms.
+                Map<String, String> effective = new LinkedHashMap<>(compactRedrivePolicies(existing.getAttributes()));
                 applyDerivedAttributes(effective);
                 for (Map.Entry<String, String> entry : attributes.entrySet()) {
                     if (readOnlyAttrs.contains(entry.getKey())) {
