@@ -73,9 +73,12 @@ ASSET=floci-aws-linux-amd64
 curl -fsSLO "https://github.com/floci-io/floci/releases/download/$VERSION/$ASSET"
 curl -fsSLO "https://github.com/floci-io/floci/releases/download/$VERSION/sha256sums.txt"
 sha256sum --ignore-missing -c sha256sums.txt     # shasum -a 256 --ignore-missing -c on macOS
+mkdir -p ~/.local/bin
 install -m 755 "$ASSET" ~/.local/bin/floci-aws
-floci-aws
+~/.local/bin/floci-aws
 ```
+
+Add `~/.local/bin` to your `PATH` to start it as plain `floci-aws`.
 
 The binary is named `floci-aws` because `floci` is the [CLI](https://github.com/floci-io/floci-cli).
 
@@ -99,8 +102,9 @@ gh attestation verify "$ASSET" --repo floci-io/floci
   `xattr -d com.apple.quarantine floci-aws`. Downloads made with `curl` are not quarantined.
 - **Docker is optional.** Without it every service that does not run containers works as usual. The
   container-backed ones keep their control plane but start no containers (RDS, ElastiCache, MemoryDB,
-  OpenSearch, Neptune, DocumentDB, MSK, EKS, Timestream for InfluxDB), or fail the request that needs one
-  (Lambda, ECS, EC2 instances, CodeBuild, Batch, SageMaker, AppSync JavaScript resolvers, Pipes with Kafka
+  OpenSearch, Neptune, DocumentDB, MSK, EKS, Timestream for InfluxDB, and EC2, whose instances run with no
+  SSH, user data or SSM commands unless security-group enforcement is on, which makes a launch fail), or
+  fail the request that needs one (Lambda, ECS, CodeBuild, Batch, SageMaker, AppSync JavaScript resolvers, Pipes with Kafka
   sources, MWAA, Amazon MQ, Managed Flink, Redshift, Redshift Serverless, the RDS Data API, Athena, the ECR
   registry, CodeArtifact, Verified Permissions). Floci logs one
   warning at startup naming the affected services when Docker is unreachable. With Docker, the binary finds
@@ -121,8 +125,9 @@ than the working directory:
 | Windows | `%LOCALAPPDATA%\floci-aws` |
 
 `FLOCI_STORAGE_PERSISTENT_PATH` overrides it. Containers the binary starts are named with the namespace
-`host-<port>`, so they never collide with an image or a second binary sharing the same Docker daemon;
-`FLOCI_DOCKER_RESOURCE_NAMESPACE` overrides it.
+`host-<port>`, so they do not collide with an image or with a second binary on another port sharing the
+same Docker daemon. Binaries on separate hosts that use the same port and the same remote daemon share
+that namespace: give each its own `FLOCI_DOCKER_RESOURCE_NAMESPACE`.
 
 The state directory is not per port, though. Two binaries with persistence on need their own
 `FLOCI_STORAGE_PERSISTENT_PATH` each, or they write the same state files. Restart a persistent binary on
