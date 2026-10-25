@@ -11,7 +11,9 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -19,6 +21,7 @@ import java.util.stream.Stream;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
@@ -35,6 +38,9 @@ class SesBulkV1IntegrationTest {
     // A sender of its own: an identity under example.com would outlive this class and reach the
     // other SES classes that share the application.
     private static final String SENDER = "bulk-v1@floci.test";
+
+    private static final String MISSING_DESTINATION_2 = "1 validation error detected: Value at "
+            + "'destinations.2.member.destination' failed to satisfy constraint: Member must not be null";
 
     private static final Pattern MESSAGE_ID_PATTERN =
             Pattern.compile("<MessageId>([^<]+)</MessageId>");
@@ -148,7 +154,9 @@ class SesBulkV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>InvalidParameterValue</Code>"));
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at 'destinations' "
+                    + "failed to satisfy constraint: Member must not be null"));
     }
 
     @Test
@@ -164,32 +172,31 @@ class SesBulkV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>InvalidParameterValue</Code>"));
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at 'template' "
+                    + "failed to satisfy constraint: Member must not be null"));
     }
 
     @Test
     @Order(6)
-    void sendBulkTemplatedEmail_perEntryMissingDestination_mapsToInvalidParameterValue() {
-        // An entry with only ReplacementTemplateData (no recipient) reaches the per-entry send,
-        // which throws AwsException("InvalidParameterValue", ...). Expected per-entry
-        // Status string in v1 is "InvalidParameterValue", not "Failed" or "InvalidParameter".
-        // DefaultTemplateData supplies team so rendering succeeds before the recipient check.
-        String body = given()
+    void sendBulkTemplatedEmail_entryWithoutDestination_isAValidationError() {
+        // An entry with only ReplacementTemplateData has a null Destination, which the model
+        // validation refuses for the whole request (probe-confirmed).
+        given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "v1-bulk-welcome")
             .formParam("DefaultTemplateData", "{\"team\":\"floci\"}")
-            .formParam("Destinations.member.1.ReplacementTemplateData", "{\"name\":\"Ghost\"}")
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
+            .formParam("Destinations.member.2.ReplacementTemplateData", "{\"name\":\"Ghost\"}")
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .extract().body().asString();
-
-        assertEquals(1L, body.split("<Status>InvalidParameterValue</Status>", -1).length - 1L,
-                "expected per-entry Status=InvalidParameterValue");
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(MISSING_DESTINATION_2));
     }
 
     @Test
@@ -343,6 +350,133 @@ class SesBulkV1IntegrationTest {
             .extract().body().asString();
 
         assertEquals(50L, body.split("<Status>Success</Status>", -1).length - 1L);
+    }
+
+    @Test
+    @Order(14)
+    void sendBulkTemplatedEmail_emptyToAddresses_answersTheEntryBeforeSenderAndTemplate() {
+        // boto3 serializes ToAddresses=[] as a bare empty-valued key. AWS answers the entry even
+        // for an unverified Source and a missing template (probe-confirmed).
+        String body = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendBulkTemplatedEmail")
+            .formParam("Source", "bulk-v1-unverified@floci.test")
+            .formParam("Template", "ghost")
+            .formParam("DefaultTemplateData", "{}")
+            .formParam("Destinations.member.1.Destination.ToAddresses", "")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>InvalidParameterValue</Status>"))
+            .body(containsString("<Error>Destination cannot be empty</Error>"))
+            .body(not(containsString("<MessageId>")))
+            .extract().body().asString();
+
+        assertEquals(1L, body.split("<member>", -1).length - 1L);
+    }
+
+    @Test
+    @Order(15)
+    void sendBulkTemplatedEmail_skippedIndex_isAValidationError() {
+        // boto3 sends nothing for Destination={}, which leaves a gap in the member indexes.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendBulkTemplatedEmail")
+            .formParam("Source", SENDER)
+            .formParam("Template", "v1-bulk-welcome")
+            .formParam("DefaultTemplateData", "{\"name\":\"X\",\"team\":\"floci\"}")
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
+            .formParam("Destinations.member.3.Destination.ToAddresses.member.1", "bob@example.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(MISSING_DESTINATION_2));
+    }
+
+    @Test
+    @Order(16)
+    void sendBulkTemplatedEmail_emptyEntryBesideRecipients_failsOnlyThatEntry() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendBulkTemplatedEmail")
+            .formParam("Source", SENDER)
+            .formParam("Template", "v1-bulk-welcome")
+            .formParam("DefaultTemplateData", "{\"name\":\"X\",\"team\":\"floci\"}")
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
+            .formParam("Destinations.member.2.Destination.ToAddresses", "")
+            .formParam("Destinations.member.3.Destination.ToAddresses.member.1", "bob@example.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SendBulkTemplatedEmailResponse.SendBulkTemplatedEmailResult.Status.member.size()", equalTo(3))
+            .body("SendBulkTemplatedEmailResponse.SendBulkTemplatedEmailResult.Status.member[0].Status",
+                    equalTo("Success"))
+            .body("SendBulkTemplatedEmailResponse.SendBulkTemplatedEmailResult.Status.member[1].Status",
+                    equalTo("InvalidParameterValue"))
+            .body("SendBulkTemplatedEmailResponse.SendBulkTemplatedEmailResult.Status.member[1].Error",
+                    equalTo("Missing required header 'To'."))
+            .body("SendBulkTemplatedEmailResponse.SendBulkTemplatedEmailResult.Status.member[1].MessageId.size()",
+                    equalTo(0))
+            .body("SendBulkTemplatedEmailResponse.SendBulkTemplatedEmailResult.Status.member[2].Status",
+                    equalTo("Success"));
+    }
+
+    // The model validation answers ahead of the address syntax, the template selector and the
+    // destination count (probed 2026-10-25).
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("modelViolationParams")
+    @Order(17)
+    void sendBulkTemplatedEmail_modelValidationPrecedesOtherChecks(String label, Map<String, String> params,
+                                                                   String message) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendBulkTemplatedEmail")
+            .formParams(params)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(message));
+    }
+
+    static Stream<Arguments> modelViolationParams() {
+        Map<String, String> withoutDestination2 = Map.of(
+                "Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com",
+                "Destinations.member.2.ReplacementTemplateData", "{}");
+        Map<String, String> gapAt2 = new HashMap<>();
+        for (int i = 1; i <= 51; i++) {
+            if (i != 2) {
+                gapAt2.put("Destinations.member." + i + ".Destination.ToAddresses.member.1",
+                        "user" + i + "@example.com");
+            }
+        }
+        return Stream.of(
+                Arguments.of("malformed Source",
+                        with(withoutDestination2, "Source", "not-an-address", "Template", "v1-bulk-welcome"),
+                        MISSING_DESTINATION_2),
+                Arguments.of("no Template", with(withoutDestination2, "Source", SENDER),
+                        "2 validation errors detected: Value at 'template' failed to satisfy constraint: "
+                                + "Member must not be null; Value at 'destinations.2.member.destination' "
+                                + "failed to satisfy constraint: Member must not be null"),
+                Arguments.of("51 indexes with a gap", with(gapAt2, "Source", SENDER, "Template", "v1-bulk-welcome"),
+                        MISSING_DESTINATION_2));
+    }
+
+    private static Map<String, String> with(Map<String, String> params, String... namesAndValues) {
+        Map<String, String> merged = new HashMap<>(params);
+        for (int i = 0; i < namesAndValues.length; i += 2) {
+            merged.put(namesAndValues[i], namesAndValues[i + 1]);
+        }
+        return merged;
     }
 
     private static RequestSpecification destinations(RequestSpecification spec, int count) {

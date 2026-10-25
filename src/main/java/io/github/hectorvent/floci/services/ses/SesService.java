@@ -1734,6 +1734,11 @@ public class SesService {
         for (BulkEmailEntry entry : request.entries()) {
             try {
                 SesAddressSyntax.requireBulkDestination(entry, request.replyToAddresses());
+                // An entry with no recipient beside entries with one fails on its own (probe-confirmed
+                // on v1 and v2).
+                if (!anyBulkRecipient(List.of(entry))) {
+                    throw new AwsException("InvalidParameterValue", "Missing required header 'To'.", 400);
+                }
                 JsonNode merged = mergeTemplateData(template.templateData(), entry.replacementTemplateData());
                 List<MessageTag> mergedTags = mergeEmailTags(request.defaultEmailTags(), entry.replacementEmailTags());
                 List<MessageHeader> mergedHeaders = mergeHeaders(template.headers(), entry.replacementHeaders());

@@ -642,6 +642,33 @@ class SesBulkV2IntegrationTest {
                     """.formatted(entries(51)), "Template must have at least a subject, text, or html part."));
     }
 
+    // An entry with no recipient beside one with a recipient fails on its own (probed 2026-10-25).
+    @Test
+    @Order(18)
+    void sendBulkEmail_emptyEntryBesideRecipients_failsOnlyThatEntry() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "FromEmailAddress": "bulk-v2-inline@floci.test",
+                  "DefaultContent": {"Template": {"TemplateContent": {"Subject": "s", "Text": "t"}}},
+                  "BulkEmailEntries": [
+                    {"Destination": {"ToAddresses": ["alice@example.com"]}},
+                    {"Destination": {"ToAddresses": []}}
+                  ]
+                }
+                """)
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(200)
+            .body("BulkEmailEntryResults", hasSize(2))
+            .body("BulkEmailEntryResults[0].Status", equalTo("SUCCESS"))
+            .body("BulkEmailEntryResults[1].Status", equalTo("INVALID_PARAMETER"))
+            .body("BulkEmailEntryResults[1].Error", equalTo("Missing required header 'To'."));
+    }
+
     private static String entries(int count) {
         StringBuilder entries = new StringBuilder();
         for (int i = 1; i <= count; i++) {
