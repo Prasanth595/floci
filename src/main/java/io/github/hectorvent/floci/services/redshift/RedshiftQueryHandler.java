@@ -92,12 +92,23 @@ public class RedshiftQueryHandler {
 
             String region = regionResolver.resolveRegionFromAuth(authorizationHeader);
             String defaultIamRoleArn = params.getFirst("DefaultIamRoleArn");
-            Cluster cluster = manageMasterPassword
-                    ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
-                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
-                            params.getFirst("MasterPasswordSecretKmsKeyId"), region, defaultIamRoleArn)
-                    : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
+            Integer automatedRetention = parseOptionalInteger(params, "AutomatedSnapshotRetentionPeriod");
+            Cluster cluster;
+            if (manageMasterPassword) {
+                cluster = automatedRetention == null
+                        ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
+                                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
+                                params.getFirst("MasterPasswordSecretKmsKeyId"), region, defaultIamRoleArn)
+                        : service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
+                                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
+                                params.getFirst("MasterPasswordSecretKmsKeyId"), region, defaultIamRoleArn, automatedRetention);
+            } else {
+                cluster = automatedRetention == null
+                        ? service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
+                                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn)
+                        : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
+                                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention);
+            }
             String parameterGroupName = params.getFirst("ClusterParameterGroupName");
             String multiAz = params.getFirst("MultiAZ");
             boolean hasParameterGroup = parameterGroupName != null && !parameterGroupName.isBlank();
@@ -177,6 +188,13 @@ public class RedshiftQueryHandler {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             List<Snapshot> snapshots = service.describeSnapshots(snapshotIdentifier, clusterIdentifier);
+            String snapshotType = params.getFirst("SnapshotType");
+            if (snapshotType != null) {
+                if (!List.of("manual", "automated").contains(snapshotType)) {
+                    throw new AwsException("InvalidParameterValue", "SnapshotType must be manual or automated", 400);
+                }
+                snapshots = snapshots.stream().filter(snapshot -> snapshotType.equals(snapshot.getSnapshotType())).toList();
+            }
             XmlBuilder xmlBuilder = new XmlBuilder()
                     .start("DescribeClusterSnapshotsResponse")
                       .start("DescribeClusterSnapshotsResult")
@@ -680,9 +698,14 @@ public class RedshiftQueryHandler {
             String clusterParameterGroupName = params.getFirst("ClusterParameterGroupName");
             List<String> vpcSecurityGroupIds = memberList(params, "VpcSecurityGroupIds");
             String multiAz = params.getFirst("MultiAZ");
-            Cluster cluster = service.modifyCluster(clusterIdentifier, nodeType, numberOfNodes,
-                    masterUserPassword, clusterParameterGroupName, vpcSecurityGroupIds,
-                    multiAz == null ? null : Boolean.parseBoolean(multiAz));
+            Integer automatedRetention = parseOptionalInteger(params, "AutomatedSnapshotRetentionPeriod");
+            Cluster cluster = automatedRetention == null
+                    ? service.modifyCluster(clusterIdentifier, nodeType, numberOfNodes,
+                            masterUserPassword, clusterParameterGroupName, vpcSecurityGroupIds,
+                            multiAz == null ? null : Boolean.parseBoolean(multiAz))
+                    : service.modifyCluster(clusterIdentifier, nodeType, numberOfNodes,
+                            masterUserPassword, clusterParameterGroupName, vpcSecurityGroupIds,
+                            multiAz == null ? null : Boolean.parseBoolean(multiAz), automatedRetention);
             String xml = new XmlBuilder()
                     .start("ModifyClusterResponse")
                       .start("ModifyClusterResult")
@@ -926,6 +949,7 @@ public class RedshiftQueryHandler {
             .elem("NodeType", cluster.getNodeType())
             .elem("MasterUsername", cluster.getMasterUsername())
             .elem("ClusterStatus", cluster.getClusterStatus())
+            .elem("AutomatedSnapshotRetentionPeriod", String.valueOf(cluster.getAutomatedSnapshotRetentionPeriod()))
             .elem("ClusterAvailabilityStatus", availabilityStatus(cluster.getClusterStatus()))
             .elem("AvailabilityZoneRelocationStatus", "disabled")
             // AWS always returns "enabled" or "disabled" here, never blank.
@@ -1063,6 +1087,7 @@ public class RedshiftQueryHandler {
             .elem("ClusterIdentifier", snapshot.getClusterIdentifier())
             .elem("SnapshotArn", snapshot.getSnapshotArn())
             .elem("SnapshotCreateTime", createTime)
+            .elem("SnapshotType", snapshot.getSnapshotType())
             .elem("ManualSnapshotRetentionPeriod", snapshot.getManualSnapshotRetentionPeriod().toString())
             .elem("Status", snapshot.getStatus())
             .elem("Port", String.valueOf(snapshot.getPort()))

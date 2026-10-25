@@ -1724,6 +1724,10 @@ public interface EmulatorConfig {
 
     interface RedshiftServiceConfig {
         @WithDefault("true")
+        boolean automatedSnapshotsEnabled();
+        @WithDefault("60")
+        long snapshotSweepIntervalSeconds();
+        @WithDefault("true")
         boolean enabled();
         @WithDefault("5439")
         int defaultPort();

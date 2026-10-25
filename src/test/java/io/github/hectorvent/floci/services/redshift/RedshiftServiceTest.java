@@ -2608,6 +2608,16 @@ class RedshiftServiceTest {
         when(snapshotScheduleBackend.get("res")).thenReturn(Optional.of(schedule));
     }
 
+    @Test
+    void snapshotScheduleRejectsOutOfRangeCronFields() {
+        when(snapshotScheduleBackend.get("invalid-cron")).thenReturn(Optional.empty());
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.createSnapshotSchedule(
+                "invalid-cron", null, List.of("cron(60 12 *)"), Map.of()));
+
+        assertEquals("InvalidSchedule", failure.getErrorCode());
+    }
+
     private static String extractResourceId(String arn) {
         String resource = arn.substring(arn.lastIndexOf(':') + 1);
         return resource.contains("/") ? resource.substring(resource.lastIndexOf('/') + 1) : resource;
