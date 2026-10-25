@@ -38,10 +38,12 @@ final class DynamoDbExportRecords {
         }
         List<JsonNode> records = new ArrayList<>();
         for (ItemChange change : changes) {
-            if (Objects.equals(change.oldItem(), change.newItem())) {
+            ObjectNode oldImage = change.oldItem() != null ? sortedAttributes(change.oldItem()) : null;
+            ObjectNode newImage = change.newItem() != null ? sortedAttributes(change.newItem()) : null;
+            if (Objects.equals(oldImage, newImage)) {
                 continue;
             }
-            JsonNode item = change.newItem() != null ? change.newItem() : change.oldItem();
+            JsonNode item = newImage != null ? newImage : oldImage;
             ObjectNode record = NODES.objectNode();
             record.putObject("Metadata").putObject("WriteTimestampMicros")
                     .put("N", String.valueOf(ChronoUnit.MICROS.between(Instant.EPOCH, change.lastWrite())));
@@ -50,11 +52,11 @@ final class DynamoDbExportRecords {
                 keys.set(keyName, item.get(keyName));
             }
             record.set("Keys", sortedAttributes(keys));
-            if (change.oldItem() != null && !newImageOnly) {
-                record.set("OldImage", sortedAttributes(change.oldItem()));
+            if (oldImage != null && !newImageOnly) {
+                record.set("OldImage", oldImage);
             }
-            if (change.newItem() != null) {
-                record.set("NewImage", sortedAttributes(change.newItem()));
+            if (newImage != null) {
+                record.set("NewImage", newImage);
             }
             records.add(record);
         }

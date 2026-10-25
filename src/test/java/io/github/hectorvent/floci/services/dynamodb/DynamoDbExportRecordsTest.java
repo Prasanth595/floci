@@ -61,4 +61,20 @@ class DynamoDbExportRecordsTest {
                 + "OldImage:{" + ION_SORTED.formatted("before") + "},NewImage:{" + ION_SORTED.formatted("after") + "}}}",
                 DynamoDbIonText.recordLine(record));
     }
+
+    @Test
+    void itemWhoseSetsOnlyChangeOrderGetsNoRecord() throws IOException {
+        String item = """
+            {"zk": {"S": "k"}, "ak": {"N": "1"}, "ss": {"SS": %s}, "ns": {"NS": %s}, "bs": {"BS": %s},
+             "m": {"M": {"ss": {"SS": %s}}}, "l": {"L": [{"NS": %s}]}}
+            """;
+        ItemChange reordered = new ItemChange(
+                MAPPER.readTree(item.formatted("[\"a\", \"b\"]", "[\"1\", \"2\"]", "[\"AQ==\", \"Ag==\"]",
+                        "[\"x\", \"y\"]", "[\"10\", \"20\"]")),
+                MAPPER.readTree(item.formatted("[\"b\", \"a\"]", "[\"2\", \"1\"]", "[\"Ag==\", \"AQ==\"]",
+                        "[\"y\", \"x\"]", "[\"20\", \"10\"]")),
+                Instant.EPOCH);
+
+        assertEquals(List.of(), DynamoDbExportRecords.records(List.of(reordered), TABLE, false));
+    }
 }
