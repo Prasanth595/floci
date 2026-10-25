@@ -184,4 +184,34 @@ class RedshiftDataAdminSecretIntegrationTest {
         verify(factory, atLeastOnce()).open(target.capture());
         assertEquals("initial_admin", target.getValue().user());
     }
+
+    @Test
+    void callerOwnedSecretConnectsAsItsOwnDatabaseUserEvenWhenMatchingAdminUsername() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String namespaceName = "data-caller-secret-" + suffix;
+        String workgroup = "data-caller-secret-wg-" + suffix;
+        Namespace namespace = redshift.createNamespace(request -> request.namespaceName(namespaceName)
+                .adminUsername("initial_admin").dbName("analytics").manageAdminPassword(true)).namespace();
+        cleanup.register(() -> redshift.deleteNamespace(request -> request.namespaceName(namespaceName)));
+        redshift.createWorkgroup(request -> request.workgroupName(workgroup).namespaceName(namespaceName));
+        cleanup.register(() -> redshift.deleteWorkgroup(request -> request.workgroupName(workgroup)));
+
+        String callerSecretArn = secrets.createSecret(request -> request.name("caller-secret-" + suffix)
+                .secretString("{\"username\":\"report_reader\",\"password\":\"ReaderSecret123!\"}")).arn();
+        cleanup.register(() -> secrets.deleteSecret(request -> request.secretId(callerSecretArn).forceDeleteWithoutRecovery(true)));
+
+        redshift.updateNamespace(request -> request.namespaceName(namespaceName).adminUsername("report_reader"));
+
+        ExecuteStatementResponse executed = data.executeStatement(request -> request.workgroupName(workgroup)
+                .secretArn(callerSecretArn).database("analytics")
+                .waitTimeSeconds(30).sql("SELECT 303 AS answer"));
+        DescribeStatementResponse described = data.describeStatement(request -> request.id(executed.id()));
+        assertEquals(StatusString.FINISHED, described.status(), described.error());
+
+        ArgumentCaptor<RedshiftDataResourceResolver.DatabaseTarget> target =
+                ArgumentCaptor.forClass(RedshiftDataResourceResolver.DatabaseTarget.class);
+        verify(factory, atLeastOnce()).open(target.capture());
+        assertEquals("report_reader", target.getValue().user());
+        assertEquals("ReaderSecret123!", target.getValue().password());
+    }
 }
