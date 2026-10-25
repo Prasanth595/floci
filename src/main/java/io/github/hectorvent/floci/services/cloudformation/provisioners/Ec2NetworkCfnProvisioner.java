@@ -649,7 +649,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         String family = ctx.resolveOptional(props, "AddressFamily");
         require(PREFIX_LIST, "PrefixListName", name);
         require(PREFIX_LIST, "AddressFamily", family);
-        Integer maxEntries = optionalInt(props, ctx, "MaxEntries");
+        Integer maxEntries = ctx.resolveOptionalInt(props, "MaxEntries");
         List<PrefixListEntry> entries = prefixListEntries(props, ctx);
         ManagedPrefixList existing = ctx.isUpdate() ? findPrefixList(ctx.priorPhysicalId(), ctx.region()) : null;
         if (existing == null) {
@@ -790,22 +790,6 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             entries.add(new PrefixListEntry(cidr, row.path("Description").asText(null)));
         }
         return entries;
-    }
-
-    /**
-     * An integer property, or null when it is absent or {@code AWS::NoValue}. A value written into the
-     * template has to be an integer, a literal blank included, as {@code ElbV2CfnProvisioner} reads one.
-     */
-    private static Integer optionalInt(JsonNode props, ProvisionContext ctx, String property) {
-        String value = ctx.resolveOptional(props, property);
-        if (value == null || (value.isBlank() && !props.get(property).isTextual())) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(value.trim());
-        } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError", "Value of property " + property + " must be an integer.", 400);
-        }
     }
 
     /**
