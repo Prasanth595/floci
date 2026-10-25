@@ -17,7 +17,7 @@
 | `DescribeRepositories` | List repositories or fetch by name |
 | `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
 | `GetAuthorizationToken` | Returns a docker-login token + proxy endpoint |
-| `ListImages` | Enumerate tags and digests in a repository |
+| `ListImages` | Enumerate paginated tags and digests in a repository |
 | `DescribeImages` | Image metadata: digest, size, push timestamp, manifest media type |
 | `BatchGetImage` | Fetch image manifests, honoring `acceptedMediaTypes` |
 | `BatchDeleteImage` | Delete images by tag or digest |
@@ -36,6 +36,11 @@
 | `PutRegistryPolicy` / `GetRegistryPolicy` / `DeleteRegistryPolicy` | Registry policy round-trip (stored, not enforced) |
 | `PutReplicationConfiguration` / `DescribeRegistry` | Store the registry's replication rules and return them with the registry ID (stored, not acted on) |
 | `PutRegistryScanningConfiguration` / `GetRegistryScanningConfiguration` | Store the registry's scan type and scanning rules (stored, not acted on) |
+
+`ListImages` accepts `maxResults` from 1 to 1000 (default 100) and returns `nextToken`
+when another page remains. Tokens are scoped to the region, registry, and repository;
+local pages use stable tag order. Listing still enumerates tagged images and ignores
+the optional `filter` fields.
 
 ### Admin Endpoints
 

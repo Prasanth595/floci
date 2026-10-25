@@ -505,6 +505,18 @@ public class EcrService implements ResourceProvider {
         }
     }
 
+    public PaginatedResult<ImageIdentifier> listImages(String repositoryName, String registryId, String region,
+                                                       Integer maxResults, String nextToken) {
+        int limit = maxResults != null ? maxResults : 100;
+        if (limit < 1 || limit > 1000) {
+            throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 1000", 400);
+        }
+        String namespace = "ListImages:" + region + ":" + effectiveAccount(registryId) + ":" + repositoryName;
+        return Pagination.paginate(listImages(repositoryName, registryId, region), ImageIdentifier::getImageTag,
+                limit, nextToken, namespace,
+                token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
+    }
+
     public DescribeImagesResult describeImages(String repositoryName,
                                                 List<ImageIdentifier> requested,
                                                 String registryId,

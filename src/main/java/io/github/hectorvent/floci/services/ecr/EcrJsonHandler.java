@@ -314,14 +314,27 @@ public class EcrJsonHandler {
     private Response handleListImages(JsonNode request, String region) {
         String repo = request.path("repositoryName").asText(null);
         String registryId = request.path("registryId").asText(null);
-        List<ImageIdentifier> ids = service.listImages(repo, registryId, region);
+        JsonNode limit = request.get("maxResults");
+        if (limit != null && !limit.isNull() && (!limit.isIntegralNumber() || !limit.canConvertToInt())) {
+            throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 1000", 400);
+        }
+        JsonNode token = request.get("nextToken");
+        if (token != null && !token.isNull() && !token.isTextual()) {
+            throw new AwsException("InvalidParameterException", "Invalid nextToken", 400);
+        }
+        Integer maxResults = request.hasNonNull("maxResults") ? limit.asInt() : null;
+        PaginatedResult<ImageIdentifier> page = service.listImages(repo, registryId, region,
+                maxResults, request.path("nextToken").asText(null));
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        for (ImageIdentifier id : ids) {
+        for (ImageIdentifier id : page.items()) {
             arr.add(buildImageIdentifier(id));
         }
         response.set("imageIds", arr);
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
