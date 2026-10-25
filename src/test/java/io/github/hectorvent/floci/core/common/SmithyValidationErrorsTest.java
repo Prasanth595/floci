@@ -50,6 +50,15 @@ class SmithyValidationErrorsTest {
     void noViolations_isAProgrammingError() {
         assertThrows(IllegalArgumentException.class, () -> SmithyValidationErrors.message(List.of()));
     }
+
+    @Test
+    void notNull_hasTwoForms() {
+        assertEquals("Value null at 'a.b' failed to satisfy constraint: Member must not be null",
+                SmithyValidationErrors.notNull("a.b"));
+        assertEquals("Value at 'a.b' failed to satisfy constraint: Member must not be null",
+                SmithyValidationErrors.notNullWithoutValue("a.b"));
+    }
+
     @Test
     void lengthBoundsPreserveValuesAndIncludeEndpoints() {
         assertEquals("Value '' at 'name' failed to satisfy constraint: "

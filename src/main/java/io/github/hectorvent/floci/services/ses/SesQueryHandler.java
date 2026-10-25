@@ -773,16 +773,16 @@ public class SesQueryHandler {
         // violations in the model's member order (probe-confirmed).
         List<String> violations = new ArrayList<>();
         if (templateName == null && templateArn == null) {
-            violations.add(nullMember("template"));
+            violations.add(SmithyValidationErrors.notNullWithoutValue("template"));
         }
         if (!params.containsKey("Destinations") && !hasParamWithPrefix(params, "Destinations.")) {
-            violations.add(nullMember("destinations"));
+            violations.add(SmithyValidationErrors.notNullWithoutValue("destinations"));
         }
         // A skipped index, like an entry without a Destination, is a null destination
         // (probe-confirmed). An empty address list still sends its bare key.
         for (int i = 1; i <= Math.min(destinations.last(), MAX_VALIDATED_DESTINATION_INDEX); i++) {
             if (!destinations.withDestination().contains(i)) {
-                violations.add(nullMember("destinations." + i + ".member.destination"));
+                violations.add(SmithyValidationErrors.notNullWithoutValue("destinations." + i + ".member.destination"));
             }
         }
         if (!violations.isEmpty()) {
@@ -1617,10 +1617,6 @@ public class SesQueryHandler {
             return 0;
         }
         return token.length() > 9 ? Integer.MAX_VALUE : Integer.parseInt(token);
-    }
-
-    private static String nullMember(String path) {
-        return "Value at '" + path + "' failed to satisfy constraint: Member must not be null";
     }
 
     private List<String> extractMembers(MultivaluedMap<String, String> params, String prefix) {
