@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,7 +15,6 @@ import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -184,7 +184,7 @@ class RedshiftDataSessions implements AutoCloseable {
         session.active = null;
         session.execution = null;
         session.connection = null;
-        session.userChanges.clear();
+        session.userChanges.rollback();
         return retirement;
     }
 
@@ -288,7 +288,7 @@ class RedshiftDataSessions implements AutoCloseable {
         private RedshiftDataExecution execution;
         private Reservation active;
         private Runnable connectionClosed;
-        private final List<UserChange> userChanges = new ArrayList<>();
+        private UserChanges userChanges = new UserChanges();
 
         private Session(Scope owner, RedshiftDataResourceResolver.DatabaseTarget target, JsonNode request, Instant createdAt) {
             this.owner = owner;
@@ -398,18 +398,24 @@ class RedshiftDataSessions implements AutoCloseable {
             session.transactionFailed = true;
         }
 
-        void addUserChanges(List<UserChange> changes) {
+        void completeUserChanges(String sql) {
             synchronized (session) {
                 if (!session.closed) {
-                    session.userChanges.addAll(changes);
+                    session.userChanges.complete(sql);
                 }
             }
         }
 
         List<UserChange> takeUserChanges() {
+            UserChanges changes = takeUserChangeState();
+            changes.commit();
+            return changes.drainCommitted();
+        }
+
+        UserChanges takeUserChangeState() {
             synchronized (session) {
-                List<UserChange> changes = List.copyOf(session.userChanges);
-                session.userChanges.clear();
+                UserChanges changes = session.userChanges;
+                session.userChanges = new UserChanges();
                 return changes;
             }
         }

@@ -61,11 +61,12 @@ connection and its failure rolls it back, including any transaction opened by ea
 calls on that session. Transaction-control modifiers beyond optional `WORK` or `TRANSACTION`
 are rejected before execution. These cross-call transaction details have not been verified against live AWS.
 
-Floci rejects transaction-control statements in `BatchExecuteStatement`, including savepoints,
-with `ValidationException` before executing any SQL in the batch. Each `Sqls` entry must contain
-a single statement. This restriction keeps the batch's commit and rollback behavior under Data API
-control and prevents audit records for user changes rolled back by later batch statements.
-The exact AWS behavior for transaction-control statements inside a batch has not been verified.
+Batch audit records track successful user changes through transaction boundaries and savepoints.
+`ROLLBACK TO` discards changes after the named savepoint, while `RELEASE` keeps them pending until
+commit. A full rollback discards pending changes; changes committed earlier in the batch retain
+their audit records if a later statement fails. Batch entries support transaction-control commands
+and multiple SQL statements. Audit state advances after each successful command, while an entry's
+result metadata preserves its first command's result and its original SQL text.
 
 An omitted keep-alive on a reuse request preserves the previous idle timeout. A supplied value
 replaces it after successful admission, and the idle deadline starts when the query completes.

@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
@@ -542,11 +543,10 @@ public class RedshiftDataService implements Resettable {
     private void successfulUserChange(RedshiftDataStatementStore.StoredStatement stored,
                                       RedshiftDataResourceResolver.DatabaseTarget target, String sql,
                                       RedshiftDataSessions.Reservation session) {
-        List<UserChange> changes = RedshiftAuditSql.userChanges(sql);
         if (session != null && session.inTransaction()) {
-            session.addUserChanges(changes);
+            session.completeUserChanges(sql);
         } else {
-            publishUserChanges(stored, target, changes);
+            publishUserChanges(stored, target, RedshiftAuditSql.userChanges(sql));
         }
     }
 
@@ -862,16 +862,7 @@ public class RedshiftDataService implements Resettable {
         }
         List<String> sqls = new ArrayList<>();
         for (JsonNode n : sqlsNode) {
-            String sql = n.asText();
-            List<String> statements = RedshiftAuditSql.statements(sql);
-            if (statements.size() > 1) {
-                throw new AwsException("ValidationException", "Each Sqls entry must contain a single SQL statement.", 400);
-            }
-            if (!statements.isEmpty() && RedshiftAuditSql.isTransactionControl(statements.getFirst())) {
-                throw new AwsException("ValidationException",
-                        "Transaction control statements are not supported in BatchExecuteStatement.", 400);
-            }
-            sqls.add(sql);
+            sqls.add(n.asText());
         }
 
         ResolvedTarget resolved = resolveTarget(request, region, owner);
@@ -910,6 +901,7 @@ public class RedshiftDataService implements Resettable {
             Connection connection = use.connection();
             execution.track(connection);
             BackendSql batchBackend = new RedshiftDataBackendSql(connection, execution);
+            UserChanges userChanges = session == null ? new UserChanges() : session.takeUserChangeState();
             boolean committed = false;
             try {
                 connection.setAutoCommit(false);
@@ -931,7 +923,7 @@ public class RedshiftDataService implements Resettable {
                     try {
                         execution.checkCancellation();
                         publishActivity(parent, target, sqls.get(n));
-                        runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum(), execution, false);
+                        runBatchEntry(sub, connection, sqls.get(n), target.spectrum(), execution, userChanges);
                     } catch (SQLException e) {
                         sub.status = RedshiftDataStatementStore.Status.FAILED;
                         sub.error = e.getMessage();
@@ -963,15 +955,14 @@ public class RedshiftDataService implements Resettable {
                 if (!failed) {
                     execution.commit(connection::commit);
                     committed = true;
-                    if (session != null) {
-                        publishUserChanges(parent, target, session.takeUserChanges());
-                    }
-                    for (String sql : sqls) {
-                        publishUserChanges(parent, target, RedshiftAuditSql.userChanges(sql));
-                    }
+                    userChanges.commit();
                     parent.status = RedshiftDataStatementStore.Status.FINISHED;
                 }
             } finally {
+                if (!committed) {
+                    userChanges.rollback();
+                }
+                publishUserChanges(parent, target, userChanges.drainCommitted());
                 if (!committed && session != null) {
                     session.takeUserChanges();
                 }
@@ -1001,6 +992,28 @@ public class RedshiftDataService implements Resettable {
         }
         parent.durationNanos = totalDuration;
         parent.updatedAt = Instant.now();
+    }
+
+    private void runBatchEntry(RedshiftDataStatementStore.StoredStatement sub, Connection connection, String sql,
+                               SpectrumSession context, RedshiftDataExecution execution, UserChanges userChanges)
+            throws SQLException {
+        List<String> commands = RedshiftAuditSql.statements(sql);
+        if (commands.isEmpty()) {
+            runOnConnection(sub, connection, sql, Map.of(), context, execution, false);
+            return;
+        }
+        long duration = 0;
+        for (int i = 0; i < commands.size(); i++) {
+            // JDBC exposes the first result of an entry; later commands still affect transaction audit state.
+            RedshiftDataStatementStore.StoredStatement result = i == 0 ? sub : new RedshiftDataStatementStore.StoredStatement();
+            try {
+                runOnConnection(result, connection, commands.get(i), Map.of(), context, execution, false);
+                userChanges.complete(commands.get(i));
+            } finally {
+                duration += result.durationNanos;
+                sub.durationNanos = duration;
+            }
+        }
     }
 
     // ── ListStatements ─────────────────────────────────────────────────────

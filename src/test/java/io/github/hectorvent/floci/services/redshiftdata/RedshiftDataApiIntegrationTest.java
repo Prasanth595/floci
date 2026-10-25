@@ -26,11 +26,13 @@ import software.amazon.awssdk.services.redshiftdata.model.ResourceNotFoundExcept
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
+import java.util.UUID;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -157,6 +159,36 @@ class RedshiftDataApiIntegrationTest {
             redshift.modifyCluster(clusterId, null, null, null,
                     "default.redshift-1.0", null);
             redshift.deleteClusterParameterGroup(parameterGroup);
+        }
+    }
+
+    @Test
+    void sdkBatchSavepointRollbackOmitsTheRolledBackUserFromCloudWatchLogs() {
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String kept = "audit_kept_" + suffix;
+        String discarded = "audit_discarded_" + suffix;
+        String group = "/aws/redshift/cluster/" + clusterId + "/userlog";
+        redshift.enableLogging(clusterId, null, null, "cloudwatch", List.of("userlog"));
+        try (RedshiftDataClient data = RedshiftDataClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build();
+             CloudWatchLogsClient logs = CloudWatchLogsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                     .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build()) {
+            String batch = data.batchExecuteStatement(request -> request.clusterIdentifier(clusterId)
+                    .dbUser("admin").database("dev").sqls("CREATE USER " + kept + " PASSWORD 'Secret123'",
+                            "SAVEPOINT s; CREATE USER " + discarded + " PASSWORD 'Secret123'; ROLLBACK TO s")).id();
+            awaitFinished(batch);
+            String query = data.executeStatement(request -> request.clusterIdentifier(clusterId).dbUser("admin")
+                    .database("dev").sql("SELECT COUNT(*) FROM pg_user WHERE usename = '" + discarded + "'")).id();
+            awaitFinished(query);
+            assertEquals(0L, data.getStatementResult(request -> request.id(query)).records().getFirst().getFirst().longValue());
+            List<String> messages = logs.getLogEvents(GetLogEventsRequest.builder().logGroupName(group)
+                    .logStreamName(clusterId).build()).events().stream().map(event -> event.message()).toList();
+            assertTrue(messages.stream().anyMatch(message -> message.contains("," + kept + ",,Create,")));
+            assertFalse(messages.stream().anyMatch(message -> message.contains("," + discarded + ",")));
+        } finally {
+            redshift.disableLogging(clusterId);
+            executeAndWait("DROP USER IF EXISTS " + kept);
+            executeAndWait("DROP USER IF EXISTS " + discarded);
         }
     }
 

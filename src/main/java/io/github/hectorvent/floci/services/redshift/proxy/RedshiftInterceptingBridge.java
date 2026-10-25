@@ -3,8 +3,8 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
-import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.Savepoint;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
 import io.github.hectorvent.floci.services.redshift.spectrum.PostgresExtendedBackendSession;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumColumn;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
@@ -73,8 +73,7 @@ public class RedshiftInterceptingBridge {
     private final String databaseName;
     private final RedshiftAuditLogPublisher auditLogPublisher;
     private final String databaseUser;
-    private final ArrayDeque<UserChange> completedUserChanges = new ArrayDeque<>();
-    private final ArrayDeque<AuditSavepoint> auditSavepoints = new ArrayDeque<>();
+    private final UserChanges auditUserChanges = new UserChanges();
     private final PostgresExtendedBackendSession relationalBackend;
     private final Map<String, PostgresWireDecoder.ParseMessage> relationalStatements = new HashMap<>();
     private final ExtendedQuerySession session = new ExtendedQuerySession();
@@ -89,8 +88,6 @@ public class RedshiftInterceptingBridge {
     private boolean extendedSpectrumError;
     private boolean rolledBackInCycle;
     private boolean auditCycleFailed;
-
-    private record AuditSavepoint(String name, int changeCount) { }
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService) {
         this(client, backend, s3Service, iamService, null);
@@ -929,57 +926,25 @@ public class RedshiftInterceptingBridge {
                 return;
             }
             String tag = new String(body, StandardCharsets.UTF_8).replace("\0", "");
-            Savepoint savepoint = RedshiftAuditSql.savepoint(command);
-            if (savepoint != null) {
-                completeSavepoint(savepoint);
-            } else if ("ROLLBACK".equalsIgnoreCase(tag)) {
-                completedUserChanges.clear();
-                auditSavepoints.clear();
-            } else if ("COMMIT".equalsIgnoreCase(tag)) {
-                publishCompletedUserChanges();
-                auditSavepoints.clear();
-            } else {
-                completedUserChanges.addAll(RedshiftAuditSql.userChanges(command));
-            }
+            auditUserChanges.complete(command, tag);
+            publishCompletedUserChanges();
         };
-    }
-
-    private void completeSavepoint(Savepoint savepoint) {
-        if ("SAVEPOINT".equals(savepoint.operation())) {
-            auditSavepoints.addLast(new AuditSavepoint(savepoint.name(), completedUserChanges.size()));
-            return;
-        }
-        while (!auditSavepoints.isEmpty()) {
-            AuditSavepoint mark = auditSavepoints.peekLast();
-            if (mark.name().equals(savepoint.name())) {
-                if ("ROLLBACK".equals(savepoint.operation())) {
-                    while (completedUserChanges.size() > mark.changeCount()) {
-                        completedUserChanges.removeLast();
-                    }
-                } else {
-                    auditSavepoints.removeLast();
-                }
-                return;
-            }
-            auditSavepoints.removeLast();
-        }
     }
 
     private void completeUserChanges(byte[] readyStatus) {
         if (readyStatus.length > 0 && readyStatus[0] == 'I') {
-            auditSavepoints.clear();
             if (auditCycleFailed) {
-                completedUserChanges.clear();
+                auditUserChanges.rollback();
             } else {
-                publishCompletedUserChanges();
+                auditUserChanges.commit();
             }
+            publishCompletedUserChanges();
         }
         auditCycleFailed = false;
     }
 
     private void publishCompletedUserChanges() {
-        UserChange change;
-        while ((change = completedUserChanges.poll()) != null) {
+        for (UserChange change : auditUserChanges.drainCommitted()) {
             auditLogPublisher.publishRegisteredUserChange(clusterAccountId, clusterIdentifier(), databaseName,
                     change.username(), change.action(), change.oldUsername());
         }

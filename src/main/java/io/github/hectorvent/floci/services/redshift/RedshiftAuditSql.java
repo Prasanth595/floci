@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -11,6 +12,71 @@ public final class RedshiftAuditSql {
     public record UserChange(String username, String action, String oldUsername) { }
 
     public record Savepoint(String operation, String name) { }
+
+    public static final class UserChanges {
+        private final List<UserChange> pending = new ArrayList<>();
+        private final List<UserChange> committed = new ArrayList<>();
+        private final ArrayDeque<Checkpoint> savepoints = new ArrayDeque<>();
+
+        private record Checkpoint(String name, int count) { }
+
+        public void complete(String sql) {
+            List<Token> tokens = tokens(sql);
+            String command = !tokens.isEmpty() && tokens.getFirst().kind() == Kind.WORD
+                    ? tokens.getFirst().text() : "";
+            complete(sql, command);
+        }
+
+        public void complete(String sql, String commandTag) {
+            Savepoint savepoint = savepoint(sql);
+            if (savepoint != null) {
+                completeSavepoint(savepoint);
+                return;
+            }
+            if ("COMMIT".equalsIgnoreCase(commandTag) || "END".equalsIgnoreCase(commandTag)) {
+                commit();
+            } else if ("ROLLBACK".equalsIgnoreCase(commandTag) || "ABORT".equalsIgnoreCase(commandTag)) {
+                rollback();
+            } else {
+                pending.addAll(userChanges(sql));
+            }
+        }
+
+        public void commit() {
+            committed.addAll(pending);
+            rollback();
+        }
+
+        public void rollback() {
+            pending.clear();
+            savepoints.clear();
+        }
+
+        public List<UserChange> drainCommitted() {
+            List<UserChange> changes = List.copyOf(committed);
+            committed.clear();
+            return changes;
+        }
+
+        private void completeSavepoint(Savepoint savepoint) {
+            if ("SAVEPOINT".equals(savepoint.operation())) {
+                savepoints.addLast(new Checkpoint(savepoint.name(), pending.size()));
+                return;
+            }
+            while (!savepoints.isEmpty()) {
+                Checkpoint checkpoint = savepoints.peekLast();
+                if (checkpoint.name().equals(savepoint.name())) {
+                    if ("ROLLBACK".equals(savepoint.operation())) {
+                        pending.subList(checkpoint.count(), pending.size()).clear();
+                    } else {
+                        savepoints.removeLast();
+                    }
+                    return;
+                }
+                savepoints.removeLast();
+            }
+        }
+    }
 
     private enum Kind { WORD, IDENTIFIER, STRING, SYMBOL }
 
@@ -106,18 +172,6 @@ public final class RedshiftAuditSql {
             }
         }
         return changes;
-    }
-
-    public static boolean isTransactionControl(String sql) {
-        List<Token> tokens = tokens(sql);
-        if (tokens.isEmpty() || tokens.getFirst().kind() != Kind.WORD) {
-            return false;
-        }
-        return switch (tokens.getFirst().text().toUpperCase(Locale.ROOT)) {
-            case "BEGIN", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT", "RELEASE" -> true;
-            case "START", "PREPARE" -> tokens.size() > 1 && tokens.get(1).keyword("TRANSACTION");
-            default -> false;
-        };
     }
 
     public static Savepoint savepoint(String sql) {

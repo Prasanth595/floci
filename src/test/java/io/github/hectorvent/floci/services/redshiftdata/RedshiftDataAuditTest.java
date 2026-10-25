@@ -3,17 +3,18 @@ package io.github.hectorvent.floci.services.redshiftdata;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import org.h2.Driver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.util.List;
@@ -52,31 +53,114 @@ class RedshiftDataAuditTest {
     }
 
     @Test
-    void batchRejectsSavepointRollbackBeforeCreatingUsersOrAuditRecords() throws Exception {
+    void batchSavepointRollbackDoesNotLogDiscardedUsers() throws Exception {
         try (Fixture fixture = new Fixture()) {
-            AwsException error = assertThrows(AwsException.class,
-                    () -> fixture.batch("SAVEPOINT s", "CREATE USER bob PASSWORD 'secret'", "ROLLBACK TO s"));
-            assertEquals("ValidationException", error.getErrorCode());
-            assertTrue(fixture.events.isEmpty());
-            verifyNoInteractions(fixture.factory);
+            fixture.mockSuccessfulBackend();
+            fixture.assertFinished(fixture.batch("SAVEPOINT s", "CREATE USER bob PASSWORD 'secret'", "ROLLBACK TO s"));
+            assertTrue(fixture.records("userlog").isEmpty());
+            assertEquals(3, fixture.records("useractivitylog").size());
         }
     }
 
     @ParameterizedTest
     @ValueSource(strings = {
-            "BEGIN", "START /* transaction */ TRANSACTION", "COMMIT", "END", "ROLLBACK", "ABORT",
-            "SAVEPOINT s", "RELEASE SAVEPOINT s", "ROLLBACK WORK TO SAVEPOINT s", "PREPARE TRANSACTION 'txn'",
-            "/* outer /* nested */ comment */ SAVEPOINT s", "-- comment\n rOlLbAcK To s",
-            "CREATE USER bob PASSWORD 'secret'; ROLLBACK", "SELECT 1; -- comment\rROLLBACK",
-            "; ROLLBACK", "; /* empty statement */ SAVEPOINT s;"
+            "ROLLBACK TO s", "ROLLBACK WORK TO SAVEPOINT s", "-- comment\r rOlLbAcK To s"
     })
-    void batchValidatesEveryStatementBeforeExecutingAnySql(String sql) throws Exception {
+    void batchSavepointRollbackPreservesEarlierChanges(String rollback) throws Exception {
         try (Fixture fixture = new Fixture()) {
-            AwsException error = assertThrows(AwsException.class,
-                    () -> fixture.batch("CREATE USER alice PASSWORD 'secret'", sql));
-            assertEquals("ValidationException", error.getErrorCode());
-            assertTrue(fixture.events.isEmpty());
-            verifyNoInteractions(fixture.factory);
+            fixture.mockSuccessfulBackend();
+            fixture.assertFinished(fixture.batch("CREATE USER kept", "SAVEPOINT s", "CREATE USER discarded", rollback));
+            assertEquals(List.of("kept"), fixture.loggedUsers());
+        }
+    }
+
+    @Test
+    void batchTracksNestedRepeatedAndReleasedSavepointsInsideOneEntry() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            Connection connection = fixture.mockSuccessfulBackend();
+            String sql = "; CREATE USER kept; SAVEPOINT s; CREATE USER discarded; SAVEPOINT s; CREATE USER nested; "
+                    + "ROLLBACK TO s; RELEASE SAVEPOINT s; ROLLBACK TO s; "
+                    + "CREATE USER repeated; ROLLBACK TO s; CREATE USER after_rollback";
+            ObjectNode response = fixture.batch(sql);
+            fixture.assertFinished(response);
+            assertEquals(List.of("kept", "after_rollback"), fixture.loggedUsers());
+            verify(connection).prepareStatement(" CREATE USER kept");
+            assertEquals(sql, fixture.service.describeStatement(fixture.mapper.createObjectNode()
+                    .put("Id", response.path("Id").asText())).path("SubStatements").get(0).path("QueryString").asText());
+        }
+    }
+
+    @Test
+    void releasingSavepointRetainsChangesForTheFinalCommit() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.mockSuccessfulBackend();
+            fixture.assertFinished(fixture.batch("SAVEPOINT s", "CREATE USER kept", "RELEASE s"));
+            assertEquals(List.of("kept"), fixture.loggedUsers());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ROLLBACK", "ABORT"})
+    void batchRollbackDiscardsOnlyChangesSinceTheLastCommit(String rollback) throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.mockSuccessfulBackend();
+            fixture.assertFinished(fixture.batch("CREATE USER committed", "COMMIT", "CREATE USER discarded",
+                    rollback, "CREATE USER final_commit"));
+            assertEquals(List.of("committed", "final_commit"), fixture.loggedUsers());
+        }
+    }
+
+    @Test
+    void failedBatchStillLogsChangesCommittedByAnEarlierStatement() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            Connection connection = fixture.mockSuccessfulBackend();
+            when(connection.prepareStatement("SELECT broken")).thenThrow(new SQLException("broken", "42P01"));
+            ObjectNode response = fixture.batch("CREATE USER committed", "END", "CREATE USER discarded", "SELECT broken");
+            assertEquals("FAILED", fixture.service.describeStatement(fixture.mapper.createObjectNode()
+                    .put("Id", response.path("Id").asText())).path("Status").asText());
+            assertEquals(List.of("committed"), fixture.loggedUsers());
+        }
+    }
+
+    @Test
+    void commitBeforeAnErrorInsideTheSameEntryRetainsCommittedAuditRecords() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            Connection connection = fixture.mockSuccessfulBackend();
+            when(connection.prepareStatement(" SELECT broken")).thenThrow(new SQLException("broken", "42P01"));
+            ObjectNode response = fixture.batch("CREATE USER committed", "COMMIT; SELECT broken");
+            assertEquals("FAILED", fixture.service.describeStatement(fixture.mapper.createObjectNode()
+                    .put("Id", response.path("Id").asText())).path("Status").asText());
+            assertEquals(List.of("committed"), fixture.loggedUsers());
+        }
+    }
+
+    @Test
+    void batchSavepointRollbackRetainsPendingChangesFromTheSession() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.mockSuccessfulBackend();
+            String session = fixture.service.executeStatement(fixture.request("BEGIN")
+                    .put("SessionKeepAliveSeconds", 60), "us-east-1").path("SessionId").asText();
+            fixture.reuse(session, "CREATE USER kept");
+            ObjectNode request = fixture.mapper.createObjectNode().put("SessionId", session).put("WaitTimeSeconds", 5);
+            request.putArray("Sqls").add("SAVEPOINT s").add("CREATE USER discarded").add("ROLLBACK TO s");
+            fixture.assertFinished(fixture.service.batchExecuteStatement(request, "us-east-1"));
+            assertEquals(List.of("kept"), fixture.loggedUsers());
+        }
+    }
+
+    @Test
+    void batchRollbackCanUseSavepointCreatedByAnEarlierSessionStatement() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.mockSuccessfulBackend();
+            String session = fixture.service.executeStatement(fixture.request("BEGIN")
+                    .put("SessionKeepAliveSeconds", 60), "us-east-1").path("SessionId").asText();
+            fixture.reuse(session, "CREATE USER kept");
+            fixture.reuse(session, "SAVEPOINT s");
+            fixture.reuse(session, "CREATE USER discarded");
+            ObjectNode request = fixture.mapper.createObjectNode().put("SessionId", session).put("WaitTimeSeconds", 5);
+            request.putArray("Sqls").add("ROLLBACK TO s");
+            fixture.assertFinished(fixture.service.batchExecuteStatement(request, "us-east-1"));
+            assertEquals(List.of("kept"), fixture.loggedUsers());
         }
     }
 
@@ -157,6 +241,7 @@ class RedshiftDataAuditTest {
         private final Connection keeper;
 
         private Fixture() throws Exception {
+            Driver.load();
             String url = "jdbc:h2:mem:" + UUID.randomUUID();
             keeper = DriverManager.getConnection(url);
             when(factory.open(any())).thenAnswer(invocation -> DriverManager.getConnection(url));
@@ -185,6 +270,24 @@ class RedshiftDataAuditTest {
 
         private List<String> records(String type) {
             return events.stream().filter(event -> event.group().endsWith("/" + type)).map(Event::message).toList();
+        }
+
+        private List<String> loggedUsers() {
+            return records("userlog").stream().map(line -> line.split(",", -1)[1]).toList();
+        }
+
+        private Connection mockSuccessfulBackend() throws SQLException {
+            // H2 user DDL implicitly commits; model successful PostgreSQL responses for transaction audit tests.
+            Connection connection = mock(Connection.class);
+            PreparedStatement statement = mock(PreparedStatement.class);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            when(factory.open(any())).thenReturn(connection);
+            return connection;
+        }
+
+        private void assertFinished(ObjectNode response) {
+            ObjectNode described = service.describeStatement(mapper.createObjectNode().put("Id", response.path("Id").asText()));
+            assertEquals("FINISHED", described.path("Status").asText(), described.toString());
         }
 
         private ObjectNode request(String sql) {
