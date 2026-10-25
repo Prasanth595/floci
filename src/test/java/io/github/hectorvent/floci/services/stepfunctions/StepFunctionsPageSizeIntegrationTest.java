@@ -20,8 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
  * ListActivities and GetExecutionHistory bound maxResults and nextToken the same way, with the
- * same messages, and page by 100 when maxResults is omitted or 0. The history's default page is
- * pinned by StepFunctionsExecutionHistoryPaginationIntegrationTest.
+ * same length messages and in the same order, and page by 100 when maxResults is omitted or 0.
+ * The history's default page is pinned by StepFunctionsExecutionHistoryPaginationIntegrationTest.
  */
 @QuarkusTest
 class StepFunctionsPageSizeIntegrationTest {
@@ -52,6 +52,24 @@ class StepFunctionsPageSizeIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"ListActivities", "GetExecutionHistory"})
+    void theBoundsThemselvesAreAccepted(String action) {
+        // A token of 1 or 1,024 characters passes the length check and is then refused as unknown.
+        for (String nextToken : List.of("x", "x".repeat(1024))) {
+            assertEquals("InvalidToken", errorType(action, Map.of("nextToken", nextToken)));
+        }
+        if ("ListActivities".equals(action)) {
+            call(action, Map.of("maxResults", 1000)).then().statusCode(200);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ListActivities", "GetExecutionHistory"})
+    void bothFieldsAreReadBeforeEitherIsBounded(String action) {
+        assertRefused(action, Map.of("maxResults", 1001, "nextToken", 5), "nextToken must be a string.");
+    }
+
     @Test
     void listActivitiesPagesByOneHundredWhenMaxResultsIsOmittedOrZero() {
         List<String> arns = new ArrayList<>();
@@ -66,20 +84,30 @@ class StepFunctionsPageSizeIntegrationTest {
                 assertNotNull(page.path("nextToken"));
             }
         } finally {
+            // Best effort, unasserted, so a failed delete can neither hide the test's own failure
+            // nor stop the remaining deletes.
             for (String arn : arns) {
-                call("DeleteActivity", Map.of("activityArn", arn)).then().statusCode(200);
+                call("DeleteActivity", Map.of("activityArn", arn));
             }
         }
     }
 
     private static void assertRefused(String action, Map<String, Object> parameters, String message) {
+        Response response = refused(action, parameters);
+        assertEquals("ValidationException", response.path("__type"));
+        assertEquals(message, response.path("message"));
+    }
+
+    private static String errorType(String action, Map<String, Object> parameters) {
+        return refused(action, parameters).path("__type");
+    }
+
+    private static Response refused(String action, Map<String, Object> parameters) {
         Map<String, Object> body = new HashMap<>(parameters);
         if ("GetExecutionHistory".equals(action)) {
             body.put("executionArn", EXECUTION_ARN);
         }
-        Response response = call(action, body).then().statusCode(400).extract().response();
-        assertEquals("ValidationException", response.path("__type"));
-        assertEquals(message, response.path("message"));
+        return call(action, body).then().statusCode(400).extract().response();
     }
 
     private static Response call(String action, Map<String, ?> body) {
