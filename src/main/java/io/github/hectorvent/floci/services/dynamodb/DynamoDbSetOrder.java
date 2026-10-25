@@ -11,7 +11,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 /**
  * DynamoDB stores a set's members in its own order, not as written: strings by
@@ -21,9 +24,6 @@ final class DynamoDbSetOrder {
 
     private static final List<String> SET_TYPES = List.of("SS", "NS", "BS");
     private static final Comparator<String> STRINGS = DynamoDbSetOrder::compareCodePoints;
-    private static final Comparator<String> NUMBERS = Comparator.comparing(DynamoDbSetOrder::numberOf);
-    private static final Comparator<String> BINARIES =
-            Comparator.comparing(DynamoDbSetOrder::bytesOf, Arrays::compareUnsigned);
 
     private DynamoDbSetOrder() {}
 
@@ -69,10 +69,15 @@ final class DynamoDbSetOrder {
 
     private static Comparator<String> comparatorFor(String setType) {
         return switch (setType) {
-            case "NS" -> NUMBERS;
-            case "BS" -> BINARIES;
+            case "NS" -> byKey(DynamoDbSetOrder::numberOf, Comparator.naturalOrder());
+            case "BS" -> byKey(DynamoDbSetOrder::bytesOf, Arrays::compareUnsigned);
             default -> STRINGS;
         };
+    }
+
+    private static <K> Comparator<String> byKey(Function<String, K> key, Comparator<K> order) {
+        Map<String, K> keys = new HashMap<>();
+        return Comparator.comparing(text -> keys.computeIfAbsent(text, key), order);
     }
 
     // String.compareTo orders by UTF-16 unit, which puts a supplementary character
