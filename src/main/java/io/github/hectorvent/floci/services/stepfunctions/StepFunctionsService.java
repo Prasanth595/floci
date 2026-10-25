@@ -1195,13 +1195,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     public PaginatedResult<Activity> listActivities(String region, Integer maxResults, String nextToken) {
-        if (maxResults != null && (maxResults < 0 || maxResults > 1000)) {
-            throw new AwsException("ValidationException", "maxResults must be between 0 and 1000.", 400);
-        }
-        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 1024)) {
-            throw new AwsException("ValidationException", "nextToken length must be between 1 and 1024.", 400);
-        }
-        int pageSize = maxResults == null || maxResults == 0 ? 100 : maxResults;
+        int pageSize = StepFunctionsPaging.pageSize(maxResults, nextToken);
         return Pagination.paginate(listActivities(region), Activity::getActivityArn, pageSize, nextToken,
                 "states:activities:" + region,
                 token -> new AwsException("InvalidToken", "Invalid nextToken.", 400));

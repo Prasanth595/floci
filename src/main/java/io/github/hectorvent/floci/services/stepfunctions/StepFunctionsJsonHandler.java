@@ -36,9 +36,6 @@ import java.util.Set;
 @ApplicationScoped
 public class StepFunctionsJsonHandler {
 
-    private static final int DEFAULT_HISTORY_PAGE_SIZE = 100;
-    private static final int MAX_HISTORY_PAGE_SIZE = 1000;
-    private static final int MAX_TOKEN_LENGTH = 1024;
     private static final Duration HISTORY_TOKEN_LIFETIME = Duration.ofHours(24);
 
     private final StepFunctionsService service;
@@ -496,13 +493,8 @@ public class StepFunctionsJsonHandler {
         boolean includeExecutionData = request.path("includeExecutionData").asBoolean(true);
         boolean reverseOrder = parseOptionalBoolean(request, "reverseOrder", false);
         Integer maxResults = parseOptionalInt(request, "maxResults");
-        if (maxResults != null && (maxResults < 0 || maxResults > MAX_HISTORY_PAGE_SIZE)) {
-            throw new AwsException("ValidationException", "maxResults must be between 0 and 1000.", 400);
-        }
         String nextToken = optionalText(request, "nextToken");
-        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > MAX_TOKEN_LENGTH)) {
-            throw new AwsException("ValidationException", "nextToken length must be between 1 and 1024.", 400);
-        }
+        int pageSize = StepFunctionsPaging.pageSize(maxResults, nextToken);
         Long lastReturnedId = nextToken == null ? null : historyTokenPosition(nextToken, arn, reverseOrder);
 
         List<HistoryEvent> live = service.getExecutionHistory(arn);
@@ -521,8 +513,7 @@ public class StepFunctionsJsonHandler {
                 && !listedAfter(events.get(start), lastReturnedId, reverseOrder)) {
             start++;
         }
-        int end = Math.min(events.size(),
-                start + (maxResults == null || maxResults == 0 ? DEFAULT_HISTORY_PAGE_SIZE : maxResults));
+        int end = Math.min(events.size(), start + pageSize);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("events");
         for (HistoryEvent e : events.subList(start, end)) {
