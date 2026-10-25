@@ -416,7 +416,11 @@ class RedshiftContainerManagerTest {
         verify(specBuilder).withCmd(List.of("postgres", "-c", "allow_system_table_mods=on", "-c", "max_connections=2000"));
         clearInvocations(specBuilder);
 
-        manager.start(ACCOUNT_ID, "serverless_us-east-1_analytics-wg", "admin", "pass", "analytics", null);
+        manager.start(ACCOUNT_ID, "rg-cluster", "admin", "pass", "dev", "rg.xlarge");
+        verify(specBuilder).withCmd(List.of("postgres", "-c", "allow_system_table_mods=on", "-c", "max_connections=2000"));
+        clearInvocations(specBuilder);
+
+        manager.start(ACCOUNT_ID, "serverless_us-east-1_analytics-wg", "admin", "pass", "analytics", "serverless");
         verify(specBuilder).withCmd(List.of("postgres", "-c", "allow_system_table_mods=on", "-c", "max_connections=2000"));
     }
 
@@ -431,7 +435,8 @@ class RedshiftContainerManagerTest {
         assertEquals(2000, RedshiftContainerManager.maxConnections("my-cluster", "ra3.4xlplus"));
         assertEquals(2000, RedshiftContainerManager.maxConnections("my-cluster", "ra3.4xlarge"));
         assertEquals(2000, RedshiftContainerManager.maxConnections("my-cluster", "ra3.16xlarge"));
-        assertEquals(2000, RedshiftContainerManager.maxConnections("serverless_us-east-1_wg1", null));
+        assertEquals(2000, RedshiftContainerManager.maxConnections("my-cluster", "rg.xlarge"));
+        assertEquals(2000, RedshiftContainerManager.maxConnections("my-cluster", "rg2.xlarge"));
         assertEquals(2000, RedshiftContainerManager.maxConnections("my-cluster", "serverless"));
     }
 

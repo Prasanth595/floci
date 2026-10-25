@@ -157,9 +157,6 @@ public class RedshiftContainerManager {
     }
 
     static int maxConnections(String clusterIdentifier, String nodeType) {
-        if (clusterIdentifier != null && clusterIdentifier.startsWith("serverless_")) {
-            return LARGE_CLUSTER_MAX_CONNECTIONS;
-        }
         return maxConnectionsForNodeType(nodeType);
     }
 
@@ -168,7 +165,8 @@ public class RedshiftContainerManager {
             return DEFAULT_MAX_CONNECTIONS;
         }
         String normalized = nodeType.toLowerCase().trim();
-        if (normalized.startsWith("ra3") || normalized.endsWith("8xlarge") || normalized.endsWith("16xlarge")
+        if (normalized.startsWith("ra3") || normalized.startsWith("rg")
+                || normalized.endsWith("8xlarge") || normalized.endsWith("16xlarge")
                 || normalized.equals("serverless")) {
             return LARGE_CLUSTER_MAX_CONNECTIONS;
         }

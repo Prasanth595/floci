@@ -72,8 +72,8 @@ public class RedshiftServerlessRuntime {
         String backendId = backendId(region, workgroupName);
         try {
             RedshiftContainerHandle handle = adopt
-                    ? containerManager.adoptOrStart(accountId, backendId, masterUsername, masterPassword, dbName)
-                    : containerManager.start(accountId, backendId, masterUsername, masterPassword, dbName);
+                    ? containerManager.adoptOrStart(accountId, backendId, masterUsername, masterPassword, dbName, "serverless")
+                    : containerManager.start(accountId, backendId, masterUsername, masterPassword, dbName, "serverless");
             proxyManager.startProxy(relayKey(accountId, backendId), endpoint.getPort(),
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     masterUsername, masterPassword, dbName,
