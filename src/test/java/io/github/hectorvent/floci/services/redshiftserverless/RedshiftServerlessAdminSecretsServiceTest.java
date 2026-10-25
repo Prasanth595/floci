@@ -38,6 +38,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -285,6 +286,39 @@ class RedshiftServerlessAdminSecretsServiceTest {
         verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics",
                 GENERATED_PASSWORD, ORIGINAL_PASSWORD);
         verify(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
+    }
+
+    @Test
+    void blockedRollbackSecretDeletionRestoresCurrentBackendPasswordAndCanRetry() {
+        createUnmanaged();
+        attachWorkgroup();
+        RedshiftServerlessService.NamespaceUpdateSnapshot snapshot = service.snapshotNamespaceUpdate(NAME, REGION);
+        Namespace managed = update(null, null, true);
+        AtomicReference<String> backendPassword = new AtomicReference<>(GENERATED_PASSWORD);
+        doAnswer(invocation -> {
+            backendPassword.set(invocation.getArgument(6, String.class));
+            return null;
+        }).when(runtime).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
+        doAnswer(invocation -> {
+            backendPassword.set(invocation.getArgument(5, String.class));
+            return null;
+        }).when(runtime).restoreMasterPassword(any(), any(), any(), any(), any(), any());
+        AwsException failure = new AwsException("InvalidRequestException", "Secret has replicas", 400);
+        doThrow(failure).when(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
+
+        assertSame(failure, assertThrows(AwsException.class, () -> service.restoreNamespaceUpdate(snapshot, REGION)));
+
+        assertEquals(GENERATED_PASSWORD, backendPassword.get());
+        assertSame(managed, service.getNamespace(NAME, REGION));
+        assertEquals(SECRET_ARN, managed.getAdminPasswordSecretArn());
+        assertEquals(managed.getAdminUserPassword(), backendPassword.get());
+        doReturn(null).when(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
+
+        service.restoreNamespaceUpdate(snapshot, REGION);
+
+        assertEquals(ORIGINAL_PASSWORD, backendPassword.get());
+        assertEquals(ORIGINAL_PASSWORD, service.getNamespace(NAME, REGION).getAdminUserPassword());
+        assertNull(service.getNamespace(NAME, REGION).getAdminPasswordSecretArn());
     }
 
     @Test

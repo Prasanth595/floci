@@ -449,12 +449,21 @@ public class RedshiftServerlessService implements Resettable {
         if (snapshot.secret() != null) {
             requireAdminSecrets().restore(snapshot.secret(), region);
         }
-        if (!Objects.equals(current.getAdminUserPassword(), previous.getAdminUserPassword())) {
+        boolean passwordChanged = !Objects.equals(current.getAdminUserPassword(), previous.getAdminUserPassword());
+        if (passwordChanged) {
             applyNewAdminPassword(current, previous.getAdminUserPassword(), region);
         }
         if (current.getAdminPasswordSecretArn() != null
                 && !Objects.equals(current.getAdminPasswordSecretArn(), previous.getAdminPasswordSecretArn())) {
-            requireAdminSecrets().delete(current, region);
+            try {
+                requireAdminSecrets().delete(current, region);
+            } catch (RuntimeException failure) {
+                if (passwordChanged) {
+                    compensate(() -> restoreAdminPassword(current, region), failure,
+                            "restore current backend admin password after blocked rollback");
+                }
+                throw failure;
+            }
         }
         namespaces.put(storageKey(region, previous.getNamespaceName()), previous);
     }
