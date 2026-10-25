@@ -300,7 +300,7 @@ public class RedshiftServerlessService implements Resettable {
                                                   String defaultIamRoleArn, List<String> iamRoles,
                                                   List<String> logExports, String region) {
         return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
-                defaultIamRoleArn, iamRoles, logExports, null, null, region, false);
+                defaultIamRoleArn, iamRoles, logExports, null, null, region, false, false);
     }
 
     public synchronized Namespace updateNamespace(String namespaceName, String adminUsername,
@@ -309,7 +309,8 @@ public class RedshiftServerlessService implements Resettable {
                                                   List<String> logExports, Boolean manageAdminPassword,
                                                   String adminPasswordSecretKmsKeyId, String region) {
         return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
-                defaultIamRoleArn, iamRoles, logExports, manageAdminPassword, adminPasswordSecretKmsKeyId, region, false);
+                defaultIamRoleArn, iamRoles, logExports, manageAdminPassword, adminPasswordSecretKmsKeyId, region, false,
+                false);
     }
 
     /**
@@ -322,7 +323,17 @@ public class RedshiftServerlessService implements Resettable {
                                                      String defaultIamRoleArn, List<String> iamRoles,
                                                      List<String> logExports, String region) {
         return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
-                defaultIamRoleArn, iamRoles, logExports, null, null, region, true);
+                defaultIamRoleArn, iamRoles, logExports, null, null, region, true, false);
+    }
+
+    public synchronized Namespace reconcileNamespace(String namespaceName, String adminUsername,
+                                                     String adminUserPassword, String kmsKeyId,
+                                                     String defaultIamRoleArn, List<String> iamRoles,
+                                                     List<String> logExports, Boolean manageAdminPassword,
+                                                     String adminPasswordSecretKmsKeyId, String region) {
+        return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, manageAdminPassword, adminPasswordSecretKmsKeyId, region, true,
+                false);
     }
 
     /**
@@ -334,7 +345,8 @@ public class RedshiftServerlessService implements Resettable {
                                            String adminUserPassword, String kmsKeyId,
                                            String defaultIamRoleArn, List<String> iamRoles,
                                            List<String> logExports, Boolean manageAdminPassword,
-                                           String adminPasswordSecretKmsKeyId, String region, boolean resetOmitted) {
+                                           String adminPasswordSecretKmsKeyId, String region, boolean resetOmitted,
+                                           boolean forceManagedPasswordRotation) {
         validateManagedPassword(manageAdminPassword, adminUserPassword, adminPasswordSecretKmsKeyId);
         String key = storageKey(region, namespaceName);
         Namespace current = getNamespace(namespaceName, region);
@@ -366,7 +378,7 @@ public class RedshiftServerlessService implements Resettable {
         }
         if (managed) {
             updated.setAdminUsername(adminUserOf(updated));
-            if (!wasManaged) {
+            if (!wasManaged || forceManagedPasswordRotation) {
                 updated.setAdminUserPassword(runtime.generatePassword());
             }
             if (adminPasswordSecretKmsKeyId != null) {
@@ -382,7 +394,8 @@ public class RedshiftServerlessService implements Resettable {
         boolean rotated = !Objects.equals(current.getAdminUserPassword(), updated.getAdminUserPassword());
         boolean secretUpdated = managed && wasManaged
                 && (!Objects.equals(current.getAdminUsername(), updated.getAdminUsername())
-                || !Objects.equals(current.getAdminPasswordSecretKmsKeyId(), updated.getAdminPasswordSecretKmsKeyId()));
+                || !Objects.equals(current.getAdminPasswordSecretKmsKeyId(), updated.getAdminPasswordSecretKmsKeyId())
+                || !Objects.equals(current.getAdminUserPassword(), updated.getAdminUserPassword()));
         boolean backendChanged = false;
         boolean storeAttempted = false;
         try {
@@ -467,6 +480,7 @@ public class RedshiftServerlessService implements Resettable {
         snapshot.setStatus("AVAILABLE");
         snapshot.setSnapshotCreateTime(Instant.now());
         snapshot.setAdminUsername(adminUserOf(namespace));
+        snapshot.setAdminUserPassword(namespace.getAdminUserPassword());
         snapshot.setKmsKeyId(namespace.getKmsKeyId());
         snapshot.setRetentionPeriod(retentionDays);
         snapshot.setTags(tags);
@@ -641,6 +655,14 @@ public class RedshiftServerlessService implements Resettable {
     public synchronized RestoreResult restoreFromSnapshot(String namespaceName, String workgroupName,
                                                           String snapshotName, String ownerAccount,
                                                           String region) {
+        return restoreFromSnapshot(namespaceName, workgroupName, snapshotName, ownerAccount, null, null, region);
+    }
+
+    public synchronized RestoreResult restoreFromSnapshot(String namespaceName, String workgroupName,
+                                                          String snapshotName, String ownerAccount,
+                                                          Boolean manageAdminPassword,
+                                                          String adminPasswordSecretKmsKeyId, String region) {
+        validateManagedPassword(manageAdminPassword, null, adminPasswordSecretKmsKeyId);
         validateNamespaceName(namespaceName);
         RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
         if (ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(snapshot.getOwnerAccount())) {
@@ -661,6 +683,15 @@ public class RedshiftServerlessService implements Resettable {
         }
         Namespace restored = new Namespace(namespace);
         restored.setStatus("AVAILABLE");
+        if (Boolean.TRUE.equals(manageAdminPassword)) {
+            restored = applyNamespaceUpdate(namespaceName, null, null, null, null, null, null,
+                    true, adminPasswordSecretKmsKeyId, region, false, true);
+            restored.setStatus("AVAILABLE");
+        } else if (snapshot.getAdminUserPassword() != null) {
+            restored = applyNamespaceUpdate(namespaceName, snapshot.getAdminUsername(), snapshot.getAdminUserPassword(),
+                    null, null, null, null, false, null, region, false, false);
+            restored.setStatus("AVAILABLE");
+        }
         namespaces.put(storageKey(region, namespaceName), restored);
         return new RestoreResult(restored, snapshot);
     }

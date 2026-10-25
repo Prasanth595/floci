@@ -231,6 +231,56 @@ class RedshiftServerlessAdminSecretsServiceTest {
         assertEquals(SECRET_KEY, copy.getAdminPasswordSecretKmsKeyId());
     }
 
+    @Test
+    void restoreWithoutManagedCredentialsRestoresSnapshotPasswordAndRemovesManagedSecret() {
+        createUnmanaged();
+        service.createSnapshot("managed-restore-snap", NAME, null, null, REGION);
+        attachWorkgroup();
+        update(null, null, true);
+        clearInvocations(secrets, runtime);
+
+        Namespace restored = service.restoreFromSnapshot(NAME, WORKGROUP, "managed-restore-snap", null, REGION)
+                .namespace();
+
+        assertEquals(ORIGINAL_PASSWORD, restored.getAdminUserPassword());
+        assertNull(restored.getAdminPasswordSecretArn());
+        verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics",
+                GENERATED_PASSWORD, ORIGINAL_PASSWORD);
+        verify(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
+    }
+
+    @Test
+    void restoreWithManagedCredentialsRefreshesPasswordAndExistingSecret() throws Exception {
+        when(runtime.generatePassword()).thenReturn(GENERATED_PASSWORD, "Restored456!");
+        createManaged();
+        service.createSnapshot("refresh-managed-snap", NAME, null, null, REGION);
+        attachWorkgroup();
+        clearInvocations(secrets, runtime);
+
+        Namespace restored = service.restoreFromSnapshot(NAME, WORKGROUP, "refresh-managed-snap", null,
+                true, SECRET_KEY, REGION).namespace();
+
+        assertEquals("Restored456!", restored.getAdminUserPassword());
+        assertEquals(SECRET_ARN, restored.getAdminPasswordSecretArn());
+        verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics",
+                GENERATED_PASSWORD, "Restored456!");
+        ArgumentCaptor<String> secretValue = ArgumentCaptor.forClass(String.class);
+        verify(secrets).putSecretValue(eq(SECRET_ARN), secretValue.capture(), isNull(), isNull(), eq(REGION), any());
+        assertEquals("Restored456!", mapper.readTree(secretValue.getValue()).path("password").asText());
+    }
+
+    @Test
+    void restoreFromSnapshotWithoutStoredPasswordKeepsCurrentCredentials() {
+        createUnmanaged();
+        service.createSnapshot("legacy-snap", NAME, null, null, REGION).setAdminUserPassword(null);
+        service.updateNamespace(NAME, null, "Changed123!", null, null, null, null, REGION);
+        attachWorkgroup();
+
+        Namespace restored = service.restoreFromSnapshot(NAME, WORKGROUP, "legacy-snap", null, REGION).namespace();
+
+        assertEquals("Changed123!", restored.getAdminUserPassword());
+    }
+
     private Namespace createManaged() {
         return service.createNamespace(NAME, "admin", null, "analytics", null, null, List.of(), List.of(), Map.of(),
                 true, SECRET_KEY, REGION);

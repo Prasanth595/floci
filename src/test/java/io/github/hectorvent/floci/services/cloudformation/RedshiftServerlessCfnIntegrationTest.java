@@ -52,7 +52,7 @@ class RedshiftServerlessCfnIntegrationTest {
               "Properties": {
                 "NamespaceName": "%s",
                 "AdminUsername": "admin",
-                "AdminUserPassword": "Secret123!",
+                "ManageAdminPassword": true,
                 "DbName": "analytics",
                 "LogExports": ["userlog"],
                 "Tags": [{"Key": "env", "Value": "dev"}]
@@ -74,6 +74,7 @@ class RedshiftServerlessCfnIntegrationTest {
             "NsId": {"Value": {"Fn::GetAtt": ["Ns", "Namespace.NamespaceId"]}},
             "NsDb": {"Value": {"Fn::GetAtt": ["Ns", "Namespace.DbName"]}},
             "NsStatus": {"Value": {"Fn::GetAtt": ["Ns", "Namespace.Status"]}},
+            "NsSecretArn": {"Value": {"Fn::GetAtt": ["Ns", "Namespace.AdminPasswordSecretArn"]}},
             "WgRef": {"Value": {"Ref": "Wg"}},
             "WgArn": {"Value": {"Fn::GetAtt": ["Wg", "Workgroup.WorkgroupArn"]}},
             "WgId": {"Value": {"Fn::GetAtt": ["Wg", "Workgroup.WorkgroupId"]}},
@@ -116,6 +117,7 @@ class RedshiftServerlessCfnIntegrationTest {
         assertEquals(WORKGROUP, outputValue(created, "WgRef"));
         assertEquals("analytics", outputValue(created, "NsDb"));
         assertEquals("AVAILABLE", outputValue(created, "NsStatus"));
+        assertTrue(outputValue(created, "NsSecretArn").startsWith("arn:aws:secretsmanager:"));
         assertEquals("AVAILABLE", outputValue(created, "WgStatus"));
         assertEquals(NAMESPACE, outputValue(created, "WgNamespace"));
         assertEquals("32", outputValue(created, "WgBase"));
@@ -128,6 +130,7 @@ class RedshiftServerlessCfnIntegrationTest {
                 .statusCode(200)
                 .body("namespace.namespaceArn", equalTo(outputValue(created, "NsArn")))
                 .body("namespace.namespaceId", equalTo(outputValue(created, "NsId")))
+                .body("namespace.adminPasswordSecretArn", equalTo(outputValue(created, "NsSecretArn")))
                 .body("namespace.logExports", hasItem("userlog"));
         call("GetWorkgroup", "{\"workgroupName\":\"" + WORKGROUP + "\"}")
                 .statusCode(200)

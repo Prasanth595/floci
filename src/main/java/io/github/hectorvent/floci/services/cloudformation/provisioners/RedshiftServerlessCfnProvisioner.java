@@ -108,6 +108,10 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
                 r.getLogicalId(), NAME_MAX_LENGTH, true);
         String adminUsername = ctx.resolveOptional(props, "AdminUsername");
         String adminUserPassword = ctx.resolveOptional(props, "AdminUserPassword");
+        String manageAdminPasswordProperty = ctx.resolveOptional(props, "ManageAdminPassword");
+        Boolean manageAdminPassword = manageAdminPasswordProperty == null
+                ? null : Boolean.parseBoolean(manageAdminPasswordProperty);
+        String adminPasswordSecretKmsKeyId = ctx.resolveOptional(props, "AdminPasswordSecretKmsKeyId");
         String kmsKeyId = ctx.resolveOptional(props, "KmsKeyId");
         String defaultIamRoleArn = ctx.resolveOptional(props, "DefaultIamRoleArn");
         List<String> iamRoles = ctx.resolveStringList(props, "IamRoles");
@@ -125,12 +129,19 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
                         400);
             }
             namespace = service.reconcileNamespace(name, adminUsername, adminUserPassword, kmsKeyId,
-                    defaultIamRoleArn, iamRoles, logExports, ctx.region());
+                    defaultIamRoleArn, iamRoles, logExports, Boolean.TRUE.equals(manageAdminPassword),
+                    adminPasswordSecretKmsKeyId, ctx.region());
             reconcileTags(namespace.getNamespaceArn(), tags, ctx);
         } else {
-            namespace = service.createNamespace(name, adminUsername, adminUserPassword,
-                    ctx.resolveOptional(props, "DbName"), kmsKeyId, defaultIamRoleArn, iamRoles, logExports, tags,
-                    ctx.region());
+            if (manageAdminPassword == null && adminPasswordSecretKmsKeyId == null) {
+                namespace = service.createNamespace(name, adminUsername, adminUserPassword,
+                        ctx.resolveOptional(props, "DbName"), kmsKeyId, defaultIamRoleArn, iamRoles, logExports,
+                        tags, ctx.region());
+            } else {
+                namespace = service.createNamespace(name, adminUsername, adminUserPassword,
+                        ctx.resolveOptional(props, "DbName"), kmsKeyId, defaultIamRoleArn, iamRoles, logExports,
+                        tags, manageAdminPassword, adminPasswordSecretKmsKeyId, ctx.region());
+            }
         }
 
         r.setPhysicalId(name);
@@ -145,6 +156,16 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
         r.getAttributes().put("Namespace.LogExports", String.join(",", namespace.getLogExports()));
         if (namespace.getAdminUsername() != null) {
             r.getAttributes().put("Namespace.AdminUsername", namespace.getAdminUsername());
+        }
+        if (namespace.getAdminPasswordSecretArn() != null) {
+            r.getAttributes().put("Namespace.AdminPasswordSecretArn", namespace.getAdminPasswordSecretArn());
+        } else {
+            r.getAttributes().remove("Namespace.AdminPasswordSecretArn");
+        }
+        if (namespace.getAdminPasswordSecretKmsKeyId() != null) {
+            r.getAttributes().put("Namespace.AdminPasswordSecretKmsKeyId", namespace.getAdminPasswordSecretKmsKeyId());
+        } else {
+            r.getAttributes().remove("Namespace.AdminPasswordSecretKmsKeyId");
         }
         if (namespace.getDefaultIamRoleArn() != null) {
             r.getAttributes().put("Namespace.DefaultIamRoleArn", namespace.getDefaultIamRoleArn());
