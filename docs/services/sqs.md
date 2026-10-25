@@ -204,3 +204,10 @@ https://sqs.<region>.amazonaws.com/000000000000/<queue-name>
 The region is the one the request was signed for, and the host carries that region's partition DNS suffix, so a queue in `cn-north-1` is reported as `https://sqs.cn-north-1.amazonaws.com.cn/...`. Use it for tooling that parses or compares queue URLs against the AWS form. Most SDKs send requests to the endpoint you configured and take only the path from the URL. Clients that send requests to the host in the returned URL, such as the AWS SDK for Java 1.x, need the default `floci` setting or DNS that points the `sqs.<region>` host at Floci.
 
 Under either setting every form is accepted as input. That covers the AWS URL, the Floci URL, any other host whose path ends in `/<account>/<queue-name>`, and the bare queue name. A queue is stored by account and name, so a base URL with a path of its own, such as `http://localhost:4566/sqs`, keeps the same queues under either setting. Existing queues, persisted ones included, are reported in the form the current setting and base URL give.
+
+## Storage write failures
+
+When the message backend reports a failed write, the queue retains its previously acknowledged
+live contents and delivery state. Stored message snapshots are detached from live messages, so a
+compaction cannot capture delivery changes that have not been saved. This does not change the
+backend's own acknowledgement or flush policy, and it does not make moves between queues atomic.
