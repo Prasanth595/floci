@@ -396,6 +396,27 @@ class SnsServiceTest {
         snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "FilterPolicyScope", "MessageBody", REGION);
         assertEquals("MessageBody", snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION)
                 .get("FilterPolicyScope"));
+
+        snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "FilterPolicy", "", REGION);
+        assertFalse(snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION)
+                .containsKey("FilterPolicyScope"), "A cleared filter policy hides the stored scope");
+    }
+
+    @Test
+    void getSubscriptionAttributes_reportsAScopeSetBeforeThePolicyOnceThePolicyIsSet() {
+        Topic topic = snsService.createTopic("scope-first-topic", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "sqs",
+                "arn:aws:sqs:us-east-1:000000000000:my-queue", REGION, Map.of());
+
+        snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "FilterPolicyScope", "MessageBody", REGION);
+        Map<String, String> withoutPolicy = snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION);
+        assertFalse(withoutPolicy.containsKey("FilterPolicyScope"));
+        assertFalse(withoutPolicy.containsKey("FilterPolicy"));
+
+        snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "FilterPolicy",
+                "{\"event\":[\"order\"]}", REGION);
+        assertEquals("MessageBody", snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION)
+                .get("FilterPolicyScope"));
     }
 
     @Test
