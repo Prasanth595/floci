@@ -3,8 +3,9 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 /**
- * The page request the Step Functions list operations share: a {@code maxResults} of 0 to 1000,
- * where 0 or none means 100, and a {@code nextToken} of 1 to 1024 characters.
+ * The page request ListActivities and GetExecutionHistory check: a {@code maxResults} of 0 to 1000,
+ * where 0 or none means 100, and a {@code nextToken} of 1 to 1024 characters. Callers read both
+ * fields before calling it, so a wrongly typed field is reported before either bound.
  */
 final class StepFunctionsPaging {
 
