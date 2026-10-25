@@ -59,12 +59,10 @@ class ApsCreateWorkspaceIdempotencyIntegrationTest {
     void cleanUp() {
         AccountAwareStorageBackend<PrometheusWorkspace> workspaces = storageFactory.create("aps", "aps-workspaces.json",
                 new TypeReference<Map<String, PrometheusWorkspace>>() {});
-        AccountAwareStorageBackend<PrometheusWorkspace> receipts = storageFactory.create("aps", "aps-workspace-requests.json",
-                new TypeReference<Map<String, PrometheusWorkspace>>() {});
         created.forEach(item -> {
             workspaces.deleteForAccount(item.account(), item.region().id() + "::" + item.id());
             if (item.token() != null) {
-                receipts.deleteForAccount(item.account(), item.region().id() + "::" + item.token());
+                workspaces.deleteForAccount(item.account(), ":CreateWorkspace::" + item.region().id() + "::" + item.token());
             }
         });
     }

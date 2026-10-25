@@ -24,7 +24,8 @@ definitions, scrapers and logging configurations are not implemented.
   the calling account and region. Tokens accept 1–64 printable ASCII characters excluding
   spaces. A retry returns the original response; changing the alias, tags or KMS key with
   the same token returns `ConflictException` (409). Receipts use the configured storage
-  mode and remain until that state is cleared, including after workspace deletion; token
+  mode and are committed atomically with the workspace in the same store. They remain
+  until that state is cleared, including after workspace deletion; token
   expiry is not emulated. Requests without a token create independently.
 - `kmsKeyArn` is stored and echoed back but no encryption is performed.
 - A rule groups namespace is **ACTIVE from birth** for the same reason, so the provider's

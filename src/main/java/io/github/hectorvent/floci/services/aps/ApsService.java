@@ -35,15 +35,12 @@ public class ApsService implements TagHandler {
     private static final Pattern CLIENT_TOKEN = Pattern.compile("[!-~]{1,64}");
 
     private final StorageBackend<String, PrometheusWorkspace> storage;
-    private final StorageBackend<String, PrometheusWorkspace> workspaceRequests;
     private final StorageBackend<String, RuleGroupsNamespace> namespaceStorage;
     private final RegionResolver regionResolver;
 
     @Inject
     public ApsService(StorageFactory storageFactory, RegionResolver regionResolver) {
         this.storage = storageFactory.create("aps", "aps-workspaces.json",
-                new TypeReference<Map<String, PrometheusWorkspace>>() {});
-        this.workspaceRequests = storageFactory.create("aps", "aps-workspace-requests.json",
                 new TypeReference<Map<String, PrometheusWorkspace>>() {});
         this.namespaceStorage = storageFactory.create("aps", "aps-rule-groups-namespaces.json",
                 new TypeReference<Map<String, RuleGroupsNamespace>>() {});
@@ -64,7 +61,7 @@ public class ApsService implements TagHandler {
         }
         Map<String, String> requestedTags = tags != null ? tags : Map.of();
         if (clientToken != null) {
-            PrometheusWorkspace receipt = workspaceRequests.get(key(region, clientToken)).orElse(null);
+            PrometheusWorkspace receipt = storage.get(workspaceRequestKey(region, clientToken)).orElse(null);
             if (receipt != null) {
                 if (!Objects.equals(stripAlias(alias), receipt.getAlias())
                         || !Objects.equals(kmsKeyArn, receipt.getKmsKeyArn())
@@ -95,9 +92,12 @@ public class ApsService implements TagHandler {
         }
 
         PrometheusWorkspace response = clientToken != null ? copyWorkspace(workspace) : workspace;
-        storage.put(key(region, workspaceId), workspace);
         if (clientToken != null) {
-            workspaceRequests.put(key(region, clientToken), response);
+            // One commit keeps the receipt and resource together in snapshots and WAL replay.
+            storage.putAllAtomically(Map.of(key(region, workspaceId), workspace,
+                    workspaceRequestKey(region, clientToken), response));
+        } else {
+            storage.put(key(region, workspaceId), workspace);
         }
         LOG.infov("Created AMP workspace: {0} in {1}", workspaceId, region);
         return clientToken != null ? copyWorkspace(response) : workspace;
@@ -306,6 +306,11 @@ public class ApsService implements TagHandler {
 
     private static String keyPrefix(String region) {
         return region + "::";
+    }
+
+    private static String workspaceRequestKey(String region, String clientToken) {
+        // Request regions cannot contain ':', keeping receipts outside every workspace prefix.
+        return ":CreateWorkspace::" + region + "::" + clientToken;
     }
 
     private static String namespaceKey(String region, String workspaceId, String name) {
