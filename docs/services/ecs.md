@@ -1050,10 +1050,16 @@ Native runs publish `awsvpc` task ports on dynamically allocated Docker host por
 When Floci runs in Docker, task ports remain private to the configured Docker network
 unless `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST=true` is set.
 
-Host publishing allocates a free port for each task, including tasks with an explicit
-`hostPort`. On AWS that port belongs to the task's ENI; reserving it literally on the
-single Docker host would prevent two tasks or rolling-deployment revisions from
-coexisting. Discover the allocated host address and port in `DescribeTasks`:
+Enabling host publishing preserves stable ports by default: an explicit non-zero
+`hostPort` is used, otherwise the host port equals `containerPort`. Existing host-side
+clients can keep using `localhost:<hostPort>`. Only one task at a time can reserve each
+stable port on the shared Docker host.
+
+To run tasks with matching container ports concurrently, including rolling-deployment
+revisions, also set `FLOCI_SERVICES_ECS_DYNAMIC_AWSVPC_HOST_PORTS=true`
+(`floci.services.ecs.dynamic-awsvpc-host-ports`, default `false`). Docker then allocates
+an available host port per task, including tasks declaring an explicit `hostPort`.
+Discover the actual published address and port in `DescribeTasks`:
 
 ```bash
 aws ecs describe-tasks --cluster my-cluster --tasks "$TASK_ARN" \
@@ -1062,8 +1068,8 @@ aws ecs describe-tasks --cluster my-cluster --tasks "$TASK_ARN" \
 
 Published `awsvpc` ports bind to `127.0.0.1` by default. Set
 `floci.services.ecs.host-port-bind-address` (`FLOCI_SERVICES_ECS_HOST_PORT_BIND_ADDRESS`)
-to another Docker-host interface if clients need one. The same allocation and binding
-rules apply when security-group enforcement uses a task network-namespace helper.
+to another Docker-host interface if clients need one. The same stable or dynamic
+allocation and interface settings apply to security-group network-namespace helpers.
 These are interfaces on the Docker daemon's host, which may differ from Floci's host.
 
 ```yaml
@@ -1074,13 +1080,15 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST: "true"
+      FLOCI_SERVICES_ECS_DYNAMIC_AWSVPC_HOST_PORTS: "true"
       FLOCI_SERVICES_ECS_HOST_PORT_BIND_ADDRESS: "127.0.0.1"
 ```
 
 Host publishing is an emulator convenience and defaults to `false` in Docker mode.
-Applications that previously assumed `localhost:<containerPort>` must instead use
-that task's reported host port. Bridge/host-mode explicit bindings retain their
-existing fixed-port behavior.
+With dynamic allocation enabled, host-side clients must use each task's reported host
+port. Load balancers inside Docker use the container's Docker-network address and
+container port; native load balancers use the published host port. Bridge/host-mode
+explicit bindings retain their existing fixed-port behavior.
 
 ## Examples
 

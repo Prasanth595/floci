@@ -342,6 +342,7 @@ floci:
     ecs:
       enabled: true
       mock: true
+      dynamic-awsvpc-host-ports: false
       host-volume-roots: []
       allow-unsafe-host-volumes: false
       image-pull-behavior: prefer-cached

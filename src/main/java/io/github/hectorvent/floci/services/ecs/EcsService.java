@@ -2135,10 +2135,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 continue;
             }
             for (NetworkBinding binding : container.getNetworkBindings()) {
-                addresses.add(new EcsTaskAddress(host, binding.hostPort()));
-                if (!EcsTaskAddress.isLoopback(host)) {
-                    addresses.add(new EcsTaskAddress(host, binding.containerPort()));
-                }
+                int port = EcsTaskAddress.isLoopback(host) ? binding.hostPort() : binding.containerPort();
+                addresses.add(new EcsTaskAddress(host, port));
             }
         }
         return addresses;

@@ -2272,10 +2272,14 @@ public interface EmulatorConfig {
 
         /**
          * Publish {@code awsvpc} task ports on the Docker host so local host processes can
-         * reach them. Docker allocates a free host port per task; DescribeTasks reports it.
+         * reach them. Uses stable host ports unless {@code dynamic-awsvpc-host-ports} is enabled.
          */
         @WithDefault("false")
         boolean publishAwsvpcPortsToHost();
+
+        /** Allocate a free host port per awsvpc task when host publishing is enabled. */
+        @WithDefault("false")
+        boolean dynamicAwsvpcHostPorts();
 
         /** Host interface for published awsvpc task ports, including firewall namespaces. */
         @WithDefault("127.0.0.1")

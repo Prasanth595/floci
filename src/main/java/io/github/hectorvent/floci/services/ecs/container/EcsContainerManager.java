@@ -446,15 +446,18 @@ public class EcsContainerManager {
                 EcsLinuxParameters.apply(specBuilder, def,
                         def.getMemory() != null ? def.getMemory() : parseTaskMemoryMb(task.getMemory()));
 
-                // Each awsvpc task has its own ENI on AWS. Host publishing must allocate
-                // a different Docker port per task, including during rolling deployments.
+                // Stable publishing serves existing host clients; dynamic publishing lets
+                // tasks sharing an awsvpc container port coexist on the Docker host.
                 if (protectedNetwork == null && def.getPortMappings() != null) {
                     boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
+                    boolean publishAwsvpcPorts = awsvpc && config.services().ecs().publishAwsvpcPortsToHost();
                     boolean publishToHost = !containerDetector.isRunningInContainer()
-                            || awsvpc && config.services().ecs().publishAwsvpcPortsToHost();
+                            || publishAwsvpcPorts;
                     for (PortMapping pm : def.getPortMappings()) {
                         if (awsvpc && publishToHost) {
-                            specBuilder.withPortBinding(pm.containerPort(), 0, hostPortBindAddress());
+                            int hostPort = awsvpcHostPort(pm, publishAwsvpcPorts,
+                                    config.services().ecs().dynamicAwsvpcHostPorts());
+                            specBuilder.withPortBinding(pm.containerPort(), hostPort, hostPortBindAddress());
                         } else if (!awsvpc && pm.hostPort() > 0) {
                             specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
                         } else if (publishToHost) {
@@ -1330,7 +1333,8 @@ public class EcsContainerManager {
             Map<Integer, Integer> bindings = namespacePortBindings(
                     definition,
                     containerDetector.isRunningInContainer(),
-                    config.services().ecs().publishAwsvpcPortsToHost());
+                    config.services().ecs().publishAwsvpcPortsToHost(),
+                    config.services().ecs().dynamicAwsvpcHostPorts());
             namespace = firewallManager.createNamespace("ecs", taskId, regionResolver.getAccountId(),
                     region, config.services().ecs().dockerNetwork(), bindings, Map.of(RUN_LABEL, runId),
                     hostPortBindAddress());
@@ -1371,7 +1375,8 @@ public class EcsContainerManager {
     }
 
     static Map<Integer, Integer> namespacePortBindings(
-            TaskDefinition definition, boolean runningInContainer, boolean publishAwsvpcPortsToHost) {
+            TaskDefinition definition, boolean runningInContainer, boolean publishAwsvpcPortsToHost,
+            boolean dynamicAwsvpcHostPorts) {
         Map<Integer, Integer> bindings = new LinkedHashMap<>();
         if (runningInContainer && !publishAwsvpcPortsToHost) {
             return bindings;
@@ -1381,10 +1386,18 @@ public class EcsContainerManager {
                 continue;
             }
             for (PortMapping port : container.getPortMappings()) {
-                bindings.put(port.containerPort(), 0);
+                bindings.put(port.containerPort(), awsvpcHostPort(port, publishAwsvpcPortsToHost,
+                        dynamicAwsvpcHostPorts));
             }
         }
         return bindings;
+    }
+
+    private static int awsvpcHostPort(PortMapping port, boolean publishToHost, boolean dynamicHostPorts) {
+        if (publishToHost && !dynamicHostPorts) {
+            return port.hostPort() > 0 ? port.hostPort() : port.containerPort();
+        }
+        return 0;
     }
 
     private record PreparedNetwork(NetworkInterface eni, SecurityGroupFirewallManager.Namespace namespace) {}

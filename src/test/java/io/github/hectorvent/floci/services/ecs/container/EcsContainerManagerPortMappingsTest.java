@@ -26,6 +26,8 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -201,10 +203,44 @@ class EcsContainerManagerPortMappingsTest {
         verify(builder, never()).withDynamicPort(80);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void awsvpcHostPublishingKeepsTheContainerPortByDefault(boolean runningInContainer) {
+        when(containerDetector.isRunningInContainer()).thenReturn(runningInContainer);
+        when(config.services().ecs().publishAwsvpcPortsToHost()).thenReturn(true);
+
+        startWith(List.of(new PortMapping(80)), NetworkMode.awsvpc);
+
+        verify(builder).withPortBinding(80, 80, "127.0.0.1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void awsvpcHostPublishingKeepsTheExplicitHostPortByDefault(boolean runningInContainer) {
+        when(containerDetector.isRunningInContainer()).thenReturn(runningInContainer);
+        when(config.services().ecs().publishAwsvpcPortsToHost()).thenReturn(true);
+
+        startWith(List.of(new PortMapping(80, 18080, "tcp")), NetworkMode.awsvpc);
+
+        verify(builder).withPortBinding(80, 18080, "127.0.0.1");
+    }
+
+    @Test
+    void dynamicAllocationAloneDoesNotPublishAwsvpcPortsInDocker() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.services().ecs().dynamicAwsvpcHostPorts()).thenReturn(true);
+
+        startWith(List.of(new PortMapping(80)), NetworkMode.awsvpc);
+
+        verify(builder).withExposedPort(80);
+        verify(builder, never()).withPortBinding(eq(80), anyInt(), anyString());
+    }
+
     @Test
     void awsvpcPortUsesDynamicLoopbackBindingForHostRunners() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         when(config.services().ecs().publishAwsvpcPortsToHost()).thenReturn(true);
+        when(config.services().ecs().dynamicAwsvpcHostPorts()).thenReturn(true);
 
         startWith(List.of(new PortMapping(15_672)), NetworkMode.awsvpc);
 
@@ -217,6 +253,7 @@ class EcsContainerManagerPortMappingsTest {
     void awsvpcHostPublishingDoesNotReserveTheEniPortOnTheSharedHost() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         when(config.services().ecs().publishAwsvpcPortsToHost()).thenReturn(true);
+        when(config.services().ecs().dynamicAwsvpcHostPorts()).thenReturn(true);
 
         startWith(List.of(new PortMapping(8080, 18_080, "tcp")), NetworkMode.awsvpc);
 
@@ -233,7 +270,7 @@ class EcsContainerManagerPortMappingsTest {
         taskDefinition.setContainerDefinitions(List.of(app));
 
         Map<Integer, Integer> bindings = EcsContainerManager.namespacePortBindings(
-                taskDefinition, true, true);
+                taskDefinition, true, true, true);
 
         assertEquals(Map.of(6379, 0, 8080, 0), bindings);
     }
@@ -246,9 +283,36 @@ class EcsContainerManagerPortMappingsTest {
         taskDefinition.setContainerDefinitions(List.of(app));
 
         Map<Integer, Integer> bindings = EcsContainerManager.namespacePortBindings(
-                taskDefinition, true, false);
+                taskDefinition, true, false, false);
 
         assertEquals(Map.of(), bindings);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void protectedAwsvpcNamespaceKeepsStablePublishingByDefault(boolean runningInContainer) {
+        ContainerDefinition app = new ContainerDefinition();
+        app.setPortMappings(List.of(new PortMapping(6379), new PortMapping(8080, 18080, "tcp")));
+        TaskDefinition taskDefinition = new TaskDefinition();
+        taskDefinition.setContainerDefinitions(List.of(app));
+
+        Map<Integer, Integer> bindings = EcsContainerManager.namespacePortBindings(
+                taskDefinition, runningInContainer, true, false);
+
+        assertEquals(Map.of(6379, 6379, 8080, 18080), bindings);
+    }
+
+    @Test
+    void protectedAwsvpcNamespaceUsesDynamicBindingsInNativeModeWithoutPublishingOptIn() {
+        ContainerDefinition app = new ContainerDefinition();
+        app.setPortMappings(List.of(new PortMapping(8080, 18080, "tcp")));
+        TaskDefinition taskDefinition = new TaskDefinition();
+        taskDefinition.setContainerDefinitions(List.of(app));
+
+        Map<Integer, Integer> bindings = EcsContainerManager.namespacePortBindings(
+                taskDefinition, false, false, false);
+
+        assertEquals(Map.of(8080, 0), bindings);
     }
 
     @Test
@@ -261,7 +325,7 @@ class EcsContainerManagerPortMappingsTest {
         taskDefinition.setContainerDefinitions(List.of(app));
 
         Map<Integer, Integer> bindings = EcsContainerManager.namespacePortBindings(
-                taskDefinition, false, true);
+                taskDefinition, false, true, true);
 
         assertEquals(Map.of(6379, 0, 8080, 0), bindings);
     }
@@ -270,6 +334,7 @@ class EcsContainerManagerPortMappingsTest {
     void twoAwsvpcTasksWithSameHostPortNeverBindLiterally() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         when(config.services().ecs().publishAwsvpcPortsToHost()).thenReturn(true);
+        when(config.services().ecs().dynamicAwsvpcHostPorts()).thenReturn(true);
 
         startWith(List.of(new PortMapping(80, 80, "tcp")), NetworkMode.awsvpc);
         startWith(List.of(new PortMapping(80, 80, "tcp")), NetworkMode.awsvpc);
@@ -282,6 +347,7 @@ class EcsContainerManagerPortMappingsTest {
     void publishedPortsReportDockersAllocationEvenWhenFlociRunsInDocker() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         when(config.services().ecs().publishAwsvpcPortsToHost()).thenReturn(true);
+        when(config.services().ecs().dynamicAwsvpcHostPorts()).thenReturn(true);
         when(lifecycleManager.getDockerClient().inspectContainerCmd("docker-id").exec()
                 .getNetworkSettings().getPorts().getBindings()).thenReturn(Map.of(
                         ExposedPort.tcp(80), new Ports.Binding[]{new Ports.Binding("127.0.0.1", "32781")}));
@@ -296,6 +362,7 @@ class EcsContainerManagerPortMappingsTest {
     void awsvpcHostBindingUsesTheConfiguredInterface() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         when(config.services().ecs().publishAwsvpcPortsToHost()).thenReturn(true);
+        when(config.services().ecs().dynamicAwsvpcHostPorts()).thenReturn(true);
         when(config.services().ecs().hostPortBindAddress()).thenReturn("192.0.2.10");
 
         startWith(List.of(new PortMapping(80)), NetworkMode.awsvpc);
