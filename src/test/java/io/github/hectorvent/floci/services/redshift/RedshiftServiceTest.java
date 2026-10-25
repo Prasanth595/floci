@@ -68,6 +68,35 @@ import static org.mockito.Mockito.*;
 
 class RedshiftServiceTest {
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void activityParameterUpdatesStayWithinTheCallingAccount(boolean reset) {
+        ClusterParameterGroup group = new ClusterParameterGroup("shared", "redshift-1.0", "audit");
+        when(parameterGroupBackend.get("shared")).thenReturn(Optional.of(group));
+        Cluster owned = new Cluster();
+        owned.setClusterIdentifier("owned");
+        owned.setClusterParameterGroupName("shared");
+        owned.setUserActivityLoggingEnabled(reset);
+        Cluster foreign = new Cluster();
+        foreign.setClusterIdentifier("foreign");
+        foreign.setClusterParameterGroupName("shared");
+        foreign.setUserActivityLoggingEnabled(reset);
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "owned", owned),
+                new AccountAwareStorageBackend.AccountEntry<>("222222222222", "foreign", foreign)));
+        when(clusterBackend.scan(any())).thenReturn(List.of(owned));
+
+        if (reset) {
+            service.resetClusterParameterGroup("shared", true, List.of());
+        } else {
+            service.modifyClusterParameterGroup("shared", List.of(new Parameter("enable_user_activity_logging", "true")));
+        }
+
+        assertEquals(!reset, owned.isUserActivityLoggingEnabled());
+        assertEquals(reset, foreign.isUserActivityLoggingEnabled());
+        verify(clusterBackend, never()).putForAccount(eq("222222222222"), anyString(), any());
+    }
+
     @Test
     void recoveryProxyFailureDoesNotDestructivelyStopAnAdoptedContainer() {
         Cluster cluster = new Cluster();

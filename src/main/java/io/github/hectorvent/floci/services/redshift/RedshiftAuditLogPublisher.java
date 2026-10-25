@@ -14,8 +14,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -23,8 +21,6 @@ public class RedshiftAuditLogPublisher {
 
     private static final Logger LOG = Logger.getLogger(RedshiftAuditLogPublisher.class);
     private static final Set<String> LOG_TYPES = Set.of("connectionlog", "userlog", "useractivitylog");
-    private static final Pattern SQL_PASSWORD = Pattern.compile(
-            "(?i)(\\bPASSWORD\\s+)(?:'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|[^\\s;,]+)");
     private static final Map<String, List<String>> LOG_COLUMNS = Map.of(
             "connectionlog", List.of("event", "recordtime", "remotehost", "remoteport", "pid", "dbname",
                     "username", "authmethod", "duration", "sslversion", "sslcipher", "mtu", "sslcompression",
@@ -68,12 +64,7 @@ public class RedshiftAuditLogPublisher {
         if (registration == null) {
             return;
         }
-        Cluster cluster = new Cluster();
-        cluster.setClusterIdentifier(registration.identifier());
-        cluster.setLoggingEnabled(registration.enabled());
-        cluster.setLoggingDestinationType(registration.destination());
-        cluster.setLoggingExports(registration.exports());
-        cluster.setUserActivityLoggingEnabled(registration.activityLoggingEnabled());
+        Cluster cluster = registeredCluster(registration);
         publish(cluster, accountId, registration.region(), logType, record);
     }
 
@@ -123,6 +114,18 @@ public class RedshiftAuditLogPublisher {
 
     public void publishConnection(Cluster cluster, String accountId, String region, String database, String username,
                                   String event, String remoteAddress, String error) {
+        publish(cluster, accountId, region, "connectionlog",
+                connectionRecord(database, username, event, remoteAddress, null, error));
+    }
+
+    public void publishRegisteredConnection(String accountId, String clusterIdentifier, String database, String username,
+                                            String event, String remoteAddress, int remotePort) {
+        publishRegistered(accountId, clusterIdentifier, "connectionlog",
+                connectionRecord(database, username, event, remoteAddress, remotePort, null));
+    }
+
+    private Map<String, Object> connectionRecord(String database, String username, String event, String remoteAddress,
+                                                  Integer remotePort, String error) {
         Map<String, Object> record = new LinkedHashMap<>();
         record.put("recordtime", Instant.ofEpochMilli(clock.millis()).toString());
         record.put("dbname", database);
@@ -130,7 +133,7 @@ public class RedshiftAuditLogPublisher {
         record.put("event", event);
         record.put("remotehost", remoteAddress);
         record.put("authmethod", "password");
-        record.put("remoteport", "");
+        record.put("remoteport", remotePort);
         record.put("pid", "");
         record.put("duration", "");
         record.put("sslversion", "");
@@ -149,7 +152,7 @@ public class RedshiftAuditLogPublisher {
         if (error != null) {
             record.put("event", "authentication failure");
         }
-        publish(cluster, accountId, region, "connectionlog", record);
+        return record;
     }
 
     public void publishUserChange(Cluster cluster, String accountId, String region, String database,
@@ -237,12 +240,6 @@ public class RedshiftAuditLogPublisher {
     }
 
     static String sanitizeSql(String sql) {
-        Matcher matcher = SQL_PASSWORD.matcher(sql);
-        StringBuilder sanitized = new StringBuilder(sql.length());
-        while (matcher.find()) {
-            matcher.appendReplacement(sanitized, Matcher.quoteReplacement(matcher.group(1) + "'[REDACTED]'"));
-        }
-        matcher.appendTail(sanitized);
-        return sanitized.toString();
+        return RedshiftAuditSql.sanitize(sql);
     }
 }

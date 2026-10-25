@@ -31,6 +31,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 
 /**
  * Handles the PostgreSQL wire protocol auth intercept.
@@ -140,6 +141,19 @@ public class PostgresProtocolHandler {
                                       int handshakeTimeoutMillis, boolean forwardStartupParameters,
                                       boolean databaseIamAuthentication) throws IOException {
 
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName, iamEnabled, sigV4,
+                binding, tlsCertificates, passwordValidator, handshakeTimeoutMillis, forwardStartupParameters,
+                databaseIamAuthentication, (user, database) -> { });
+    }
+
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding, RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator, int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters, boolean databaseIamAuthentication,
+                                      BiConsumer<String, String> startupObserver) throws IOException {
+
         client.setSoTimeout(handshakeTimeoutMillis);
 
         // Phase 1: Read client startup message (possibly preceded by SSL request)
@@ -151,6 +165,7 @@ public class PostgresProtocolHandler {
         }
         client = startup.socket();
         String clientUsername = startup.username();
+        startupObserver.accept(clientUsername, resolveEffectiveDbName(startup.database(), dbName));
         InputStream clientIn = client.getInputStream();
         // PgBouncer rejects partial login packets; keep the challenge together until flush().
         // https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_24_0/src/server.c#L116-L119

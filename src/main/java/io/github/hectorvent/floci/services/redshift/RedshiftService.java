@@ -1459,16 +1459,7 @@ public class RedshiftService {
         group.setParameters(current);
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
-        boolean activityLoggingEnabled = userActivityLoggingEnabled(group);
-        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : clusters.scanAllAccountEntries(key -> true).stream()
-                .filter(entry -> parameterGroupName.equals(entry.value().getClusterParameterGroupName())).toList()) {
-            entry.value().setUserActivityLoggingEnabled(activityLoggingEnabled);
-            clusters.putForAccount(entry.accountId(), entry.key(), entry.value());
-            if (auditLogPublisher != null) {
-                auditLogPublisher.register(entry.accountId(), regionResolver.getRegion(), entry.value());
-            }
-        }
-        clusters.flush();
+        refreshClustersForActivityParameter(parameterGroupName, group);
         return group;
     }
 
@@ -1533,13 +1524,14 @@ public class RedshiftService {
 
     private void refreshClustersForActivityParameter(String parameterGroupName, ClusterParameterGroup group) {
         boolean enabled = userActivityLoggingEnabled(group);
-        List<AccountAwareStorageBackend.AccountEntry<Cluster>> affected = clusters.scanAllAccountEntries(key -> true).stream()
-                .filter(entry -> parameterGroupName.equals(entry.value().getClusterParameterGroupName())).toList();
-        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : affected) {
-            entry.value().setUserActivityLoggingEnabled(enabled);
-            clusters.putForAccount(entry.accountId(), entry.key(), entry.value());
+        String accountId = clusters.accountId();
+        List<Cluster> affected = clusters.scan(key -> true).stream()
+                .filter(cluster -> parameterGroupName.equals(cluster.getClusterParameterGroupName())).toList();
+        for (Cluster cluster : affected) {
+            cluster.setUserActivityLoggingEnabled(enabled);
+            clusters.putForAccount(accountId, cluster.getClusterIdentifier(), cluster);
             if (auditLogPublisher != null) {
-                auditLogPublisher.register(entry.accountId(), regionResolver.getRegion(), entry.value());
+                auditLogPublisher.register(accountId, regionResolver.getRegion(), cluster);
             }
         }
         clusters.flush();

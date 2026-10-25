@@ -67,6 +67,8 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 
 CloudWatch audit events use the AWS log groups `/aws/redshift/cluster/<clusterIdentifier>/<logType>` and CSV log records. `connectionlog` and `userlog` follow the logging export selection. `useractivitylog` additionally requires `enable_user_activity_logging=true` in the cluster parameter group, which is false by default.
 
+Audit delivery covers PostgreSQL wire connections and Data API connections, including batch statements and retained sessions. Records identify the requested database user and database, even when temporary credentials use a master connection internally. User changes are published after commit and discarded on rollback, including rollback to a savepoint on the wire path. SQL password literals are redacted, including literals separated from `PASSWORD` by SQL comments.
+
 ### Final snapshots on cluster deletion
 
 `DeleteCluster` defaults `SkipFinalClusterSnapshot` to `false`, so a

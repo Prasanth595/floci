@@ -37,4 +37,7 @@ Deliver Redshift audit events to the existing CloudWatch Logs service when a clu
 
 - AWS audit logs follow the documented CSV column order. Values unavailable at the proxy boundary are empty, while password literals are redacted from query text.
 - The wire proxy observes SQL text but may not know a statement's final result at the point it is parsed. User DDL events must be tied to backend completion, not merely recognized at parse time.
+- Match wire completions through the existing response coordinator. Track each command in a Simple Query, handle empty replies and suspended portals, and retain user changes until their transaction commits. Savepoint rollback removes only changes after that savepoint.
+- Data API batches publish activity for attempted statements and user changes after the batch commits. Retained sessions hold pending user changes across requests, and their connection records follow the connection's lifetime rather than each request.
+- Audit identities retain the requested user and database independently of backend credentials. Parameter-group changes refresh only clusters owned by the caller.
 - Redshift parameter-group support may affect whether `enable_user_activity_logging` can be represented; confirm current parameter behavior and make the effective enablement rule explicit in implementation and tests.

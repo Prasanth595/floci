@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshiftdata;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -13,6 +14,7 @@ import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -177,14 +179,16 @@ class RedshiftDataSessions implements AutoCloseable {
         }
         session.closed = true;
         sessions.remove(session.id, session);
-        Retirement retirement = new Retirement(session.id, session.connection, cancel ? session.execution : null);
+        Retirement retirement = new Retirement(session.id, session.connection, cancel ? session.execution : null,
+                session.connectionClosed);
         session.active = null;
         session.execution = null;
         session.connection = null;
+        session.userChanges.clear();
         return retirement;
     }
 
-    private record Retirement(String id, Connection connection, RedshiftDataExecution execution) { }
+    private record Retirement(String id, Connection connection, RedshiftDataExecution execution, Runnable connectionClosed) { }
 
     private static void cleanUp(Retirement retirement) {
         if (retirement == null) {
@@ -196,7 +200,13 @@ class RedshiftDataSessions implements AutoCloseable {
                     retirement.execution().cancel();
                 }
             } finally {
-                closeConnection(retirement.connection(), retirement.id());
+                try {
+                    closeConnection(retirement.connection(), retirement.id());
+                } finally {
+                    if (retirement.connection() != null && retirement.connectionClosed() != null) {
+                        retirement.connectionClosed().run();
+                    }
+                }
             }
         };
         if (retirement.execution() == null) {
@@ -277,6 +287,8 @@ class RedshiftDataSessions implements AutoCloseable {
         private Connection connection;
         private RedshiftDataExecution execution;
         private Reservation active;
+        private Runnable connectionClosed;
+        private final List<UserChange> userChanges = new ArrayList<>();
 
         private Session(Scope owner, RedshiftDataResourceResolver.DatabaseTarget target, JsonNode request, Instant createdAt) {
             this.owner = owner;
@@ -338,6 +350,10 @@ class RedshiftDataSessions implements AutoCloseable {
         }
 
         Connection connection(RedshiftDataConnectionFactory factory) throws SQLException {
+            return connection(factory, () -> { }, () -> { });
+        }
+
+        Connection connection(RedshiftDataConnectionFactory factory, Runnable openedAudit, Runnable closedAudit) throws SQLException {
             synchronized (session) {
                 if (session.closed) {
                     throw new SQLException("Session has expired", "08003");
@@ -347,13 +363,19 @@ class RedshiftDataSessions implements AutoCloseable {
                 }
             }
             Connection opened = factory.open(session.target);
+            openedAudit.run();
             synchronized (session) {
                 if (!session.closed && !expired(session)) {
                     session.connection = opened;
+                    session.connectionClosed = closedAudit;
                     return opened;
                 }
             }
-            closeConnection(opened, session.id);
+            try {
+                closeConnection(opened, session.id);
+            } finally {
+                closedAudit.run();
+            }
             throw new SQLException("Session has expired", "08003");
         }
 
@@ -374,6 +396,22 @@ class RedshiftDataSessions implements AutoCloseable {
 
         void failTransaction() {
             session.transactionFailed = true;
+        }
+
+        void addUserChanges(List<UserChange> changes) {
+            synchronized (session) {
+                if (!session.closed) {
+                    session.userChanges.addAll(changes);
+                }
+            }
+        }
+
+        List<UserChange> takeUserChanges() {
+            synchronized (session) {
+                List<UserChange> changes = List.copyOf(session.userChanges);
+                session.userChanges.clear();
+                return changes;
+            }
         }
 
         void abort() {

@@ -15,10 +15,7 @@ import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.time.Instant;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.Semaphore;
 
 /**
@@ -238,12 +235,19 @@ public class RedshiftAuthProxy {
 
     private void handleConnection(Socket client) {
         PostgresProtocolHandler.AuthenticatedSession session = null;
+        LoginAttempt login = new LoginAttempt();
         try {
             client.setTcpNoDelay(true);
             PostgresProtocolHandler.BackendConnector connector = () -> {
                 Socket backendSocket = new Socket();
-                backendSocket.connect(new InetSocketAddress(backendHost, backendPort),
-                        backendConnectTimeoutMillis);
+                try {
+                    backendSocket.connect(new InetSocketAddress(backendHost, backendPort),
+                            backendConnectTimeoutMillis);
+                } catch (IOException failure) {
+                    login.backendUnavailable = true;
+                    closeQuietly(backendSocket);
+                    throw failure;
+                }
                 backendSocket.setTcpNoDelay(true);
                 return backendSocket;
             };
@@ -252,22 +256,25 @@ public class RedshiftAuthProxy {
             session = PostgresProtocolHandler.authenticate(
                             client, connector, masterUsername, masterPassword, dbName,
                             false, sigV4, null, tlsCertificates, passwordValidator,
-                            handshakeTimeoutMillis);
+                            handshakeTimeoutMillis, false, true, (user, database) -> {
+                                login.username = user;
+                                login.database = database;
+                            });
             if (session != null) {
-                publishConnection(client, "authenticated", null);
+                publishConnection(client, login, "authenticated");
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
                 RoleConfiguration roles = roleConfiguration;
                 new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
-                        clusterAccountId, roles.iamRoleArns(), spectrumInterceptor, clusterKey, dbName,
-                        roles.defaultIamRoleArn(), auditLogPublisher, masterUsername).run();
-                publishConnection(client, "disconnection", null);
+                        clusterAccountId, roles.iamRoleArns(), spectrumInterceptor, clusterKey, login.database,
+                        roles.defaultIamRoleArn(), auditLogPublisher, login.username).run();
+                publishConnection(client, login, "disconnection");
             } else {
-                publishConnection(client, "authentication_failure", "authentication failed");
+                publishConnection(client, login, login.backendUnavailable ? "connection_error" : "authentication failure");
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());
-            publishConnection(client, "connection_error", "connection failed");
+            publishConnection(client, login, "connection_error");
         } finally {
             // authenticate's success path hands both sockets to the bridge, which closes both
             // itself; every other path (early return on a bare probe, auth failure, thrown
@@ -282,21 +289,20 @@ public class RedshiftAuthProxy {
         }
     }
 
-    private void publishConnection(Socket client, String event, String error) {
-        if (auditLogPublisher == null) {
+    private static final class LoginAttempt {
+        private String username;
+        private String database;
+        private boolean backendUnavailable;
+    }
+
+    private void publishConnection(Socket client, LoginAttempt login, String event) {
+        if (auditLogPublisher == null || login.username == null) {
             return;
         }
         String remoteAddress = client.getInetAddress() == null ? null : client.getInetAddress().getHostAddress();
-        Map<String, Object> record = new LinkedHashMap<>();
-        record.put("recordtime", Instant.now().toString());
-        record.put("dbname", dbName);
-        record.put("username", masterUsername);
-        record.put("event", error == null ? event : "authentication failure");
-        record.put("remotehost", remoteAddress);
-        record.put("remoteport", client.getPort());
-        record.put("authmethod", "password");
         String clusterIdentifier = clusterKey.substring(clusterKey.indexOf(':') + 1);
-        auditLogPublisher.publishRegistered(clusterAccountId, clusterIdentifier, "connectionlog", record);
+        auditLogPublisher.publishRegisteredConnection(clusterAccountId, clusterIdentifier, login.database, login.username,
+                event, remoteAddress, client.getPort());
     }
 
     private static void closeQuietly(Socket s) {

@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
@@ -56,10 +58,6 @@ public class RedshiftDataService implements Resettable {
             "(?is)\\A(BEGIN|START\\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT)(?:\\s+(?:WORK|TRANSACTION))?\\s*;?\\s*\\z");
     private static final Pattern TRANSACTION_PREFIX = Pattern.compile("(?is)\\A(?:BEGIN|START|COMMIT|END|ROLLBACK|ABORT)\\b");
     private static final Pattern TRANSACTION_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/|--[^\\r\\n]*");
-    private static final Pattern USER_DDL = Pattern.compile(
-            "(?is)^\\s*(CREATE|DROP|ALTER)\\s+USER\\s+(?:(?:IF\\s+(?:NOT\\s+)?EXISTS)\\s+)?"
-                    + "(\"(?:\"\"|[^\"])*\"|[^\\s;]+)"
-                    + "(?:\\s+RENAME\\s+TO\\s+(\"(?:\"\"|[^\"])*\"|[^\\s;]+))?");
 
     private final RedshiftDataResourceResolver resolver;
     private final RedshiftDataConnectionFactory connectionFactory;
@@ -419,14 +417,41 @@ public class RedshiftDataService implements Resettable {
 
     private ConnectionUse connection(RedshiftDataResourceResolver.DatabaseTarget target,
                                      RedshiftDataSessions.Reservation session) throws SQLException {
-        return new ConnectionUse(session == null ? connectionFactory.open(target) : session.connection(connectionFactory), session);
+        Runnable disconnected = () -> publishConnection(target, "disconnection", null);
+        try {
+            Connection connection;
+            if (session == null) {
+                connection = connectionFactory.open(target);
+                publishConnection(target, "authenticated", null);
+            } else {
+                connection = session.connection(connectionFactory,
+                        () -> publishConnection(target, "authenticated", null), disconnected);
+            }
+            return new ConnectionUse(connection, session, disconnected);
+        } catch (SQLException failure) {
+            publishConnection(target, "authentication failure", failure.getSQLState());
+            throw failure;
+        }
     }
 
-    private record ConnectionUse(Connection connection, RedshiftDataSessions.Reservation session) implements AutoCloseable {
+    private void publishConnection(RedshiftDataResourceResolver.DatabaseTarget target, String event, String error) {
+        if (auditLogPublisher != null && target.cluster() != null) {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(target.arn());
+            auditLogPublisher.publishConnection(target.cluster(), arn.accountId(), arn.region(), target.database(),
+                    target.auditUser(), event, null, error);
+        }
+    }
+
+    private record ConnectionUse(Connection connection, RedshiftDataSessions.Reservation session,
+                                 Runnable disconnected) implements AutoCloseable {
         @Override
         public void close() throws SQLException {
             if (session == null) {
-                connection.close();
+                try {
+                    connection.close();
+                } finally {
+                    disconnected.run();
+                }
                 return;
             }
             try {
@@ -456,12 +481,8 @@ public class RedshiftDataService implements Resettable {
             Connection connection = use.connection();
             execution.track(connection);
             try {
-                if (auditLogPublisher != null && target.cluster() != null) {
-                    AwsArnUtils.Arn arn = AwsArnUtils.parse(stored.resourceArn);
-                    auditLogPublisher.publishActivity(target.cluster(), arn.accountId(), stored.region,
-                            target.database(), target.user(), sql);
-                }
-                if (session != null && transactionControl(stored, sql, connection, session, execution)) {
+                publishActivity(stored, target, sql);
+                if (session != null && transactionControl(stored, target, sql, connection, session, execution)) {
                     return;
                 }
                 if (session != null && session.transactionFailed()) {
@@ -476,7 +497,7 @@ public class RedshiftDataService implements Resettable {
                     }
                     execution.commit(() -> runOnConnection(stored, connection, sql, parameters,
                             target.spectrum(), execution, true));
-                    publishSuccessfulUserChange(stored, target, sql, session == null || !session.inTransaction());
+                    successfulUserChange(stored, target, sql, session);
                 } else {
                     runOnConnection(stored, connection, sql, parameters, target.spectrum(), execution, false);
                     execution.commit(() -> {
@@ -484,7 +505,7 @@ public class RedshiftDataService implements Resettable {
                             connection.commit();
                         }
                     });
-                    publishSuccessfulUserChange(stored, target, sql, session == null || !session.inTransaction());
+                    successfulUserChange(stored, target, sql, session);
                 }
             } catch (SQLException failure) {
                 if (session != null && failure.getSQLState() != null && failure.getSQLState().startsWith("08")) {
@@ -510,43 +531,37 @@ public class RedshiftDataService implements Resettable {
         stored.updatedAt = Instant.now();
     }
 
-    private void publishSuccessfulUserChange(RedshiftDataStatementStore.StoredStatement stored,
-                                             RedshiftDataResourceResolver.DatabaseTarget target, String sql,
-                                             boolean committed) {
-        if (!committed || auditLogPublisher == null || target.cluster() == null) {
-            return;
+    private void publishActivity(RedshiftDataStatementStore.StoredStatement stored,
+                                 RedshiftDataResourceResolver.DatabaseTarget target, String sql) {
+        if (auditLogPublisher != null && target.cluster() != null) {
+            auditLogPublisher.publishActivity(target.cluster(), stored.accountId, stored.region,
+                    target.database(), target.auditUser(), sql);
         }
-        Matcher matcher = USER_DDL.matcher(sql);
-        if (!matcher.find()) {
-            return;
-        }
-        String operation = matcher.group(1).toUpperCase(Locale.ROOT);
-        String oldUsername = null;
-        String username = unquoteIdentifier(matcher.group(2));
-        String action = switch (operation) {
-            case "CREATE" -> "Create";
-            case "DROP" -> "Drop";
-            case "ALTER" -> "Alter";
-            default -> throw new IllegalStateException("Unexpected user DDL operation");
-        };
-        if ("ALTER".equals(operation) && matcher.group(3) != null) {
-            oldUsername = username;
-            username = unquoteIdentifier(matcher.group(3));
-            action = "Rename";
-        }
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(stored.resourceArn);
-        auditLogPublisher.publishUserChange(target.cluster(), arn.accountId(), stored.region,
-                target.database(), username, action, oldUsername);
     }
 
-    private static String unquoteIdentifier(String identifier) {
-        if (identifier.length() >= 2 && identifier.startsWith("\"") && identifier.endsWith("\"")) {
-            return identifier.substring(1, identifier.length() - 1).replace("\"\"", "\"");
+    private void successfulUserChange(RedshiftDataStatementStore.StoredStatement stored,
+                                      RedshiftDataResourceResolver.DatabaseTarget target, String sql,
+                                      RedshiftDataSessions.Reservation session) {
+        List<UserChange> changes = RedshiftAuditSql.userChanges(sql);
+        if (session != null && session.inTransaction()) {
+            session.addUserChanges(changes);
+        } else {
+            publishUserChanges(stored, target, changes);
         }
-        return identifier;
     }
 
-    private boolean transactionControl(RedshiftDataStatementStore.StoredStatement stored, String sql,
+    private void publishUserChanges(RedshiftDataStatementStore.StoredStatement stored,
+                                    RedshiftDataResourceResolver.DatabaseTarget target, List<UserChange> changes) {
+        if (auditLogPublisher != null && target.cluster() != null) {
+            for (UserChange change : changes) {
+                auditLogPublisher.publishUserChange(target.cluster(), stored.accountId, stored.region,
+                        target.database(), change.username(), change.action(), change.oldUsername());
+            }
+        }
+    }
+
+    private boolean transactionControl(RedshiftDataStatementStore.StoredStatement stored,
+                                       RedshiftDataResourceResolver.DatabaseTarget target, String sql,
                                        Connection connection, RedshiftDataSessions.Reservation session,
                                        RedshiftDataExecution execution) throws SQLException {
         String normalized = TRANSACTION_COMMENTS.matcher(sql).replaceAll(" ").trim();
@@ -568,12 +583,17 @@ public class RedshiftDataService implements Resettable {
                     session.transaction(true);
                 }
                 case "COMMIT", "END" -> {
+                    boolean rolledBack = session.transactionFailed();
                     if (!connection.getAutoCommit()) {
                         if (session.transactionFailed()) {
                             connection.rollback();
                         } else {
                             connection.commit();
                         }
+                    }
+                    List<UserChange> changes = session.takeUserChanges();
+                    if (!rolledBack) {
+                        publishUserChanges(stored, target, changes);
                     }
                     session.transaction(false);
                     connection.setAutoCommit(true);
@@ -582,6 +602,7 @@ public class RedshiftDataService implements Resettable {
                     if (!connection.getAutoCommit()) {
                         connection.rollback();
                     }
+                    session.takeUserChanges();
                     session.transaction(false);
                     connection.setAutoCommit(true);
                 }
@@ -900,6 +921,7 @@ public class RedshiftDataService implements Resettable {
                     sub.updatedAt = now;
                     try {
                         execution.checkCancellation();
+                        publishActivity(parent, target, sqls.get(n));
                         runOnConnection(sub, connection, sqls.get(n), Map.of(), target.spectrum(), execution, false);
                     } catch (SQLException e) {
                         sub.status = RedshiftDataStatementStore.Status.FAILED;
@@ -915,6 +937,9 @@ public class RedshiftDataService implements Resettable {
                             throw e;
                         }
                         connection.rollback();
+                        if (session != null) {
+                            session.takeUserChanges();
+                        }
                         failed = true;
                         break;
                     }
@@ -929,9 +954,18 @@ public class RedshiftDataService implements Resettable {
                 if (!failed) {
                     execution.commit(connection::commit);
                     committed = true;
+                    if (session != null) {
+                        publishUserChanges(parent, target, session.takeUserChanges());
+                    }
+                    for (String sql : sqls) {
+                        publishUserChanges(parent, target, RedshiftAuditSql.userChanges(sql));
+                    }
                     parent.status = RedshiftDataStatementStore.Status.FINISHED;
                 }
             } finally {
+                if (!committed && session != null) {
+                    session.takeUserChanges();
+                }
                 if (preparation != null) {
                     if (committed) {
                         preparation.finishCycle(batchBackend, true);
