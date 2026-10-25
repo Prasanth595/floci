@@ -92,9 +92,7 @@ class LambdaWebCodeBucketIntegrationTest {
     void lambdaNeedsGetObjectVersionUnderTheConditionsItSends() {
         s3Service.putBucketVersioning(bucket, "Enabled");
         put(bucket);
-        String refusal = "Lambda service principal lambda.amazonaws.com does not have s3:GetObject and"
-                + " s3:GetObjectVersion permission on s3://" + bucket + "/app.zip. Update the bucket policy to grant"
-                + " the Lambda service principal access and retry.";
+        String refusal = lambdaRefusal();
         refused(null, refusal);
 
         policy(allow("\"s3:GetObject\"", null));
@@ -115,8 +113,29 @@ class LambdaWebCodeBucketIntegrationTest {
         refused(null, refusal);
     }
 
-    private void put(String in) {
-        s3Service.putObject(in, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+    @Test
+    void aGrantForOneVersionAdmitsOnlyThatVersion() {
+        s3Service.putBucketVersioning(bucket, "Enabled");
+        String older = put(bucket);
+        String latest = put(bucket);
+        policy(allow("\"s3:GetObjectVersion\"", "{\"StringEquals\":{\"s3:VersionId\":\"" + latest + "\"}}"));
+        accepted(null);
+        accepted(latest);
+        refused(older, lambdaRefusal());
+        policy(allow("\"s3:GetObjectVersion\"", "{\"StringEquals\":{\"s3:VersionId\":\"" + older + "\"}}"));
+        refused(null, lambdaRefusal());
+        accepted(older);
+    }
+
+    private String lambdaRefusal() {
+        return "Lambda service principal lambda.amazonaws.com does not have s3:GetObject and s3:GetObjectVersion"
+                + " permission on s3://" + bucket + "/app.zip. Update the bucket policy to grant the Lambda service"
+                + " principal access and retry.";
+    }
+
+    private String put(String in) {
+        return s3Service.putObject(in, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of())
+                .getVersionId();
     }
 
     private void policy(String statements) {

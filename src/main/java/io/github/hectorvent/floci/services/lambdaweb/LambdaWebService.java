@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -640,7 +641,8 @@ public class LambdaWebService implements Resettable {
                 throw new AwsException("ValidationException", "Zipped size must be smaller than "
                         + LambdaWebCode.MAX_BYTES + " bytes", 400);
             }
-            requireLambdaCanRead(fn, revision);
+            requireLambdaCanRead(fn, revision,
+                    build.versionId != null ? build.versionId : object.object().getVersionId());
             size = code.store(accountId, region, fn.functionName, revision.revisionId, object.body());
         } catch (IOException e) {
             throw new UncheckedIOException("Could not close the code object s3://" + build.bucket + "/" + build.key, e);
@@ -663,13 +665,14 @@ public class LambdaWebService implements Resettable {
     }
 
     /** AWS evaluates only s3:GetObjectVersion, although its message names both actions. */
-    private void requireLambdaCanRead(WebFunction fn, WebFunctionRevision revision) {
+    private void requireLambdaCanRead(WebFunction fn, WebFunctionRevision revision, String versionId) {
         WebFunctionRevision.BuildConfig build = revision.buildConfig;
         AwsArnUtils.Arn function = AwsArnUtils.parse(fn.functionArn);
         String objectArn = AwsArnUtils.Arn.global(function.partition(), "s3", "", build.bucket + "/" + build.key)
                 .toString();
         if (serviceCalls.authorize("lambda", "s3:GetObjectVersion", objectArn, revision.revisionArn,
-                function.accountId()) == Decision.DENY) {
+                function.accountId(), Map.of(IamConditionContextResolver.VERSION_ID, List.of(versionId)))
+                == Decision.DENY) {
             throw new AwsException("ValidationException", "Lambda service principal " + ServicePrincipals.of("lambda")
                     + " does not have s3:GetObject and s3:GetObjectVersion permission on s3://" + build.bucket + "/"
                     + build.key + ". Update the bucket policy to grant the Lambda service principal access and retry.",

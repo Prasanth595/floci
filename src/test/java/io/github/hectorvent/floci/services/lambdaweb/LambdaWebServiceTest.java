@@ -947,7 +947,8 @@ class LambdaWebServiceTest {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
         when(serviceCalls.authorize(eq("lambda"), eq("s3:GetObjectVersion"), eq("arn:aws:s3:::code/app.zip"),
-                startsWith(ARN + "/revision/rev-"), eq(ACCOUNT_ID))).thenReturn(Decision.DENY);
+                startsWith(ARN + "/revision/rev-"), eq(ACCOUNT_ID), eq(Map.of("s3:versionid", List.of("v1")))))
+                .thenReturn(Decision.DENY);
         when(s3.openObject("code", "app.zip", null)).thenReturn(object(new byte[0]));
 
         AwsException create = error(() -> service.createFunction(REGION, createRequest("app")));
