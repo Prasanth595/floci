@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.sqs;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -740,6 +742,7 @@ public class SqsService implements Resettable, ResourceProvider {
 
         validateMaximumMessageSize(attributes);
         attributes = validateMessageRetentionPeriod(attributes);
+        attributes = compactRedrivePolicies(attributes);
 
         String accountId = regionResolver.getAccountId();
         String queueUrl = buildQueueUrl(region, accountId, queueName);
@@ -1242,6 +1245,44 @@ public class SqsService implements Resettable, ResourceProvider {
         return normalized;
     }
 
+    private static final ObjectMapper REDRIVE_POLICY_MAPPER =
+            new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
+    /**
+     * AWS stores RedrivePolicy and RedriveAllowPolicy as compact JSON, so a document sent with
+     * whitespace (a trailing newline, pretty-printing) reads back without it. A value that is not
+     * a JSON object is left as supplied.
+     */
+    private static Map<String, String> compactRedrivePolicies(Map<String, String> attributes) {
+        if (attributes == null) {
+            return null;
+        }
+        Map<String, String> compacted = attributes;
+        for (String name : List.of("RedrivePolicy", "RedriveAllowPolicy")) {
+            String value = attributes.get(name);
+            if (value == null || value.isEmpty()) {
+                continue;
+            }
+            String compact;
+            try {
+                JsonNode document = REDRIVE_POLICY_MAPPER.readTree(value);
+                if (document == null || !document.isObject()) {
+                    continue;
+                }
+                compact = REDRIVE_POLICY_MAPPER.writeValueAsString(document);
+            } catch (JsonProcessingException ignored) {
+                continue;
+            }
+            if (!compact.equals(value)) {
+                if (compacted == attributes) {
+                    compacted = new HashMap<>(attributes);
+                }
+                compacted.put(name, compact);
+            }
+        }
+        return compacted;
+    }
+
     private static AwsException invalidMessageRetentionPeriod() {
         return new AwsException("InvalidAttributeValue",
                 "Invalid value for the parameter MessageRetentionPeriod.", 400);
@@ -1659,6 +1700,7 @@ public class SqsService implements Resettable, ResourceProvider {
                         "The specified queue does not exist.", 400));
         validateMaximumMessageSize(attributes);
         attributes = validateMessageRetentionPeriod(attributes);
+        attributes = compactRedrivePolicies(attributes);
         if (attributes != null) {
             for (Map.Entry<String, String> entry : attributes.entrySet()) {
                 if (entry.getValue() == null || entry.getValue().isEmpty()) {

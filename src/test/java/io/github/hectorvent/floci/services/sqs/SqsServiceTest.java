@@ -269,6 +269,46 @@ class SqsServiceTest {
     }
 
     @Test
+    void redrivePolicyIsStoredAsCompactJson() {
+        String region = "eu-west-1";
+        Queue dlq = sqsService.createQueue("redrive-compact-dlq", null, region);
+        String dlqArn = sqsService.getQueueAttributes(dlq.getQueueUrl(), List.of("QueueArn"), region).get("QueueArn");
+        String spaced = "{\n  \"deadLetterTargetArn\": \"" + dlqArn + "\",\n  \"maxReceiveCount\": 3\n}\n";
+        String compact = "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":3}";
+
+        Queue created = sqsService.createQueue("redrive-compact-created", Map.of("RedrivePolicy", spaced), region);
+        assertEquals(compact, sqsService.getQueueAttributes(created.getQueueUrl(),
+                List.of("RedrivePolicy"), region).get("RedrivePolicy"));
+
+        Queue updated = sqsService.createQueue("redrive-compact-updated", null, region);
+        sqsService.setQueueAttributes(updated.getQueueUrl(), Map.of("RedrivePolicy", spaced), region);
+        assertEquals(compact, sqsService.getQueueAttributes(updated.getQueueUrl(),
+                List.of("RedrivePolicy"), region).get("RedrivePolicy"));
+    }
+
+    @Test
+    void redriveAllowPolicyIsStoredAsCompactJson() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("redrive-allow-compact", null, region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(),
+                Map.of("RedriveAllowPolicy", "{ \"redrivePermission\": \"allowAll\" }\n"), region);
+        assertEquals("{\"redrivePermission\":\"allowAll\"}", sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("RedriveAllowPolicy"), region).get("RedriveAllowPolicy"));
+    }
+
+    @Test
+    void createQueue_recreateWithSameRedrivePolicyInOtherWhitespaceIsNotAConflict() {
+        String region = "eu-west-1";
+        Queue dlq = sqsService.createQueue("redrive-recreate-dlq", null, region);
+        String dlqArn = sqsService.getQueueAttributes(dlq.getQueueUrl(), List.of("QueueArn"), region).get("QueueArn");
+        String compact = "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":3}";
+        Queue queue = sqsService.createQueue("redrive-recreate", Map.of("RedrivePolicy", compact), region);
+
+        Queue same = sqsService.createQueue("redrive-recreate", Map.of("RedrivePolicy", compact + "\n"), region);
+        assertEquals(queue.getQueueUrl(), same.getQueueUrl());
+    }
+
+    @Test
     void createQueue_acceptsTheAwsCeilingWhenTheConfiguredMaximumIsLower() {
         String region = "eu-west-1";
         SqsService service = new SqsService(new InMemoryStorage<>(), 30, 131072, BASE_URL, clock);
