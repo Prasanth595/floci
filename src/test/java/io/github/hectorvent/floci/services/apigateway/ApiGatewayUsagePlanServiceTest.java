@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -124,5 +125,44 @@ class ApiGatewayUsagePlanServiceTest {
             List<UsagePlan.Limits> samples = reader.get(60, TimeUnit.SECONDS);
             assertEquals(0L, mixed.get(), "limits mixing two revisions, for example " + samples);
         }
+    }
+
+    // A patch writes back the plan it read, so without the lock a delete between the two is undone.
+    @Test
+    void aDeleteDuringAPatchStaysDeleted() throws Exception {
+        ApiGatewayService service = service();
+        List<Map<String, String>> patch = new ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            patch.add(Map.of("op", "add", "path", "/apiStages", "value", "api:s" + i));
+        }
+        int resurrected = 0;
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            for (int round = 0; round < 200; round++) {
+                String planId = service.createUsagePlan(REGION, Map.of("name", "delete-race")).getId();
+                CountDownLatch start = new CountDownLatch(1);
+                Future<?> patcher = executor.submit(() -> {
+                    assertTrue(start.await(5, TimeUnit.SECONDS));
+                    try {
+                        service.updateUsagePlan(REGION, planId, patch);
+                    } catch (AwsException expected) {
+                        // The delete went first, so the patch finds no plan.
+                        assertEquals("NotFoundException", expected.getErrorCode());
+                    }
+                    return null;
+                });
+                Future<?> deleter = executor.submit(() -> {
+                    assertTrue(start.await(5, TimeUnit.SECONDS));
+                    service.deleteUsagePlan(REGION, planId);
+                    return null;
+                });
+                start.countDown();
+                patcher.get(10, TimeUnit.SECONDS);
+                deleter.get(10, TimeUnit.SECONDS);
+                if (service.getUsagePlans(REGION).stream().anyMatch(plan -> plan.getId().equals(planId))) {
+                    resurrected++;
+                }
+            }
+        }
+        assertEquals(0, resurrected, "plans a patch wrote back after they were deleted");
     }
 }

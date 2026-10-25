@@ -133,8 +133,9 @@ public class ApiGatewayService implements ResourceProvider {
     private final Object domainNameLock = new Object();
     private final Object vpcLinkTagLock = new Object();
     /**
-     * Guards a usage plan patch. A patch writes back the stages, throttle and quota it read, so two at
-     * once would restore one another's stale values.
+     * Guards a usage plan patch and delete. A patch writes back the stages, throttle and quota it
+     * read, so two at once would restore one another's stale values, and a delete between its read
+     * and its write would be undone.
      */
     private final Object usagePlanLock = new Object();
     private final TlsCertificateManager certificateManager;
@@ -1604,8 +1605,10 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     public void deleteUsagePlan(String region, String usagePlanId) {
-        getUsagePlan(region, usagePlanId);
-        usagePlanStore.delete(usagePlanKey(region, usagePlanId));
+        synchronized (usagePlanLock) {
+            getUsagePlan(region, usagePlanId);
+            usagePlanStore.delete(usagePlanKey(region, usagePlanId));
+        }
     }
 
     /**
