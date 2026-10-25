@@ -80,9 +80,16 @@ class RedshiftDataResourceResolver {
             return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
                     workgroup.masterUsername(), workgroup.masterPassword(), spectrum);
         }
-        DatabaseSecretCredentials creds = secretCredentials(request.get("SecretArn").asText(), region);
+        String secretArn = request.get("SecretArn").asText();
+        DatabaseSecretCredentials creds = secretCredentials(secretArn, region);
+        String user = creds.username();
+        if ((workgroup.adminPasswordSecretArn() != null && workgroup.adminPasswordSecretArn().equals(secretArn))
+                || user.equals(workgroup.adminUsername())
+                || (workgroup.masterUsername() != null && user.equals(workgroup.masterUsername()))) {
+            user = workgroup.masterUsername();
+        }
         return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
-                creds.username(), creds.password(), spectrum);
+                user, creds.password(), spectrum);
     }
 
     private DatabaseSecretCredentials secretCredentials(String secretArn, String region) {

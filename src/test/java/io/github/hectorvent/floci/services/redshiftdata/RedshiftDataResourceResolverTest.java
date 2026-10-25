@@ -133,6 +133,31 @@ class RedshiftDataResourceResolverTest {
     }
 
     @Test
+    void aWorkgroupWithARenamedAdminSecretConnectsWithTheBackendRole() {
+        String secretArn = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT + ":secret:redshift-serverless/ns-1";
+        RedshiftServerlessService.WorkgroupTarget renamedTarget = new RedshiftServerlessService.WorkgroupTarget(
+                "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT + ":workgroup/wg-id", "wg-1",
+                "127.0.0.1", 55433, "analytics", "root", "Secret123", "renamed_admin",
+                List.of("arn:aws:iam::" + ACCOUNT + ":role/Spectrum"), secretArn);
+        when(serverless.getWorkgroupTarget("wg-1", REGION)).thenReturn(renamedTarget);
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        SecretVersion version = new SecretVersion();
+        version.setSecretString("{\"username\":\"renamed_admin\",\"password\":\"Secret123\"}");
+        when(secrets.getSecretValue(eq(secretArn), any(), any(), eq(REGION))).thenReturn(version);
+        ObjectNode req = mapper.createObjectNode();
+        req.put("WorkgroupName", "wg-1");
+        req.put("Database", "analytics");
+        req.put("SecretArn", secretArn);
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(mock(RedshiftService.class), secrets).resolve(req, REGION);
+
+        assertEquals("root", target.user());
+        assertEquals("Secret123", target.password());
+        assertEquals(55433, target.port());
+    }
+
+    @Test
     void aWorkgroupRejectsAClusterIdentifierAndAWrongDatabase() {
         when(serverless.getWorkgroupTarget("wg-1", REGION)).thenReturn(workgroupTarget());
         RedshiftDataResourceResolver resolver = resolver(mock(RedshiftService.class), mock(SecretsManagerService.class));

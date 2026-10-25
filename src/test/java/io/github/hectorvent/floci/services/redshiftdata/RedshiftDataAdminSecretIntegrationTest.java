@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -121,5 +122,66 @@ class RedshiftDataAdminSecretIntegrationTest {
         assertEquals(GENERATED_PASSWORD, target.getValue().password());
         assertEquals(value.path("password").asText(), target.getValue().password());
         assertEquals("analytics", target.getValue().database());
+    }
+
+    @Test
+    void sdkExecutesSqlUsingManagedSecretAfterAdminUsernameRename() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String namespaceName = "data-rename-" + suffix;
+        String workgroup = "data-rename-wg-" + suffix;
+        Namespace namespace = redshift.createNamespace(request -> request.namespaceName(namespaceName)
+                .adminUsername("initial_admin").dbName("analytics").manageAdminPassword(true)).namespace();
+        cleanup.register(() -> redshift.deleteNamespace(request -> request.namespaceName(namespaceName)));
+        redshift.createWorkgroup(request -> request.workgroupName(workgroup).namespaceName(namespaceName));
+        cleanup.register(() -> redshift.deleteWorkgroup(request -> request.workgroupName(workgroup)));
+
+        redshift.updateNamespace(request -> request.namespaceName(namespaceName).adminUsername("renamed_admin"));
+
+        JsonNode value = mapper.readTree(secrets.getSecretValue(request -> request
+                .secretId(namespace.adminPasswordSecretArn())).secretString());
+        assertEquals("renamed_admin", value.path("username").asText());
+
+        ExecuteStatementResponse executed = data.executeStatement(request -> request.workgroupName(workgroup)
+                .secretArn(namespace.adminPasswordSecretArn()).database("analytics")
+                .waitTimeSeconds(30).sql("SELECT 101 AS answer"));
+        DescribeStatementResponse described = data.describeStatement(request -> request.id(executed.id()));
+        assertEquals(StatusString.FINISHED, described.status(), described.error());
+
+        ArgumentCaptor<RedshiftDataResourceResolver.DatabaseTarget> target =
+                ArgumentCaptor.forClass(RedshiftDataResourceResolver.DatabaseTarget.class);
+        verify(factory, atLeastOnce()).open(target.capture());
+        assertEquals("initial_admin", target.getValue().user());
+    }
+
+    @Test
+    void sdkExecutesSqlUsingManagedSecretWhenManagementEnabledAfterUsernameRename() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String namespaceName = "data-late-manage-" + suffix;
+        String workgroup = "data-late-manage-wg-" + suffix;
+        redshift.createNamespace(request -> request.namespaceName(namespaceName)
+                .adminUsername("initial_admin").adminUserPassword("ExplicitSecret123!").dbName("analytics"));
+        cleanup.register(() -> redshift.deleteNamespace(request -> request.namespaceName(namespaceName)));
+        redshift.createWorkgroup(request -> request.workgroupName(workgroup).namespaceName(namespaceName));
+        cleanup.register(() -> redshift.deleteWorkgroup(request -> request.workgroupName(workgroup)));
+
+        redshift.updateNamespace(request -> request.namespaceName(namespaceName).adminUsername("earlier_renamed_admin"));
+        Namespace managed = redshift.updateNamespace(request -> request.namespaceName(namespaceName)
+                .manageAdminPassword(true)).namespace();
+        assertNotNull(managed.adminPasswordSecretArn());
+
+        JsonNode value = mapper.readTree(secrets.getSecretValue(request -> request
+                .secretId(managed.adminPasswordSecretArn())).secretString());
+        assertEquals("earlier_renamed_admin", value.path("username").asText());
+
+        ExecuteStatementResponse executed = data.executeStatement(request -> request.workgroupName(workgroup)
+                .secretArn(managed.adminPasswordSecretArn()).database("analytics")
+                .waitTimeSeconds(30).sql("SELECT 202 AS answer"));
+        DescribeStatementResponse described = data.describeStatement(request -> request.id(executed.id()));
+        assertEquals(StatusString.FINISHED, described.status(), described.error());
+
+        ArgumentCaptor<RedshiftDataResourceResolver.DatabaseTarget> target =
+                ArgumentCaptor.forClass(RedshiftDataResourceResolver.DatabaseTarget.class);
+        verify(factory, atLeastOnce()).open(target.capture());
+        assertEquals("initial_admin", target.getValue().user());
     }
 }

@@ -922,15 +922,25 @@ public class RedshiftServerlessService implements Resettable {
         }
         return new WorkgroupTarget(workgroup.getWorkgroupArn(), workgroup.getWorkgroupName(),
                 workgroup.getRuntimeHost(), workgroup.getRuntimePort(), namespace.getDbName(),
-                workgroup.getMasterUsername(), namespace.getAdminUserPassword(), adminUserOf(namespace), namespace.getIamRoles());
+                workgroup.getMasterUsername(), namespace.getAdminUserPassword(), adminUserOf(namespace),
+                namespace.getIamRoles(), namespace.getAdminPasswordSecretArn());
     }
 
     /** Connection details of a workgroup's backend; {@code adminUsername} is the name clients log in with. */
     public record WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
-                                  String masterUsername, String masterPassword, String adminUsername, List<String> iamRoleArns) {
+                                  String masterUsername, String masterPassword, String adminUsername,
+                                  List<String> iamRoleArns, String adminPasswordSecretArn) {
+        public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
+                               String masterUsername, String masterPassword, String adminUsername,
+                               List<String> iamRoleArns) {
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
+                    iamRoleArns, null);
+        }
+
         public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
                                String masterUsername, String masterPassword, String adminUsername) {
-            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername, List.of());
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
+                    List.of(), null);
         }
 
         public WorkgroupTarget {
