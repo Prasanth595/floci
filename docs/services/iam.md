@@ -114,8 +114,18 @@ question and is not read here either.
 The declared constraints are read before the template is looked for, which is the order AWS
 validates in: `TemplateArn` is held to `arnType`'s 20 to 2048 characters, `MinorVersion` and
 `TemplateMinorVersion` are held to being integers and answer `InvalidInput` for a value that is
-not a number, and `ReplacementValues` is held to the 30 entries it declares. A request malformed
-in any of those is a 400 rather than the 404.
+not a number, and `ReplacementValues` is held to the 30 entries it declares and each of those
+entries to the `Values` it is required to carry, between 1 and 20 of them. A request malformed in
+any of those is a 400 rather than the 404, and one malformed in several is answered with every
+violation at once, the map's own length ahead of its entries. An entry's values are counted by the
+member being present rather than by what it holds, the list's members publishing no constraint of
+their own, so a replacement value sent empty is a value.
+
+The message for a broken entry names it by its key, as `replacementValues.Department.values`, which
+is how IAM reports a bad value in its account properties map. No recorded AWS violation on a map
+member is on hand to confirm that spelling, so it is Floci's reading of it: a capture would either
+keep it or replace it with the nested form, where the path is the map itself and the constraint
+reads "Map value must satisfy constraint".
 
 ### Policies
 

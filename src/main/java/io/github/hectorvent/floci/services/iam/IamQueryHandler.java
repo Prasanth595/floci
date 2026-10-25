@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.*;
+import io.github.hectorvent.floci.core.common.AwsQueryLists;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -50,6 +51,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Function;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -81,6 +83,17 @@ public class IamQueryHandler {
     private static final Pattern USER_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]+");
     /** {@code mapStringReplacementValueEntry} on {@code AcquireRole}: at most 30 entries. */
     private static final int REPLACEMENT_VALUES_MAX_ENTRIES = 30;
+    /** {@code replacementValueListType}, the values one entry carries: 1 to 20 of them. */
+    private static final int REPLACEMENT_VALUES_MAX_PER_ENTRY = 20;
+    /** The Query spelling of a {@code ReplacementValues} entry, which carries a key and a value. */
+    private static final String REPLACEMENT_VALUES_ENTRY = "ReplacementValues.entry.";
+    /**
+     * One entry's key, capturing the prefix the rest of that entry is read back under: an index is
+     * taken as the request spells it, and ordered by the number it reads as, an index that is no
+     * number sorting after every index that is one.
+     */
+    private static final Pattern REPLACEMENT_VALUES_ENTRY_KEY =
+            Pattern.compile("(" + Pattern.quote(REPLACEMENT_VALUES_ENTRY) + "[^.]+)\\.key");
     /** {@code sortKeyType} on {@code GetOrganizationsAccessReport}. */
     private static final Set<String> SORT_KEYS = Set.of("SERVICE_NAMESPACE_ASCENDING",
             "SERVICE_NAMESPACE_DESCENDING", "LAST_AUTHENTICATED_TIME_ASCENDING",
@@ -1567,24 +1580,67 @@ public class IamQueryHandler {
     private Response handleAcquireRole(MultivaluedMap<String, String> params) {
         String templateArn = requiredArn(params, "TemplateArn");
         requireIntegerIfPresent(params, "TemplateMinorVersion");
-        requireReplacementValuesWithinDeclaredSize(params);
+        requireReplacementValuesWithinDeclaredShape(params);
         throw noSuchRoleTemplate(templateArn);
     }
 
     /**
-     * {@code ReplacementValues} is declared with at most 30 entries, and a Query map arrives as
-     * {@code ReplacementValues.entry.N.key}, so the keys are counted rather than the indices
-     * walked: a caller numbering them sparsely still sends as many values as it sends.
+     * {@code ReplacementValues} is declared with at most 30 entries, and each entry holds a
+     * {@code ReplacementValueEntry}, which declares {@code Values} required and bounds
+     * {@code replacementValueListType} at 1 to 20 values. The API Reference spells the same thing
+     * out, "Map Entries: Maximum number of 30 items" on the map and, on the entry,
+     * "Array Members: Minimum number of 1 item. Maximum number of 20 items" with "Required: Yes".
+     * All of it is read ahead of the template lookup, so a request that breaks any of it is the 400
+     * the validation layer answers rather than a 404 that ignored the map it was handed.
+     *
+     * <p>The map's own length is reported before its entries, which is the order the shape is
+     * walked, and every entry that is broken is reported rather than only the first: the validation
+     * layer answers with each member it found broken. An entry is read off its key, as the map's
+     * own count has always been, so a value sent under no key is not an entry the map could hold
+     * and is not one here either, and an entry is read back under the index the request spelled
+     * rather than under the number that index reads as, the parameters that carry it being named
+     * after the spelling. The count takes every key, as it has since the cap landed, so two
+     * spellings of one number are two entries to it and each is answered on its own.
+     *
+     * <p>An entry's values arrive as {@code ReplacementValues.entry.N.value.Values.member.M}, read
+     * through the helper the other Query services read a list with, and they are counted by the
+     * member being present rather than by what it holds: the list's members publish no constraint
+     * of their own, so a replacement value sent empty is a value, where reading it as absent would
+     * answer the required-member violation for a list that has one. A list of no members at all is
+     * how an absent member reaches a Query service, so the lower bound of 1 is never reached on its
+     * own, and an entry carrying nothing is the required member reading as null. The violation names
+     * the entry by its key, the way the account properties map names one, rather than by whatever
+     * index the request numbered it with.
      */
-    private static void requireReplacementValuesWithinDeclaredSize(
+    private static void requireReplacementValuesWithinDeclaredShape(
             MultivaluedMap<String, String> params) {
-        long entries = params.keySet().stream()
-                .filter(name -> name.startsWith("ReplacementValues.entry.") && name.endsWith(".key"))
-                .count();
-        if (entries > REPLACEMENT_VALUES_MAX_ENTRIES) {
-            throw SmithyValidationErrors.validationError("Value at 'replacementValues' failed to "
-                    + "satisfy constraint: Member must have length less than or equal to "
-                    + REPLACEMENT_VALUES_MAX_ENTRIES);
+        List<String> entries = params.keySet().stream()
+                .map(REPLACEMENT_VALUES_ENTRY_KEY::matcher)
+                .filter(Matcher::matches)
+                .map(matcher -> matcher.group(1))
+                .sorted(Comparator.<String>comparingInt(AwsQueryLists::memberIndex)
+                        .thenComparing(Comparator.naturalOrder()))
+                .toList();
+        List<String> violations = new ArrayList<>();
+        if (entries.size() > REPLACEMENT_VALUES_MAX_ENTRIES) {
+            violations.add("Value at 'replacementValues' failed to satisfy constraint: Member "
+                    + "must have length less than or equal to " + REPLACEMENT_VALUES_MAX_ENTRIES);
+        }
+        for (String entry : entries) {
+            String path = "replacementValues." + params.getFirst(entry + ".key") + ".values";
+            Pattern members = AwsQueryLists.memberKeys(entry + ".value.Values", null);
+            long values = params.keySet().stream()
+                    .filter(name -> members.matcher(name).matches())
+                    .count();
+            if (values == 0) {
+                violations.add(SmithyValidationErrors.notNull(path));
+            } else if (values > REPLACEMENT_VALUES_MAX_PER_ENTRY) {
+                violations.add("Value at '" + path + "' failed to satisfy constraint: Member must "
+                        + "have length less than or equal to " + REPLACEMENT_VALUES_MAX_PER_ENTRY);
+            }
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
         }
     }
 

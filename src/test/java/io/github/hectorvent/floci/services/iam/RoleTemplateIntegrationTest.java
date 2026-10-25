@@ -161,4 +161,128 @@ class RoleTemplateIntegrationTest {
             .statusCode(404)
             .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
     }
+
+    /**
+     * Each entry holds a {@code ReplacementValueEntry}, which declares {@code Values} required.
+     * A Query list arrives as {@code ...value.Values.member.M}, so an entry sending none of those
+     * is the required member reading as null, reported against the key the entry was sent under.
+     */
+    @Test
+    void anEntryCarryingNoValuesIsTheRequiredMemberRatherThanThe404() {
+        iam("AcquireRole")
+            .formParam("TemplateArn", TEMPLATE_ARN)
+            .formParam("ReplacementValues.entry.1.key", "Department")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value null "
+                    + "at 'replacementValues.Department.values' failed to satisfy constraint: "
+                    + "Member must not be null"))
+            .body(not(containsString("NoSuchEntity")));
+    }
+
+    /**
+     * {@code replacementValueListType} is 1 to 20, so a 21st value in one entry is a length
+     * violation ahead of the lookup, while 20 of them reach the 404 the ARN earns.
+     */
+    @Test
+    void moreValuesInOneEntryThanTheDeclaredMaximumIsAValidationError() {
+        acquireWithValues(21).when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at "
+                    + "'replacementValues.Department.values' failed to satisfy constraint: Member "
+                    + "must have length less than or equal to 20"));
+
+        acquireWithValues(20).when().post("/").then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+    }
+
+    private static RequestSpecification acquireWithValues(int values) {
+        RequestSpecification request = iam("AcquireRole")
+                .formParam("TemplateArn", TEMPLATE_ARN)
+                .formParam("ReplacementValues.entry.1.key", "Department");
+        for (int value = 1; value <= values; value++) {
+            request.formParam("ReplacementValues.entry.1.value.Values.member." + value, "v" + value);
+        }
+        return request;
+    }
+
+    /**
+     * The list's members publish no constraint of their own, so a value sent empty is still a
+     * value: the entry carries one, the required member is satisfied and the request reaches the
+     * 404. That is the same reading {@code GetMFADevice} gives a blank {@code UserName}, where what
+     * the request carries is the member being present rather than what it holds.
+     */
+    @Test
+    void anEntryWhoseOnlyValueIsEmptyStillCarriesAValue() {
+        iam("AcquireRole")
+            .formParam("TemplateArn", TEMPLATE_ARN)
+            .formParam("ReplacementValues.entry.1.key", "Department")
+            .formParam("ReplacementValues.entry.1.value.Values.member.1", "")
+        .when().post("/").then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"))
+            .body(not(containsString("ValidationError")));
+    }
+
+    /**
+     * A Query index is read as the request spells it, the parameters that carry an entry being
+     * named after that spelling rather than after the number the spelling reads as. An entry
+     * numbered {@code 01} holds its key and its values under {@code entry.01}, so that is where
+     * they are read from and the entry is whole: reading it as entry 1 would look for parameters
+     * nothing sent and answer the required member against a key it could not find either.
+     *
+     * <p>The 404 alone would not hold that, an entry nothing read at all reaching it too, so the
+     * same entry left empty is sent as well: the violation naming {@code Department} is what says
+     * the key was read under the spelling it arrived in rather than under {@code 1}.
+     */
+    @Test
+    void anEntryNumberedWithALeadingZeroIsReadUnderTheSpellingItWasSent() {
+        iam("AcquireRole")
+            .formParam("TemplateArn", TEMPLATE_ARN)
+            .formParam("ReplacementValues.entry.01.key", "Department")
+            .formParam("ReplacementValues.entry.01.value.Values.member.1", "Engineering")
+        .when().post("/").then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"))
+            .body(not(containsString("ValidationError")));
+
+        iam("AcquireRole")
+            .formParam("TemplateArn", TEMPLATE_ARN)
+            .formParam("ReplacementValues.entry.01.key", "Department")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value null "
+                    + "at 'replacementValues.Department.values' failed to satisfy constraint: "
+                    + "Member must not be null"));
+    }
+
+    /**
+     * The validation layer answers with every member it found broken, so a request that sends 31
+     * entries and leaves two of them empty is told all three things at once: the map's own length
+     * first, the shape being walked from the outside in, then the entries in the order their
+     * numbers read rather than the order the parameters happen to be held in.
+     */
+    @Test
+    void theMapsLengthAndEveryEmptyEntryAreReportedTogether() {
+        RequestSpecification request = iam("AcquireRole").formParam("TemplateArn", TEMPLATE_ARN);
+        for (int entry = 1; entry <= 31; entry++) {
+            request.formParam("ReplacementValues.entry." + entry + ".key", "Parameter" + entry);
+            if (entry != 2 && entry != 10) {
+                request.formParam("ReplacementValues.entry." + entry + ".value.Values.member.1", "v");
+            }
+        }
+
+        request.when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("3 validation errors detected: Value at "
+                    + "'replacementValues' failed to satisfy constraint: Member must have length "
+                    + "less than or equal to 30; Value null at 'replacementValues.Parameter2."
+                    + "values' failed to satisfy constraint: Member must not be null; Value null "
+                    + "at 'replacementValues.Parameter10.values' failed to satisfy constraint: "
+                    + "Member must not be null"));
+    }
 }
