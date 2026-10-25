@@ -734,7 +734,25 @@ class RedshiftServiceTest {
         assertNotNull(secretValue.get());
         String rotatedPassword = new ObjectMapper().readTree(secretValue.get()).path("password").asText();
         assertEquals(cluster.getMasterPassword(), rotatedPassword);
-        assertFalse(rotatedPassword.chars().anyMatch(character -> "'\"/@".indexOf(character) >= 0));
+        assertFalse(rotatedPassword.chars().anyMatch(character -> "'\"/@\\".indexOf(character) >= 0));
+    }
+
+    @Test
+    void managedRotationReservationBlocksClusterDeletionBeforeMutation() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("managed-cluster");
+        cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-managed");
+        cluster.setClusterStatus("available");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "managed-cluster", cluster)));
+        when(clusterBackend.getForAccount("111111111111", "managed-cluster")).thenReturn(Optional.of(cluster));
+
+        service.reserve(cluster.getMasterPasswordSecretArn(), "us-east-1");
+
+        assertThrows(AwsException.class, () -> service.deleteCluster("managed-cluster"));
+        verify(cm, never()).stop("111111111111", "managed-cluster");
+
+        service.release(cluster.getMasterPasswordSecretArn(), "us-east-1");
     }
 
     @Test

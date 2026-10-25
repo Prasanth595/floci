@@ -7,6 +7,10 @@ public interface ManagedSecretRotator {
 
     boolean supports(String secretArn, String region);
 
+    default void reserve(String secretArn, String region) { }
+
+    default void release(String secretArn, String region) { }
+
     void rotate(String secretArn, String region, Rotation rotation);
 
     /** Commits a backend password change and its corresponding secret value as one rotation. */

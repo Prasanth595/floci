@@ -40,6 +40,13 @@ class ManagedSecretRotationServiceTest {
             assertEquals(previous, service.getSecretValue(original.getArn(), null, "AWSPREVIOUS", REGION).getVersionId());
             service.rotateSecret(original.getArn(), token, null, null, true, REGION);
             assertEquals(1, changes.get());
+            String secondToken = UUID.randomUUID().toString();
+            service.rotateSecret(original.getArn(), secondToken, null, null, true, REGION);
+            await(() -> secondToken.equals(service.describeSecret(original.getArn(), REGION).getCurrentVersionId()));
+            assertEquals(token, service.getSecretValue(original.getArn(), null, "AWSPREVIOUS", REGION).getVersionId());
+            service.rotateSecret(original.getArn(), token, null, null, true, REGION);
+            assertEquals(secondToken, service.describeSecret(original.getArn(), REGION).getCurrentVersionId());
+            assertEquals(2, changes.get());
         } finally {
             service.shutdown();
         }
@@ -84,17 +91,29 @@ class ManagedSecretRotationServiceTest {
     void failedOwnerChangeRollsBackAndSameTokenCanRetry() throws Exception {
         AtomicInteger attempts = new AtomicInteger();
         AtomicInteger rollbacks = new AtomicInteger();
-        SecretsManagerService service = service(owner(rotation -> rotation.commit(() -> {
-            if (attempts.incrementAndGet() == 1) {
-                throw new IllegalStateException("backend refused password");
+        CountDownLatch firstFailure = new CountDownLatch(1);
+        CountDownLatch firstRelease = new CountDownLatch(1);
+        SecretsManagerService service = service(owner(rotation -> {
+            try {
+                rotation.commit(() -> {
+                    if (attempts.incrementAndGet() == 1) {
+                        throw new IllegalStateException("backend refused password");
+                    }
+                    return "new-password";
+                }, rollbacks::incrementAndGet);
+            } catch (IllegalStateException e) {
+                firstFailure.countDown();
+                throw e;
             }
-            return "new-password";
-        }, rollbacks::incrementAndGet)));
+        }, firstRelease::countDown));
         try {
             Secret original = create(service);
             String token = UUID.randomUUID().toString();
             service.rotateSecret(original.getArn(), token, null, rules(), true, REGION);
-            await(() -> !service.describeSecret(original.getArn(), REGION).isRotationEnabled());
+            assertTrue(firstFailure.await(5, TimeUnit.SECONDS));
+            assertTrue(firstRelease.await(5, TimeUnit.SECONDS));
+            await(() -> rollbacks.get() == 1);
+            assertTrue(service.describeSecret(original.getArn(), REGION).isRotationEnabled());
             assertEquals("old-password", service.getSecretValue(original.getArn(), null, null, REGION).getSecretString());
             assertNull(service.describeSecret(original.getArn(), REGION).getLastRotatedDate());
             assertEquals(1, rollbacks.get());
@@ -140,6 +159,10 @@ class ManagedSecretRotationServiceTest {
     }
 
     private static ManagedSecretRotator owner(Consumer<ManagedSecretRotator.Rotation> action) {
+        return owner(action, () -> { });
+    }
+
+    private static ManagedSecretRotator owner(Consumer<ManagedSecretRotator.Rotation> action, Runnable releaseAction) {
         return new ManagedSecretRotator() {
             public boolean supports(String arn, String region) {
                 return true;
@@ -147,6 +170,10 @@ class ManagedSecretRotationServiceTest {
 
             public void rotate(String arn, String region, Rotation rotation) {
                 action.accept(rotation);
+            }
+
+            public void release(String arn, String region) {
+                releaseAction.run();
             }
         };
     }

@@ -95,6 +95,7 @@ public class RedshiftService implements ManagedSecretRotator {
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ResourceKey> managedRotationReservations = new ConcurrentHashMap<>();
 
     private record ResourceKey(String accountId, String kind, String identifier) { }
 
@@ -125,7 +126,18 @@ public class RedshiftService implements ManagedSecretRotator {
 
     // Acquire resource locks before the service monitor; snapshot I/O never takes the monitor.
     private <T> T mutateCluster(String identifier, Supplier<T> mutation) {
-        return withResourceLock("cluster", identifier, () -> mutate(mutation));
+        return withResourceLock("cluster", identifier, () -> {
+            ensureNoManagedRotation(clusters.accountId(), identifier);
+            return mutate(mutation);
+        });
+    }
+
+    private void ensureNoManagedRotation(String accountId, String identifier) {
+        ResourceKey key = new ResourceKey(accountId, "cluster", identifier);
+        if (managedRotationReservations.containsValue(key)) {
+            throw new AwsException("InvalidRequestException",
+                    "The cluster's managed master password is being rotated. Try again after rotation completes.", 400);
+        }
     }
 
     private synchronized <T> T mutate(Supplier<T> mutation) {
@@ -691,6 +703,7 @@ public class RedshiftService implements ManagedSecretRotator {
     public Cluster deleteCluster(String identifier, Boolean skipFinalClusterSnapshot,
                                                String finalSnapshotIdentifier, Integer finalSnapshotRetentionPeriod) {
         return withResourceLock("cluster", identifier, () -> {
+            ensureNoManagedRotation(clusters.accountId(), identifier);
             Supplier<Cluster> deletion = () -> deleteClusterWithFinalSnapshot(identifier, skipFinalClusterSnapshot,
                     finalSnapshotIdentifier, finalSnapshotRetentionPeriod);
             return Boolean.TRUE.equals(skipFinalClusterSnapshot) ? deletion.get()
@@ -927,7 +940,7 @@ public class RedshiftService implements ManagedSecretRotator {
             }
             String oldPassword = cluster.getMasterPassword();
             String newPassword = RandomPasswordGenerator.generate(objectMapper.createObjectNode()
-                    .put("ExcludeCharacters", "'\"/@"));
+                    .put("ExcludeCharacters", "'\"/@\\"));
             rotation.commit(() -> {
                 containerManager.alterUserPassword(entry.accountId(), cluster.getClusterIdentifier(),
                         cluster.getMasterUsername(), newPassword);
@@ -948,6 +961,45 @@ public class RedshiftService implements ManagedSecretRotator {
             });
             return null;
         }));
+    }
+
+    @Override
+    public void reserve(String secretArn, String region) {
+        AccountAwareStorageBackend.AccountEntry<Cluster> entry = clusters.scanAllAccountEntries(key -> true).stream()
+                .filter(candidate -> secretArn.equals(candidate.value().getMasterPasswordSecretArn()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The Redshift cluster for this managed secret no longer exists.", 400));
+        ResourceKey key = new ResourceKey(entry.accountId(), "cluster", entry.key());
+        withResourceLock(entry.accountId(), "cluster", entry.key(), () -> {
+            Cluster cluster = clusters.getForAccount(entry.accountId(), entry.key())
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "The Redshift cluster for this managed secret no longer exists.", 400));
+            if (!secretArn.equals(cluster.getMasterPasswordSecretArn())) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The Redshift cluster for this managed secret no longer exists.", 400);
+            }
+            if (!"available".equals(cluster.getClusterStatus())) {
+                throw new AwsException("InvalidRequestException",
+                        "The Redshift cluster must be available to rotate its master password.", 400);
+            }
+            if (managedRotationReservations.putIfAbsent(secretArn, key) != null) {
+                throw new AwsException("InvalidRequestException",
+                        "The cluster's managed master password is already being rotated.", 400);
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public void release(String secretArn, String region) {
+        ResourceKey key = managedRotationReservations.get(secretArn);
+        if (key != null) {
+            withResourceLock(key.accountId(), key.kind(), key.identifier(), () -> {
+                managedRotationReservations.remove(secretArn, key);
+                return null;
+            });
+        }
     }
 
     public Cluster describeLoggingStatus(String clusterIdentifier) {
@@ -1271,8 +1323,11 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
-        return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
-                () -> mutate(() -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType))));
+        return withResourceLock("cluster", clusterIdentifier, () -> {
+            ensureNoManagedRotation(clusters.accountId(), clusterIdentifier);
+            return withResourceLock("snapshot", snapshotIdentifier,
+                    () -> mutate(() -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType)));
+        });
     }
 
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType,
@@ -1283,6 +1338,7 @@ public class RedshiftService implements ManagedSecretRotator {
         }
         return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
                 () -> {
+                    ensureNoManagedRotation(clusters.accountId(), clusterIdentifier);
                     Cluster cluster = restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType);
                     try {
                         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
