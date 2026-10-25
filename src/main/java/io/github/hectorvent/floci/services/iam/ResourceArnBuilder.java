@@ -1713,13 +1713,16 @@ public class ResourceArnBuilder {
     private String ciphertextKeyTarget(JsonNode body, String region, String accountId, String partition) {
         JsonNode ciphertext = body.path("CiphertextBlob");
         if (kmsService != null && !ciphertext.isMissingNode() && !ciphertext.isNull()) {
+            if (!ciphertext.isTextual() && !ciphertext.isBinary()) {
+                return keyWildcard(region, accountId, partition);
+            }
             byte[] blob;
             try {
                 blob = ciphertext.binaryValue();
             } catch (IOException e) {
                 return keyWildcard(region, accountId, partition);
             }
-            String keyArn = kmsService.get().decryptToKeyArn(blob, region);
+            String keyArn = blob == null ? null : kmsService.get().decryptToKeyArn(blob, region);
             if (keyArn != null) {
                 return keyArn;
             }

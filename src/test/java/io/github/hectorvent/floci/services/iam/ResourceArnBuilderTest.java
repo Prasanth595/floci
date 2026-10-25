@@ -1282,6 +1282,18 @@ class ResourceArnBuilderTest {
         setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\"}");
         assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
                 backedBy(unresolvable).buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"CiphertextBlob\":629}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"CiphertextBlob\":{\"KeyId\":\"x\"}}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"CiphertextBlob\":[\"aGk=\"]}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     /**
