@@ -1754,7 +1754,7 @@ public class ElastiCacheService implements ResourceProvider {
     public ReplicationGroup modifyReplicationGroup(String groupId, List<String> userGroupIdsToAdd,
                                                     List<String> userGroupIdsToRemove,
                                                     ReplicationGroupSettings settings) {
-        return modifyReplicationGroup(groupId, userGroupIdsToAdd, userGroupIdsToRemove, false, false, settings);
+        return modifyReplicationGroup(groupId, userGroupIdsToAdd, userGroupIdsToRemove, false, false, settings, null);
     }
 
     /**
@@ -1762,11 +1762,14 @@ public class ElastiCacheService implements ResourceProvider {
      * {@code deleteAuthToken} is AuthTokenUpdateStrategy DELETE, which AWS allows only when the
      * cache moves to user groups. A cache whose last user group goes has no access control, as
      * on AWS, unless it kept an auth token by joining user groups without the DELETE.
+     * {@code securityGroupIds} replaces the whole stored list; a null leaves the memberships
+     * untouched, which is what a request that names none means.
      */
     public ReplicationGroup modifyReplicationGroup(String groupId, List<String> userGroupIdsToAdd,
                                                     List<String> userGroupIdsToRemove,
                                                     boolean removeUserGroups, boolean deleteAuthToken,
-                                                    ReplicationGroupSettings settings) {
+                                                    ReplicationGroupSettings settings,
+                                                    List<String> securityGroupIds) {
         settings.validate();
         synchronized (lockFor("rg:" + groupId)) {
             ReplicationGroup group = getReplicationGroup(groupId);
@@ -1835,6 +1838,9 @@ public class ElastiCacheService implements ResourceProvider {
                 }
                 if (deleteAuthToken) {
                     group.setAuthToken(null);
+                }
+                if (securityGroupIds != null) {
+                    group.setSecurityGroupIds(securityGroupIds);
                 }
                 if (hadUserGroups && nextUserGroupIds.isEmpty()) {
                     group.setTransitEncryptionEnabled(group.isEncryptedInTransit());

@@ -250,7 +250,8 @@ public class ElastiCacheQueryHandler {
                     userGroupIdsToRemove.isEmpty() ? null : userGroupIdsToRemove,
                     Boolean.parseBoolean(params.getFirst("RemoveUserGroups")),
                     "DELETE".equals(params.getFirst("AuthTokenUpdateStrategy")),
-                    settings);
+                    settings,
+                    optionalSecurityGroupIds(params));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("ModifyReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -682,6 +683,19 @@ public class ElastiCacheQueryHandler {
             }
         }
         return securityGroupIds;
+    }
+
+    /**
+     * A modify that names no SecurityGroupIds leaves the memberships untouched, so the absent
+     * list must read as null, never as the empty list a replace would mean.
+     */
+    private static List<String> optionalSecurityGroupIds(MultivaluedMap<String, String> params) {
+        for (String prefix : List.of("SecurityGroupIds.SecurityGroupId", "SecurityGroupIds.member")) {
+            if (params.containsKey(prefix + ".1")) {
+                return parseSecurityGroupIds(params);
+            }
+        }
+        return null;
     }
 
 private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> params) {

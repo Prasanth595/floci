@@ -18,6 +18,7 @@ import software.amazon.awssdk.services.elasticache.model.CreateUserResponse;
 import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeCacheClustersRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsResponse;
@@ -31,6 +32,7 @@ import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupR
 import software.amazon.awssdk.services.elasticache.model.ModifyUserRequest;
 import software.amazon.awssdk.services.elasticache.model.ModifyUserResponse;
 import software.amazon.awssdk.services.elasticache.model.ReplicationGroup;
+import software.amazon.awssdk.services.elasticache.model.SecurityGroupMembership;
 import software.amazon.awssdk.services.elasticache.model.UserAlreadyExistsException;
 import software.amazon.awssdk.services.elasticache.model.UserGroupNotFoundException;
 import software.amazon.awssdk.services.elasticache.model.UserNotFoundException;
@@ -410,6 +412,31 @@ class ElastiCacheTest {
 
     @Test
     @Order(14)
+    void modifyReplicationGroupSecurityGroupsAreEchoedByMemberClusters() {
+        requireGroup();
+
+        elasticache.modifyReplicationGroup(ModifyReplicationGroupRequest.builder()
+                .replicationGroupId(groupId)
+                .securityGroupIds("sg-compat-1", "sg-compat-2")
+                .build());
+
+        var described = elasticache.describeReplicationGroups(DescribeReplicationGroupsRequest.builder()
+                .replicationGroupId(groupId)
+                .build());
+        assertThat(described.replicationGroups().get(0).memberClusters()).hasSize(1);
+
+        var clusters = elasticache.describeCacheClusters(DescribeCacheClustersRequest.builder()
+                .cacheClusterId(described.replicationGroups().get(0).memberClusters().get(0))
+                .build());
+        assertThat(clusters.cacheClusters().get(0).securityGroups())
+                .extracting(SecurityGroupMembership::securityGroupId)
+                .containsExactly("sg-compat-1", "sg-compat-2");
+        assertThat(clusters.cacheClusters().get(0).securityGroups())
+                .allSatisfy(membership -> assertThat(membership.status()).isEqualTo("active"));
+    }
+
+    @Test
+    @Order(15)
     void deleteReplicationGroupReleasesPortForReuse() {
         requireGroup();
 
