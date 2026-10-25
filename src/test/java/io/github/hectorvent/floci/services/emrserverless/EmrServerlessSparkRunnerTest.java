@@ -9,7 +9,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
-import io.github.hectorvent.floci.services.emrserverless.model.JobDriver;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.Test;
@@ -23,11 +22,15 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -46,15 +49,13 @@ class EmrServerlessSparkRunnerTest {
 
     @Test
     void sparkSubmitRunsLocallyOnFlocisS3ThenTheRunsOwnSettings() {
-        JobDriver.SparkSubmit sparkSubmit = new JobDriver.SparkSubmit();
-        sparkSubmit.setEntryPoint("s3://bucket/jobs/report.py");
-        sparkSubmit.setEntryPointArguments(List.of("s3://bucket/input/", "s3://bucket/output/"));
-        sparkSubmit.setSparkSubmitParameters("--conf spark.executor.cores=2 --py-files s3://bucket/jobs/lib.zip");
+        List<String> application = List.of("--conf", "spark.executor.cores=2", "--py-files", "s3://bucket/jobs/lib.zip",
+                "s3://bucket/jobs/report.py", "s3://bucket/input/", "s3://bucket/output/");
         Map<String, String> defaults = new LinkedHashMap<>();
         defaults.put("spark.executor.cores", "4");
         defaults.put("spark.sql.shuffle.partitions", "8");
 
-        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job(sparkSubmit, defaults), ENDPOINT);
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job(application, defaults), ENDPOINT);
 
         assertEquals(List.of("--master", "local[*]",
                 "--conf", "spark.hadoop.fs.s3a.endpoint=http://floci:4566",
@@ -73,11 +74,9 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
-    void anEntryPointWithoutParametersOrArgumentsFollowsFlocisSettings() {
-        JobDriver.SparkSubmit sparkSubmit = new JobDriver.SparkSubmit();
-        sparkSubmit.setEntryPoint("s3://bucket/jobs/app.jar");
-
-        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job(sparkSubmit, Map.of()), ENDPOINT);
+    void anApplicationWithoutOptionsOrArgumentsFollowsFlocisSettings() {
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(
+                job(List.of("s3://bucket/jobs/app.jar"), Map.of()), ENDPOINT);
 
         assertEquals("--conf", arguments.get(arguments.size() - 3));
         assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(arguments.size() - 2));
@@ -99,13 +98,40 @@ class EmrServerlessSparkRunnerTest {
 
     @Test
     void theImageIsTheReleasesPublicImageUnlessATemplateNamesAnother() {
+        assertEquals("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                EmrServerlessSparkRunner.image(null, "emr-7.5.0"));
+        assertEquals("public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest",
+                EmrServerlessSparkRunner.image(null, "emr-spark-8.1.0"));
+        assertEquals("registry.internal/emr-serverless/spark/emr-7.5.0:20250425",
+                EmrServerlessSparkRunner.image("registry.internal/emr-serverless/spark/%s:20250425", "emr-7.5.0"));
+    }
+
+    @Test
+    void theDriverRunsInTheJobsImageAndNetworkNamedAndLabelledForItsService() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(job(Duration.ZERO), progress);
+
+        verify(builder).newContainer("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest");
+        verify(spec).withName(ContainerStorageHelper.dockerName(config, "emr-serverless-00f0000000000001"));
+        verify(spec).withDockerNetwork(Optional.of("floci-network"));
+        verify(spec).withLabels(argThat(labels ->
+                "emr-serverless".equals(labels.get(ContainerStorageHelper.SERVICE_LABEL))));
+    }
+
+    @Test
+    void aTemplateThatNamesNoImageFailsTheRunWithItsReason() {
         EmrServerlessSparkRunner runner = runner();
 
-        assertEquals("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest", runner.image("emr-7.5.0"));
-        assertEquals("public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest", runner.image("emr-spark-8.1.0"));
-        when(config.services().emrserverless().imageTemplate())
-                .thenReturn(Optional.of("registry.internal/emr-serverless/spark/%s:20250425"));
-        assertEquals("registry.internal/emr-serverless/spark/emr-7.5.0:20250425", runner.image("emr-7.5.0"));
+        SparkJobRunner.Outcome outcome = runner.run(
+                job("registry.internal/emr-serverless/spark/%d:latest", List.of("s3://bucket/jobs/app.jar"), Map.of(),
+                        Duration.ZERO), progress);
+
+        assertNull(outcome.exitCode());
+        assertNotNull(outcome.failure());
+        verify(lifecycle, never()).createAndStart(any());
     }
 
     @Test
@@ -120,7 +146,7 @@ class EmrServerlessSparkRunnerTest {
         when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenAnswer(look -> {
             if (cancelled.compareAndSet(false, true)) {
                 try {
-                    runner.stop(job.jobRunId());
+                    runner.stop(job.runId());
                 } catch (RuntimeException ignored) {
                     // Dropped, as the executor drops what its task throws; the assertions below catch a lost cancel.
                 }
@@ -169,7 +195,7 @@ class EmrServerlessSparkRunnerTest {
         SparkJobRunner.Job job = job(Duration.ZERO);
         assertEquals(0, runner.run(job, progress).exitCode());
 
-        runner.stop(job.jobRunId());
+        runner.stop(job.runId());
 
         // A stop kept past its run would halt the next run of this id before it started.
         assertEquals(0, runner.run(job, progress).exitCode());
@@ -207,7 +233,7 @@ class EmrServerlessSparkRunnerTest {
         List<Container> drivers = List.of(driver("left-behind", "4566"), driver("another-deployments", "4567"));
         when(docker.listContainersCmd().withShowAll(true).withLabelFilter(anyMap()).exec()).thenReturn(drivers);
 
-        runner.removeLeftoverDrivers();
+        runner.removeLeftoverDrivers("emr-serverless");
 
         verify(lifecycle).removeIfExists("left-behind");
         verify(lifecycle, never()).removeIfExists("another-deployments");
@@ -215,14 +241,17 @@ class EmrServerlessSparkRunnerTest {
 
     // A runner whose driver container, "driver", starts at once and exits with code 0 unless a test says otherwise.
     private EmrServerlessSparkRunner runner() {
-        when(config.services().emrserverless().imageTemplate()).thenReturn(Optional.empty());
+        return runner(mock(ContainerBuilder.class, RETURNS_DEEP_STUBS));
+    }
+
+    private EmrServerlessSparkRunner runner(ContainerBuilder builder) {
         when(lifecycle.getDockerClient()).thenReturn(docker);
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("driver", Map.of()));
         when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenReturn(false);
         when(docker.inspectContainerCmd("driver").exec().getState().getExitCodeLong()).thenReturn(0L);
-        return new EmrServerlessSparkRunner(mock(ContainerBuilder.class, RETURNS_DEEP_STUBS), lifecycle,
-                mock(ContainerLogStreamer.class), mock(LaunchedContainerAwsEnv.class),
-                mock(LambdaExecutionRoleCredentials.class), config, new MutableClock(), Duration.ZERO);
+        return new EmrServerlessSparkRunner(builder, lifecycle, mock(ContainerLogStreamer.class),
+                mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class), config,
+                new MutableClock(), Duration.ZERO);
     }
 
     private static Container driver(String id, String owner) {
@@ -234,18 +263,22 @@ class EmrServerlessSparkRunnerTest {
     }
 
     private static SparkJobRunner.Job job(Duration timeout) {
-        JobDriver.SparkSubmit sparkSubmit = new JobDriver.SparkSubmit();
-        sparkSubmit.setEntryPoint("s3://bucket/jobs/app.jar");
-        return job(sparkSubmit, Map.of(), timeout);
+        return job(List.of("s3://bucket/jobs/app.jar"), Map.of(), timeout);
     }
 
-    private static SparkJobRunner.Job job(JobDriver.SparkSubmit sparkSubmit, Map<String, String> sparkDefaults) {
-        return job(sparkSubmit, sparkDefaults, Duration.ZERO);
+    private static SparkJobRunner.Job job(List<String> application, Map<String, String> sparkDefaults) {
+        return job(application, sparkDefaults, Duration.ZERO);
     }
 
-    private static SparkJobRunner.Job job(JobDriver.SparkSubmit sparkSubmit, Map<String, String> sparkDefaults,
+    private static SparkJobRunner.Job job(List<String> application, Map<String, String> sparkDefaults,
                                           Duration timeout) {
-        return new SparkJobRunner.Job("00f0000000000001", "00f0000000000000", "123456789012", "eu-west-1",
-                "emr-7.5.0", "arn:aws:iam::123456789012:role/job", sparkSubmit, sparkDefaults, timeout);
+        return job(null, application, sparkDefaults, timeout);
+    }
+
+    private static SparkJobRunner.Job job(String imageTemplate, List<String> application,
+                                          Map<String, String> sparkDefaults, Duration timeout) {
+        return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
+                imageTemplate, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, application,
+                timeout);
     }
 }

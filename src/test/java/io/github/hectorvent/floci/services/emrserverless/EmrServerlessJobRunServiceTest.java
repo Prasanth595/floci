@@ -241,7 +241,7 @@ class EmrServerlessJobRunServiceTest {
     }
 
     @Test
-    void theRunnerGetsTheRunsAccountReleaseRoleAndBatchTimeout() {
+    void theRunnerGetsTheRunsAccountReleaseImageRoleApplicationAndBatchTimeout() {
         FakeRunner runner = new FakeRunner();
         EmrServerlessJobRunService service = dockerService(runner);
         String batch = service.startJobRun(applicationId, request(null, 30L)).getJobRunId();
@@ -250,13 +250,15 @@ class EmrServerlessJobRunServiceTest {
         runNext();
 
         SparkJobRunner.Job job = runner.jobs.get(0);
-        assertEquals(batch, job.jobRunId());
-        assertEquals(applicationId, job.applicationId());
+        assertEquals("emr-serverless", job.service());
+        assertEquals(batch, job.runId());
         assertEquals(ACCOUNT_ID, job.accountId());
         assertEquals(REGION, job.region());
         assertEquals("emr-7.5.0", job.releaseLabel());
+        assertNull(job.imageTemplate());
+        assertNull(job.dockerNetwork());
         assertEquals(ROLE, job.executionRole());
-        assertEquals("s3://bucket/jobs/app.jar", job.sparkSubmit().getEntryPoint());
+        assertEquals(List.of("s3://bucket/jobs/app.jar"), job.application());
         assertEquals(Duration.ofMinutes(30), job.timeout());
         assertEquals(Duration.ZERO, runner.jobs.get(1).timeout());
     }
@@ -282,6 +284,18 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(List.of(fromApp, Map.of("spark.executor.cores", "2"), fromApp, Map.of("spark.executor.cores", "2"),
                 fromApp, Map.of("spark.executor.cores", "2", "spark.app.name", "from-app")), sparkDefaults);
         assertEquals("emr-spark-8.1.0", runner.jobs.get(5).releaseLabel());
+    }
+
+    @Test
+    void aRunsSparkSubmitParametersComeBeforeItsEntryPointAndItsArguments() {
+        JobDriver.SparkSubmit sparkSubmit = new JobDriver.SparkSubmit();
+        sparkSubmit.setEntryPoint("s3://bucket/jobs/report.py");
+        sparkSubmit.setEntryPointArguments(List.of("s3://bucket/input/", "s3://bucket/output/"));
+        sparkSubmit.setSparkSubmitParameters("--conf spark.executor.cores=2 --py-files 's3://bucket/jobs/lib.zip'");
+
+        assertEquals(List.of("--conf", "spark.executor.cores=2", "--py-files", "s3://bucket/jobs/lib.zip",
+                "s3://bucket/jobs/report.py", "s3://bucket/input/", "s3://bucket/output/"),
+                EmrServerlessJobRunService.application(sparkSubmit));
     }
 
     private String applicationWithSparkDefaults(String releaseLabel) {
@@ -445,7 +459,7 @@ class EmrServerlessJobRunServiceTest {
             new EmrServerlessJobRunService(mock(StorageFactory.class), applications, iamService,
                     new RegionResolver(REGION, ACCOUNT_ID), null, objectMapper, config, clock, sparkRunner).shutdown();
 
-            verify(sparkRunner, times(reconcile ? 1 : 0)).removeLeftoverDrivers();
+            verify(sparkRunner, times(reconcile ? 1 : 0)).removeLeftoverDrivers("emr-serverless");
         }
     }
 
@@ -468,19 +482,19 @@ class EmrServerlessJobRunServiceTest {
             if (progress.cancelled()) {
                 return Outcome.halted();
             }
-            driversStarted.add(job.jobRunId());
+            driversStarted.add(job.runId());
             progress.started();
             whileRunning.run();
             if (outcome.timedOut()) {
                 progress.timedOut();
                 whileTimingOut.run();
             }
-            return stopped.contains(job.jobRunId()) ? Outcome.halted() : outcome;
+            return stopped.contains(job.runId()) ? Outcome.halted() : outcome;
         }
 
         @Override
-        public void stop(String jobRunId) {
-            stopped.add(jobRunId);
+        public void stop(String runId) {
+            stopped.add(runId);
         }
     }
 }

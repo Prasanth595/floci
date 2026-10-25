@@ -81,6 +81,8 @@ public class EmrServerlessJobRunService implements Resettable {
     private static final String MODE_BATCH = "BATCH";
     private static final String MODE_STREAMING = "STREAMING";
     private static final String RUNNER_DOCKER = "docker";
+    // The service a container run's driver belongs to, which names it and labels it.
+    private static final String SERVICE = "emr-serverless";
     private static final String SPARK_DEFAULTS = "spark-defaults";
     // No source gives AWS's wording for these; they are Floci's.
     static final String HIVE_NOT_RUN = "Floci runs Spark job runs only, and this is a Hive job run.";
@@ -122,6 +124,10 @@ public class EmrServerlessJobRunService implements Resettable {
     // Null in the immediate runner mode.
     private final SparkJobRunner sparkRunner;
     private final Executor runExecutor;
+    // Where a container run's driver runs: image-template, with the release label for %s, and docker-network;
+    // null when not set.
+    private final String imageTemplate;
+    private final String dockerNetwork;
     // Container runs a thread is running; one not here that has not ended was left by a restart.
     private final Set<String> executing = new HashSet<>();
     // Raised by each reset, so a run's thread from before it writes nothing back after the wipe.
@@ -136,10 +142,12 @@ public class EmrServerlessJobRunService implements Resettable {
                 applications, iamService, regionResolver, requestContext, objectMapper,
                 config.services().emrserverless().jobRunDurationSeconds(), clock,
                 RUNNER_DOCKER.equalsIgnoreCase(config.services().emrserverless().runnerMode()) ? sparkRunner : null,
-                Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-serverless-run-", 0).factory()));
+                Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-serverless-run-", 0).factory()),
+                config.services().emrserverless().imageTemplate().orElse(null),
+                config.services().emrserverless().dockerNetwork().orElse(null));
         // Before any run of this process starts: a driver an earlier one left belongs to a run read as FAILED.
         if (this.sparkRunner != null && config.services().emrserverless().reconcileContainersOnStartup()) {
-            sparkRunner.removeLeftoverDrivers();
+            sparkRunner.removeLeftoverDrivers(SERVICE);
         }
     }
 
@@ -154,6 +162,16 @@ public class EmrServerlessJobRunService implements Resettable {
                                IamService iamService, RegionResolver regionResolver, RequestContext requestContext,
                                ObjectMapper objectMapper, int runDurationSeconds, Clock clock,
                                SparkJobRunner sparkRunner, Executor runExecutor) {
+        this(store, applications, iamService, regionResolver, requestContext, objectMapper, runDurationSeconds, clock,
+                sparkRunner, runExecutor, null, null);
+    }
+
+    private EmrServerlessJobRunService(AccountAwareStorageBackend<JobRunRecord> store,
+                                       EmrServerlessService applications, IamService iamService,
+                                       RegionResolver regionResolver, RequestContext requestContext,
+                                       ObjectMapper objectMapper, int runDurationSeconds, Clock clock,
+                                       SparkJobRunner sparkRunner, Executor runExecutor,
+                                       String imageTemplate, String dockerNetwork) {
         if (runDurationSeconds < 0) {
             throw new IllegalArgumentException(
                     "floci.services.emrserverless.job-run-duration-seconds must not be negative: " + runDurationSeconds);
@@ -168,6 +186,8 @@ public class EmrServerlessJobRunService implements Resettable {
         this.clock = clock;
         this.sparkRunner = sparkRunner;
         this.runExecutor = runExecutor;
+        this.imageTemplate = imageTemplate;
+        this.dockerNetwork = dockerNetwork;
     }
 
     @PreDestroy
@@ -437,9 +457,9 @@ public class EmrServerlessJobRunService implements Resettable {
         Long minutes = run.getExecutionTimeoutMinutes();
         Duration timeout = MODE_STREAMING.equals(run.getMode()) || minutes == null || minutes == 0
                 ? Duration.ZERO : Duration.ofMinutes(minutes);
-        SparkJobRunner.Job job = new SparkJobRunner.Job(run.getJobRunId(), run.getApplicationId(), arn.accountId(),
-                arn.region(), run.getReleaseLabel(), run.getExecutionRole(), run.getJobDriver().getSparkSubmit(),
-                sparkDefaults(app, run), timeout);
+        SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
+                run.getReleaseLabel(), imageTemplate, dockerNetwork, run.getExecutionRole(), sparkDefaults(app, run),
+                application(run.getJobDriver().getSparkSubmit()), timeout);
         executing.add(run.getJobRunId());
         long launchedIn = generation;
         runExecutor.execute(() -> execute(job, launchedIn));
@@ -450,11 +470,26 @@ public class EmrServerlessJobRunService implements Resettable {
         try {
             outcome = sparkRunner.run(job, new RunProgress(job, launchedIn));
         } catch (RuntimeException e) {
-            LOG.warnv(e, "EMR Serverless job run {0} could not run", job.jobRunId());
+            LOG.warnv(e, "EMR Serverless job run {0} could not run", job.runId());
             outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage());
         }
         SparkJobRunner.Outcome ended = outcome;
-        RequestScopes.runAs(job.accountId(), job.region(), () -> ended(job.jobRunId(), ended, launchedIn));
+        RequestScopes.runAs(job.accountId(), job.region(), () -> ended(job.runId(), ended, launchedIn));
+    }
+
+    /**
+     * What follows Floci's own settings on a run's {@code spark-submit} command line: its
+     * {@code sparkSubmitParameters}, split as a shell would split them, then its entry point and the
+     * entry point's arguments.
+     */
+    static List<String> application(JobDriver.SparkSubmit sparkSubmit) {
+        List<String> application = new ArrayList<>(
+                EmrServerlessSparkRunner.splitParameters(sparkSubmit.getSparkSubmitParameters()));
+        application.add(sparkSubmit.getEntryPoint());
+        if (sparkSubmit.getEntryPointArguments() != null) {
+            application.addAll(sparkSubmit.getEntryPointArguments());
+        }
+        return application;
     }
 
     /**
@@ -813,18 +848,18 @@ public class EmrServerlessJobRunService implements Resettable {
 
         @Override
         public void started() {
-            RequestScopes.runAs(job.accountId(), job.region(), () -> driverStarted(job.jobRunId(), launchedIn));
+            RequestScopes.runAs(job.accountId(), job.region(), () -> driverStarted(job.runId(), launchedIn));
         }
 
         @Override
         public void timedOut() {
-            RequestScopes.runAs(job.accountId(), job.region(), () -> driverTimedOut(job.jobRunId(), launchedIn));
+            RequestScopes.runAs(job.accountId(), job.region(), () -> driverTimedOut(job.runId(), launchedIn));
         }
 
         @Override
         public boolean cancelled() {
             return !RequestScopes.callAs(job.accountId(), job.region(),
-                    () -> waitingToStart(job.jobRunId(), launchedIn));
+                    () -> waitingToStart(job.runId(), launchedIn));
         }
     }
 }

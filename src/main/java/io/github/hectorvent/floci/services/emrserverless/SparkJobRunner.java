@@ -1,16 +1,16 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
-import io.github.hectorvent.floci.services.emrserverless.model.JobDriver;
-
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 
 /**
- * Runs a Spark job run to its end, in the {@code docker} runner mode. The job run service holds the
- * run's state and calls this off the request thread; {@link EmrServerlessSparkRunner} is the Docker
- * implementation, and a test supplies its own.
+ * Runs a Spark application to its end, in the EMR services' {@code docker} runner mode: an EMR
+ * Serverless job run, or a step of an EMR cluster. The service holds the run's state and calls this
+ * off the request thread; {@link EmrServerlessSparkRunner} is the Docker implementation, and a test
+ * supplies its own.
  */
-interface SparkJobRunner {
+public interface SparkJobRunner {
 
     /**
      * Runs {@code job} and returns how it ended, telling {@code progress} once its Spark driver runs and
@@ -23,9 +23,9 @@ interface SparkJobRunner {
      * Stops the run's driver, now or as soon as it starts, so {@link #run} returns {@link Outcome#halted};
      * a run {@link #run} has already returned from is left as it is.
      */
-    void stop(String jobRunId);
+    void stop(String runId);
 
-    /** What a run tells the job run service, and asks it, while it goes. */
+    /** What a run tells the service, and asks it, while it goes. */
     interface Progress {
 
         /** The run's Spark driver runs. */
@@ -39,13 +39,17 @@ interface SparkJobRunner {
     }
 
     /**
-     * What a run needs: its identity, the application's release, the run's execution role, its Spark
-     * submission, the {@code spark-defaults} properties that apply to it, and how long it may run
+     * What a run needs: the service it belongs to and its id there, which name its container; its account
+     * and Region; its release, and the image template and Docker network to run it in (a null template is
+     * the release's public EMR Serverless image, a null network the global default); the execution role
+     * whose credentials it gets; the {@code spark-defaults} properties that apply to it;
+     * {@code application}, what follows Floci's own settings on {@code spark-submit}'s command line (the
+     * run's options, then its application and that application's arguments); and how long it may run
      * ({@link Duration#ZERO} for no limit).
      */
-    record Job(String jobRunId, String applicationId, String accountId, String region, String releaseLabel,
-               String executionRole, JobDriver.SparkSubmit sparkSubmit, Map<String, String> sparkDefaults,
-               Duration timeout) {
+    record Job(String service, String runId, String accountId, String region, String releaseLabel,
+               String imageTemplate, String dockerNetwork, String executionRole, Map<String, String> sparkDefaults,
+               List<String> application, Duration timeout) {
     }
 
     /**
@@ -54,19 +58,19 @@ interface SparkJobRunner {
      */
     record Outcome(Integer exitCode, boolean timedOut, boolean stopped, String failure) {
 
-        static Outcome exitedWith(int exitCode) {
+        public static Outcome exitedWith(int exitCode) {
             return new Outcome(exitCode, false, false, null);
         }
 
-        static Outcome outOfTime() {
+        public static Outcome outOfTime() {
             return new Outcome(null, true, false, null);
         }
 
-        static Outcome halted() {
+        public static Outcome halted() {
             return new Outcome(null, false, true, null);
         }
 
-        static Outcome couldNotStart(String failure) {
+        public static Outcome couldNotStart(String failure) {
             return new Outcome(null, false, false, failure);
         }
     }

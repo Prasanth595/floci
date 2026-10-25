@@ -10,7 +10,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
-import io.github.hectorvent.floci.services.emrserverless.model.JobDriver;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -30,12 +29,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Runs a Spark job run's {@code spark-submit} in a container of the release's EMR Serverless image.
- * The image's own entrypoint hands over to a script EMR Serverless supplies at run time, which the
- * public image lacks, so the runner starts {@code spark-submit} itself, in local mode: the container
- * holds the driver and its executors. The container reaches Floci as the other containers Floci
- * launches do, with the run's execution role as its credentials, and S3A, which takes {@code s3://}
- * on every release, is pointed at Floci's S3.
+ * Runs a Spark application's {@code spark-submit} in a container of an EMR Serverless image, for an EMR
+ * Serverless job run or an EMR step. The image's own entrypoint hands over to a script EMR Serverless
+ * supplies at run time, which the public image lacks, so the runner starts {@code spark-submit} itself,
+ * in local mode: the container holds the driver and its executors. The container reaches Floci as the
+ * other containers Floci launches do, with the run's execution role as its credentials, and S3A, which
+ * takes {@code s3://} on every release, is pointed at Floci's S3.
  */
 @ApplicationScoped
 public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardown {
@@ -49,7 +48,6 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "public.ecr.aws/emr-serverless/spark4/%s:latest"; // partition-literal: ECR Public's registry host, where AWS publishes the base images; image-template overrides it
     // "The default behavior for shutdown is to have no grace period": immediate termination.
     private static final int STOP_TIMEOUT_SECONDS = 0;
-    private static final String SERVICE = "emr-serverless";
     // The characters a backslash escapes inside double quotes; before any other it is kept.
     private static final String DOUBLE_QUOTE_ESCAPES = "\"\\$`\n";
     // How often a running driver is looked at, as Batch's runner looks at its jobs.
@@ -92,7 +90,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     @Override
     public Outcome run(Job job, Progress progress) {
         Launch launch = new Launch();
-        launches.put(job.jobRunId(), launch);
+        launches.put(job.runId(), launch);
         Optional<SessionCreds> credentials = Optional.empty();
         Closeable logHandle = null;
         try {
@@ -100,18 +98,18 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (progress.cancelled()) {
                 return Outcome.halted();
             }
-            credentials = roleCredentials.forRole(job.executionRole(), job.accountId(), job.jobRunId());
+            credentials = roleCredentials.forRole(job.executionRole(), job.accountId(), job.runId());
             Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
-                    SERVICE, job.jobRunId(), job.accountId(), job.region()));
+                    job.service(), job.runId(), job.accountId(), job.region()));
             // The deployment that started the driver, which removeLeftoverDrivers() goes by.
             labels.put(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config));
             String endpoint = awsEnv.flociEndpoint();
-            ContainerSpec spec = containerBuilder.newContainer(image(job.releaseLabel()))
-                    .withName(ContainerStorageHelper.dockerName(config, SERVICE + "-" + job.jobRunId()))
+            ContainerSpec spec = containerBuilder.newContainer(image(job.imageTemplate(), job.releaseLabel()))
+                    .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
                     .withEntrypoint(List.of(SPARK_SUBMIT))
                     .withCmd(sparkSubmitArguments(job, endpoint))
                     .withEnv(awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()))
-                    .withDockerNetwork(config.services().emrserverless().dockerNetwork())
+                    .withDockerNetwork(Optional.ofNullable(job.dockerNetwork()))
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
                     .withLogRotation()
@@ -123,7 +121,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (launch.stopRequested || progress.cancelled()) {
                 return Outcome.halted();
             }
-            logHandle = logStreamer.attachConsoleOnly(containerId, SERVICE + ":" + job.jobRunId());
+            logHandle = logStreamer.attachConsoleOnly(containerId, job.service() + ":" + job.runId());
             progress.started();
             return awaitEnd(containerId, job, launch, progress);
         } catch (InterruptedException e) {
@@ -135,10 +133,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 // A reset removed the driver while it was being watched.
                 return Outcome.halted();
             }
-            LOG.warnv(e, "EMR Serverless job run {0} could not run", job.jobRunId());
+            LOG.warnv(e, "Spark run {0} of {1} could not run", job.runId(), job.service());
             return Outcome.couldNotStart(e.getMessage());
         } finally {
-            launches.remove(job.jobRunId(), launch);
+            launches.remove(job.runId(), launch);
             String unclaimed = launch.container.getAndSet(null);
             if (unclaimed != null) {
                 lifecycleManager.stopAndRemove(unclaimed, logHandle, STOP_TIMEOUT_SECONDS);
@@ -151,8 +149,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     @Override
-    public void stop(String jobRunId) {
-        Launch launch = launches.get(jobRunId);
+    public void stop(String runId) {
+        Launch launch = launches.get(runId);
         if (launch != null) {
             // run() reads it once the driver's container is up and at each look at the driver after, and
             // removes the driver itself: a stop makes no Docker call, so no Docker error can lose it.
@@ -176,16 +174,17 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     /**
-     * Removes the drivers an earlier Floci process left running, which no thread follows any more: their
-     * runs are {@code FAILED} once read, so nothing would ever stop them. The job run service calls this
-     * before it hands a run to {@link #run}, so every driver of this deployment it finds is a leftover.
+     * Removes the drivers of {@code service}'s runs an earlier Floci process left running, which no thread
+     * follows any more: their runs are {@code FAILED} once read, so nothing would ever stop them. The
+     * service calls this before it hands a run to {@link #run}, so every driver of this deployment it
+     * finds is a leftover.
      */
-    public void removeLeftoverDrivers() {
+    public void removeLeftoverDrivers(String service) {
         String owner = ContainerStorageHelper.ownerIdentity(config);
         ContainerStorageHelper.LabelAliases aliases = ContainerStorageHelper.CONTAINER_LABEL_ALIASES;
         try {
             List<Container> containers = aliases.listByLabels(
-                    Map.of(ContainerStorageHelper.SERVICE_LABEL, SERVICE, ContainerStorageHelper.OWNER_LABEL, owner),
+                    Map.of(ContainerStorageHelper.SERVICE_LABEL, service, ContainerStorageHelper.OWNER_LABEL, owner),
                     filter -> lifecycleManager.getDockerClient().listContainersCmd()
                             .withShowAll(true)
                             .withLabelFilter(filter)
@@ -196,26 +195,30 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 if (aliases.consistent(container.getId(), labels)
                         && aliases.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)) {
                     lifecycleManager.removeIfExists(container.getId());
-                    LOG.infov("Removed EMR Serverless driver {0}, left running by an earlier Floci process",
+                    LOG.infov("Removed {0} Spark driver {1}, left running by an earlier Floci process", service,
                             container.getId());
                 }
             }
         } catch (RuntimeException e) {
-            LOG.warnv("Could not remove the EMR Serverless drivers an earlier Floci process left: {0}",
+            LOG.warnv("Could not remove the {0} Spark drivers an earlier Floci process left: {1}", service,
                     e.getMessage());
         }
     }
 
-    String image(String releaseLabel) {
-        return config.services().emrserverless().imageTemplate()
-                .orElse(releaseLabel.startsWith("emr-spark-") ? SPARK_RUNTIME_DEFAULT_IMAGE : DEFAULT_IMAGE)
-                .formatted(releaseLabel);
+    /**
+     * The image a release's runs use: {@code imageTemplate}, with {@code %s} standing for the release
+     * label, or, when it is null, the release's public EMR Serverless image.
+     */
+    static String image(String imageTemplate, String releaseLabel) {
+        String template = imageTemplate != null ? imageTemplate
+                : releaseLabel.startsWith("emr-spark-") ? SPARK_RUNTIME_DEFAULT_IMAGE : DEFAULT_IMAGE;
+        return template.formatted(releaseLabel);
     }
 
     /**
      * {@code spark-submit}'s arguments: local mode, S3A on Floci's S3 for {@code s3://} and {@code s3a://}
-     * paths, then the run's {@code spark-defaults} and its own {@code sparkSubmitParameters}, which win
-     * over what comes before them, then the entry point and its arguments. Before release 7.10.0
+     * paths, then the run's {@code spark-defaults} and its own options, which win over what comes before
+     * them, then its application and that application's arguments. Before release 7.10.0
      * {@code s3://} is EMRFS, which ignores the endpoint setting, so it is switched to S3A. S3A writes
      * are committed through commit data the writer keeps in memory, without which EMR's committer finds
      * none and a write is silently lost.
@@ -231,22 +234,18 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         conf(arguments, "spark.hadoop.aws.glue.endpoint", flociEndpoint);
         conf(arguments, "spark.hadoop.aws.region", job.region());
         job.sparkDefaults().forEach((key, value) -> conf(arguments, key, value));
-        JobDriver.SparkSubmit sparkSubmit = job.sparkSubmit();
-        arguments.addAll(splitParameters(sparkSubmit.getSparkSubmitParameters()));
-        arguments.add(sparkSubmit.getEntryPoint());
-        if (sparkSubmit.getEntryPointArguments() != null) {
-            arguments.addAll(sparkSubmit.getEntryPointArguments());
-        }
+        arguments.addAll(job.application());
         return arguments;
     }
 
     /**
-     * {@code sparkSubmitParameters} as a POSIX shell would split them: on whitespace, except inside single
+     * {@code spark-submit} parameters given as one string, as EMR Serverless's
+     * {@code sparkSubmitParameters}, split as a POSIX shell would split them: on whitespace, except inside single
      * or double quotes. Outside quotes a backslash takes the next character as it is; inside double quotes
      * only a {@code "}, {@code \}, {@code $}, {@code `} or newline, and before any other character it is
      * kept. A backslash before a newline continues the line, and both go.
      */
-    static List<String> splitParameters(String parameters) {
+    public static List<String> splitParameters(String parameters) {
         List<String> words = new ArrayList<>();
         if (parameters == null) {
             return words;
@@ -321,7 +320,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 return Outcome.exitedWith(exitCode != null ? exitCode.intValue() : -1);
             }
             if (deadline != null && !clock.instant().isBefore(deadline)) {
-                LOG.infov("EMR Serverless job run {0} passed its execution timeout of {1}", job.jobRunId(),
+                LOG.infov("Spark run {0} of {1} passed its execution timeout of {2}", job.runId(), job.service(),
                         job.timeout());
                 progress.timedOut();
                 return Outcome.outOfTime();
