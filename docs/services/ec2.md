@@ -378,10 +378,10 @@ and `sk-ecdsa-sha2-nistp256@openssh.com`.
 
 | Action | Description |
 |--------|-------------|
-| CreateKeyPair | Creates an RSA or ED25519 key pair and returns its private key as PEM or as a PuTTY `.ppk` file. |
+| CreateKeyPair | Creates an RSA or ED25519 key pair and returns its private key as PEM or as a PuTTY `.ppk` file, with `key-pair` tags from `TagSpecification` returned in `tagSet`. |
 | DescribeKeyPairs | Lists or returns stored key pairs. |
 | DeleteKeyPair | Deletes a key pair from the local EC2 store. |
-| ImportKeyPair | Imports a public key as a local key pair. |
+| ImportKeyPair | Imports a public key as a local key pair, with `key-pair` tags from `TagSpecification` returned in `tagSet`. |
 
 `CreateKeyPair` creates a 2048-bit RSA key unless `KeyType=ed25519` asks for an ED25519 key, and
 returns its private key as PEM unless `KeyFormat=ppk` asks for a PuTTY key file, in the forms AWS
@@ -398,9 +398,9 @@ with `DryRunOperation` before any of these checks, and creates nothing either.
 | Action | Description |
 |--------|-------------|
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
-| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
-| RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
-| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. |
+| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. Applies `image` and `snapshot` tags from `TagSpecification` to the AMI and its new snapshots. |
+| RegisterImage | Registers an AMI from supplied metadata and block device mappings, with `image` tags from `TagSpecification`. |
+| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns, applying `image` and `snapshot` tags from `TagSpecification` to the copy and its new snapshots. |
 | DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account
@@ -531,7 +531,7 @@ matching how AWS itself responds.
 
 | Action | Description |
 |--------|-------------|
-| CreateNetworkAcl | Creates a network ACL in a VPC. |
+| CreateNetworkAcl | Creates a network ACL in a VPC, with `network-acl` tags from `TagSpecification`. |
 | DescribeNetworkAcls | Lists or returns stored network ACLs. |
 | DeleteNetworkAcl | Deletes a network ACL from the local EC2 store. |
 | CreateNetworkAclEntry | Adds an entry to a network ACL. |
