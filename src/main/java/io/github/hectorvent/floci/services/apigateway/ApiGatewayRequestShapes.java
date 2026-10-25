@@ -1,11 +1,8 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestShapeCheck;
 import io.github.hectorvent.floci.core.common.RequestShapeCheck.ByPosition;
-import io.github.hectorvent.floci.core.common.RequestShapeModel;
-import org.jboss.logging.Logger;
 
 import java.util.Map;
 import java.util.Set;
@@ -32,8 +29,6 @@ final class ApiGatewayRequestShapes {
 
     static final String RESOURCE_NAME = "aws/apigateway-request-shapes.json";
 
-    private static final Logger LOG = Logger.getLogger(ApiGatewayRequestShapes.class);
-
     private static final String NUMBER = "class com.amazon.coral.value.json.numbers.TruncatingBigNumber";
     private static final String BOOLEAN = "class java.lang.Boolean";
 
@@ -54,25 +49,14 @@ final class ApiGatewayRequestShapes {
             Map.of("double", "%s is not an expected Json type"),
             true);
 
-    private static final class Holder {
-        static final RequestShapeModel MODEL = RequestShapeModel.load(RESOURCE_NAME, "API Gateway request shapes");
-    }
+    private static final RequestShapeCheck.Operations OPERATIONS =
+            new RequestShapeCheck.Operations(RESOURCE_NAME, "API Gateway request shapes", MESSAGES);
 
     private ApiGatewayRequestShapes() {
     }
 
     /** Checks an API Gateway request body against the body shape of {@code operation}. */
     static void check(String operation, JsonNode request) {
-        check(Holder.MODEL, operation, request);
-    }
-
-    static void check(RequestShapeModel model, String operation, JsonNode request) {
-        String input = model.operations().get(operation);
-        if (input == null) {
-            LOG.errorv("No API Gateway input shape for operation {0} in {1}", operation, RESOURCE_NAME);
-            throw new AwsException("InternalFailure",
-                    "The request processing has failed because of an unknown error.", 500);
-        }
-        RequestShapeCheck.check(model, input, request, MESSAGES);
+        OPERATIONS.check(operation, request);
     }
 }

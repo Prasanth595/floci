@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.RequestShapeModel.Shape;
+import org.jboss.logging.Logger;
 
 import java.util.Map;
 import java.util.Set;
@@ -17,9 +18,12 @@ import java.util.TreeMap;
  * how it names a scalar of the wrong kind, by its JSON token ({@code NUMBER_VALUE},
  * {@code TRUE_VALUE}, ...) unless the service gives it another name, and whether it reads a
  * structure's members and a map's entries in body order or in name order, which decides the value
- * reported when several are wrong. A list is always read in its own order.
+ * reported when several are wrong. A list is always read in its own order. A service that checks
+ * whole request bodies holds its model and messages in an {@link Operations}.
  */
 public final class RequestShapeCheck {
+
+    private static final Logger LOG = Logger.getLogger(RequestShapeCheck.class);
 
     /** A message that depends on whether the value was read as a member or as an element. */
     public record ByPosition(String member, String element) {
@@ -78,6 +82,62 @@ public final class RequestShapeCheck {
                         Set<String> scalarTypes) {
             this(errorCode, objectNotExpected, listNotExpected, scalarForStructure, scalarForList, scalarForMap,
                     conversion, decimalToken, invalidBoolean, blobNotText, scalarTypes, Map.of(), Map.of(), false);
+        }
+    }
+
+    /**
+     * One service's request bodies: its vendored model, loaded on first use, and its {@link Messages}.
+     * A body is walked against the input shape of the operation it was sent to. An operation the model
+     * does not know is a wiring defect in Floci, so it is logged and answered as AWS answers a fault,
+     * a 500 {@code InternalFailure}.
+     */
+    public static final class Operations {
+
+        private final String resourceName;
+        private final String description;
+        private final Messages messages;
+        private volatile RequestShapeModel model;
+
+        /**
+         * @param resourceName the vendored model on the classpath, such as
+         *                     {@code aws/sesv2-request-shapes.json}
+         * @param description  names the model in a failure to load it
+         * @param messages     the service's deserializer wording
+         */
+        public Operations(String resourceName, String description, Messages messages) {
+            this.resourceName = resourceName;
+            this.description = description;
+            this.messages = messages;
+        }
+
+        /** Checks {@code request} against the input shape of {@code operation} in the vendored model. */
+        public void check(String operation, JsonNode request) {
+            check(model(), operation, request);
+        }
+
+        /** Checks {@code request} against the input shape of {@code operation} in {@code model}. */
+        public void check(RequestShapeModel model, String operation, JsonNode request) {
+            String input = model.operations().get(operation);
+            if (input == null) {
+                LOG.errorv("No input shape for operation {0} in {1}", operation, resourceName);
+                throw new AwsException("InternalFailure",
+                        "The request processing has failed because of an unknown error.", 500);
+            }
+            RequestShapeCheck.check(model, input, request, messages);
+        }
+
+        private RequestShapeModel model() {
+            RequestShapeModel loaded = model;
+            if (loaded == null) {
+                synchronized (this) {
+                    loaded = model;
+                    if (loaded == null) {
+                        loaded = RequestShapeModel.load(resourceName, description);
+                        model = loaded;
+                    }
+                }
+            }
+            return loaded;
         }
     }
 

@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService.StoredMapping;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
@@ -872,8 +873,7 @@ public class ApiGatewayController {
      */
     private JsonNode readCreateUsagePlanBody(String body) {
         if (body == null || body.isEmpty()) {
-            throw new AwsException("ValidationException", "1 validation error detected: Value null at "
-                    + "'createUsagePlanInput' failed to satisfy constraint: Member must not be null", 400);
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("createUsagePlanInput"));
         }
         JsonNode node;
         try {

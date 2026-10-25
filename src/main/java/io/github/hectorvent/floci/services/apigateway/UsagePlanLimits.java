@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan.ApiStage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan.Limits;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan.Quota;
@@ -20,7 +21,8 @@ import java.util.Objects;
  */
 public final class UsagePlanLimits {
 
-    private static final List<String> PERIODS = List.of("DAY", "WEEK", "MONTH");
+    /** In the model's order, which an input-model enum violation lists. */
+    private static final List<String> PERIODS = List.of("MONTH", "WEEK", "DAY");
     private static final BigDecimal INT_MIN = BigDecimal.valueOf(Integer.MIN_VALUE);
     private static final BigDecimal INT_MAX = BigDecimal.valueOf(Integer.MAX_VALUE);
     private static final String BAD_REQUEST = "BadRequestException";
@@ -45,7 +47,7 @@ public final class UsagePlanLimits {
         String periodViolation = periodViolation(request);
         if (periodViolation != null) {
             // CreateUsagePlan's input model refuses an unknown period before any of API Gateway's own checks.
-            throw new AwsException("ValidationException", "1 validation error detected: " + periodViolation, 400);
+            throw SmithyValidationErrors.validationException(periodViolation);
         }
         Throttle throttle = request.get("throttle") instanceof Map<?, ?> settings ? throttle(settings) : null;
         Quota quota = quotaSettings == null
@@ -79,16 +81,15 @@ public final class UsagePlanLimits {
     }
 
     /**
-     * CreateUsagePlan's input-model violation for a quota period outside the enum, without the
-     * {@code N validation error(s) detected:} prefix, or null when the period is absent or valid.
+     * CreateUsagePlan's input-model violation for a quota period outside the enum, as
+     * {@link SmithyValidationErrors#notInEnum} words it, or null when the period is absent or valid.
      */
     static String periodViolation(Map<String, Object> request) {
         Object period = request.get("quota") instanceof Map<?, ?> settings ? settings.get("period") : null;
         if (period == null || PERIODS.contains(String.valueOf(period))) {
             return null;
         }
-        return "Value '" + period + "' at 'createUsagePlanInput.quota.period' failed to satisfy constraint: "
-                + "Member must satisfy enum value set: [MONTH, WEEK, DAY]";
+        return SmithyValidationErrors.notInEnum(String.valueOf(period), "createUsagePlanInput.quota.period", PERIODS);
     }
 
     /** A field API Gateway leaves out reads 0. */

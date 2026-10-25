@@ -1,11 +1,8 @@
 package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestShapeCheck;
 import io.github.hectorvent.floci.core.common.RequestShapeCheck.ByPosition;
-import io.github.hectorvent.floci.core.common.RequestShapeModel;
-import org.jboss.logging.Logger;
 
 import java.util.Set;
 
@@ -30,8 +27,6 @@ final class SesV2RequestShapes {
 
     static final String RESOURCE_NAME = "aws/sesv2-request-shapes.json";
 
-    private static final Logger LOG = Logger.getLogger(SesV2RequestShapes.class);
-
     private static final RequestShapeCheck.Messages MESSAGES = new RequestShapeCheck.Messages(
             SesV2Json.SERIALIZATION_EXCEPTION,
             SesV2Json.OBJECT_NOT_EXPECTED,
@@ -45,25 +40,14 @@ final class SesV2RequestShapes {
             null,
             Set.of("string", "blob"));
 
-    private static final class Holder {
-        static final RequestShapeModel MODEL = RequestShapeModel.load(RESOURCE_NAME, "SES v2 request shapes");
-    }
+    private static final RequestShapeCheck.Operations OPERATIONS =
+            new RequestShapeCheck.Operations(RESOURCE_NAME, "SES v2 request shapes", MESSAGES);
 
     private SesV2RequestShapes() {
     }
 
     /** Checks an SES v2 request body against the body shape of {@code operation}. */
     static void check(String operation, JsonNode request) {
-        check(Holder.MODEL, operation, request);
-    }
-
-    static void check(RequestShapeModel model, String operation, JsonNode request) {
-        String input = model.operations().get(operation);
-        if (input == null) {
-            LOG.errorv("No SES v2 input shape for operation {0} in {1}", operation, RESOURCE_NAME);
-            throw new AwsException("InternalFailure",
-                    "The request processing has failed because of an unknown error.", 500);
-        }
-        RequestShapeCheck.check(model, input, request, MESSAGES);
+        OPERATIONS.check(operation, request);
     }
 }

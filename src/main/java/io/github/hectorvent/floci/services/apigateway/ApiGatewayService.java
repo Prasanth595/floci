@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -1505,12 +1506,10 @@ public class ApiGatewayService implements ResourceProvider {
             violations.add(periodViolation);
         }
         if (request.get("name") == null) {
-            violations.add("Value null at 'createUsagePlanInput.name' failed to satisfy constraint: "
-                    + "Member must not be null");
+            violations.add(SmithyValidationErrors.notNull("createUsagePlanInput.name"));
         }
         if (!violations.isEmpty()) {
-            throw new AwsException("ValidationException", violations.size() + " validation error"
-                    + (violations.size() == 1 ? "" : "s") + " detected: " + String.join("; ", violations), 400);
+            throw SmithyValidationErrors.validationException(violations);
         }
         if (String.valueOf(request.get("name")).isEmpty()) {
             throw new AwsException("BadRequestException", "Usage Plan name must be specified", 400);

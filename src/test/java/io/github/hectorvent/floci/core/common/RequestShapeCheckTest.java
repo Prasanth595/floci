@@ -23,7 +23,7 @@ class RequestShapeCheckTest {
 
     private static final RequestShapeModel MODEL = parse("""
             {
-              "operations": {},
+              "operations": {"Put": "Request"},
               "shapes": {
                 "Request": {"type": "structure", "members": {
                   "Name": "Text", "Count": "Number", "On": "Flag", "Data": "Bytes", "When": "Time", "Rate": "Fraction",
@@ -151,6 +151,37 @@ class RequestShapeCheckTest {
         String list = "{\"Names\": [true, 5]}";
         assertRefused(list, "TRUE_VALUE as String");
         assertRefused(list, sorted, "TRUE_VALUE as String");
+    }
+
+    @Test
+    void operationsWalkTheInputShapeOfAKnownOperation() throws Exception {
+        RequestShapeCheck.Operations operations =
+                new RequestShapeCheck.Operations("aws/fixture-request-shapes.json", "fixture request shapes", MESSAGES);
+        AwsException e = assertThrows(AwsException.class,
+                () -> operations.check(MODEL, "Put", MAPPER.readTree("{\"Name\": 5}")));
+        assertEquals("Refused", e.getErrorCode());
+        assertEquals("NUMBER_VALUE as String", e.getMessage());
+        operations.check(MODEL, "Put", MAPPER.readTree("{\"Name\": \"n\"}"));
+    }
+
+    @Test
+    void operationsAnswerAnUnknownOperationAsAnInternalFailure() {
+        RequestShapeCheck.Operations operations =
+                new RequestShapeCheck.Operations("aws/fixture-request-shapes.json", "fixture request shapes", MESSAGES);
+        AwsException e = assertThrows(AwsException.class,
+                () -> operations.check(MODEL, "NoSuchOperation", MAPPER.readTree("{}")));
+        assertEquals("InternalFailure", e.getErrorCode());
+        assertEquals(500, e.getHttpStatus());
+        assertEquals("The request processing has failed because of an unknown error.", e.getMessage());
+    }
+
+    @Test
+    void operationsLoadTheVendoredModelOnFirstCheckNotWhenBuilt() {
+        RequestShapeCheck.Operations missing =
+                new RequestShapeCheck.Operations("aws/no-such-request-shapes.json", "missing request shapes", MESSAGES);
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> missing.check("Put", MAPPER.readTree("{}")));
+        assertEquals("missing request shapes resource not found: aws/no-such-request-shapes.json", e.getMessage());
     }
 
     private static void assertRefused(String body, String message) {
