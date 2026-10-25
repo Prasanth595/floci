@@ -18,10 +18,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -246,7 +244,7 @@ public class EksPodIdentityAssociationService {
         String after = "";
         if (nextToken != null && !nextToken.isBlank()) {
             try {
-                String decoded = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+                String decoded = Base64Url.decode(nextToken);
                 if (!decoded.startsWith(prefix + "\n")) {
                     throw invalid("nextToken does not belong to this cluster");
                 }
