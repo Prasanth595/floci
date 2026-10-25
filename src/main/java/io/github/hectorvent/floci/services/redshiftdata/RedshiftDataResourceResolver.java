@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessRuntime;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -83,11 +84,22 @@ class RedshiftDataResourceResolver {
         String secretArn = request.get("SecretArn").asText();
         DatabaseSecretCredentials creds = secretCredentials(secretArn, region);
         String user = creds.username();
-        if (workgroup.adminPasswordSecretArn() != null && workgroup.adminPasswordSecretArn().equals(secretArn)) {
+        if (isManagedAdminSecret(secretArn, workgroup.adminPasswordSecretArn(), region)) {
             user = workgroup.masterUsername();
         }
         return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
                 user, creds.password(), spectrum);
+    }
+
+    private boolean isManagedAdminSecret(String secretArn, String managedSecretArn, String region) {
+        if (managedSecretArn == null) {
+            return false;
+        }
+        if (managedSecretArn.equals(secretArn)) {
+            return true;
+        }
+        Secret resolvedSecret = secretsManagerService.describeSecret(secretArn, region);
+        return resolvedSecret != null && managedSecretArn.equals(resolvedSecret.getArn());
     }
 
     private DatabaseSecretCredentials secretCredentials(String secretArn, String region) {

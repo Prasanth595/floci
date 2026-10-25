@@ -140,9 +140,11 @@ class RedshiftDataAdminSecretIntegrationTest {
         JsonNode value = mapper.readTree(secrets.getSecretValue(request -> request
                 .secretId(namespace.adminPasswordSecretArn())).secretString());
         assertEquals("renamed_admin", value.path("username").asText());
+        String partialSecretArn = namespace.adminPasswordSecretArn().substring(0,
+                namespace.adminPasswordSecretArn().length() - 7);
 
         ExecuteStatementResponse executed = data.executeStatement(request -> request.workgroupName(workgroup)
-                .secretArn(namespace.adminPasswordSecretArn()).database("analytics")
+                .secretArn(partialSecretArn).database("analytics")
                 .waitTimeSeconds(30).sql("SELECT 101 AS answer"));
         DescribeStatementResponse described = data.describeStatement(request -> request.id(executed.id()));
         assertEquals(StatusString.FINISHED, described.status(), described.error());
