@@ -375,6 +375,10 @@ public final class UsagePlanLimits {
             Map<String, Throttle> patched = methods == null ? new LinkedHashMap<>() : methods;
             int slash = target.lastIndexOf('/');
             if ("remove".equals(op)) {
+                // As for add and replace, a path that names no method is invalid, before any key is looked up.
+                if (methodKey(target)[1].isEmpty()) {
+                    throw invalidPatchPath(op, path);
+                }
                 if (patched.remove(target) == null) {
                     throw new AwsException("NotFoundException", "Method throttle does not exist for {resourcePath: "
                             + (slash < 0 ? target : target.substring(0, slash)) + ", method: "

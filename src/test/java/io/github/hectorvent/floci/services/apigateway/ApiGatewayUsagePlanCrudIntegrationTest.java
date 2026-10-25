@@ -665,6 +665,37 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                 .body("quota.period", equalTo("MONTH"));
     }
 
+    // Measured on API Gateway: removing a method throttle path that names no method is an invalid path.
+    @Test
+    void removingAMethodThrottlePathThatNamesNoMethodIsAnInvalidPathAndLeavesTheStage() {
+        String usagePlanId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"remove-no-method\",\"throttle\":{\"burstLimit\":20,\"rateLimit\":10},"
+                        + "\"apiStages\":[{\"apiId\":\"a1\",\"stage\":\"v1\","
+                        + "\"throttle\":{\"/pets/GET\":{\"burstLimit\":10,\"rateLimit\":5}}}]}")
+                .post("/usageplans")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"remove\",\"path\":\"/apiStages/a1:v1/throttle/nope\"}]}")
+                .patch("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Invalid patch path  '/apiStages/a1:v1/throttle/nope' specified for op "
+                        + "'remove'. Must be one of: [/apiStages, /quota, /throttle, /productCode, "
+                        + "/apiStages/<apidId:stageName>/throttle/<resourcePath>/<httpMethod>, "
+                        + "/apiStages/<apidId:stageName>/throttle]"));
+
+        given().get("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(200)
+                .body("apiStages[0].throttle['/pets/GET'].burstLimit", equalTo(10));
+    }
+
     private static String createNamedPlan(String name) {
         return given().contentType(ContentType.JSON)
                 .body("{\"name\":\"" + name + "\"}")

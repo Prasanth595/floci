@@ -13,6 +13,7 @@ import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -595,6 +596,23 @@ class UsagePlanLimitsTest {
     private static String opViolation(String op, int index) {
         return "Value '" + op + "' at 'updateUsagePlanInput.patchOperations." + index + ".member.op' failed to satisfy "
                 + "constraint: Member must satisfy enum value set: [add, remove, move, test, replace, copy]";
+    }
+
+    // Measured on API Gateway: a remove whose method throttle path names no method is an invalid path, as for
+    // add and replace, before the key is looked up.
+    @ParameterizedTest
+    @ValueSource(strings = {"/nope", "//pets/", "/GET", "//GET", "/"})
+    void removingAMethodThrottlePathThatNamesNoMethodIsAnInvalidPath(String suffix) {
+        String path = "/apiStages/a:v1/throttle" + suffix;
+        assertRefused(() -> patch(fixture(), "remove", path, null), "BadRequestException", 400,
+                invalidPath("remove", path, REMOVE_PATHS));
+    }
+
+    @Test
+    void removingAMethodThrottleThePlanLacksIsStillNotFound() {
+        assertRefused(() -> patch(fixture(), "remove", "/apiStages/a:v1/throttle//pets/POST", null),
+                "NotFoundException", 404,
+                "Method throttle does not exist for {resourcePath: /pets, method: POST} for usageplan plan1");
     }
 
     @Test
