@@ -4290,6 +4290,14 @@ public class CognitoService implements ResourceProvider {
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
         } catch (CustomEmailSenderException e) {
+            for (String attributeName : attributes.keySet()) {
+                if (isVerifiableContactAttribute(attributeName)
+                        && !Objects.equals(attributeVerificationDestination(currentUser, attributeName),
+                                attributeVerificationDestination(updatedUser, attributeName))) {
+                    verificationCodeService.invalidatePrevious(
+                            poolId, currentUser.getUsername(), verificationPurpose(attributeName));
+                }
+            }
             updatedUser.setLastModifiedDate(System.currentTimeMillis() / 1000L);
             userStore.put(userKey(poolId, updatedUser.getUsername()), updatedUser);
             throw e;

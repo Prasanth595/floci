@@ -596,6 +596,9 @@ A failed hand-over of its code to `CustomEmailSender` still keeps the complete
 attribute update, including other attributes in the same request. The request
 returns the delivery error, and the undelivered code is withdrawn so another
 verification code can be requested after the sender is working again.
+Codes issued for earlier destinations of changed contacts are also withdrawn,
+including when the replacement is pending. Codes for unchanged contacts that
+the failed delivery did not reach remain usable.
 A verification code is still sent to the replacement value, but Cognito no
 longer retains or exposes the old value. For alias attributes, the old alias is
 removed immediately and the replacement becomes usable for sign-in only after
