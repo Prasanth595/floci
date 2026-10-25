@@ -8,7 +8,9 @@ import io.github.hectorvent.floci.services.bedrockagentcore.model.Branch;
 import io.github.hectorvent.floci.services.bedrockagentcore.model.MemoryEvent;
 import io.github.hectorvent.floci.services.bedrockagentcore.model.PayloadType;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreMemoryService;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreMemoryService.MemoryDeleted;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -18,6 +20,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * AgentCore Memory events: the data plane behind {@code CreateEvent}, {@code ListEvents},
@@ -167,6 +170,12 @@ public class BedrockAgentCoreEventService {
         eventStore.delete(key);
         LOG.debugv("DeleteEvent: memory={0} event={1}", memoryId, eventId);
         return eventId;
+    }
+
+    void onMemoryDeleted(@Observes MemoryDeleted deleted) {
+        String prefix = deleted.memoryId() + "::";
+        eventStore.deleteAllAtomically(eventStore.keys().stream()
+                .filter(k -> k.startsWith(prefix)).collect(Collectors.toSet()));
     }
 
     // ── validation ───────────────────────────────────────────────

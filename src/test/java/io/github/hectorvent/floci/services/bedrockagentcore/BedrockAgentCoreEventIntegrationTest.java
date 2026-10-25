@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.bedrockagentcore;
 
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreMemoryService.MemoryDeleted;
+import io.quarkus.arc.Arc;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Test;
@@ -11,6 +13,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * AgentCore Memory events.
@@ -245,5 +248,11 @@ class BedrockAgentCoreEventIntegrationTest {
         given().contentType(ContentType.JSON).body("{\"nextToken\":\"not-a-real-token\"}")
                 .when().post("/memories/" + memoryId + "/actor/actor1/sessions/sess1")
                 .then().statusCode(400);
+    }
+
+    @Test
+    void eventServiceObservesMemoryDeletion() {
+        assertTrue(Arc.container().beanManager().resolveObserverMethods(new MemoryDeleted("m")).stream()
+                .anyMatch(observer -> observer.getBeanClass() == BedrockAgentCoreEventService.class));
     }
 }

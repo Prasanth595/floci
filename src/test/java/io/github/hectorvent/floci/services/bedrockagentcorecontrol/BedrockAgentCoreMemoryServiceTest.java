@@ -3,11 +3,13 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreMemoryService.MemoryDeleted;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.Memory;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -126,6 +128,17 @@ class BedrockAgentCoreMemoryServiceTest {
         // A different token against the now-missing id still 404s.
         assertEquals(404, assertThrows(AwsException.class,
                 () -> service.delete(id, "other", REGION)).getHttpStatus());
+    }
+
+    @Test
+    void deleteAnnouncesTheMemoryOnceAndNotOnReplay() {
+        List<MemoryDeleted> deleted = new ArrayList<>();
+        service = new BedrockAgentCoreMemoryService(
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), clock, deleted::add);
+        String id = create("myMemory").getMemoryId();
+        service.delete(id, "del-1", REGION);
+        service.delete(id, "del-1", REGION);
+        assertEquals(List.of(new MemoryDeleted(id)), deleted);
     }
 
     @Test
