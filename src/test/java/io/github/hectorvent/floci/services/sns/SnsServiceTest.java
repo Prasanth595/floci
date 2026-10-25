@@ -70,6 +70,18 @@ class SnsServiceTest {
     }
 
     @Test
+    void createTopicWithStatusReportsWhetherTheTopicWasCreated() {
+        SnsService.TopicCreation first = snsService.createTopicWithStatus(
+                "status-topic", null, null, REGION);
+        SnsService.TopicCreation second = snsService.createTopicWithStatus(
+                "status-topic", null, null, REGION);
+
+        assertTrue(first.created());
+        assertFalse(second.created());
+        assertSame(first.topic(), second.topic());
+    }
+
+    @Test
     void smsAttributesAreScopedToAccountAndRegion() {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("111122223333", "444455556666", "111122223333");
@@ -248,6 +260,19 @@ class SnsServiceTest {
         assertEquals("sqs", sub.getProtocol());
         assertEquals(ACCOUNT, sub.getOwner());
         assertEquals(Map.of("attr1", "value1", "attr2", "value2"), sub.getAttributes());
+    }
+
+    @Test
+    void subscribeWithStatusReportsWhetherTheSubscriptionWasCreated() {
+        Topic topic = snsService.createTopic("status-topic", null, null, REGION);
+        SnsService.SubscriptionCreation first = snsService.subscribeWithStatus(
+                topic.getTopicArn(), "sqs", "http://localhost:4566/queue", REGION, Map.of());
+        SnsService.SubscriptionCreation second = snsService.subscribeWithStatus(
+                topic.getTopicArn(), "sqs", "http://localhost:4566/queue", REGION, Map.of());
+
+        assertTrue(first.created());
+        assertFalse(second.created());
+        assertSame(first.subscription(), second.subscription());
     }
 
     @Test

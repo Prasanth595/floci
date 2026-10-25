@@ -2032,7 +2032,7 @@ public class CognitoService implements ResourceProvider {
     private void validateLogConfigurations(List<Map<String, Object>> configs) {
         if (configs == null) {
             throw validationErrors(List.of(
-                    "Value null at 'logConfigurations' failed to satisfy constraint: Member must not be null"));
+                    SmithyValidationErrors.notNull("logConfigurations")));
         }
 
         List<String> errors = new ArrayList<>();
@@ -4245,34 +4245,19 @@ public class CognitoService implements ResourceProvider {
 
         CognitoUser updatedUser = MAPPER.convertValue(currentUser, CognitoUser.class);
         List<Map<String, Object>> deliveryDetails = new ArrayList<>();
+        Map<String, String> contacts = new LinkedHashMap<>();
 
-        boolean issued = false;
-        try {
-            for (Map.Entry<String, String> attribute : attributes.entrySet()) {
-                String attributeName = attribute.getKey();
-                String value = attribute.getValue();
-
-                if (blankToNull(value) == null) {
-                    // AWS: "To delete an attribute from the user, submit the attribute in
-                    // your API request with a blank value."
-                    updatedUser.getAttributes().remove(attributeName);
-                    updatedUser.getAttributes().remove(attributeName + "_verified");
-                    updatedUser.getPendingAttributes().remove(attributeName);
-                    continue;
-                }
-
-                if (!isVerifiableContactAttribute(attributeName)) {
-                    updatedUser.getAttributes().put(attributeName, value);
-                    continue;
-                }
-
-                VerificationCode.Purpose purpose = verificationPurpose(attributeName);
-                ensureVerificationWiring();
-                String verificationCode = verificationCodeService.issue(
-                        poolId, currentUser.getUsername(), purpose, Duration.ofHours(24));
-                dispatchAttributeVerificationCode(pool, clientId, currentUser, attributeName, value,
-                        purpose, verificationCode, "CustomEmailSender_UpdateUserAttribute", clientMetadata, messages);
-
+        for (Map.Entry<String, String> attribute : attributes.entrySet()) {
+            String attributeName = attribute.getKey();
+            String value = attribute.getValue();
+            if (blankToNull(value) == null) {
+                updatedUser.getAttributes().remove(attributeName);
+                updatedUser.getAttributes().remove(attributeName + "_verified");
+                updatedUser.getPendingAttributes().remove(attributeName);
+            } else if (!isVerifiableContactAttribute(attributeName)) {
+                updatedUser.getAttributes().put(attributeName, value);
+            } else {
+                contacts.put(attributeName, value);
                 if (requiresVerificationBeforeUpdate(pool, attributeName)) {
                     updatedUser.getPendingAttributes().put(attributeName, value);
                 } else {
@@ -4280,6 +4265,20 @@ public class CognitoService implements ResourceProvider {
                     updatedUser.getAttributes().put(attributeName + "_verified", "false");
                     updatedUser.getPendingAttributes().remove(attributeName);
                 }
+            }
+        }
+
+        boolean issued = false;
+        try {
+            for (Map.Entry<String, String> attribute : contacts.entrySet()) {
+                String attributeName = attribute.getKey();
+                String value = attribute.getValue();
+                VerificationCode.Purpose purpose = verificationPurpose(attributeName);
+                ensureVerificationWiring();
+                String verificationCode = verificationCodeService.issue(
+                        poolId, currentUser.getUsername(), purpose, Duration.ofHours(24));
+                dispatchAttributeVerificationCode(pool, clientId, currentUser, attributeName, value,
+                        purpose, verificationCode, "CustomEmailSender_UpdateUserAttribute", clientMetadata, messages);
 
                 Map<String, Object> detail = new LinkedHashMap<>();
                 detail.put("AttributeName", attributeName);
@@ -4290,13 +4289,25 @@ public class CognitoService implements ResourceProvider {
             issued = true;
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
+        } catch (CustomEmailSenderException e) {
+            for (String attributeName : attributes.keySet()) {
+                if (isVerifiableContactAttribute(attributeName)
+                        && !Objects.equals(attributeVerificationDestination(currentUser, attributeName),
+                                attributeVerificationDestination(updatedUser, attributeName))) {
+                    verificationCodeService.invalidatePrevious(
+                            poolId, currentUser.getUsername(), verificationPurpose(attributeName));
+                }
+            }
+            updatedUser.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, updatedUser.getUsername()), updatedUser);
+            throw e;
         } catch (AwsException e) {
             throw e;
         } catch (RuntimeException e) {
             throw codeDeliveryFailure();
         } finally {
             if (!issued) {
-                // Nothing is stored, so the codes already issued for messages still to send go with it.
+                // A failed sender hand-over must not leave earlier queued codes live but unsent.
                 messages.forEach(message -> verificationCodeService.invalidatePrevious(
                         poolId, currentUser.getUsername(), message.purpose()));
             }
@@ -5608,8 +5619,7 @@ public class CognitoService implements ResourceProvider {
             System.arraycopy(parts, usernameEnd, fields, 2, 3);
             fields[5] = hasAuthTime ? parts[end].substring(REFRESH_TOKEN_AUTH_TIME_FIELD.length()) : "";
             if (hasScopes) {
-                fields[6] = new String(Base64.getUrlDecoder().decode(
-                        parts[parts.length - 1].substring(REFRESH_TOKEN_SCOPE_FIELD.length())), StandardCharsets.UTF_8);
+                fields[6] = Base64Url.decode(parts[parts.length - 1].substring(REFRESH_TOKEN_SCOPE_FIELD.length()));
             }
             return fields;
         } catch (Exception ignored) { }

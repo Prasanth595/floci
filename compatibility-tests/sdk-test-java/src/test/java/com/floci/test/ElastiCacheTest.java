@@ -35,6 +35,8 @@ import software.amazon.awssdk.services.elasticache.model.UserAlreadyExistsExcept
 import software.amazon.awssdk.services.elasticache.model.UserGroupNotFoundException;
 import software.amazon.awssdk.services.elasticache.model.UserNotFoundException;
 
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -447,9 +449,15 @@ class ElastiCacheTest {
         Assumptions.assumeTrue(userCreated && userId != null, "User must exist from earlier ordered test");
     }
 
-    private static Socket openSocket(int port) throws IOException {
-        Socket socket = new Socket(TestFixtures.proxyHost(), port);
+    /** The group has an auth token, so it is encrypted in transit and its endpoint takes TLS only. */
+    private static Socket openSocket(int port) throws Exception {
+        SSLSocket socket = (SSLSocket) TestFixtures.flociCaTrust().getSocketFactory()
+                .createSocket(TestFixtures.proxyHost(), port);
+        SSLParameters parameters = socket.getSSLParameters();
+        parameters.setEndpointIdentificationAlgorithm("HTTPS");
+        socket.setSSLParameters(parameters);
         socket.setSoTimeout(5000);
+        socket.startHandshake();
         return socket;
     }
 

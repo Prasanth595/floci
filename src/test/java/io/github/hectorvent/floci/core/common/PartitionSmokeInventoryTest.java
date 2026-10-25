@@ -31,7 +31,9 @@ class PartitionSmokeInventoryTest {
     private static final Path EXEMPTIONS = Path.of("src/test/resources/partition/smoke-exemptions.tsv");
     private static final Pattern MINTS = Pattern.compile(
             "buildArn\\(|buildGlobalArn\\(|\\bArn\\.of\\(|\\bArn\\.global\\(|\\bnew (AwsArnUtils\\.)?Arn\\("
-                    + "|dnsSuffixFor\\(|AwsEndpoints\\.\\w+\\(");
+                    + "|dnsSuffixFor\\(|AwsEndpoints\\.\\w+\\("
+                    // An ARN concatenated by hand mints as surely as Arn.of; a PARTITION_REGEX pattern only matches one.
+                    + "|\"arn:\"\\s*\\+(?!\\s*(?:AwsArnUtils\\s*\\.\\s*)?PARTITION_REGEX\\b)");
 
     @Test
     void everyMintingPackageIsCoveredOrExempted() {

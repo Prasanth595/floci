@@ -215,26 +215,23 @@ class SesBulkV1IntegrationTest {
         }
     }
 
+    // AWS counts the destinations before it looks the template up (probed 2026-10-24).
     @Test
     @Order(8)
-    void sendBulkTemplatedEmail_destinationsExceeds50_returnsMessageRejected() {
-        RequestSpecification spec = given()
+    void sendBulkTemplatedEmail_destinationsExceed50_isCountedBeforeTheTemplateLookup() {
+        destinations(given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", "bulk@example.com")
-            .formParam("Template", "v1-bulk-welcome");
-        for (int i = 1; i <= 51; i++) {
-            spec = spec.formParam(
-                    "Destinations.member." + i + ".Destination.ToAddresses.member.1",
-                    "user" + i + "@example.com");
-        }
-        spec
+            .formParam("Template", "ghost"), 51)
         .when()
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>MessageRejected</Code>"));
+            .body(containsString("<Code>InvalidParameterValue</Code>"))
+            .body(containsString(
+                    "<Message>You must specify at least 1 destination, and no more than 50 destinations</Message>"));
     }
 
     @Test
@@ -313,5 +310,32 @@ class SesBulkV1IntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("<Code>MessageRejected</Code>"));
+    }
+
+    @Test
+    @Order(13)
+    void sendBulkTemplatedEmail_fiftyDestinations_sendsEachDestination() {
+        String body = destinations(given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendBulkTemplatedEmail")
+            .formParam("Source", "bulk@example.com")
+            .formParam("Template", "v1-bulk-welcome")
+            .formParam("DefaultTemplateData", "{\"name\":\"X\",\"team\":\"floci\"}"), 50)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        assertEquals(50L, body.split("<Status>Success</Status>", -1).length - 1L);
+    }
+
+    private static RequestSpecification destinations(RequestSpecification spec, int count) {
+        for (int i = 1; i <= count; i++) {
+            spec = spec.formParam("Destinations.member." + i + ".Destination.ToAddresses.member.1",
+                    "user" + i + "@example.com");
+        }
+        return spec;
     }
 }

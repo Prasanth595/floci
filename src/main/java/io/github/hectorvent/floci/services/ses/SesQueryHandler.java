@@ -779,8 +779,6 @@ public class SesQueryHandler {
                     "Template or TemplateArn is required.", 400);
         }
         String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
-        EmailTemplate template = templateService.getTemplate(resolvedName, region);
-        JsonNode defaultTemplateData = parseTemplateData(defaultDataRaw);
 
         List<BulkEmailEntry> entries = new ArrayList<>();
         for (int i = 1; ; i++) {
@@ -801,6 +799,10 @@ public class SesQueryHandler {
             throw new AwsException("InvalidParameterValue",
                     "At least one destination is required.", 400);
         }
+        // AWS counts the destinations before it looks the template up (probe-confirmed).
+        SesService.requireBulkDestinationCount(entries.size());
+        EmailTemplate template = templateService.getTemplate(resolvedName, region);
+        JsonNode defaultTemplateData = parseTemplateData(defaultDataRaw);
 
         String configurationSetName = getParam(params, "ConfigurationSetName");
         String returnPath = getParam(params, "ReturnPath");

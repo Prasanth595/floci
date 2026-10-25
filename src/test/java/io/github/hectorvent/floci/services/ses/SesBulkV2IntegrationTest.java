@@ -13,6 +13,7 @@ import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -25,6 +26,9 @@ class SesBulkV2IntegrationTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
+
+    private static final String DESTINATION_COUNT_MESSAGE =
+            "You must specify at least 1 destination, and no more than 50 destinations";
 
     @Test
     @Order(1)
@@ -234,7 +238,8 @@ class SesBulkV2IntegrationTest {
             .post("/v2/email/outbound-bulk-emails")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo(DESTINATION_COUNT_MESSAGE));
     }
 
     @Test
@@ -261,13 +266,7 @@ class SesBulkV2IntegrationTest {
 
     @Test
     @Order(7)
-    void sendBulkEmail_entriesExceeds50_returnsMessageRejected() {
-        StringBuilder entries = new StringBuilder();
-        for (int i = 1; i <= 51; i++) {
-            if (i > 1) entries.append(",");
-            entries.append("{\"Destination\":{\"ToAddresses\":[\"user")
-                    .append(i).append("@example.com\"]}}");
-        }
+    void sendBulkEmail_entriesExceeds50_returnsBadRequest() {
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
@@ -279,12 +278,13 @@ class SesBulkV2IntegrationTest {
                   },
                   "BulkEmailEntries": [%s]
                 }
-                """.formatted(entries))
+                """.formatted(entries(51)))
         .when()
             .post("/v2/email/outbound-bulk-emails")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("MessageRejected"));
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo(DESTINATION_COUNT_MESSAGE));
     }
 
     @Test
@@ -333,8 +333,24 @@ class SesBulkV2IntegrationTest {
     }
 
     @ParameterizedTest(name = "{0}")
-    @MethodSource("wrongTypeSendBulkEmailBodies")
+    @MethodSource("io.github.hectorvent.floci.services.ses.SesV2SerializationErrors#nonObjectBodies")
     @Order(12)
+    void sendBulkEmail_nonObjectBody_isASerializationException(String body, String message) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo(message));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("wrongTypeSendBulkEmailBodies")
+    @Order(13)
     void sendBulkEmail_wrongMemberType_returnsSerializationException(String label, String body) {
         given()
             .contentType("application/json")
@@ -350,9 +366,6 @@ class SesBulkV2IntegrationTest {
     static Stream<Arguments> malformedSendBulkEmailBodies() {
         String validDefaultTemplate = "\"DefaultContent\": {\"Template\": {\"TemplateName\": \"v2-bulk-welcome\", \"TemplateData\": \"{\\\"team\\\":\\\"floci\\\",\\\"name\\\":\\\"X\\\"}\"}}";
         return Stream.of(
-                Arguments.of("body is array", "[1,2,3]"),
-                Arguments.of("body is JSON null literal", "null"),
-                Arguments.of("body is JSON string", "\"hello\""),
                 Arguments.of("BulkEmailEntries element is null", """
                     {
                       "FromEmailAddress": "bulk@example.com",
@@ -480,5 +493,149 @@ class SesBulkV2IntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("MessageRejected"));
+    }
+
+    @Test
+    @Order(14)
+    void sendBulkEmail_fiftyEntries_sendsEachEntry() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "FromEmailAddress": "bulk@example.com",
+                  "DefaultContent": {
+                    "Template": {
+                      "TemplateName": "v2-bulk-welcome",
+                      "TemplateData": "{\\"name\\":\\"X\\",\\"team\\":\\"floci\\"}"
+                    }
+                  },
+                  "BulkEmailEntries": [%s]
+                }
+                """.formatted(entries(50)))
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(200)
+            .body("BulkEmailEntryResults", hasSize(50))
+            .body("BulkEmailEntryResults.Status", everyItem(equalTo("SUCCESS")));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("missingEntriesMembers")
+    @Order(15)
+    void sendBulkEmail_missingEntries_isAModelViolation(String label, String entriesMember) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "FromEmailAddress": "bulk@example.com",
+                  "DefaultContent": {
+                    "Template": {"TemplateName": "v2-bulk-welcome"}
+                  }%s
+                }
+                """.formatted(entriesMember))
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("1 validation error detected: Value at 'bulkEmailEntries' "
+                    + "failed to satisfy constraint: Member must not be null"));
+    }
+
+    static Stream<Arguments> missingEntriesMembers() {
+        return Stream.of(
+                Arguments.of("absent", ""),
+                Arguments.of("null", ", \"BulkEmailEntries\": null"));
+    }
+
+    // AWS counts the entries before it resolves the stored template, the configuration set and the
+    // tenant, each of which would otherwise answer 404 (probed 2026-10-24).
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("countBeforeLookupBodies")
+    @Order(16)
+    void sendBulkEmail_entryCountIsCheckedBeforeLookups(String label, String body) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo(DESTINATION_COUNT_MESSAGE));
+    }
+
+    static Stream<Arguments> countBeforeLookupBodies() {
+        String inline = "\"DefaultContent\": {\"Template\": {\"TemplateContent\": {\"Subject\": \"s\", \"Text\": \"t\"}}}";
+        return Stream.of(
+                Arguments.of("ghost stored template", """
+                    {"FromEmailAddress": "bulk@example.com",
+                     "DefaultContent": {"Template": {"TemplateName": "ghost-template"}},
+                     "BulkEmailEntries": [%s]}
+                    """.formatted(entries(51))),
+                Arguments.of("ghost stored template by ARN", """
+                    {"FromEmailAddress": "bulk@example.com",
+                     "DefaultContent": {"Template": {
+                       "TemplateArn": "arn:aws:ses:us-east-1:000000000000:template/ghost-template"}},
+                     "BulkEmailEntries": [%s]}
+                    """.formatted(entries(51))),
+                Arguments.of("ghost configuration set", """
+                    {"FromEmailAddress": "bulk@example.com", "ConfigurationSetName": "ghost-cs", %s,
+                     "BulkEmailEntries": [%s]}
+                    """.formatted(inline, entries(51))),
+                Arguments.of("ghost tenant", """
+                    {"FromEmailAddress": "bulk@example.com", "TenantName": "ghost-tenant", %s,
+                     "BulkEmailEntries": [%s]}
+                    """.formatted(inline, entries(51))),
+                Arguments.of("empty entries with a ghost tenant", """
+                    {"FromEmailAddress": "bulk@example.com", "TenantName": "ghost-tenant", %s,
+                     "BulkEmailEntries": []}
+                    """.formatted(inline)));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("checkedBeforeCountBodies")
+    @Order(17)
+    void sendBulkEmail_earlierChecksWinOverEntryCount(String label, String body, String message) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo(message));
+    }
+
+    static Stream<Arguments> checkedBeforeCountBodies() {
+        return Stream.of(
+                Arguments.of("malformed From", """
+                    {"FromEmailAddress": "not an address",
+                     "DefaultContent": {"Template": {"TemplateContent": {"Subject": "s", "Text": "t"}}},
+                     "BulkEmailEntries": [%s]}
+                    """.formatted(entries(51)), "Invalid email address<not an address>."),
+                Arguments.of("empty inline content", """
+                    {"FromEmailAddress": "bulk@example.com",
+                     "DefaultContent": {"Template": {"TemplateContent": {}}},
+                     "BulkEmailEntries": [%s]}
+                    """.formatted(entries(51)), "Template must have at least a subject, text, or html part."));
+    }
+
+    private static String entries(int count) {
+        StringBuilder entries = new StringBuilder();
+        for (int i = 1; i <= count; i++) {
+            if (i > 1) {
+                entries.append(",");
+            }
+            entries.append("{\"Destination\":{\"ToAddresses\":[\"user")
+                    .append(i).append("@example.com\"]}}");
+        }
+        return entries.toString();
     }
 }

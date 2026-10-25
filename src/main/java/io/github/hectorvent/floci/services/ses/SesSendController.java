@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.ses;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -41,8 +40,8 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 
 /**
  * REST JSON controller for the three SES V2 send endpoints:
@@ -93,8 +92,7 @@ public class SesSendController {
                         "Account sending is disabled.", 400);
             }
 
-            JsonNode request = objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("SendEmail", request);
             validateTrackingOverrides(request);
 
@@ -162,12 +160,12 @@ public class SesSendController {
                 List<MessageAttachment> attachments =
                         parseAttachmentsArray(simple.path("Attachments"), "content.simple.attachments");
                 requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
-                sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
-                        null, regionResolver.getAccountId(), region);
-                messageId = sesService.sendEmail(sendRequest
+                SendEmailRequest simpleRequest = sendRequest
                         .content(new EmailContent.Simple(subject, bodyText, bodyHtml, additionalHeaders,
                                 attachments))
-                        .build());
+                        .build();
+                sesService.checkTenantSendAccess(simpleRequest, null, regionResolver.getAccountId());
+                messageId = sesService.sendEmail(simpleRequest);
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     throw new AwsException("BadRequestException", "Source cannot be empty", 400);
@@ -196,11 +194,11 @@ public class SesSendController {
                             ? templateName
                             : SesTemplateService.templateNameFromArn(templateArn);
                     requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
-                    sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
-                            configurationSetName, resolvedName, regionResolver.getAccountId(), region);
-                    messageId = sesService.sendEmail(sendRequest
+                    SendEmailRequest templateRequest = sendRequest
                             .content(new EmailContent.Template(resolvedName, templateData, additionalHeaders))
-                            .build());
+                            .build();
+                    sesService.checkTenantSendAccess(templateRequest, resolvedName, regionResolver.getAccountId());
+                    messageId = sesService.sendEmail(templateRequest);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
                     String subject = inline.path("Subject").asText(null);
@@ -211,12 +209,12 @@ public class SesSendController {
                     // configuration set pass through the gate.
                     SesService.requireInlineTemplateContent(subject, text, html);
                     requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
-                    sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
-                            configurationSetName, null, regionResolver.getAccountId(), region);
-                    messageId = sesService.sendEmail(sendRequest
+                    SendEmailRequest inlineRequest = sendRequest
                             .content(new EmailContent.InlineTemplate(subject, text, html, templateData,
                                     additionalHeaders))
-                            .build());
+                            .build();
+                    sesService.checkTenantSendAccess(inlineRequest, null, regionResolver.getAccountId());
+                    messageId = sesService.sendEmail(inlineRequest);
                 }
             } else {
                 throw new AwsException("BadRequestException",
@@ -246,10 +244,13 @@ public class SesSendController {
                         "Account sending is disabled.", 400);
             }
 
-            JsonNode request = objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("SendBulkEmail", request);
             validateTrackingOverrides(request);
+            JsonNode bulkEntries = request.path("BulkEmailEntries");
+            if (bulkEntries.isMissingNode() || bulkEntries.isNull()) {
+                throw constraintViolation(null, "bulkEmailEntries", "Member must not be null");
+            }
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
             if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                 throw new AwsException("BadRequestException",
@@ -284,9 +285,9 @@ public class SesSendController {
                         "DefaultContent.Template requires TemplateName, TemplateArn, or TemplateContent.", 400);
             }
 
-            String subject;
-            String text;
-            String html;
+            String subject = null;
+            String text = null;
+            String html = null;
             // Inline template content is not a stored template resource, so it stays out of the
             // tenant gate below.
             String gateTemplateName = null;
@@ -297,27 +298,24 @@ public class SesSendController {
                 html = inline.path("Html").asText(null);
                 // Shape validation belongs before the tenant gate below, as on SendEmail.
                 SesService.requireInlineTemplateContent(subject, text, html);
-            } else {
+            }
+            // AWS counts the entries after the inline content check and before it looks the stored
+            // template up (probe-confirmed).
+            SesService.requireBulkDestinationCount(bulkEntries.size());
+            if (!hasInline) {
                 String resolvedName = hasName
                         ? templateName
                         : SesTemplateService.templateNameFromArn(templateArn);
                 gateTemplateName = resolvedName;
-                EmailTemplate stored = templateService.getTemplate(resolvedName, region);
-                subject = stored.getSubject();
-                text = stored.getTextPart();
-                html = stored.getHtmlPart();
+                subject = null;
+                text = null;
+                html = null;
             }
 
             JsonNode defaultTemplateData = parseTemplateData(template, "TemplateData");
             List<MessageTag> defaultEmailTags = parseEmailTagsArray(request.path("DefaultEmailTags"), "DefaultEmailTags");
             List<MessageHeader> defaultHeaders =
                     parseHeadersArray(template.path("Headers"), "defaultContent.template.headers");
-
-            JsonNode bulkEntries = request.path("BulkEmailEntries");
-            if (!bulkEntries.isArray() || bulkEntries.isEmpty()) {
-                throw new AwsException("BadRequestException",
-                        "BulkEmailEntries must be a non-empty array.", 400);
-            }
 
             List<BulkEmailEntry> entries = new ArrayList<>();
             int entryIndex = 1;
@@ -341,8 +339,15 @@ public class SesSendController {
 
             // The tenant gate runs only after every part of the request has been parsed and
             // validated — AWS reports malformed content before a missing tenant (probe-confirmed).
-            sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
-                    gateTemplateName, regionResolver.getAccountId(), region);
+            sesService.checkTenantBulkSendAccess(tenantName, fromEmailAddress, configurationSetName,
+                    gateTemplateName, entries, regionResolver.getAccountId(), region);
+            // SES reports an unknown or DISABLED tenant before an unknown stored template (probe-confirmed).
+            if (gateTemplateName != null) {
+                EmailTemplate stored = templateService.getTemplate(gateTemplateName, region);
+                subject = stored.getSubject();
+                text = stored.getTextPart();
+                html = stored.getHtmlPart();
+            }
 
             List<BulkEmailEntryResult> results = sesService.sendBulkEmail(SendBulkEmailRequest.builder()
                     .source(fromEmailAddress)
@@ -393,8 +398,7 @@ public class SesSendController {
                 throw new AwsException("SendingPausedException",
                         "Account sending is disabled.", 400);
             }
-            JsonNode request = objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("SendCustomVerificationEmail", request);
             templateName = request.path("TemplateName").asText(null);
             String messageId = sesService.sendCustomVerificationEmail(
@@ -411,8 +415,6 @@ public class SesSendController {
                         "Custom verification email template <" + templateName + "> does not exist", 404);
             }
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
