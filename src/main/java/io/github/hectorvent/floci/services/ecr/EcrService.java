@@ -487,20 +487,6 @@ public class EcrService implements ResourceProvider {
     // ListImages / DescribeImages / BatchGetImage / BatchDeleteImage
     // ============================================================
 
-    public List<ImageIdentifier> listImages(String repositoryName, String registryId, String region) {
-        Repository repo = requireRepo(repositoryName, registryId, region);
-        requireRegistry();
-        String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
-        try {
-            RegistryHttpClient http = registryManager.httpClient();
-            List<String> tags = http.listTags(internal);
-            return imageIdentifiers(http, internal, tags);
-        } catch (Exception e) {
-            LOG.warnv("ListImages registry query failed for {0}: {1}", repositoryName, e.getMessage());
-            return List.of();
-        }
-    }
-
     public PaginatedResult<ImageIdentifier> listImages(String repositoryName, String registryId, String region,
                                                        Integer maxResults, String nextToken) {
         int limit = maxResults != null ? maxResults : 100;
