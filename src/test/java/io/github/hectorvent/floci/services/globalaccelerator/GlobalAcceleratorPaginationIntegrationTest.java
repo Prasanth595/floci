@@ -6,10 +6,12 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.globalaccelerator.model.Accelerator;
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -30,6 +32,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -48,6 +52,11 @@ class GlobalAcceleratorPaginationIntegrationTest {
 
     private AccountAwareStorageBackend<Accelerator> accelerators;
     private final List<SeededAccelerator> seeded = new ArrayList<>();
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @BeforeEach
     void setUp() {
@@ -150,6 +159,25 @@ class GlobalAcceleratorPaginationIntegrationTest {
             assertTrue(response.accelerators().isEmpty());
             assertNull(response.nextToken());
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"MaxResults\":4294967297}", "{\"MaxResults\":1.5}",
+            "{\"MaxResults\":\"1\"}"})
+    void httpRejectsMalformedPageSizes(String body) {
+        given().header("X-Amz-Target", "GlobalAccelerator_V20180706.ListAccelerators")
+                .contentType("application/x-amz-json-1.1").body(body)
+                .post("/").then().statusCode(400)
+                .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"NextToken\":{}}", "{\"NextToken\":[]}"})
+    void httpRejectsMalformedTokenFields(String body) {
+        given().header("X-Amz-Target", "GlobalAccelerator_V20180706.ListAccelerators")
+                .contentType("application/x-amz-json-1.1").body(body)
+                .post("/").then().statusCode(400)
+                .body("__type", equalTo("InvalidNextTokenException"));
     }
 
     private List<String> seed(String account, int count) {

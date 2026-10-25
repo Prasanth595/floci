@@ -60,6 +60,15 @@ public class GlobalAcceleratorJsonHandler {
                 yield Response.ok(Map.of()).build();
             }
             case "ListAccelerators" -> {
+                JsonNode maxResults = request.get("MaxResults");
+                if (maxResults != null && !maxResults.isNull()
+                        && (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt())) {
+                    throw new AwsException("InvalidArgumentException", "MaxResults must be between 1 and 100", 400);
+                }
+                JsonNode nextToken = request.get("NextToken");
+                if (nextToken != null && !nextToken.isNull() && !nextToken.isTextual()) {
+                    throw new AwsException("InvalidNextTokenException", "Invalid NextToken", 400);
+                }
                 PaginatedResult<Accelerator> page = service.listAccelerators(
                         integer(request, "MaxResults"), text(request, "NextToken"));
                 Map<String, Object> result = new LinkedHashMap<>();
