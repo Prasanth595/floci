@@ -63,6 +63,7 @@ public class Cluster {
     public void setLoggingS3KeyPrefix(String loggingS3KeyPrefix) { this.loggingS3KeyPrefix = loggingS3KeyPrefix; }
 
     private String loggingDestinationType;
+    private String loggingRegion;
     private List<String> loggingExports;
     private boolean userActivityLoggingEnabled;
     private String loggingS3TableKmsKeyId;
@@ -70,6 +71,8 @@ public class Cluster {
 
     public String getLoggingDestinationType() { return loggingDestinationType; }
     public void setLoggingDestinationType(String loggingDestinationType) { this.loggingDestinationType = loggingDestinationType; }
+    public String getLoggingRegion() { return loggingRegion; }
+    public void setLoggingRegion(String loggingRegion) { this.loggingRegion = loggingRegion; }
     public List<String> getLoggingExports() { return loggingExports; }
     public void setLoggingExports(List<String> loggingExports) { this.loggingExports = loggingExports; }
     public boolean isUserActivityLoggingEnabled() { return userActivityLoggingEnabled; }

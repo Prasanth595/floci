@@ -179,9 +179,7 @@ public class RedshiftService {
                         .toList();
         for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : availableClusters) {
             Cluster cluster = entry.value();
-            if (auditLogPublisher != null) {
-                auditLogPublisher.register(entry.accountId(), regionResolver.getRegion(), cluster);
-            }
+            registerAuditLogging(entry.accountId(), cluster);
             if (containerManager.getContainer(entry.accountId(), cluster.getClusterIdentifier()).isPresent()) {
                 continue;
             }
@@ -823,9 +821,7 @@ public class RedshiftService {
 
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
-        if (auditLogPublisher != null) {
-            auditLogPublisher.register(clusters.accountId(), regionResolver.getRegion(), cluster);
-        }
+        registerAuditLogging(clusters.accountId(), cluster);
         return cluster;
     }
 
@@ -863,9 +859,7 @@ public class RedshiftService {
         proxyManager.updateIamRoles(relayKey(clusters.accountId(), clusterIdentifier), cluster.getIamRoleArns(), defaultRole);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
-        if (auditLogPublisher != null) {
-            auditLogPublisher.register(clusters.accountId(), regionResolver.getRegion(), cluster);
-        }
+        registerAuditLogging(clusters.accountId(), cluster);
         return cluster;
     }
 
@@ -956,15 +950,14 @@ public class RedshiftService {
         cluster.setLoggingEnabled(true);
         cluster.setLoggingBucketName(bucketName);
         cluster.setLoggingDestinationType(logDestinationType);
+        cluster.setLoggingRegion(regionResolver.getRegion());
         cluster.setLoggingExports(logExports == null || logExports.isEmpty() ? null : List.copyOf(logExports));
         cluster.setLoggingS3KeyPrefix(s3KeyPrefix);
         cluster.setLoggingS3TableKmsKeyId(s3TableKmsKeyId);
         cluster.setLoggingS3TableGranularity(s3TableGranularity);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
-        if (auditLogPublisher != null) {
-            auditLogPublisher.register(clusters.accountId(), regionResolver.getRegion(), cluster);
-        }
+        registerAuditLogging(clusters.accountId(), cluster);
         return cluster;
     }
 
@@ -979,14 +972,13 @@ public class RedshiftService {
         cluster.setLoggingBucketName(null);
         cluster.setLoggingS3KeyPrefix(null);
         cluster.setLoggingDestinationType(null);
+        cluster.setLoggingRegion(null);
         cluster.setLoggingExports(null);
         cluster.setLoggingS3TableKmsKeyId(null);
         cluster.setLoggingS3TableGranularity(null);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
-        if (auditLogPublisher != null) {
-            auditLogPublisher.register(clusters.accountId(), regionResolver.getRegion(), cluster);
-        }
+        registerAuditLogging(clusters.accountId(), cluster);
         return cluster;
     }
 
@@ -1534,11 +1526,16 @@ public class RedshiftService {
         for (Cluster cluster : affected) {
             cluster.setUserActivityLoggingEnabled(enabled);
             clusters.putForAccount(accountId, cluster.getClusterIdentifier(), cluster);
-            if (auditLogPublisher != null) {
-                auditLogPublisher.register(accountId, regionResolver.getRegion(), cluster);
-            }
+            registerAuditLogging(accountId, cluster);
         }
         clusters.flush();
+    }
+
+    private void registerAuditLogging(String accountId, Cluster cluster) {
+        if (auditLogPublisher != null) {
+            String region = cluster.getLoggingRegion() != null ? cluster.getLoggingRegion() : regionResolver.getRegion();
+            auditLogPublisher.register(accountId, region, cluster);
+        }
     }
 
     private void requireMutableParameterGroup(String name) {

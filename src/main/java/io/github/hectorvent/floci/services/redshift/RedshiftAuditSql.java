@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
@@ -91,10 +92,25 @@ public final class RedshiftAuditSql {
         }
     }
 
+    private record Redaction(int start, int end) { }
+
     public static String sanitize(String sql) {
-        List<Token> tokens = tokens(sql);
+        List<Redaction> redactions = new ArrayList<>();
+        collectPasswordRedactions(sql, tokens(sql), redactions);
+        collectPasswordRedactions(sql, tokens(sql, true), redactions);
+        redactions.sort(Comparator.comparingInt(Redaction::start));
         StringBuilder sanitized = new StringBuilder(sql.length());
         int copied = 0;
+        for (Redaction redaction : redactions) {
+            if (redaction.start() >= copied) {
+                sanitized.append(sql, copied, redaction.start()).append("'[REDACTED]'");
+            }
+            copied = Math.max(copied, redaction.end());
+        }
+        return sanitized.append(sql, copied, sql.length()).toString();
+    }
+
+    private static void collectPasswordRedactions(String sql, List<Token> tokens, List<Redaction> redactions) {
         for (int i = 0; i + 1 < tokens.size(); i++) {
             if (!tokens.get(i).keyword("PASSWORD")) {
                 continue;
@@ -104,14 +120,22 @@ public final class RedshiftAuditSql {
                 continue;
             }
             int end = value.end();
+            boolean uncertainBoundary = ambiguousPasswordString(value);
             // PostgreSQL concatenates string literals separated by a newline, including comments.
             while (value.kind() == Kind.STRING && i + 1 < tokens.size() && tokens.get(i + 1).kind() == Kind.STRING) {
-                end = tokens.get(++i).end();
+                Token continuation = tokens.get(++i);
+                end = continuation.end();
+                uncertainBoundary |= ambiguousPasswordString(continuation);
             }
-            sanitized.append(sql, copied, value.start()).append("'[REDACTED]'");
-            copied = end;
+            // A session may disable standard_conforming_strings, making the remaining password boundary uncertain.
+            redactions.add(new Redaction(value.start(), uncertainBoundary ? sql.length() : end));
         }
-        return sanitized.append(sql, copied, sql.length()).toString();
+    }
+
+    private static boolean ambiguousPasswordString(Token token) {
+        String text = token.text();
+        return token.kind() == Kind.STRING && text.indexOf('\\') >= 0
+                && (text.startsWith("'") || text.regionMatches(true, 0, "N'", 0, 2));
     }
 
     public static List<String> statements(String sql) {
@@ -211,6 +235,10 @@ public final class RedshiftAuditSql {
     }
 
     private static List<Token> tokens(String sql) {
+        return tokens(sql, false);
+    }
+
+    private static List<Token> tokens(String sql, boolean ordinaryStringEscapes) {
         List<Token> tokens = new ArrayList<>();
         int i = 0;
         while (i < sql.length()) {
@@ -227,13 +255,14 @@ public final class RedshiftAuditSql {
                 int start = i;
                 Kind kind;
                 if ("eEnNbBxX".indexOf(c) >= 0 && i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
-                    i = skipQuoted(sql, i + 1, '\'', c == 'e' || c == 'E');
+                    i = skipQuoted(sql, i + 1, '\'', c == 'e' || c == 'E'
+                            || ordinaryStringEscapes && (c == 'n' || c == 'N'));
                     kind = Kind.STRING;
                 } else if ((c == 'u' || c == 'U') && sql.startsWith("&'", i + 1)) {
                     i = skipQuoted(sql, i + 2, '\'', false);
                     kind = Kind.STRING;
                 } else if (c == '\'' || c == '"') {
-                    i = skipQuoted(sql, i, c, false);
+                    i = skipQuoted(sql, i, c, c == '\'' && ordinaryStringEscapes);
                     kind = c == '\'' ? Kind.STRING : Kind.IDENTIFIER;
                 } else if (c == '$' && dollarDelimiter(sql, i) != null) {
                     String delimiter = dollarDelimiter(sql, i);

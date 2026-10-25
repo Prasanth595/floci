@@ -133,6 +133,32 @@ class RedshiftAuditLogPublisherTest {
         assertFalse(sanitized.contains("suffix"), sanitized);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "ALTER USER alice PASSWORD 'prefix\\'suffix'",
+            "SET standard_conforming_strings=off; ALTER USER alice PASSWORD 'prefix\\'suffix'",
+            "ALTER USER alice PASSWORD N'prefix\\'suffix'",
+            "ALTER USER alice PASSWORD 'first'\n 'prefix\\'suffix'",
+            "ALTER USER alice PASSWORD 'prefix\\'suffix'; ALTER USER bob PASSWORD 'anothersecret'",
+            "SELECT 'path\\'tail'; ALTER USER alice PASSWORD 'anothersecret'",
+            "SELECT 'path\\'; ALTER USER alice PASSWORD 'anothersecret'"
+    })
+    void redactsPasswordsWithUncertainBackslashBoundaries(String sql) {
+        String sanitized = RedshiftAuditLogPublisher.sanitizeSql(sql);
+        assertFalse(sanitized.contains("prefix"), sanitized);
+        assertFalse(sanitized.contains("suffix"), sanitized);
+        assertFalse(sanitized.contains("first"), sanitized);
+        assertFalse(sanitized.contains("anothersecret"), sanitized);
+    }
+
+    @Test
+    void explicitEscapeStringsRetainFollowingSqlAndOtherBackslashStringsRemainVisible() {
+        assertEquals("ALTER USER alice PASSWORD '[REDACTED]'; SELECT 1", RedshiftAuditLogPublisher.sanitizeSql(
+                "ALTER USER alice PASSWORD E'prefix\\'suffix'; SELECT 1"));
+        String sql = "SELECT 'C:\\reports\\daily'";
+        assertEquals(sql, RedshiftAuditLogPublisher.sanitizeSql(sql));
+    }
+
     private static Cluster enabledCluster(List<String> exports) {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("analytics");

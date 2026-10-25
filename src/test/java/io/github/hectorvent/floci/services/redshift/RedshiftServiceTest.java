@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbApiStreamReader;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
@@ -67,6 +68,43 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 class RedshiftServiceTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void loggingDestinationRegionSurvivesStorageAndRestart(boolean refresh) throws Exception {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        cluster.setClusterStatus("available");
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        ObjectMapper mapper = new ObjectMapper();
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        RedshiftService original = new RedshiftService(sf, cm, config,
+                new RegionResolver("us-west-2", "111111111111"), proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, mapper, null, null);
+        original.enableLogging("warehouse", null, null, "cloudwatch", List.of("connectionlog"));
+
+        Cluster restored = mapper.readValue(mapper.writeValueAsBytes(cluster), Cluster.class);
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(restored));
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "warehouse", restored)));
+        when(cm.getContainer("111111111111", "warehouse")).thenReturn(Optional.of(
+                new RedshiftContainerHandle("container", "warehouse", "localhost", 5432)));
+        CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
+        RedshiftAuditLogPublisher publisher = new RedshiftAuditLogPublisher(logs);
+        RedshiftService restarted = new RedshiftService(sf, cm, config, regionResolver,
+                proxyManager, dockerHostResolver, credentialBroker, secretsManagerService, mapper, null, publisher);
+
+        restarted.onStart(null);
+        if (refresh) {
+            restarted.modifyClusterIamRoles("warehouse", List.of(), List.of());
+        }
+        publisher.publishRegisteredConnection("111111111111", "warehouse", "dev", "alice",
+                "authenticated", "192.0.2.1", 54321);
+
+        verify(logs).putLogEventsForAccount(eq("111111111111"),
+                eq("/aws/redshift/cluster/warehouse/connectionlog"), eq("warehouse"), anyList(), eq("us-west-2"));
+        verify(logs, never()).createLogGroupForAccount(anyString(), anyString(), any(), anyMap(), eq("us-east-1"));
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
