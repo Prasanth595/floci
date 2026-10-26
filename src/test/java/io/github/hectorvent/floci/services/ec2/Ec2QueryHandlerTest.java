@@ -94,6 +94,59 @@ class Ec2QueryHandlerTest {
     }
 
     @ParameterizedTest
+    @CsvSource({
+            "CreateKeyPair,key-pair,key", "ImportKeyPair,key-pair,key",
+            "CreateNetworkAcl,network-acl,key", "RegisterImage,image,key",
+            "CreateImage,image,key", "CreateImage,snapshot,value",
+            "CopyImage,image,key", "CopyImage,snapshot,limit"
+    })
+    void rejectsInvalidCreationTagsBeforeAllocatingResources(String action, String resourceType,
+                                                             String violation) {
+        for (String prefix : List.of("TagSpecification", "TagSpecifications")) {
+            Ec2Service service = mock(Ec2Service.class);
+            MultivaluedMap<String, String> params = createSubnetParams("10.38.1.0/24");
+            params.putSingle("GroupName", "test");
+            params.putSingle("GroupDescription", "test");
+            params.putSingle("MinCount", "1");
+            params.putSingle("MaxCount", "1");
+            params.putSingle("KeyName", "test");
+            params.putSingle("PublicKeyMaterial",
+                    Base64.getEncoder().encodeToString(ED25519_KEY.getBytes(StandardCharsets.UTF_8)));
+            params.putSingle(prefix + ".1.ResourceType", resourceType);
+            switch (violation) {
+                case "key" -> {
+                    params.putSingle(prefix + ".1.Tag.1.Key", "k".repeat(129));
+                    params.putSingle(prefix + ".1.Tag.1.Value", "v");
+                }
+                case "value" -> {
+                    params.putSingle(prefix + ".1.Tag.1.Key", "k");
+                    params.putSingle(prefix + ".1.Tag.1.Value", "v".repeat(257));
+                }
+                case "limit" -> {
+                    for (int i = 1; i <= 51; i++) {
+                        params.putSingle(prefix + ".1.Tag." + i + ".Key", "k" + i);
+                    }
+                }
+                default -> throw new IllegalArgumentException(violation);
+            }
+
+            Response response = handler(service).handle(action, params, "us-east-1");
+
+            assertEquals(400, response.getStatus());
+            String body = response.getEntity().toString();
+            String code = "limit".equals(violation) ? "TagLimitExceeded" : "InvalidParameterValue";
+            String message = switch (violation) {
+                case "key" -> "Tag key exceeds the maximum length of 128 characters";
+                case "value" -> "Tag value exceeds the maximum length of 256 characters";
+                default -> "The maximum number of Tags for a resource has been reached.";
+            };
+            assertTrue(body.contains("<Code>" + code + "</Code>"), body);
+            assertTrue(body.contains(message), body);
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"CreateLaunchTemplate", "CreateLaunchTemplateVersion"})
     void rejectsReservedNestedTemplateTagsBeforeCreatingATemplateOrVersion(String action) {
         Ec2Service service = mock(Ec2Service.class);

@@ -9815,6 +9815,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * Every tag constraint that does not need the resource: reserved keys, key and value lengths
+     * and the per-resource limit, the same rules CreateTags enforces on the list it writes. A
+     * create handler runs this on the TagSpecification it parsed before creating the resource,
+     * so a rejected specification leaves nothing behind; CreateTags checks the same rules again
+     * when it applies the list.
+     */
+    public static void validateNewResourceTags(List<Tag> tagList) {
+        validateUserTagKeys(tagList);
+        validateTagLengths(tagList);
+        requireWithinTagLimit(userTagKeys(tagList));
+    }
+
+    /**
      * CreateTags and DeleteTags name at least one resource, each a well-formed EC2 id. An id Floci
      * seeds without hex digits (the default VPC's, a catalog AMI's) passes only when this region
      * holds that resource.
@@ -9935,17 +9948,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /** At most 50 user tags on a resource after the change; tags with the aws: prefix do not count. */
     private void requireWithinTagLimit(String region, String resourceId, List<Tag> tagList) {
+        Set<String> userKeys = userTagKeys(tagsOf(region, resourceId).orElse(List.of()));
+        userKeys.addAll(userTagKeys(tagList));
+        requireWithinTagLimit(userKeys);
+    }
+
+    /** The distinct non-reserved keys of a tag list, what counts toward the per-resource limit. */
+    private static Set<String> userTagKeys(List<Tag> tagList) {
         Set<String> userKeys = new HashSet<>();
-        for (Tag tag : tagsOf(region, resourceId).orElse(List.of())) {
-            if (!isAwsTagKey(tag.getKey())) {
-                userKeys.add(tag.getKey());
-            }
-        }
         for (Tag tag : tagList) {
             if (!isAwsTagKey(tag.getKey())) {
                 userKeys.add(tag.getKey());
             }
         }
+        return userKeys;
+    }
+
+    private static void requireWithinTagLimit(Set<String> userKeys) {
         if (userKeys.size() > MAX_USER_TAGS_PER_RESOURCE) {
             throw new AwsException("TagLimitExceeded",
                     "The maximum number of Tags for a resource has been reached.", 400);

@@ -3568,6 +3568,7 @@ public class Ec2QueryHandler {
         checkDryRun(p);
         String keyName = requireKeyName(p);
         List<Tag> tags = parseTagsForResource(p, "key-pair");
+        Ec2Service.validateNewResourceTags(tags);
         KeyPair kp = service.createKeyPair(region, keyName, p.getFirst("KeyType"), p.getFirst("KeyFormat"));
         applyResourceTags(tags, region, kp.getKeyPairId());
         XmlBuilder xml = new XmlBuilder()
@@ -3672,6 +3673,7 @@ public class Ec2QueryHandler {
             throw new AwsException("InvalidKey.Format", "Key is not in valid OpenSSH public key format", 400);
         }
         List<Tag> tags = parseTagsForResource(p, "key-pair");
+        Ec2Service.validateNewResourceTags(tags);
         KeyPair kp = service.importKeyPair(region, keyName, publicKeyMaterial);
         applyResourceTags(tags, region, kp.getKeyPairId());
         XmlBuilder xml = new XmlBuilder()
@@ -3858,6 +3860,8 @@ public class Ec2QueryHandler {
     private Response handleCreateImage(MultivaluedMap<String, String> p, String region) {
         List<Tag> imageTags = parseTagsForResource(p, "image");
         List<Tag> snapshotTags = parseTagsForResource(p, "snapshot");
+        Ec2Service.validateNewResourceTags(imageTags);
+        Ec2Service.validateNewResourceTags(snapshotTags);
         Image image = service.createImage(
                 region,
                 p.getFirst("InstanceId"),
@@ -3876,6 +3880,7 @@ public class Ec2QueryHandler {
 
     private Response handleRegisterImage(MultivaluedMap<String, String> p, String region) {
         List<Tag> imageTags = parseTagsForResource(p, "image");
+        Ec2Service.validateNewResourceTags(imageTags);
         Image image = service.registerImage(
                 region,
                 p.getFirst("Name"),
@@ -3931,6 +3936,8 @@ public class Ec2QueryHandler {
     private Response handleCopyImage(MultivaluedMap<String, String> p, String region) {
         List<Tag> imageTags = parseTagsForResource(p, "image");
         List<Tag> snapshotTags = parseTagsForResource(p, "snapshot");
+        Ec2Service.validateNewResourceTags(imageTags);
+        Ec2Service.validateNewResourceTags(snapshotTags);
         Image image = service.copyImage(
                 region,
                 p.getFirst("SourceRegion"),
@@ -4300,6 +4307,7 @@ public class Ec2QueryHandler {
 
     private Response handleCreateNetworkAcl(MultivaluedMap<String, String> p, String region) {
         List<Tag> tags = parseTagsForResource(p, "network-acl");
+        Ec2Service.validateNewResourceTags(tags);
         NetworkAcl acl = service.createNetworkAcl(region, p.getFirst("VpcId"));
         applyResourceTags(tags, region, acl.getNetworkAclId());
         XmlBuilder xml = new XmlBuilder()

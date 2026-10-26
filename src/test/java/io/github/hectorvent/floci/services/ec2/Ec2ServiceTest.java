@@ -1086,6 +1086,37 @@ class Ec2ServiceTest {
         service.createTags("us-east-1", List.of(vpcId), List.of(new Tag("\uD83D\uDE00".repeat(128), "v")));
     }
 
+    @Test
+    void validateNewResourceTagsRejectsWhatCreateTagsRejects() {
+        List<Tag> fiftyKeys = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            fiftyKeys.add(new Tag("k" + i, "v"));
+        }
+        fiftyKeys.add(new Tag("k0", "a repeated key counts once"));
+
+        Ec2Service.validateNewResourceTags(fiftyKeys);
+
+        AwsException reserved = assertThrows(AwsException.class,
+                () -> Ec2Service.validateNewResourceTags(List.of(new Tag("aws:Name", "v"))));
+        assertEquals("InvalidParameterValue", reserved.getErrorCode());
+        assertEquals("Value ( aws:Name ) for parameter key is invalid. "
+                + "Tag keys starting with 'aws:' are reserved for internal use", reserved.getMessage());
+        AwsException longKey = assertThrows(AwsException.class,
+                () -> Ec2Service.validateNewResourceTags(List.of(new Tag("k".repeat(129), "v"))));
+        assertEquals("InvalidParameterValue", longKey.getErrorCode());
+        assertEquals("Tag key exceeds the maximum length of 128 characters", longKey.getMessage());
+        AwsException longValue = assertThrows(AwsException.class,
+                () -> Ec2Service.validateNewResourceTags(List.of(new Tag("k", "v".repeat(257)))));
+        assertEquals("InvalidParameterValue", longValue.getErrorCode());
+        assertEquals("Tag value exceeds the maximum length of 256 characters", longValue.getMessage());
+        List<Tag> fiftyOneKeys = new ArrayList<>(fiftyKeys);
+        fiftyOneKeys.add(new Tag("k50", "v"));
+        AwsException overLimit = assertThrows(AwsException.class,
+                () -> Ec2Service.validateNewResourceTags(fiftyOneKeys));
+        assertEquals("TagLimitExceeded", overLimit.getErrorCode());
+        assertEquals("The maximum number of Tags for a resource has been reached.", overLimit.getMessage());
+    }
+
     private static Ec2Service tagTestService(StorageFactory storageFactory) {
         return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), storageFactory);

@@ -6,6 +6,7 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
@@ -21,7 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * CreateNetworkAcl, RegisterImage, CreateImage and CopyImage. AWS applies each specification to
  * the resource the call creates, the next Describe* reports the tags, CreateKeyPair and
  * ImportKeyPair also return them in the create response's tagSet, and CreateImage and CopyImage
- * tag the AMI's new snapshots as well as the AMI.
+ * tag the AMI's new snapshots as well as the AMI. A specification CreateTags would reject is
+ * answered before anything is created, so a rejected create leaves no key pair, network ACL,
+ * AMI or snapshot behind.
  */
 @QuarkusTest
 class Ec2CreateTagSpecificationIntegrationTest {
@@ -203,6 +206,153 @@ class Ec2CreateTagSpecificationIntegrationTest {
         }
     }
 
+    @Test
+    void createKeyPairRejectsAnInvalidTagSpecificationWithoutCreatingTheKeyPair() {
+        String name = "oversized-created-" + UUID.randomUUID();
+        XmlPath rejected = ec2Rejects("CreateKeyPair",
+                "KeyName", name,
+                "TagSpecification.1.ResourceType", "key-pair",
+                "TagSpecification.1.Tag.1.Key", "k".repeat(129),
+                "TagSpecification.1.Tag.1.Value", "valid");
+        assertEquals("InvalidParameterValue", rejected.getString("Response.Errors.Error.Code"));
+        assertEquals("Tag key exceeds the maximum length of 128 characters",
+                rejected.getString("Response.Errors.Error.Message"));
+
+        XmlPath described = ec2Rejects("DescribeKeyPairs", "KeyName.1", name);
+        assertEquals("InvalidKeyPair.NotFound", described.getString("Response.Errors.Error.Code"));
+    }
+
+    @Test
+    void importKeyPairRejectsAnInvalidTagSpecificationWithoutCreatingTheKeyPair() {
+        String name = "oversized-imported-" + UUID.randomUUID();
+        XmlPath rejected = ec2Rejects("ImportKeyPair",
+                "KeyName", name,
+                "PublicKeyMaterial", Base64.getEncoder()
+                        .encodeToString(ED25519_KEY.getBytes(StandardCharsets.UTF_8)),
+                "TagSpecification.1.ResourceType", "key-pair",
+                "TagSpecification.1.Tag.1.Key", "k".repeat(129),
+                "TagSpecification.1.Tag.1.Value", "valid");
+        assertEquals("InvalidParameterValue", rejected.getString("Response.Errors.Error.Code"));
+
+        XmlPath described = ec2Rejects("DescribeKeyPairs", "KeyName.1", name);
+        assertEquals("InvalidKeyPair.NotFound", described.getString("Response.Errors.Error.Code"));
+    }
+
+    @Test
+    void createNetworkAclRejectsAnInvalidTagSpecificationWithoutCreatingTheAcl() {
+        String vpc = ec2("CreateVpc", "CidrBlock", "10.61.0.0/16")
+                .getString("CreateVpcResponse.vpc.vpcId");
+        try {
+            XmlPath rejected = ec2Rejects("CreateNetworkAcl",
+                    "VpcId", vpc,
+                    "TagSpecification.1.ResourceType", "network-acl",
+                    "TagSpecification.1.Tag.1.Key", "Team",
+                    "TagSpecification.1.Tag.1.Value", "v".repeat(257));
+            assertEquals("InvalidParameterValue", rejected.getString("Response.Errors.Error.Code"));
+            assertEquals("Tag value exceeds the maximum length of 256 characters",
+                    rejected.getString("Response.Errors.Error.Message"));
+
+            XmlPath acls = ec2("DescribeNetworkAcls",
+                    "Filter.1.Name", "vpc-id",
+                    "Filter.1.Value.1", vpc);
+            List<String> aclIds = acls.getList(
+                    "DescribeNetworkAclsResponse.networkAclSet.item.networkAclId", String.class);
+            assertEquals(1, aclIds.size(), "only the VPC's default network ACL remains");
+        } finally {
+            ec2("DeleteVpc", "VpcId", vpc);
+        }
+    }
+
+    @Test
+    void registerImageRejectsAnInvalidTagSpecificationWithoutCreatingTheAmi() {
+        String name = "oversized-registered-" + UUID.randomUUID();
+        XmlPath rejected = ec2Rejects("RegisterImage",
+                "Name", name,
+                "Architecture", "x86_64",
+                "RootDeviceName", "/dev/xvda",
+                "TagSpecification.1.ResourceType", "image",
+                "TagSpecification.1.Tag.1.Key", "k".repeat(129),
+                "TagSpecification.1.Tag.1.Value", "valid");
+        assertEquals("InvalidParameterValue", rejected.getString("Response.Errors.Error.Code"));
+
+        assertTrue(describeImageByName(name).getList(
+                "DescribeImagesResponse.imagesSet.item.imageId", String.class).isEmpty(),
+                "the rejected registration created no AMI");
+    }
+
+    @Test
+    void createImageRejectsInvalidSnapshotTagsWithoutCreatingTheAmiOrItsSnapshots() {
+        String instance = ec2("RunInstances",
+                "ImageId", "ami-0abcdef1234567890",
+                "InstanceType", "t3.micro",
+                "MinCount", "1",
+                "MaxCount", "1")
+                .getString("RunInstancesResponse.instancesSet.item.instanceId");
+        try {
+            int snapshotsBefore = selfOwnedSnapshotCount();
+            String name = "oversized-captured-" + UUID.randomUUID();
+            XmlPath rejected = ec2Rejects("CreateImage",
+                    "InstanceId", instance,
+                    "Name", name,
+                    "NoReboot", "true",
+                    "TagSpecification.1.ResourceType", "image",
+                    "TagSpecification.1.Tag.1.Key", "Team",
+                    "TagSpecification.1.Tag.1.Value", "images",
+                    "TagSpecification.2.ResourceType", "snapshot",
+                    "TagSpecification.2.Tag.1.Key", "Team",
+                    "TagSpecification.2.Tag.1.Value", "v".repeat(257));
+            assertEquals("InvalidParameterValue", rejected.getString("Response.Errors.Error.Code"));
+            assertEquals("Tag value exceeds the maximum length of 256 characters",
+                    rejected.getString("Response.Errors.Error.Message"));
+
+            assertTrue(describeImageByName(name).getList(
+                    "DescribeImagesResponse.imagesSet.item.imageId", String.class).isEmpty(),
+                    "the rejected create left no AMI");
+            assertEquals(snapshotsBefore, selfOwnedSnapshotCount(), "the rejected create left no snapshots");
+        } finally {
+            ec2("TerminateInstances", "InstanceId.1", instance);
+        }
+    }
+
+    @Test
+    void copyImageRejectsInvalidSnapshotTagsWithoutCreatingTheAmiOrItsSnapshots() {
+        String source = ec2("RegisterImage",
+                "Name", "oversized-copy-source-" + UUID.randomUUID(),
+                "Architecture", "x86_64",
+                "RootDeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.SnapshotId", "snap-0123456789abcdef0",
+                "BlockDeviceMapping.1.Ebs.VolumeSize", "8")
+                .getString("RegisterImageResponse.imageId");
+        try {
+            int snapshotsBefore = selfOwnedSnapshotCount();
+            String name = "oversized-copy-destination-" + UUID.randomUUID();
+            List<String> form = new ArrayList<>(List.of(
+                    "SourceRegion", "us-east-1",
+                    "SourceImageId", source,
+                    "Name", name,
+                    "TagSpecification.1.ResourceType", "image",
+                    "TagSpecification.1.Tag.1.Key", "Team",
+                    "TagSpecification.1.Tag.1.Value", "images",
+                    "TagSpecification.2.ResourceType", "snapshot"));
+            for (int i = 1; i <= 51; i++) {
+                form.add("TagSpecification.2.Tag." + i + ".Key");
+                form.add("k" + i);
+            }
+            XmlPath rejected = ec2Rejects("CopyImage", form.toArray(new String[0]));
+            assertEquals("TagLimitExceeded", rejected.getString("Response.Errors.Error.Code"));
+            assertEquals("The maximum number of Tags for a resource has been reached.",
+                    rejected.getString("Response.Errors.Error.Message"));
+
+            assertTrue(describeImageByName(name).getList(
+                    "DescribeImagesResponse.imagesSet.item.imageId", String.class).isEmpty(),
+                    "the rejected copy left no AMI");
+            assertEquals(snapshotsBefore, selfOwnedSnapshotCount(), "the rejected copy left no snapshots");
+        } finally {
+            ec2("DeregisterImage", "ImageId", source);
+        }
+    }
+
     private XmlPath describeImage(String imageId) {
         return ec2("DescribeImages", "ImageId.1", imageId);
     }
@@ -210,6 +360,25 @@ class Ec2CreateTagSpecificationIntegrationTest {
     private List<String> snapshotIdsOf(XmlPath describedImage) {
         return describedImage.getList(
                 "DescribeImagesResponse.imagesSet.item.blockDeviceMapping.item.ebs.snapshotId", String.class);
+    }
+
+    private XmlPath describeImageByName(String name) {
+        return ec2("DescribeImages",
+                "Filter.1.Name", "name",
+                "Filter.1.Value.1", name);
+    }
+
+    private int selfOwnedSnapshotCount() {
+        return ec2("DescribeSnapshots")
+                .getList("DescribeSnapshotsResponse.snapshotSet.item.snapshotId", String.class).size();
+    }
+
+    private XmlPath ec2Rejects(String action, String... formParams) {
+        RequestSpecification request = given().header("Authorization", AUTH).formParam("Action", action);
+        for (int i = 0; i < formParams.length; i += 2) {
+            request.formParam(formParams[i], formParams[i + 1]);
+        }
+        return request.post("/").then().statusCode(400).extract().xmlPath();
     }
 
     private XmlPath ec2(String action, String... formParams) {
