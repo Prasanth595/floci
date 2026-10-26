@@ -54,11 +54,16 @@ public class LambdaWebConnectorPass {
             return;
         }
         CallerContext caller = iamService.resolveCallerContext(accessKeyId);
-        if (caller == null) {
+        boolean accountRoot = caller == null && accessKeyId.equals(accountId);
+        if (caller == null && !accountRoot) {
             // A known credential with no policies to evaluate, as the enforcement filter treats it.
             return;
         }
-        Optional<CallerArns> callerArns = iamService.resolveCallerArns(accessKeyId);
+        String partition = AwsRegions.partitionFor(region);
+        Optional<CallerArns> callerArns = accountRoot
+                ? Optional.of(CallerArns.accountRoot(
+                        AwsArnUtils.Arn.global(partition, "iam", accountId, "root").toString(), accountId))
+                : iamService.resolveCallerArns(accessKeyId);
         Map<String, List<String>> context = new HashMap<>();
         callerArns.ifPresent(arns -> arns.putPrincipalKeys(context));
         Map<String, List<String>> effective = IamConditionContextResolver.withGlobalContext(
@@ -69,7 +74,7 @@ public class LambdaWebConnectorPass {
         }
         LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", accessKeyId, ACTION, connectorArn);
         String user = callerArns.map(CallerArns::callerArn).orElseGet(() -> AwsArnUtils.Arn.global(
-                AwsRegions.partitionFor(region), "iam", accountId, "user/" + accessKeyId).toString());
+                partition, "iam", accountId, "user/" + accessKeyId).toString());
         throw new LambdaWebAccessDeniedException("User: " + user + " is not authorized to perform: " + ACTION
                 + " on resource: " + connectorArn + " " + reason);
     }
@@ -78,7 +83,7 @@ public class LambdaWebConnectorPass {
      * Why the caller may not pass the connector, or null when it may. AWS names the first policy type
      * that refuses, by its explicit deny or by the allow it lacks: the identity policies, then the
      * permissions boundary, then the session policy. Service control policies come before them, as
-     * in the policy evaluation logic.
+     * in the policy evaluation logic. A null caller is Floci's account-root key, which only they limit.
      */
     private String refusal(CallerContext caller, String accountId, String accessKeyId, String resource,
                            Map<String, List<String>> context) {
@@ -90,6 +95,9 @@ public class LambdaWebConnectorPass {
             if (decision != SimulationDecision.ALLOWED) {
                 return reason(decision, "a service control policy", "service control policy", null);
             }
+        }
+        if (caller == null) {
+            return null;
         }
         SimulationDecision identity = simulate(caller.identityPolicies(), resource, context);
         if (identity != SimulationDecision.ALLOWED) {

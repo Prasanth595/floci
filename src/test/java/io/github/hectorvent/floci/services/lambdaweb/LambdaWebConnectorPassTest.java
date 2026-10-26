@@ -104,16 +104,26 @@ class LambdaWebConnectorPassTest {
 
     @Test
     void serviceControlPoliciesComeBeforeTheIdentityPolicies() {
-        ScpProvider scps = mock(ScpProvider.class);
-        when(scpProvider.isResolvable()).thenReturn(true);
-        when(scpProvider.get()).thenReturn(scps);
-        when(scps.effectiveScpLevels(ACCOUNT)).thenReturn(List.of(List.of(), List.of(policy(allow("*"), deny("*")))));
+        ScpProvider scps = scps(List.of(List.of(), List.of(policy(allow("*"), deny("*")))));
         holds(List.of(inline(policy(allowCreate()))), null, null);
         assertEquals("with an explicit deny in a service control policy", reason(CONNECTOR + ":1"));
 
         when(scps.effectiveScpLevels(ACCOUNT)).thenReturn(List.of(List.of(policy(allowCreate()))));
         assertEquals("because no service control policy allows the lambda:PassNetworkConnector action",
                 reason(CONNECTOR + ":1"));
+    }
+
+    @Test
+    void theAccountRootKeyIsLimitedOnlyByServiceControlPolicies() {
+        assertDoesNotThrow(() -> pass.require(REGION, ACCOUNT, ACCOUNT, CONNECTOR + ":1"));
+        ScpProvider scps = scps(List.of(List.of(policy(allow("*"), deny("*")))));
+        LambdaWebAccessDeniedException denied = assertThrows(LambdaWebAccessDeniedException.class,
+                () -> pass.require(REGION, ACCOUNT, ACCOUNT, CONNECTOR + ":1"));
+        assertEquals("User: arn:aws:iam::" + ACCOUNT + ":root is not authorized to perform: lambda:PassNetworkConnector"
+                + " on resource: " + CONNECTOR + ":1 with an explicit deny in a service control policy",
+                denied.getMessage());
+        when(scps.effectiveScpLevels(ACCOUNT)).thenReturn(List.of(List.of(policy(allow("*")))));
+        assertDoesNotThrow(() -> pass.require(REGION, ACCOUNT, ACCOUNT, CONNECTOR + ":1"));
     }
 
     @Test
@@ -135,6 +145,14 @@ class LambdaWebConnectorPassTest {
                 identity.stream().map(HeldPolicy::document).toList(), session, boundary));
         when(iamService.heldPolicies(KEY)).thenReturn(Optional.of(
                 new HeldPolicies(identity, boundary == null ? null : BOUNDARY)));
+    }
+
+    private ScpProvider scps(List<List<String>> levels) {
+        ScpProvider scps = mock(ScpProvider.class);
+        when(scpProvider.isResolvable()).thenReturn(true);
+        when(scpProvider.get()).thenReturn(scps);
+        when(scps.effectiveScpLevels(ACCOUNT)).thenReturn(levels);
+        return scps;
     }
 
     private void passes(String connectorArn) {
