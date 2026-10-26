@@ -29,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -43,6 +44,9 @@ import java.util.UUID;
 public class S3ControlController {
 
     private static final Logger LOG = Logger.getLogger(S3ControlController.class);
+
+    /** The path parameter carrying the resource ARN of the tagging operations. */
+    public static final String RESOURCE_ARN_PARAMETER = "resourceArn";
 
     private static final String AMZ_REQUEST_ID = "x-amz-request-id";
     private static final String AMZN_REQUEST_ID = "x-amzn-RequestId";
@@ -69,9 +73,9 @@ public class S3ControlController {
      * Header: x-amz-account-id
      */
     @GET
-    @Path("/tags/{resourceArn: .+}")
+    @Path("/tags/{" + RESOURCE_ARN_PARAMETER + ": .+}")
     public Response listTagsForResource(
-            @PathParam("resourceArn") String resourceArn,
+            @PathParam(RESOURCE_ARN_PARAMETER) String resourceArn,
             @HeaderParam("x-amz-account-id") String accountId) {
 
         try {
@@ -270,10 +274,10 @@ public class S3ControlController {
      * Body: XML containing {@code <Tags><Tag><Key>…</Key><Value>…</Value></Tag></Tags>}
      */
     @POST
-    @Path("/tags/{resourceArn: .+}")
+    @Path("/tags/{" + RESOURCE_ARN_PARAMETER + ": .+}")
     @Consumes(MediaType.WILDCARD)
     public Response tagResource(
-            @PathParam("resourceArn") String resourceArn,
+            @PathParam(RESOURCE_ARN_PARAMETER) String resourceArn,
             @HeaderParam("x-amz-account-id") String accountId,
             byte[] body) {
 
@@ -295,9 +299,9 @@ public class S3ControlController {
      * Header: x-amz-account-id
      */
     @DELETE
-    @Path("/tags/{resourceArn: .+}")
+    @Path("/tags/{" + RESOURCE_ARN_PARAMETER + ": .+}")
     public Response untagResource(
-            @PathParam("resourceArn") String resourceArn,
+            @PathParam(RESOURCE_ARN_PARAMETER) String resourceArn,
             @HeaderParam("x-amz-account-id") String accountId,
             @QueryParam("tagKeys") List<String> tagKeys) {
 
@@ -336,10 +340,30 @@ public class S3ControlController {
                     "Malformed percent-encoding in resource ARN: " + e.getMessage(), 400);
         }
 
+        return bucketInDecodedArn(decoded).orElseThrow(() -> new AwsException("InvalidRequest",
+                "Unsupported resource type. Only S3 bucket ARNs are supported " +
+                "(arn:aws:s3:<region>:<account>:bucket/<name> or arn:aws:s3:::<name>).", 400)); // partition-literal: AWS's message text
+    }
+
+    /**
+     * The bucket a tagging operation's resource ARN path parameter names, read the way the
+     * operation reads it. Empty for any ARN the operation rejects, including one whose
+     * percent-encoding is malformed.
+     */
+    public static Optional<String> bucketNameOf(String resourceArn) {
+        try {
+            return bucketInDecodedArn(URLDecoder.decode(resourceArn, StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException malformed) {
+            // The operation rejects this encoding as InvalidRequest, so the ARN names no bucket.
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<String> bucketInDecodedArn(String decoded) {
         // Form 1: arn:<partition>:s3:<region>:<account>:bucket/<name>
         int idx = decoded.lastIndexOf(":bucket/");
         if (idx >= 0) {
-            return decoded.substring(idx + ":bucket/".length());
+            return Optional.of(decoded.substring(idx + ":bucket/".length()));
         }
 
         // Form 2: arn:<partition>:s3:::<name>  (plain S3 ARN — no region, no account)
@@ -348,12 +372,9 @@ public class S3ControlController {
         if (parts.length == 6 && "s3".equals(parts[2])
                 && parts[3].isEmpty() && parts[4].isEmpty()
                 && !parts[5].isEmpty() && !parts[5].contains("/")) {
-            return parts[5];
+            return Optional.of(parts[5]);
         }
-
-        throw new AwsException("InvalidRequest",
-                "Unsupported resource type. Only S3 bucket ARNs are supported " +
-                "(arn:aws:s3:<region>:<account>:bucket/<name> or arn:aws:s3:::<name>).", 400); // partition-literal: AWS's message text
+        return Optional.empty();
     }
 
     /**

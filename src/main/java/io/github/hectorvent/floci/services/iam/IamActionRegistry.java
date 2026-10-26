@@ -512,6 +512,23 @@ public class IamActionRegistry {
         rule("kinesis", "POST", ".*", "kinesis:*")
     );
 
+    /**
+     * The S3 Control routes {@code S3ControlController} serves. S3 Control signs for {@code s3} and
+     * shares its IAM namespace, but AWS authorizes each of its operations as an action of its own,
+     * the one the Service Authorization Reference lists for that operation. The account
+     * {@code DeletePublicAccessBlock} has no action of its own: it is authorized as
+     * {@code s3:PutAccountPublicAccessBlock}.
+     */
+    private static final List<ActionRule> S3_CONTROL_RULES = List.of(
+        rule("s3", "GET",    "^/v20180820/accesspoint/?$",                     "s3:ListAccessPoints"),
+        rule("s3", "GET",    "^/v20180820/configuration/publicAccessBlock/?$", "s3:GetAccountPublicAccessBlock"),
+        rule("s3", "PUT",    "^/v20180820/configuration/publicAccessBlock/?$", "s3:PutAccountPublicAccessBlock"),
+        rule("s3", "DELETE", "^/v20180820/configuration/publicAccessBlock/?$", "s3:PutAccountPublicAccessBlock"),
+        rule("s3", "GET",    "^/v20180820/tags/.+",                            "s3:ListTagsForResource"),
+        rule("s3", "POST",   "^/v20180820/tags/.+",                            "s3:TagResource"),
+        rule("s3", "DELETE", "^/v20180820/tags/.+",                            "s3:UntagResource")
+    );
+
     private static ActionRule rule(String service, String method, String path, String action) {
         return rule(service, method, path, null, null, action);
     }
@@ -608,6 +625,27 @@ public class IamActionRegistry {
         }
 
         LOG.debugv("No action mapping for {0} {1} {2} — defaulting to ALLOW", credentialScope, method, path);
+        return null;
+    }
+
+    /**
+     * The action of a request routed to S3 Control, from its method and path alone, as
+     * {@link #resolveRoute} reads a REST request. Never one of the S3 object or bucket actions the
+     * same method and path would read as under {@code s3}: {@code GET /v20180820/accesspoint} is
+     * {@code ListAccessPoints}, not a read of an object in a bucket named {@code v20180820}.
+     *
+     * <p>Returns {@code null} when no rule matches (caller treats this as ALLOW).
+     */
+    public String resolveS3ControlRoute(ContainerRequestContext ctx) {
+        String method = ctx.getMethod().toUpperCase();
+        String path = rawPath(ctx.getUriInfo());
+        for (ActionRule rule : S3_CONTROL_RULES) {
+            if (rule.matches("s3", method, path, ctx)) {
+                return rule.action();
+            }
+        }
+
+        LOG.debugv("No S3 Control action mapping for {0} {1}, defaulting to ALLOW", method, path);
         return null;
     }
 

@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.s3.S3ControlController;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
@@ -761,6 +762,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     servingScope + ":" + rpcV2Route.operation());
         }
 
+        if (servesS3Control()) {
+            return new ResolvedAuthorization("s3", actionRegistry.resolveS3ControlRoute(ctx));
+        }
+
         ResolvedAuthorization routeAuthorization = restRouteAuthorization(ctx);
         if (routeAuthorization != null) {
             return routeAuthorization;
@@ -776,6 +781,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         String action = actionRegistry.resolve(servingScope, ctx);
         return targetOperation == null ? new ResolvedAuthorization(servingScope, action)
                 : new ResolvedAuthorization(servingScope, action, servingScope + ":" + targetOperation);
+    }
+
+    /**
+     * Whether JAX-RS routed this request to S3 Control. S3 Control signs for {@code s3} and is
+     * authorized in its namespace, but its paths are not S3 bucket and object paths, so neither
+     * the S3 action rules nor the S3 resource ARN apply to it.
+     */
+    private boolean servesS3Control() {
+        return resourceInfo != null && S3ControlController.class.equals(resourceInfo.getResourceClass());
     }
 
     /**
@@ -1590,12 +1604,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * Logs, Secrets Manager and KMS targets depend on the serving operation and the request's partition, STS
      * targets on the serving operation;
-     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in; and the
+     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in; S3
+     * Control targets on the route the request reached; and the
      * targets of a namespace the table of request resources reads on {@code operation}, the one the request is
      * dispatched as (see {@link RequestResources}).
      */
     private List<String> targetResources(String credentialScope, String action, String operation,
                                          ContainerRequestContext ctx, String region, String accountId) {
+        if (servesS3Control()) {
+            return arnBuilder.buildS3ControlResources(ctx, region);
+        }
         if ("logs".equals(credentialScope)) {
             return arnBuilder.buildLogResources(action, ctx, region, accountId, requestPartition());
         }

@@ -311,6 +311,10 @@ public class IamConditionContextResolver {
                     ? s3BucketResourceTagConditionContext(ctx)
                     : s3PutBucketTaggingConditionContext(ctx);
             case "s3:GetBucketTagging", "s3:DeleteBucket" -> s3BucketResourceTagConditionContext(ctx);
+            // S3 Control's TagResource sends its tags in the shape PutBucketTagging does, and
+            // UntagResource names the keys it removes in its tagKeys query parameters.
+            case "s3:TagResource" -> s3PutBucketTaggingConditionContext(ctx);
+            case "s3:UntagResource" -> s3UntagResourceConditionContext(ctx);
             // Object tags. Which action is given which key is what real AWS was measured to do,
             // not what reads naturally: s3:DeleteObject is given neither key, and s3:PutObject is
             // given the tags of the REQUEST only, never those of an object it is about to
@@ -484,7 +488,10 @@ public class IamConditionContextResolver {
         }
     }
 
-    /** {@code aws:RequestTag/<key>} from the {@code <Tagging><TagSet>} body of PutBucketTagging. */
+    /**
+     * {@code aws:RequestTag/<key>} from the {@code <Tagging><TagSet>} body of PutBucketTagging, and from the
+     * {@code <Tagging><Tags>} body of S3 Control's TagResource.
+     */
     private Map<String, List<String>> s3PutBucketTaggingConditionContext(ContainerRequestContext ctx) {
         byte[] body = bufferEntity(ctx);
         if (body == null || body.length == 0) {
@@ -498,6 +505,17 @@ public class IamConditionContextResolver {
             conditions.put("aws:TagKeys", List.copyOf(requested.keySet()));
         }
         return conditions.isEmpty() ? null : conditions;
+    }
+
+    /** {@code aws:TagKeys} from the {@code tagKeys} query parameters of S3 Control's UntagResource. */
+    private static Map<String, List<String>> s3UntagResourceConditionContext(ContainerRequestContext ctx) {
+        List<String> keys = ctx.getUriInfo().getQueryParameters().get("tagKeys");
+        if (keys == null || keys.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        conditions.put("aws:TagKeys", List.copyOf(keys));
+        return conditions;
     }
 
     /** {@code aws:ResourceTag/<key>} from the target bucket's current tags. */
