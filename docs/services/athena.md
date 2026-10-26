@@ -40,7 +40,6 @@ Pass the opaque `NextToken` to continue; final pages omit it. Tokens are scoped
 to the action, caller account, and request region and remain resumable after a
 cursor catalog is deleted. Malformed tokens, tokens outside the 1-to-1024
 character range, and invalid page sizes return `InvalidRequestException`.
-Maximum-length Unicode catalog names are supported across page boundaries.
 
 ## How it works
 

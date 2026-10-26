@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.athena;
 
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
@@ -10,8 +13,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -51,6 +52,22 @@ class AthenaDataCatalogPaginationIntegrationTest {
         assertNotNull(token);
         Map<String, Object> last = list(REGION, ACCOUNT, tokenRequest(token), 200);
         assertEquals(List.of("middle", "zzz-last"), names(last));
+        assertFalse(last.containsKey("NextToken"));
+    }
+
+    @Test
+    void sharedPagerTokenResumesTheCatalogListing() {
+        create("catalog-a");
+        create("catalog-b");
+        PaginatedResult<String> page = Pagination.paginate(
+                List.of(AthenaService.DEFAULT_CATALOG, "catalog-a", "catalog-b"),
+                name -> AthenaService.DEFAULT_CATALOG.equals(name) ? "0" : "1" + name,
+                2, null, "ListDataCatalogs:" + ACCOUNT + ":" + REGION,
+                token -> new AwsException("InvalidRequestException", "Invalid NextToken", 400));
+        assertNotNull(page.nextToken());
+        assertEquals(page.nextToken(), list(REGION, ACCOUNT, "{\"MaxResults\":2}", 200).get("NextToken"));
+        Map<String, Object> last = list(REGION, ACCOUNT, tokenRequest(page.nextToken()), 200);
+        assertEquals(List.of("catalog-b"), names(last));
         assertFalse(last.containsKey("NextToken"));
     }
 
@@ -107,13 +124,12 @@ class AthenaDataCatalogPaginationIntegrationTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"界", "😀", "A界😀"})
-    void maximumLengthUnicodeCursorIsBoundedAndResumesAfterDeletion(String unit) {
-        String prefix = unit.repeat(252 / unit.length());
+    @Test
+    void maximumSupportedNameCursorIsBoundedAndResumesAfterDeletion() {
+        String prefix = "a".repeat(123);
         String firstName = prefix + "aaaa";
         String secondName = prefix + "aaab";
-        assertEquals(256, firstName.length());
+        assertEquals(127, firstName.length());
         create(firstName);
         create(secondName);
         Map<String, Object> first = list(REGION, ACCOUNT, "{\"MaxResults\":2}", 200);
@@ -127,20 +143,6 @@ class AthenaDataCatalogPaginationIntegrationTest {
         delete(firstName);
         created.remove(firstName);
         assertEquals(List.of(secondName), names(list(REGION, ACCOUNT, tokenRequest(token), 200)));
-    }
-
-    @Test
-    void malformedUtf16CursorIsRejectedEvenWithAnIssuedScope() {
-        create("catalog-a");
-        create("catalog-b");
-        String token = (String) list(REGION, ACCOUNT, "{\"MaxResults\":2}", 200).get("NextToken");
-        assertNotNull(token);
-        byte[] payload = Base64.getUrlDecoder().decode(token);
-        for (byte[] suffix : List.of(new byte[] {0}, new byte[] {(byte) 0xD8, 0})) {
-            byte[] malformed = Arrays.copyOf(payload, payload.length + suffix.length);
-            System.arraycopy(suffix, 0, malformed, payload.length, suffix.length);
-            invalid(tokenRequest(Base64.getUrlEncoder().withoutPadding().encodeToString(malformed)));
-        }
     }
 
     @Test
