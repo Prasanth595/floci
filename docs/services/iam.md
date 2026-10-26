@@ -171,6 +171,27 @@ hand-written check the rest of the service still uses stops at the first and rep
 alone. A boolean member publishes no constraint to hold it to, so a `SetAsDefault` that is neither
 `true` nor `false` reaches the operation, which reads anything but `true` as false.
 
+A list is read the same way, from the parameters the protocol numbers under its name:
+`Audience.member.1` or the bare `Audience.1`, with a member of a list of structures carrying its
+fields under that prefix as `Tags.member.1.Key` does. Each is named in a message the way this
+service already names one, `filter.1.member` and `tags.1.member.key`, under the index the request
+spelled rather than the position the member sits at, and the count is held to the list's own
+bounds with the value left out of the message. A member outside its enum is reported under its own
+index for the same reason, which is a reading: two other services here answer one against the
+whole list instead, and nothing recorded says which form AWS answers on this protocol. A list of
+no members is how an absent list arrives, so a required one reads as null rather than as a list
+breaking a minimum of 1. A structure member arrives as `TaskPolicyArn.Arn` and is named
+`taskPolicyArn.arn`. A map is not read yet, nor is anything nested deeper than a list of
+structures. The request form is published, `AcquireRole`'s own sample numbering a map as
+`ReplacementValues.entry.1.key` and `.entry.1.value`, but the message this service answers for one
+names the whole map rather than the entry that broke a constraint, and nothing here says which AWS
+names, so reading a map would move a merged answer on a guess. `GetAccountAuthorizationDetails` is
+the first operation read through the walk, and nothing of it was read before: a `Filter` member
+outside the model's enum, a `MaxItems` outside 1 to 1000 and a `Marker` breaking its length or its
+pattern were all answered with a 200. A number too large for a 64-bit integer is a number all the
+same, so a `MaxItems` of `9223372036854775808` breaks the maximum rather than reading as no number
+at all.
+
 ### Permission Boundaries
 
 | Action | Description |
