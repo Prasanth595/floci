@@ -167,6 +167,12 @@ public class RedshiftService implements ManagedSecretRotator {
         }
     }
 
+    private void emitSnapshotEvent(String accountId, String region, EventInfo info, String sourceIdentifier, String message) {
+        if (events != null) {
+            events.recordForAccount(accountId, region, info, sourceIdentifier, message);
+        }
+    }
+
     @Inject
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
                             EmulatorConfig config, RegionResolver regionResolver,
@@ -1396,7 +1402,9 @@ public class RedshiftService implements ManagedSecretRotator {
             throw new AwsException("InvalidParameterValue", "Invalid snapshot identifier", 400);
         }
         boolean finalSnapshot = retentionPeriod != null;
-        emitEvent(finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_STARTED : RedshiftEventCatalog.SNAPSHOT_STARTED,
+        String eventRegion = scheduledTime == null ? regionResolver.getRegion() : snapshotRegion(cluster);
+        emitSnapshotEvent(accountId, eventRegion,
+                finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_STARTED : RedshiftEventCatalog.SNAPSHOT_STARTED,
                 snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "A user snapshot '") + snapshotIdentifier
                         + "' for Amazon Redshift cluster '" + clusterIdentifier + "' started at " + eventTime() + ".");
         boolean committed = false;
@@ -1419,7 +1427,8 @@ public class RedshiftService implements ManagedSecretRotator {
                     e.addSuppressed(cleanupFailure);
                 }
             }
-            emitEvent(finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_FAILED : RedshiftEventCatalog.SNAPSHOT_FAILED,
+            emitSnapshotEvent(accountId, eventRegion,
+                    finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_FAILED : RedshiftEventCatalog.SNAPSHOT_FAILED,
                     snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "The user snapshot '")
                             + snapshotIdentifier + "' for your Amazon Redshift cluster '" + clusterIdentifier
                             + "' failed at " + eventTime() + ".");
@@ -1432,7 +1441,8 @@ public class RedshiftService implements ManagedSecretRotator {
             throw failure;
         }
 
-        emitEvent(finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_COMPLETED : RedshiftEventCatalog.SNAPSHOT_COMPLETED,
+        emitSnapshotEvent(accountId, eventRegion,
+                finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_COMPLETED : RedshiftEventCatalog.SNAPSHOT_COMPLETED,
                 snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "The user snapshot '")
                         + snapshotIdentifier + "' for your Amazon Redshift cluster '" + clusterIdentifier
                         + "' completed successfully at " + eventTime() + ".");
@@ -2476,6 +2486,11 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public synchronized void createTags(String resourceName, Map<String, String> tags) {
+        String subscriptionName = eventSubscriptionTagName(resourceName);
+        if (subscriptionName != null) {
+            eventService().addSubscriptionTags(subscriptionName, tags);
+            return;
+        }
         TagHandle handle = resolveTagHandle(resourceName);
         Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         updated.putAll(tags);
@@ -2483,6 +2498,11 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public synchronized void deleteTags(String resourceName, Collection<String> tagKeys) {
+        String subscriptionName = eventSubscriptionTagName(resourceName);
+        if (subscriptionName != null) {
+            eventService().deleteSubscriptionTags(subscriptionName, tagKeys);
+            return;
+        }
         TagHandle handle = resolveTagHandle(resourceName);
         Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         tagKeys.forEach(updated::remove);
@@ -2594,7 +2614,7 @@ public class RedshiftService implements ManagedSecretRotator {
      * resolution, there is no bare-name fallback: Redshift tagging is new, so there is no
      * existing caller to stay backward compatible with.
      */
-    private TagHandle resolveTagHandle(String resourceName) {
+    private AwsArnUtils.Arn requireTagArn(String resourceName) {
         if (resourceName == null || resourceName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
         }
@@ -2620,6 +2640,17 @@ public class RedshiftService implements ManagedSecretRotator {
                 || !regionResolver.getRegion().equals(arn.region())) {
             throw new AwsException("ResourceNotFoundFault", "Resource " + resourceName + " not found", 404);
         }
+        return arn;
+    }
+
+    private String eventSubscriptionTagName(String resourceName) {
+        String resource = requireTagArn(resourceName).resource();
+        String prefix = "eventsubscription:";
+        return resource.startsWith(prefix) ? resource.substring(prefix.length()) : null;
+    }
+
+    private TagHandle resolveTagHandle(String resourceName) {
+        AwsArnUtils.Arn arn = requireTagArn(resourceName);
         String resource = arn.resource();
         int sep = resource.indexOf(':');
         if (sep < 0) {

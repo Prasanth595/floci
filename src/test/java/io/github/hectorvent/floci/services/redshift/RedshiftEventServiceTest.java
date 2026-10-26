@@ -64,6 +64,39 @@ class RedshiftEventServiceTest {
     private StorageFactory factory;
 
     @ParameterizedTest
+    @CsvSource({"success,active", "NotFound,topic-not-exist", "AuthorizationError,no-permission"})
+    void explicitRecordingUsesTheOwnersHistorySubscriptionsAndFailureStatus(String failure, String expectedStatus) {
+        create("watcher", null, List.of(), List.of(), null);
+        String owner = "565656565656";
+        String region = "us-west-2";
+        String ownerTopic = "arn:aws:sns:us-west-2:565656565656:snapshots";
+        AccountAwareStorageBackend<EventSubscription> subscriptionStore = factory.create("redshift",
+                "redshift-event-subscriptions.json", new TypeReference<Map<String, EventSubscription>>() { });
+        EventSubscription watcher = new EventSubscription();
+        watcher.setCustSubscriptionId("watcher");
+        watcher.setCustomerAwsId(owner);
+        watcher.setSnsTopicArn(ownerTopic);
+        watcher.setStatus("active");
+        watcher.setEnabled(true);
+        subscriptionStore.putForAccount(owner, region + "/watcher", watcher);
+        if (!"success".equals(failure)) {
+            doThrow(new AwsException(failure, "delivery failed", 400)).when(sns)
+                    .publish(eq(ownerTopic), any(), anyString(), anyString(), eq(region));
+        }
+
+        service.recordForAccount(owner, region, RedshiftEventCatalog.SNAPSHOT_COMPLETED, "owner-snapshot", "completed");
+
+        AccountAwareStorageBackend<RedshiftEvent> history = factory.create("redshift", "redshift-events.json",
+                new TypeReference<Map<String, RedshiftEvent>>() { });
+        assertEquals(1, history.scanForAccount(owner, key -> key.startsWith(region + "/")).size());
+        assertTrue(service.describeEvents(null, null, null, null, null, null, null).items().isEmpty());
+        assertEquals(expectedStatus, subscriptionStore.getForAccount(owner, region + "/watcher").orElseThrow().getStatus());
+        assertEquals("active", service.describeSubscriptions("watcher", null, null, null, null).items().getFirst().getStatus());
+        verify(sns).publish(eq(ownerTopic), any(), anyString(), anyString(), eq(region));
+        verify(sns, never()).publish(eq(TOPIC), any(), anyString(), anyString(), anyString());
+    }
+
+    @ParameterizedTest
     @CsvSource({"NotFound,deleted", "NotFound,recreated", "NotFound,retargeted",
             "AuthorizationError,deleted", "AuthorizationError,recreated", "AuthorizationError,retargeted"})
     void failedNotificationDoesNotOverwriteConcurrentSubscriptionChange(String errorCode, String change) throws Exception {

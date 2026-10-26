@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.RedshiftEventCatalog.EventInfo;
@@ -25,6 +26,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -89,6 +91,10 @@ public class RedshiftEventService {
 
     /** Never fails the operation that raised the event: a lost event is logged, not surfaced. */
     public void record(EventInfo info, String sourceIdentifier, String message) {
+        recordForAccount(events.accountId(), regionResolver.getRegion(), info, sourceIdentifier, message);
+    }
+
+    public void recordForAccount(String accountId, String region, EventInfo info, String sourceIdentifier, String message) {
         try {
             Instant now = clock.instant();
             long eventSequence = sequence.incrementAndGet();
@@ -102,11 +108,11 @@ public class RedshiftEventService {
             event.setSourceType(info.sourceType());
             event.setEventCategories(new ArrayList<>(List.of(info.category())));
             event.setMessage(message);
-            events.put(key(event.getKey()), event);
+            events.putForAccount(accountId, key(region, event.getKey()), event);
             if (eventSequence % PRUNE_EVERY == 0) {
                 prune(now);
             }
-            deliver(event);
+            deliver(event, accountId, region);
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not record Redshift event {0} for {1}", info.id(), sourceIdentifier);
         }
@@ -121,12 +127,12 @@ public class RedshiftEventService {
         }
     }
 
-    private void deliver(RedshiftEvent event) {
-        for (EventSubscription subscription : subscriptions.scan(this::inRegion)) {
+    private void deliver(RedshiftEvent event, String accountId, String region) {
+        for (EventSubscription subscription : subscriptions.scanForAccount(accountId, key -> key.startsWith(region + "/"))) {
             if (!matches(subscription, event)) {
                 continue;
             }
-            publish(subscription, event);
+            publish(subscription, event, accountId, region);
         }
     }
 
@@ -149,16 +155,17 @@ public class RedshiftEventService {
         return subscription.getSeverity() == null || subscription.getSeverity().equals(event.getSeverity());
     }
 
-    private void publish(EventSubscription subscription, RedshiftEvent event) {
+    private void publish(EventSubscription subscription, RedshiftEvent event, String accountId, String region) {
         String topicArn = subscription.getSnsTopicArn();
         try {
-            snsService.publish(topicArn, null, notification(event), SNS_SUBJECT,
-                    AwsArnUtils.parse(topicArn).region());
+            String topicRegion = AwsArnUtils.parse(topicArn).region();
+            RequestScopes.runAs(accountId, topicRegion,
+                    () -> snsService.publish(topicArn, null, notification(event), SNS_SUBJECT, topicRegion));
         } catch (AwsException e) {
             if ("NotFound".equals(e.getErrorCode())) {
-                updateFailureStatus(subscription, topicArn, "topic-not-exist");
+                updateFailureStatus(subscription, topicArn, "topic-not-exist", accountId, region);
             } else if (isAuthorizationFailure(e)) {
-                updateFailureStatus(subscription, topicArn, "no-permission");
+                updateFailureStatus(subscription, topicArn, "no-permission", accountId, region);
             }
             LOG.warnv(e, "Could not publish Redshift event {0} to {1}", event.getEventId(), topicArn);
         } catch (RuntimeException e) {
@@ -166,13 +173,14 @@ public class RedshiftEventService {
         }
     }
 
-    private synchronized void updateFailureStatus(EventSubscription attempted, String topicArn, String status) {
-        String storageKey = key(attempted.getCustSubscriptionId());
-        subscriptions.get(storageKey)
+    private synchronized void updateFailureStatus(EventSubscription attempted, String topicArn, String status,
+                                                   String accountId, String region) {
+        String storageKey = key(region, attempted.getCustSubscriptionId());
+        subscriptions.getForAccount(accountId, storageKey)
                 .filter(current -> current == attempted && topicArn.equals(current.getSnsTopicArn()))
                 .ifPresent(current -> {
                     current.setStatus(status);
-                    subscriptions.put(storageKey, current);
+                    subscriptions.putForAccount(accountId, storageKey, current);
                 });
     }
 
@@ -450,7 +458,11 @@ public class RedshiftEventService {
     }
 
     private String key(String name) {
-        return regionResolver.getRegion() + "/" + name;
+        return key(regionResolver.getRegion(), name);
+    }
+
+    private static String key(String region, String name) {
+        return region + "/" + name;
     }
 
     private boolean inRegion(String storedKey) {
@@ -476,6 +488,18 @@ public class RedshiftEventService {
                 throw new AwsException("InvalidTagFault", "Invalid event subscription tag.", 400);
             }
         }
+    }
+
+    public synchronized void addSubscriptionTags(String name, Map<String, String> tags) {
+        Map<String, String> updated = new LinkedHashMap<>(requireSubscription(name).getTags());
+        updated.putAll(tags);
+        replaceSubscriptionTags(name, updated);
+    }
+
+    public synchronized void deleteSubscriptionTags(String name, Collection<String> keys) {
+        Map<String, String> updated = new LinkedHashMap<>(requireSubscription(name).getTags());
+        keys.forEach(updated::remove);
+        replaceSubscriptionTags(name, updated);
     }
 
     public synchronized void replaceSubscriptionTags(String name, Map<String, String> tags) {

@@ -705,8 +705,10 @@ class RedshiftServiceTest {
         }
 
         InOrder recorded = inOrder(events);
-        recorded.verify(events).record(eq(RedshiftEventCatalog.SNAPSHOT_STARTED), eq("event-snapshot"), anyString());
-        recorded.verify(events).record(eq(fails ? RedshiftEventCatalog.SNAPSHOT_FAILED : RedshiftEventCatalog.SNAPSHOT_COMPLETED),
+        recorded.verify(events).recordForAccount(eq("111111111111"), eq("us-east-1"),
+                eq(RedshiftEventCatalog.SNAPSHOT_STARTED), eq("event-snapshot"), anyString());
+        recorded.verify(events).recordForAccount(eq("111111111111"), eq("us-east-1"),
+                eq(fails ? RedshiftEventCatalog.SNAPSHOT_FAILED : RedshiftEventCatalog.SNAPSHOT_COMPLETED),
                 eq("event-snapshot"), anyString());
         recorded.verifyNoMoreInteractions();
     }
