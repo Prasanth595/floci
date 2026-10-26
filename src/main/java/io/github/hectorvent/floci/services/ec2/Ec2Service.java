@@ -4255,7 +4255,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             acquireCapacity(region, launched);
         } catch (RuntimeException failure) {
             try {
-                terminateInstances(region, launched.stream().map(Instance::getInstanceId).toList());
+                rollBackLaunch(region, launched.stream().map(Instance::getInstanceId).toList());
             } catch (RuntimeException cleanupFailure) {
                 failure.addSuppressed(cleanupFailure);
                 LOG.errorv(cleanupFailure, "Failed to clean up rejected capacity launch in {0}", region);
@@ -14435,6 +14435,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             ni.setStatus("available");
             networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
         }
+    }
+
+    /**
+     * Undoes a launch refused after its instances were stored: terminates them and deletes every
+     * volume the launch created, those it would keep on termination included, so nothing of the
+     * refused launch is left. A launch attaches the volumes it creates at the instance's launch
+     * time; one attached since then goes as its DeleteOnTermination says, as on any termination.
+     */
+    public List<Map<String, String>> rollBackLaunch(String region, List<String> instanceIds) {
+        for (String id : instanceIds) {
+            Instance inst = getRequiredInstance(region, id);
+            for (String k : volumes.keys()) {
+                Volume vol = volumes.get(k).orElse(null);
+                if (vol == null || !region.equals(vol.getRegion())
+                        || vol.getAttachments().stream().noneMatch(a -> createdByLaunch(a, inst))) {
+                    continue;
+                }
+                withVolumeLock(vol.getVolumeId(), () -> volumes.get(k).ifPresent(current -> {
+                    current.getAttachments().stream()
+                            .filter(a -> createdByLaunch(a, inst))
+                            .forEach(a -> a.setDeleteOnTermination(true));
+                    volumes.put(k, current);
+                }));
+            }
+        }
+        return terminateInstances(region, instanceIds);
+    }
+
+    private static boolean createdByLaunch(VolumeAttachment attachment, Instance inst) {
+        return inst.getInstanceId().equals(attachment.getInstanceId())
+                && inst.getLaunchTime() != null && inst.getLaunchTime().equals(attachment.getAttachTime());
     }
 
     /**

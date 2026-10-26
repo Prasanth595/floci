@@ -48,9 +48,9 @@ class Ec2CreateFleetRollbackTest {
                 .thenReturn(reservation("i-first"))
                 .thenReturn(reservation("i-second"))
                 .thenThrow(new AwsException("InvalidSubnetID.NotFound", "launch failed", 400));
-        when(service.terminateInstances(REGION, List.of("i-first")))
+        when(service.rollBackLaunch(REGION, List.of("i-first")))
                 .thenThrow(new AwsException("InternalError", "cleanup failed", 500));
-        when(service.terminateInstances(REGION, List.of("i-second"))).thenReturn(List.of());
+        when(service.rollBackLaunch(REGION, List.of("i-second"))).thenReturn(List.of());
 
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
                 mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
@@ -62,8 +62,8 @@ class Ec2CreateFleetRollbackTest {
         String responseBody = response.getEntity().toString();
         assertTrue(responseBody.contains("<Code>InvalidSubnetID.NotFound</Code>"));
         assertTrue(responseBody.contains("CreateFleet rollback incomplete for instance(s): i-first"));
-        verify(service).terminateInstances(REGION, List.of("i-first"));
-        verify(service).terminateInstances(REGION, List.of("i-second"));
+        verify(service).rollBackLaunch(REGION, List.of("i-first"));
+        verify(service).rollBackLaunch(REGION, List.of("i-second"));
     }
 
     private static Reservation reservation(String instanceId) {

@@ -710,6 +710,39 @@ class Ec2LaunchBlockDeviceMappingsIntegrationTest {
         assertNothingLaunched(account);
     }
 
+    @Test
+    void aFleetRolledBackAfterALaunchLeavesNoVolumeOfThatLaunchBehind() {
+        String account = account();
+        String image = registerImage(account);
+        String reservation = ec2(account, "CreateCapacityReservation",
+                "InstanceType", "t3.micro", "InstancePlatform", "Linux/UNIX",
+                "AvailabilityZone", "us-east-1a", "InstanceCount", "1", "InstanceMatchCriteria", "targeted")
+                .getString("CreateCapacityReservationResponse.capacityReservation.capacityReservationId");
+        String template = ec2(account, "CreateLaunchTemplate",
+                "LaunchTemplateName", "launch-volumes-" + account,
+                "LaunchTemplateData.ImageId", image,
+                "LaunchTemplateData.InstanceType", "t3.micro",
+                "LaunchTemplateData.Placement.AvailabilityZone", "us-east-1a",
+                "LaunchTemplateData.CapacityReservationSpecification.CapacityReservationTarget.CapacityReservationId",
+                reservation,
+                "LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/sdg",
+                "LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeSize", "5",
+                "LaunchTemplateData.BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false")
+                .getString("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        // The first launch takes the reservation's one slot and creates a root that is deleted on
+        // termination and two devices that are not; the second finds no capacity left, so the
+        // fleet undoes the first.
+        request(account, "CreateFleet", "Type", "instant",
+                "LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", template,
+                "TargetCapacitySpecification.TotalTargetCapacity", "2",
+                "TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("ReservationCapacityExceeded"));
+
+        assertTrue(volumeIds(account).isEmpty());
+    }
+
     /**
      * A RegisterImage AMI rooted at /dev/sda1 on a 16 GiB gp2 snapshot, with an empty 125 GiB st1
      * data device at /dev/sdf that is kept when an instance terminates.

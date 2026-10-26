@@ -1062,7 +1062,7 @@ public class Ec2QueryHandler {
                 List<RuntimeException> rollbackFailures = new ArrayList<>();
                 for (String instanceId : launchedInstanceIds) {
                     try {
-                        service.terminateInstances(region, List.of(instanceId));
+                        service.rollBackLaunch(region, List.of(instanceId));
                     } catch (RuntimeException cleanupFailure) {
                         rollbackFailureInstanceIds.add(instanceId);
                         rollbackFailures.add(cleanupFailure);
