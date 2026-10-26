@@ -100,6 +100,7 @@ class ElastiCacheAclProxyIntegrationTest {
                     .untilAsserted(() -> assertEquals("PONG", docker("exec", name, "valkey-cli", "PING")));
             int backendPort = Integer.parseInt(docker("inspect", "--format",
                     "{{(index (index .NetworkSettings.Ports \"6379/tcp\") 0).HostPort}}", name));
+            assertEquals("OK", docker("exec", name, "valkey-cli", "SET", "other:key", "private-example"));
             FlociCertificateAuthority authority = FlociCertificateAuthority.loadOrCreate(directory.resolve("ca"));
             EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
             ElastiCacheTlsCertificates certificates = new ElastiCacheTlsCertificates(authority, config,
@@ -155,11 +156,18 @@ class ElastiCacheAclProxyIntegrationTest {
             try (Socket writer = connect(port, trust)) {
                 assertEquals("+OK", command(writer, "AUTH", "subscriber", credential));
                 assertEquals("+OK", command(writer, "SET", "allowed:key", "value"));
+                assertEquals(":1", command(writer, "EXISTS", "allowed:key"));
                 assertTrue(command(writer, "SET", "other:key", "value").startsWith("-NOPERM"));
+                assertTrue(command(writer, "GET", "other:key").startsWith("-NOPERM"));
                 assertTrue(command(writer, "ACL", "SETUSER", "default", "on", "nopass", "+@all").startsWith("-NOPERM"));
                 assertTrue(command(writer, "CONFIG", "SET", "requirepass", "").startsWith("-NOPERM"));
                 assertTrue(command(writer, "MONITOR").startsWith("-NOPERM"));
                 assertTrue(command(writer, "SLOWLOG", "GET").startsWith("-NOPERM"));
+                assertTrue(command(writer, "SYNC").startsWith("-NOPERM"),
+                        "SYNC must not expose keys outside the user's allowed pattern");
+                assertTrue(command(writer, "PSYNC", "?", "-1").startsWith("-NOPERM"),
+                        "PSYNC must not expose keys outside the user's allowed pattern");
+                assertEquals("+PONG", command(writer, "PING"));
             }
             access.set("on ~* &* -@all +ping");
             try (Socket hello = connect(port, trust)) {

@@ -46,7 +46,10 @@ unrestricted permissions.
 Backend passwords are generated in memory separately from frontend passwords and IAM
 tokens. Even `+@all` users cannot manage ACLs or backend configuration, load modules,
 reconfigure replication, shut down the engine, or observe administrative commands through
-`MONITOR` or `SLOWLOG`. These restrictions protect the proxy's private credentials.
+`MONITOR` or `SLOWLOG`. `SYNC` and `PSYNC` are also denied: replication streams can expose
+keys outside a user's permitted key patterns. These restrictions protect private backend
+credentials and key boundaries. AWS also lists both replication commands among its
+[restricted cache commands](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html).
 
 Access-string changes are installed on the next successful authentication; reconnect to
 apply changes promptly. Re-authentication on an already relayed connection uses the
@@ -56,7 +59,7 @@ ACL selectors are rejected before backend changes: a selector can grant permissi
 independently of the root rules used to protect private backend credentials. Read-only
 `ACL` commands are also unavailable through these sessions.
 
-**Draft limitation:** cluster-mode RBAC fails closed. Configuring replication credentials
+**Known limitation:** cluster-mode RBAC fails closed. Configuring replication credentials
 across all nodes is still required before disabling their default accounts. Such connections
 are rejected rather than being relayed with unrestricted permissions. Cluster-mode caches
 without user associations retain their existing behavior.
