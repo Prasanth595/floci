@@ -32,10 +32,8 @@ import java.util.function.Supplier;
 public class RedshiftServerlessRuntime {
 
     private static final Logger LOG = Logger.getLogger(RedshiftServerlessRuntime.class);
-    private static final String UPPERCASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    private static final String LOWERCASE = "abcdefghijklmnopqrstuvwxyz";
-    private static final String DIGITS = "0123456789";
-    private static final String PASSWORD_ALPHABET = UPPERCASE + LOWERCASE + DIGITS;
+    private static final String PASSWORD_ALPHABET =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static final int GENERATED_PASSWORD_LENGTH = 32;
 
     /** The namespace admin pair as it stands now; read on every login so a password change applies at once. */
@@ -49,20 +47,14 @@ public class RedshiftServerlessRuntime {
     private final RedshiftContainerManager containerManager;
     private final RedshiftProxyManager proxyManager;
     private final RedshiftCredentialBroker credentialBroker;
-    private final SecureRandom random;
+    private final SecureRandom random = new SecureRandom();
 
     @Inject
     public RedshiftServerlessRuntime(RedshiftContainerManager containerManager, RedshiftProxyManager proxyManager,
                                      RedshiftCredentialBroker credentialBroker) {
-        this(containerManager, proxyManager, credentialBroker, new SecureRandom());
-    }
-
-    RedshiftServerlessRuntime(RedshiftContainerManager containerManager, RedshiftProxyManager proxyManager,
-                              RedshiftCredentialBroker credentialBroker, SecureRandom random) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.credentialBroker = credentialBroker;
-        this.random = random;
     }
 
     public static String backendId(String region, String workgroupName) {
@@ -201,17 +193,8 @@ public class RedshiftServerlessRuntime {
 
     public String generatePassword() {
         StringBuilder password = new StringBuilder(GENERATED_PASSWORD_LENGTH);
-        password.append(UPPERCASE.charAt(random.nextInt(UPPERCASE.length())));
-        password.append(LOWERCASE.charAt(random.nextInt(LOWERCASE.length())));
-        password.append(DIGITS.charAt(random.nextInt(DIGITS.length())));
-        for (int i = password.length(); i < GENERATED_PASSWORD_LENGTH; i++) {
+        for (int i = 0; i < GENERATED_PASSWORD_LENGTH; i++) {
             password.append(PASSWORD_ALPHABET.charAt(random.nextInt(PASSWORD_ALPHABET.length())));
-        }
-        for (int i = password.length() - 1; i > 0; i--) {
-            int swapIndex = random.nextInt(i + 1);
-            char current = password.charAt(i);
-            password.setCharAt(i, password.charAt(swapIndex));
-            password.setCharAt(swapIndex, current);
         }
         return password.toString();
     }

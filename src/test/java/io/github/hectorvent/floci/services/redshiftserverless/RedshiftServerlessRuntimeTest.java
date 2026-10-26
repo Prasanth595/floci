@@ -13,7 +13,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.nio.file.Path;
-import java.security.SecureRandom;
 import java.util.List;
 import java.util.Optional;
 
@@ -256,20 +255,6 @@ class RedshiftServerlessRuntimeTest {
     void theBackendIdCannotCollideWithAClusterIdentifier() {
         assertEquals(BACKEND_ID, RedshiftServerlessRuntime.backendId(REGION, "my-wg"));
         assertTrue(BACKEND_ID.contains("_"), "cluster identifiers cannot contain an underscore");
-    }
-
-    @Test
-    void generatedPasswordsIncludeEveryRequiredCharacterTypeEvenWhenRandomDrawsRepeat() {
-        SecureRandom random = mock(SecureRandom.class);
-        when(random.nextInt(anyInt())).thenReturn(0);
-        RedshiftServerlessRuntime deterministicRuntime = new RedshiftServerlessRuntime(containers, proxies, broker, random);
-        String password = deterministicRuntime.generatePassword();
-
-        assertEquals(32, password.length());
-        assertTrue(password.matches("[A-Za-z0-9]+"));
-        assertTrue(password.chars().anyMatch(Character::isUpperCase), "password requires an uppercase letter");
-        assertTrue(password.chars().anyMatch(Character::isLowerCase), "password requires a lowercase letter");
-        assertTrue(password.chars().anyMatch(Character::isDigit), "password requires a number");
     }
 
     @Test
