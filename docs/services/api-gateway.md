@@ -171,10 +171,10 @@ stores its own copy of the key value, so without that sweep a deleted key would 
 exists and has `enabled` set to `true`, so disabling a key through `UpdateApiKey` takes effect
 immediately.
 
-> [!NOTE]
-> Floci does not implement the `apiKeyRequired` gate on methods, so a request carrying an unknown,
-> disabled, or deleted key is still executed — it simply arrives with a null `identity.apiKey` rather
-> than being rejected with `403`.
+A method with `apiKeyRequired` rejects a request whose `x-api-key` is missing, unknown, disabled,
+deleted, or not bound to the stage by a usage plan, with `403` `{"message":"Forbidden"}` and
+`x-amzn-ErrorType: ForbiddenException`, as AWS does. The header stays when the API customises its
+`INVALID_API_KEY` gateway response.
 
 ### REST Lambda Authorizers
 

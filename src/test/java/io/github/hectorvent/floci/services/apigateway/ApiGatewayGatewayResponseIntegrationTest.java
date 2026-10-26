@@ -398,6 +398,7 @@ class ApiGatewayGatewayResponseIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/api/keyed")
                 .then().statusCode(401)
                 .header("Access-Control-Allow-Origin", nullValue())
+                .header("x-amzn-ErrorType", equalTo("ForbiddenException"))
                 .body("type", equalTo("INVALID_API_KEY"))
                 .body("message", equalTo("Forbidden"));
     }

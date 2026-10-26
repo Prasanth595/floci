@@ -485,7 +485,9 @@ public class ApiGatewayExecuteController {
         // validation and throttling. resolvedApiKey is null when the header is missing or matches
         // no enabled key linked to this (apiId, stage) through a usage plan.
         if (method.isApiKeyRequired() && resolvedApiKey == null) {
-            return gatewayResponse(scope, GatewayResponseType.INVALID_API_KEY, 403, "Forbidden");
+            return gatewayResponseBuilder(scope, GatewayResponseType.INVALID_API_KEY, 403, "Forbidden", null)
+                    .header("x-amzn-ErrorType", "ForbiddenException")
+                    .build();
         }
 
         // 2. Request validation
