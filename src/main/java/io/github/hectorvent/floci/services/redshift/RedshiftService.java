@@ -1925,6 +1925,21 @@ public class RedshiftService implements ManagedSecretRotator {
         eventService().deleteSubscription(name);
     }
 
+    public EventSubscription reconcileEventSubscription(String name, String snsTopicArn, String sourceType,
+                                                         List<String> sourceIds, List<String> categories,
+                                                         String severity, Boolean enabled, Map<String, String> tags) {
+        return eventService().reconcileSubscription(name, snsTopicArn, sourceType, sourceIds, categories,
+                severity, enabled, tags, this::eventSourceExists);
+    }
+
+    public EventSubscription restoreEventSubscription(String name, String snsTopicArn, String sourceType,
+                                                       List<String> sourceIds, List<String> categories,
+                                                       String severity, Boolean enabled, Map<String, String> tags,
+                                                       String status) {
+        return eventService().restoreSubscription(name, snsTopicArn, sourceType, sourceIds, categories,
+                severity, enabled, tags, status);
+    }
+
     public PaginatedResult<EventSubscription> describeEventSubscriptions(String name, List<String> tagKeys,
                                                                          List<String> tagValues, Integer maxRecords,
                                                                          String marker) {
