@@ -485,9 +485,7 @@ public class ApiGatewayExecuteController {
         // validation and throttling. resolvedApiKey is null when the header is missing or matches
         // no enabled key linked to this (apiId, stage) through a usage plan.
         if (method.isApiKeyRequired() && resolvedApiKey == null) {
-            return gatewayResponseBuilder(scope, GatewayResponseType.INVALID_API_KEY, 403, "Forbidden", null)
-                    .header("x-amzn-ErrorType", "ForbiddenException")
-                    .build();
+            return gatewayResponse(scope, GatewayResponseType.INVALID_API_KEY, 403, "Forbidden");
         }
 
         // 2. Request validation
@@ -3931,7 +3929,25 @@ public class ApiGatewayExecuteController {
 
     private Response gatewayResponse(GatewayResponseScope scope, GatewayResponseType type, int status,
                                      String message, String validationError) {
-        return gatewayResponseBuilder(scope, type, status, message, validationError).build();
+        return gatewayResponseBuilder(scope, type, status, message, validationError)
+                .header("x-amzn-ErrorType", gatewayErrorType(type))
+                .build();
+    }
+
+    /**
+     * The {@code x-amzn-ErrorType} AWS sends with a gateway response of {@code type}, customised or
+     * not (measured on a REST API, eu-west-1, 2026-10-26). Null for the types these sites never emit.
+     */
+    private static String gatewayErrorType(GatewayResponseType type) {
+        return switch (type) {
+            case INVALID_API_KEY -> "ForbiddenException";
+            case UNAUTHORIZED -> "UnauthorizedException";
+            case ACCESS_DENIED -> "AccessDeniedException";
+            case AUTHORIZER_FAILURE, AUTHORIZER_CONFIGURATION_ERROR -> "AuthorizerConfigurationException";
+            case BAD_REQUEST_PARAMETERS, BAD_REQUEST_BODY, UNSUPPORTED_MEDIA_TYPE -> "BadRequestException";
+            case API_CONFIGURATION_ERROR, INTEGRATION_FAILURE -> "InternalServerErrorException";
+            default -> null;
+        };
     }
 
     private Response.ResponseBuilder gatewayResponseBuilder(GatewayResponseScope scope, GatewayResponseType type,
@@ -3953,10 +3969,9 @@ public class ApiGatewayExecuteController {
                                        String message) {
         GatewayResponse configured = apiGatewayService.resolveGatewayResponse(scope.region(), scope.apiId(),
                 type, fallback.getStatus());
-        if (configured == null) {
-            return fallback;
-        }
-        return renderGatewayResponse(scope, configured, type, fallback.getStatus(), message, null).build();
+        Response.ResponseBuilder builder = configured == null ? Response.fromResponse(fallback)
+                : renderGatewayResponse(scope, configured, type, fallback.getStatus(), message, null);
+        return builder.header("x-amzn-ErrorType", gatewayErrorType(type)).build();
     }
 
     private Response.ResponseBuilder renderGatewayResponse(GatewayResponseScope scope, GatewayResponse configured,

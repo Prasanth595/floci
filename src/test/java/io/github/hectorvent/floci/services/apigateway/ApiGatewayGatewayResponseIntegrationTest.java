@@ -377,6 +377,7 @@ class ApiGatewayGatewayResponseIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/api/validated")
                 .then().statusCode(400)
                 .header("Access-Control-Allow-Origin", equalTo("*"))
+                .header("x-amzn-ErrorType", equalTo("BadRequestException"))
                 .body("type", equalTo("BAD_REQUEST_PARAMETERS"))
                 .body("message", equalTo("Missing required request parameter in QUERY_STRING: 'q'"));
 
@@ -469,6 +470,7 @@ class ApiGatewayGatewayResponseIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/api/broken")
                 .then().statusCode(500)
                 .header("Access-Control-Allow-Origin", equalTo("*"))
+                .header("x-amzn-ErrorType", equalTo("InternalServerErrorException"))
                 .body("message", equalTo("Internal server error"));
     }
 

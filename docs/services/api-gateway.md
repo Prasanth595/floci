@@ -341,23 +341,23 @@ then for `DEFAULT_4XX` / `DEFAULT_5XX`, and applies the configured `statusCode`,
 This is what lets a browser read a `401`/`403`/`400` as such instead of as a CORS failure once
 `DEFAULT_4XX` maps `Access-Control-Allow-Origin`, exactly as the console's "Enable CORS" does.
 
-| Gateway-generated answer | `responseType` |
-|---|---|
-| No resource matches the path, or none declares the method (`403 Missing Authentication Token`) | `MISSING_AUTHENTICATION_TOKEN` |
-| `AWS_IAM` method without a signature | `MISSING_AUTHENTICATION_TOKEN` |
-| `AWS_IAM` signature malformed or mismatching | `INVALID_SIGNATURE` |
-| `AWS_IAM` signature outside the 5-minute window, or a presigned URL past its expiry | `EXPIRED_TOKEN` |
-| `AWS_IAM` access key the emulator never issued | `ACCESS_DENIED` |
-| Lambda authorizer returns `Deny` | `ACCESS_DENIED` |
-| Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` |
-| Cognito authorizer gets no token, an invalid one, one from another pool, or one claiming none of the method's authorization scopes (`401 Unauthorized`) | `UNAUTHORIZED` |
-| Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` |
-| Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` |
-| `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` |
-| Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` |
-| Lambda proxy function error, malformed proxy payload, or missing function | `INTEGRATION_FAILURE` |
+| Gateway-generated answer | `responseType` | `x-amzn-ErrorType` |
+|---|---|---|
+| No resource matches the path, or none declares the method (`403 Missing Authentication Token`) | `MISSING_AUTHENTICATION_TOKEN` | `MissingAuthenticationTokenException` |
+| `AWS_IAM` method without a signature | `MISSING_AUTHENTICATION_TOKEN` | `MissingAuthenticationTokenException` |
+| `AWS_IAM` signature malformed or mismatching | `INVALID_SIGNATURE` | `IncompleteSignatureException` / `InvalidSignatureException` |
+| `AWS_IAM` signature outside the 5-minute window, or a presigned URL past its expiry | `EXPIRED_TOKEN` | `InvalidSignatureException` |
+| `AWS_IAM` access key the emulator never issued | `ACCESS_DENIED` | `UnrecognizedClientException` |
+| Lambda authorizer returns `Deny` | `ACCESS_DENIED` | `AccessDeniedException` |
+| Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` | `AuthorizerConfigurationException` |
+| Cognito authorizer gets no token, an invalid one, one from another pool, or one claiming none of the method's authorization scopes (`401 Unauthorized`) | `UNAUTHORIZED` | `UnauthorizedException` |
+| Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` | `ForbiddenException` |
+| Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` | `BadRequestException` |
+| `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` | `BadRequestException` |
+| Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` | `InternalServerErrorException` |
+| Lambda proxy function error, malformed proxy payload, or missing function | `INTEGRATION_FAILURE` | `InternalServerErrorException` |
 
-A customised `statusCode` overrides the status Floci would otherwise send. Throttling, quota, request size and WAF answers are not produced on the execute plane, so
+A customised `statusCode` overrides the status Floci would otherwise send; the `x-amzn-ErrorType` stays, as on AWS. Throttling, quota, request size and WAF answers are not produced on the execute plane, so
 `THROTTLED`, `QUOTA_EXCEEDED`, `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be configured but never
 fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than treated as a gateway
 response.
