@@ -380,9 +380,13 @@ public class EcrService implements ResourceProvider {
             String keyPrefix = region + "::" + account + "::";
             templates = templateStore.scan(key -> key.startsWith(keyPrefix));
         } else {
+            Set<String> keys = new LinkedHashSet<>();
+            for (String prefix : prefixes) {
+                keys.add(templateKey(region, account, prefix));
+            }
             templates = new ArrayList<>();
-            for (String prefix : new LinkedHashSet<>(prefixes)) {
-                templateStore.get(templateKey(region, account, prefix)).ifPresent(templates::add);
+            for (String key : keys) {
+                templateStore.get(key).ifPresent(templates::add);
             }
         }
         return Pagination.paginate(templates, RepositoryCreationTemplate::getPrefix,

@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ecr.model.RepositoryCreationTemplate;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -31,9 +32,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -41,7 +40,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1633,6 +1631,10 @@ class EcrServiceTest {
                 () -> service.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION)).getErrorCode());
         assertEquals(1, service.describeRepositoryCreationTemplates(List.of("prod"), null, null, REGION)
                 .items().size());
+        PaginatedResult<RepositoryCreationTemplate> both =
+                service.describeRepositoryCreationTemplates(List.of("prod", "prod/"), 1, null, REGION);
+        assertEquals(1, both.items().size());
+        assertNull(both.nextToken());
         RepositoryCreationTemplate change = template("prod");
         change.setDescription("changed");
         assertEquals("changed", service.updateRepositoryCreationTemplate(change, REGION).getDescription());
@@ -1642,50 +1644,50 @@ class EcrServiceTest {
 
     @Test
     void creationTemplate_aSecondCreateOfThePrefixWaitsAndIsRefused() throws Exception {
-        PausingTemplateStore store = new PausingTemplateStore();
+        ParkingStore<RepositoryCreationTemplate> store = new ParkingStore<>();
         EcrService templates = templateService(store);
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
-            store.pauseNextRead();
+            store.parkNextRead();
             Future<?> first = pool.submit(() -> templates.createRepositoryCreationTemplate(
                     template("prod", "REPLICATION"), REGION));
-            assertTrue(store.read.await(5, TimeUnit.SECONDS));
+            assertTrue(store.awaitParked());
             Future<?> second = pool.submit(() -> templates.createRepositoryCreationTemplate(
                     template("prod", "REPLICATION"), REGION));
             assertThrows(TimeoutException.class, () -> second.get(200, TimeUnit.MILLISECONDS),
                     "the second create must wait for the first");
 
-            store.release.countDown();
+            store.release();
             first.get(5, TimeUnit.SECONDS);
             ExecutionException refused = assertThrows(ExecutionException.class, () -> second.get(5, TimeUnit.SECONDS));
             assertEquals("TemplateAlreadyExistsException", ((AwsException) refused.getCause()).getErrorCode());
         } finally {
-            store.release.countDown();
+            store.release();
             pool.shutdownNow();
         }
     }
 
     @Test
     void creationTemplate_aDeleteDuringAnUpdateStaysDeleted() throws Exception {
-        PausingTemplateStore store = new PausingTemplateStore();
+        ParkingStore<RepositoryCreationTemplate> store = new ParkingStore<>();
         EcrService templates = templateService(store);
         templates.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION);
         RepositoryCreationTemplate change = template("prod");
         change.setDescription("changed");
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
-            store.pauseNextRead();
+            store.parkNextRead();
             Future<?> update = pool.submit(() -> templates.updateRepositoryCreationTemplate(change, REGION));
-            assertTrue(store.read.await(5, TimeUnit.SECONDS));
+            assertTrue(store.awaitParked());
             Future<?> delete = pool.submit(() -> templates.deleteRepositoryCreationTemplate("prod", REGION));
             assertThrows(TimeoutException.class, () -> delete.get(200, TimeUnit.MILLISECONDS),
                     "the delete must wait for the update");
 
-            store.release.countDown();
+            store.release();
             update.get(5, TimeUnit.SECONDS);
             delete.get(5, TimeUnit.SECONDS);
         } finally {
-            store.release.countDown();
+            store.release();
             pool.shutdownNow();
         }
 
@@ -1696,30 +1698,5 @@ class EcrServiceTest {
         return new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), store, registryManager, Mockito.mock(EmulatorConfig.class),
                 new RegionResolver(REGION, ACCOUNT));
-    }
-
-    /** Holds the next reader of a template once it has read it, until {@code release} opens. */
-    private static final class PausingTemplateStore extends InMemoryStorage<String, RepositoryCreationTemplate> {
-        final CountDownLatch read = new CountDownLatch(1);
-        final CountDownLatch release = new CountDownLatch(1);
-        private final AtomicBoolean pauseNext = new AtomicBoolean();
-
-        void pauseNextRead() {
-            pauseNext.set(true);
-        }
-
-        @Override
-        public Optional<RepositoryCreationTemplate> get(String key) {
-            Optional<RepositoryCreationTemplate> template = super.get(key);
-            if (pauseNext.compareAndSet(true, false)) {
-                read.countDown();
-                try {
-                    release.await(5, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-            return template;
-        }
     }
 }
