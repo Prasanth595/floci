@@ -1,20 +1,23 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
-import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
-import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.FAILING_RESOURCE;
+import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.REGION;
+import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.integration;
+import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.stack;
+import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.stackAction;
+import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.waitForStackStatus;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
@@ -29,13 +32,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 @QuarkusTest
 class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
 
-    private static final String REGION = "us-east-1";
     private static final String PARAMETERS =
             ",\"RequestParameters\":{\"overwrite:header.x-example\":\"%s\"}";
     private static final String TIMEOUT = ",\"TimeoutInMillis\":15000";
-    private static final String FAILING_RESOURCE =
-            ",\"Broken\":{\"Type\":\"AWS::ApiGatewayV2::VpcLink\",\"DependsOn\":\"Integration\","
-                    + "\"Properties\":{\"Name\":\"broken\"}}";
 
     @Inject
     ApiGatewayV2Service apiGatewayV2Service;
@@ -52,16 +51,16 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
     void removingSettingsFromTheTemplateRemovesThemFromTheIntegration() {
         String stackName = "integration-settings-removal-stack";
         stackAction("CreateStack", stackName, template(PARAMETERS.formatted("value-1") + TIMEOUT, ""));
-        waitForStackStatus(stackName, "CREATE_COMPLETE");
-        Integration created = integration(stack(stackName));
+        waitForStackStatus(cloudFormationService, stackName, "CREATE_COMPLETE");
+        Integration created = integration(apiGatewayV2Service, stack(cloudFormationService, stackName));
         assertEquals(Map.of("overwrite:header.x-example", "value-1"), created.getRequestParameters());
         assertEquals(15000, created.getTimeoutInMillis());
 
         stackAction("UpdateStack", stackName, template(TIMEOUT, ""));
-        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+        waitForStackStatus(cloudFormationService, stackName, "UPDATE_COMPLETE");
 
-        Stack updated = stack(stackName);
-        Integration integration = integration(updated);
+        Stack updated = stack(cloudFormationService, stackName);
+        Integration integration = integration(apiGatewayV2Service, updated);
         assertNull(integration.getRequestParameters());
         assertEquals(15000, integration.getTimeoutInMillis());
         assertEquals("ANY", integration.getIntegrationMethod());
@@ -71,10 +70,10 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
                 .body("timeoutInMillis", equalTo(15000));
 
         stackAction("UpdateStack", stackName, template("", ""));
-        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+        waitForStackStatus(cloudFormationService, stackName, "UPDATE_COMPLETE");
 
-        Stack withoutTimeout = stack(stackName);
-        assertEquals(0, integration(withoutTimeout).getTimeoutInMillis());
+        Stack withoutTimeout = stack(cloudFormationService, stackName);
+        assertEquals(0, integration(apiGatewayV2Service, withoutTimeout).getTimeoutInMillis());
         getIntegrationResponse(withoutTimeout).body("timeoutInMillis", nullValue());
     }
 
@@ -82,27 +81,27 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
     void aTimeoutThatBecomesNoValueIsRemoved() {
         String stackName = "integration-settings-novalue-stack";
         stackAction("CreateStack", stackName, template(TIMEOUT, ""));
-        waitForStackStatus(stackName, "CREATE_COMPLETE");
-        assertEquals(15000, integration(stack(stackName)).getTimeoutInMillis());
+        waitForStackStatus(cloudFormationService, stackName, "CREATE_COMPLETE");
+        assertEquals(15000, integration(apiGatewayV2Service, stack(cloudFormationService, stackName)).getTimeoutInMillis());
 
         stackAction("UpdateStack", stackName, template(
                 ",\"TimeoutInMillis\":{\"Fn::If\":[\"Off\",{\"Ref\":\"AWS::NoValue\"},15000]}", ""));
-        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+        waitForStackStatus(cloudFormationService, stackName, "UPDATE_COMPLETE");
 
-        assertEquals(0, integration(stack(stackName)).getTimeoutInMillis());
+        assertEquals(0, integration(apiGatewayV2Service, stack(cloudFormationService, stackName)).getTimeoutInMillis());
     }
 
     @Test
     void failedUpdateRestoresTheEarlierRequestParameters() {
         String stackName = "integration-settings-rollback-stack";
         stackAction("CreateStack", stackName, template(PARAMETERS.formatted("original") + TIMEOUT, ""));
-        waitForStackStatus(stackName, "CREATE_COMPLETE");
+        waitForStackStatus(cloudFormationService, stackName, "CREATE_COMPLETE");
 
         stackAction("UpdateStack", stackName, template(PARAMETERS.formatted("changed"), FAILING_RESOURCE));
-        waitForStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+        waitForStackStatus(cloudFormationService, stackName, "UPDATE_ROLLBACK_COMPLETE");
 
-        Stack rolledBack = stack(stackName);
-        Integration integration = integration(rolledBack);
+        Stack rolledBack = stack(cloudFormationService, stackName);
+        Integration integration = integration(apiGatewayV2Service, rolledBack);
         assertEquals(Map.of("overwrite:header.x-example", "original"), integration.getRequestParameters());
         assertEquals(15000, integration.getTimeoutInMillis());
         getIntegrationResponse(rolledBack)
@@ -114,48 +113,6 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
         String integrationId = stack.getResources().get("Integration").getPhysicalId();
         return given().when().get("/v2/apis/" + apiId + "/integrations/" + integrationId)
                 .then().statusCode(200);
-    }
-
-    private Integration integration(Stack stack) {
-        StackResource api = stack.getResources().get("HttpApi");
-        StackResource integration = stack.getResources().get("Integration");
-        return apiGatewayV2Service.getIntegration(REGION, api.getPhysicalId(), integration.getPhysicalId());
-    }
-
-    private Stack stack(String stackName) {
-        return cloudFormationService.describeStacks(stackName, REGION).getFirst();
-    }
-
-    private static void stackAction(String action, String stackName, String template) {
-        RequestSpecification request = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action)
-                .formParam("StackName", stackName);
-        if (template != null) {
-            request.formParam("TemplateBody", template);
-        }
-        request.when().post("/").then().statusCode(200);
-    }
-
-    private void waitForStackStatus(String stackName, String expected) {
-        String status = null;
-        for (int attempt = 0; attempt < 200; attempt++) {
-            try {
-                status = cloudFormationService.describeStacks(stackName, REGION).getFirst().getStatus();
-            } catch (AwsException e) {
-                status = "DELETE_COMPLETE";
-            }
-            if (expected.equals(status)) {
-                return;
-            }
-            try {
-                Thread.sleep(25);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new AssertionError("Interrupted while waiting for stack status", e);
-            }
-        }
-        throw new AssertionError("Stack did not reach " + expected + ", last status " + status);
     }
 
     /**
