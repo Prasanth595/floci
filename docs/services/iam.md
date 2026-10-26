@@ -1435,8 +1435,9 @@ Policy evaluation follows the standard AWS precedence:
 
 IAM authorization denials return HTTP 400 `AccessDeniedException` for AWS JSON 1.0/1.1
 requests. REST-JSON requests return HTTP 403 `AccessDeniedException`; AWS Query and S3
-requests retain HTTP 403 XML `AccessDenied` responses. The routed protocol determines
-the status, not just the request's content type.
+requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which return HTTP 403
+`AuthorizationError`, the error every SNS operation lists for a caller denied access, whichever
+action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
