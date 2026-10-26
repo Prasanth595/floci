@@ -71,7 +71,9 @@ PREFIX ?= $(HOME)/.local
         iam-authorized-actions-verify iam-authorized-actions-test iam-passed-roles-sync iam-passed-roles-check \
         iam-passed-roles-verify iam-passed-roles-test iam-tag-on-create-sync iam-tag-on-create-check \
         iam-tag-on-create-verify iam-tag-on-create-test iam-request-resources-sync iam-request-resources-check \
-        iam-request-resources-verify iam-request-resources-test iam-data-verify
+        iam-request-resources-verify iam-request-resources-test \
+        iam-resource-tag-actions-sync iam-resource-tag-actions-check iam-resource-tag-actions-verify \
+        iam-resource-tag-actions-test iam-data-verify
 
 help: ## List the targets below
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -392,15 +394,16 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	@# Both halves run even when the first fails, so one file's drift cannot hide the other's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; passed=0; tagged=0; requested=0; \
+	@namespaces=0; actions=0; authorized=0; passed=0; tagged=0; requested=0; tagActions=0; \
 	$(MAKE) --no-print-directory iam-namespaces-verify || namespaces=$$?; \
 	$(MAKE) --no-print-directory iam-action-resources-verify || actions=$$?; \
 	$(MAKE) --no-print-directory iam-authorized-actions-verify || authorized=$$?; \
 	$(MAKE) --no-print-directory iam-passed-roles-verify || passed=$$?; \
 	$(MAKE) --no-print-directory iam-tag-on-create-verify || tagged=$$?; \
 	$(MAKE) --no-print-directory iam-request-resources-verify || requested=$$?; \
+	$(MAKE) --no-print-directory iam-resource-tag-actions-verify || tagActions=$$?; \
 	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
-			|| [ $$tagged -ne 0 ] || [ $$requested -ne 0 ]; then \
+			|| [ $$tagged -ne 0 ] || [ $$requested -ne 0 ] || [ $$tagActions -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -420,6 +423,9 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		fi; \
 		if [ $$requested -ne 0 ]; then \
 			echo "       the table of the resources requests name, see its message above"; \
+		fi; \
+		if [ $$tagActions -ne 0 ]; then \
+			echo "       the table of actions carrying aws:ResourceTag, see its message above"; \
 		fi; \
 		exit 1; \
 	fi
@@ -453,6 +459,33 @@ iam-authorized-actions-verify: ## CI gate (online): every vendored operation mus
 
 iam-authorized-actions-test: ## Run the IAM authorized-action generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_iam_authorized_actions.py -q
+
+iam-resource-tag-actions-sync: ## Regenerate src/main/resources/aws/iam-resource-tag-actions.json from AWS (commit the result)
+	$(PYTHON) tools/aws/regen_iam_resource_tag_actions.py
+
+iam-resource-tag-actions-check: ## CI gate (offline): the vendored resource-tag action list must be well-formed
+	@$(PYTHON) tools/aws/regen_iam_resource_tag_actions.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-resource-tag-actions.json is malformed."; \
+		echo "       Run 'make iam-resource-tag-actions-sync' and commit the result."; \
+		exit 1; \
+	}
+
+iam-resource-tag-actions-verify: ## CI gate (online): every vendored action must still carry aws:ResourceTag
+	@$(PYTHON) tools/aws/regen_iam_resource_tag_actions.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored resource-tag actions name an action AWS does not tag."; \
+		echo "       Run 'make iam-resource-tag-actions-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+iam-resource-tag-actions-test: ## Run the IAM resource-tag action generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_iam_resource_tag_actions.py -q
 
 iam-passed-roles-sync: ## Regenerate src/main/resources/aws/iam-passed-roles.json from AWS and botocore (commit the result)
 	$(PYTHON) tools/aws/regen_iam_passed_roles.py

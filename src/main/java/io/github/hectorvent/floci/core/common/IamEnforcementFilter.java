@@ -1140,6 +1140,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         effectiveContext.remove("dynamodb:Select");
                         effectiveContext.putAll(batchContext);
                     }
+                    Map<String, List<String>> tableTags =
+                            conditionContextResolver.dynamoDbResourceTagContext(resource);
+                    if (tableTags != null) {
+                        effectiveContext.keySet().removeIf(key -> key.startsWith("aws:ResourceTag/"));
+                        effectiveContext.putAll(tableTags);
+                    }
                 }
                 ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicyFor(
                         effectiveResourcePolicies, principal, action, resource, effectiveContext);
