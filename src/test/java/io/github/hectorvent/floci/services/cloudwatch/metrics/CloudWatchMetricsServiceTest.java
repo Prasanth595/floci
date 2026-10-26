@@ -628,18 +628,24 @@ class CloudWatchMetricsServiceTest {
     void datesFilterRecordedTimestampsAndExpiredHistoryIsDropped() {
         InMemoryStorage<String, AlarmHistoryItem> store = new InMemoryStorage<>();
         Instant now = Instant.now();
+        String expiredKey = null;
         for (int daysAgo : List.of(40, 3, 2, 1)) {
             Instant at = now.minus(Duration.ofDays(daysAgo));
             long sequence = at.getEpochSecond() * 1_000_000 + at.getNano() / 1_000;
-            store.put(REGION + "::" + String.format("%020d", sequence), new AlarmHistoryItem(sequence, "dated",
+            String key = REGION + "::" + String.format("%020d", sequence);
+            store.put(key, new AlarmHistoryItem(sequence, "dated",
                     "MetricAlarm", at.toEpochMilli(), "StateUpdate", daysAgo + " days ago", "{}"));
+            if (daysAgo == 40) {
+                expiredKey = key;
+            }
         }
         service = new CloudWatchMetricsService(new InMemoryStorage<>(), new InMemoryStorage<>(), store,
                 new RegionResolver(REGION, "000000000000"), null);
 
         assertEquals(List.of("1 days ago", "2 days ago", "3 days ago"),
                 summaries(history("dated", null, null, null, null, null, null)));
-        assertEquals(3, store.keys().size());
+        assertEquals(4, store.keys().size(), "a read hides expired history without deleting it");
+        assertTrue(store.keys().contains(expiredKey));
         assertEquals(List.of("2 days ago"), summaries(history("dated", null, null,
                 now.minus(Duration.ofDays(2)).minusSeconds(60), now.minus(Duration.ofDays(1)).minusSeconds(60),
                 null, null)));
@@ -647,6 +653,10 @@ class CloudWatchMetricsServiceTest {
                 now.minus(Duration.ofDays(1)).minusSeconds(60), null, null, null)));
         assertEquals(List.of("2 days ago", "3 days ago"), summaries(history("dated", null, null,
                 null, now.minus(Duration.ofDays(2)).plusSeconds(60), null, null)));
+
+        putAlarm("pruner");
+        assertFalse(store.keys().contains(expiredKey), "a write prunes expired history");
+        assertEquals(4, store.keys().size());
     }
 
     private MetricAlarm putAlarm(String name) {

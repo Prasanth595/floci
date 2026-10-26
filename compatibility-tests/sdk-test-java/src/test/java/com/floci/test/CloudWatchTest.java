@@ -263,7 +263,8 @@ class CloudWatchTest {
                 .period(60)
                 .evaluationPeriods(1)
                 .threshold(1.0)
-                .comparisonOperator(ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD));
+                .comparisonOperator(ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD)
+                .treatMissingData("ignore"));
         try {
             for (StateValue state : List.of(StateValue.OK, StateValue.ALARM, StateValue.OK)) {
                 cloudWatchClient.setAlarmState(request -> request
@@ -287,8 +288,8 @@ class CloudWatchTest {
             assertThat(page.nextToken()).isNotBlank();
 
             assertThatThrownBy(() -> cloudWatchClient.describeAlarmHistory(request -> request
-                    .startDate(Instant.parse("2026-10-26T16:23:10Z"))
-                    .endDate(Instant.parse("2026-10-26T16:22:10Z"))))
+                    .startDate(Instant.parse("2026-10-26T16:21:49.900Z"))
+                    .endDate(Instant.parse("2026-10-26T16:21:49.500Z"))))
                     .isInstanceOf(InvalidParameterValueException.class)
                     .hasMessageContaining("must be before end date");
         } finally {

@@ -696,6 +696,12 @@ public class CloudWatchMetricsService {
     /** Called only under this service's monitor, which also guards the sequence. */
     private void recordHistory(Alarm alarm, String region, String type, String summary, ObjectNode data) {
         Instant now = Instant.now();
+        long expired = epochMicros(now.minus(HISTORY_RETENTION));
+        for (String key : List.copyOf(historyStore.keys())) {
+            if (Long.parseLong(key.substring(key.lastIndexOf("::") + 2)) < expired) {
+                historyStore.delete(key);
+            }
+        }
         lastHistorySequence = Math.max(epochMicros(now), lastHistorySequence + 1);
         historyStore.put(region + "::" + String.format("%020d", lastHistorySequence),
                 new AlarmHistoryItem(lastHistorySequence, alarm.getAlarmName(), alarm.getAlarmType(),
@@ -735,14 +741,9 @@ public class CloudWatchMetricsService {
                 (ascending ? "alarm-history-desc" : "alarm-history-asc") + ":")) {
             return new PaginatedResult<>(List.of(), null);
         }
-        long expired = epochMicros(Instant.now().minus(HISTORY_RETENTION));
-        for (String key : List.copyOf(historyStore.keys())) {
-            if (Long.parseLong(key.substring(key.lastIndexOf("::") + 2)) < expired) {
-                historyStore.delete(key);
-            }
-        }
         List<String> types = alarmTypes == null || alarmTypes.isEmpty() ? List.of("MetricAlarm") : alarmTypes;
-        long start = startDate == null ? Long.MIN_VALUE : startDate.toEpochMilli();
+        long retained = Instant.now().minus(HISTORY_RETENTION).toEpochMilli();
+        long start = startDate == null ? retained : Math.max(retained, startDate.toEpochMilli());
         long end = endDate == null ? Long.MAX_VALUE : endDate.toEpochMilli();
         List<AlarmHistoryItem> matching = historyStore.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(item -> alarmName == null || alarmName.equals(item.alarmName()))

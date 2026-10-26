@@ -325,8 +325,8 @@ public class CloudWatchMetricsQueryHandler {
         PaginatedResult<AlarmHistoryItem> page = metricsService.describeAlarmHistory(params.getFirst("AlarmName"),
                 alarmMembers(params, "AlarmTypes"), params.getFirst("HistoryItemType"),
                 parseInstant(params.getFirst("StartDate")), parseInstant(params.getFirst("EndDate")),
-                optionalInteger(params.getFirst("MaxRecords")), params.getFirst("NextToken"),
-                params.getFirst("ScanBy"), region);
+                Pagination.parseMaxResults(params.getFirst("MaxRecords"), "MalformedInput"),
+                params.getFirst("NextToken"), params.getFirst("ScanBy"), region);
         XmlBuilder xml = new XmlBuilder().start("AlarmHistoryItems");
         for (AlarmHistoryItem item : page.items()) {
             xml.start("member")

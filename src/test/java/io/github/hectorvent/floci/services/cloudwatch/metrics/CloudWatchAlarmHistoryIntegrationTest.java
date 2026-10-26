@@ -45,7 +45,8 @@ class CloudWatchAlarmHistoryIntegrationTest {
         String name = "wire-history-" + Long.toString(System.nanoTime(), 36);
         call(json, "PutMetricAlarm", Map.of("AlarmName", name, "MetricName", "Depth", "Namespace", "Floci/History",
                 "Statistic", "Maximum", "Period", 60, "EvaluationPeriods", 1, "Threshold", 1,
-                "ComparisonOperator", "GreaterThanOrEqualToThreshold")).then().statusCode(200);
+                "ComparisonOperator", "GreaterThanOrEqualToThreshold", "TreatMissingData", "ignore"))
+                .then().statusCode(200);
         for (String state : List.of("OK", "ALARM", "OK")) {
             call(json, "SetAlarmState", Map.of("AlarmName", name, "StateValue", state, "StateReason", "manual"))
                     .then().statusCode(200);
@@ -77,15 +78,19 @@ class CloudWatchAlarmHistoryIntegrationTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void errorsCarryEachProtocolsCode(boolean json) throws Exception {
-        Instant start = Instant.parse("2026-10-26T16:23:10Z");
-        Instant end = Instant.parse("2026-10-26T16:22:10Z");
+        Instant start = Instant.parse("2026-10-26T16:21:49.900Z");
+        Instant end = Instant.parse("2026-10-26T16:21:49.500Z");
         Response reversed = call(json, "DescribeAlarmHistory", json
-                ? Map.of("StartDate", start.getEpochSecond(), "EndDate", end.getEpochSecond())
+                ? Map.of("StartDate", start.toEpochMilli() / 1000.0, "EndDate", end.toEpochMilli() / 1000.0)
                 : Map.of("StartDate", start.toString(), "EndDate", end.toString()));
         reversed.then().statusCode(400);
         assertEquals(json ? "InvalidParameterValueException" : "InvalidParameterValue", errorCode(json, reversed));
-        assertEquals("Start date Mon Oct 26 16:23:10 UTC 2026 must be before end date Mon Oct 26 16:22:10 UTC 2026",
+        assertEquals("Start date Mon Oct 26 16:21:49 UTC 2026 must be before end date Mon Oct 26 16:21:49 UTC 2026",
                 errorMessage(json, reversed));
+
+        Response malformed = call(json, "DescribeAlarmHistory", Map.of("MaxRecords", "abc"));
+        malformed.then().statusCode(400);
+        assertEquals("MalformedInput", errorCode(json, malformed));
 
         Response token = call(json, "DescribeAlarmHistory", Map.of("NextToken", "bogus"));
         token.then().statusCode(400);

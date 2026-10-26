@@ -415,7 +415,7 @@ public class CloudWatchMetricsJsonHandler {
         PaginatedResult<AlarmHistoryItem> page = metricsService.describeAlarmHistory(
                 request.path("AlarmName").asText(null), types, request.path("HistoryItemType").asText(null),
                 parseInstantNode(request.path("StartDate")), parseInstantNode(request.path("EndDate")),
-                Pagination.parseMaxResults(request, "MaxRecords", "ValidationError"),
+                Pagination.parseMaxResults(request, "MaxRecords", "MalformedInput"),
                 request.path("NextToken").asText(null), request.path("ScanBy").asText(null), region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("AlarmHistoryItems");
@@ -809,7 +809,7 @@ public class CloudWatchMetricsJsonHandler {
     private Instant parseInstantNode(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) return null;
         if (node.isNumber()) {
-            return Instant.ofEpochSecond(node.asLong());
+            return Instant.ofEpochSecond(0, node.decimalValue().movePointRight(9).longValue());
         }
         return parseInstant(node.asText(null));
     }
