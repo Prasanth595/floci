@@ -667,12 +667,7 @@ class S3Test {
             s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
                     .bucket(bucket).key(multipartKey).uploadId(uploadId).build());
         } finally {
-            try {
-                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
-            } catch (Exception ignored) {}
-            try {
-                s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
-            } catch (Exception ignored) {}
+            deleteObjectAndBucketQuietly(bucket, key);
         }
     }
 
@@ -694,16 +689,20 @@ class S3Test {
                         assertThat(s3e.awsErrorDetails().errorCode()).isEqualTo(expectedErrorCode);
                     });
         } finally {
-            try {
-                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
-            } catch (Exception ignored) {
-                // cleanup only: an already-deleted object must not mask the assertion
-            }
-            try {
-                s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
-            } catch (Exception ignored) {
-                // cleanup only: an already-emptied bucket must not mask the assertion
-            }
+            deleteObjectAndBucketQuietly(bucket, key);
+        }
+    }
+
+    private void deleteObjectAndBucketQuietly(String bucket, String key) {
+        try {
+            s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+        } catch (Exception ignored) {
+            // cleanup only: an already-deleted object must not mask the assertion
+        }
+        try {
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+        } catch (Exception ignored) {
+            // cleanup only: an already-emptied bucket must not mask the assertion
         }
     }
 }
