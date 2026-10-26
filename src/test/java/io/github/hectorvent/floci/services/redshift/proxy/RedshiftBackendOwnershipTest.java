@@ -5,7 +5,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.Socket;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
@@ -108,12 +107,8 @@ class RedshiftBackendOwnershipTest {
         }
     }
 
-    private RedshiftInterceptingBridge bridgeWithLock(ReentrantLock lock) throws Exception {
-        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(client, backend, null, null);
-        Field field = RedshiftInterceptingBridge.class.getDeclaredField("backendLock");
-        field.setAccessible(true);
-        field.set(bridge, lock);
-        return bridge;
+    private RedshiftInterceptingBridge bridgeWithLock(ReentrantLock lock) {
+        return new RedshiftInterceptingBridge(client, backend, lock);
     }
 
     private static final class DelayedWaiterLock extends ReentrantLock {

@@ -82,7 +82,7 @@ public class RedshiftInterceptingBridge {
     private final Map<String, ExtendedSpectrumExchange.PortalCursor> spectrumCursors = new HashMap<>();
     private final BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
 
-    private final ReentrantLock backendLock = new ReentrantLock(true);
+    private final ReentrantLock backendLock;
     private volatile boolean pumpBetweenMessages = true;
     private volatile boolean pumpFinished = false;
     private boolean extendedSpectrumError;
@@ -132,6 +132,20 @@ public class RedshiftInterceptingBridge {
                                       SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
                                       String defaultIamRoleArn, RedshiftAuditLogPublisher auditLogPublisher,
                                       String databaseUser) {
+        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor,
+                clusterKey, databaseName, defaultIamRoleArn, auditLogPublisher, databaseUser, new ReentrantLock(true));
+    }
+
+    /** For tests: a bridge with no services, whose fair backend lock the caller supplies. */
+    RedshiftInterceptingBridge(Socket client, Socket backend, ReentrantLock backendLock) {
+        this(client, backend, null, null, null, List.of(), null, null, null, null, null, null, backendLock);
+    }
+
+    private RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
+                                       String clusterAccountId, List<String> iamRoleArns,
+                                       SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
+                                       String defaultIamRoleArn, RedshiftAuditLogPublisher auditLogPublisher,
+                                       String databaseUser, ReentrantLock backendLock) {
         this.client = client;
         this.backend = backend;
         this.s3Service = s3Service;
@@ -145,6 +159,7 @@ public class RedshiftInterceptingBridge {
         this.auditLogPublisher = auditLogPublisher;
         this.databaseUser = databaseUser;
         this.relationalBackend = new PostgresExtendedBackendSession(backend);
+        this.backendLock = backendLock;
     }
 
     private SpectrumSession spectrumSession() {
