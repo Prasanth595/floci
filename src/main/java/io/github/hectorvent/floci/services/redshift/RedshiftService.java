@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
+import io.github.hectorvent.floci.services.redshift.RedshiftEventCatalog.EventInfo;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.AutomatedSnapshotState;
@@ -21,8 +22,10 @@ import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.EventSubscription;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
+import io.github.hectorvent.floci.services.redshift.model.RedshiftEvent;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotSchedule;
@@ -44,6 +47,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -97,6 +101,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private final ObjectMapper objectMapper;
     private final DynamoDbStreamReader streamReader;
     private final RedshiftAuditLogPublisher auditLogPublisher;
+    private final RedshiftEventService events;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
@@ -149,13 +154,27 @@ public class RedshiftService implements ManagedSecretRotator {
         return mutation.get();
     }
 
+    private static final DateTimeFormatter EVENT_MESSAGE_TIME =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneOffset.UTC);
+
+    private static String eventTime() {
+        return EVENT_MESSAGE_TIME.format(Instant.now()) + " UTC";
+    }
+
+    private void emitEvent(EventInfo info, String sourceIdentifier, String message) {
+        if (events != null) {
+            events.record(info, sourceIdentifier, message);
+        }
+    }
+
     @Inject
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
                             EmulatorConfig config, RegionResolver regionResolver,
                             RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
                             RedshiftCredentialBroker credentialBroker,
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
-                            DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher) {
+                            DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
+                            RedshiftEventService events) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -175,6 +194,16 @@ public class RedshiftService implements ManagedSecretRotator {
         this.objectMapper = objectMapper;
         this.streamReader = streamReader;
         this.auditLogPublisher = auditLogPublisher;
+        this.events = events;
+    }
+
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver, RedshiftProxyManager proxyManager,
+                    DockerHostResolver dockerHostResolver, RedshiftCredentialBroker credentialBroker,
+                    SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                    DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, null);
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -363,6 +392,8 @@ public class RedshiftService implements ManagedSecretRotator {
 
         clusters.put(identifier, cluster);
         clusters.flush();
+        emitEvent(RedshiftEventCatalog.CLUSTER_CREATED, identifier, "Amazon Redshift cluster '" + identifier
+                + "' has been created at " + eventTime() + " and is ready for use.");
         return cluster;
     }
 
@@ -785,7 +816,11 @@ public class RedshiftService implements ManagedSecretRotator {
             createSnapshot(finalSnapshotIdentifier, identifier, retentionPeriod);
         }
 
-        return mutate(() -> removeCluster(identifier, cluster));
+        Cluster removed = mutate(() -> removeCluster(identifier, cluster));
+        emitEvent(RedshiftEventCatalog.CLUSTER_DELETED, identifier, "Amazon Redshift cluster '" + identifier
+                + "' has been deleted at " + eventTime() + ". A final snapshot was "
+                + (skipSnapshot ? "not " : "") + "saved.");
+        return removed;
     }
 
     private Cluster removeCluster(String identifier, Cluster cluster) {
@@ -856,9 +891,13 @@ public class RedshiftService implements ManagedSecretRotator {
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
         validateAutomatedRetention(nodeType == null ? cluster.getNodeType() : nodeType,
                 automatedRetention == null ? cluster.getAutomatedSnapshotRetentionPeriod() : automatedRetention);
+
+        boolean passwordChanged = masterUserPassword != null && !masterUserPassword.isBlank();
+        boolean parameterGroupChanged = clusterParameterGroupName != null && !clusterParameterGroupName.isBlank();
+        boolean securityGroupsChanged = vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty();
         // alterUserPassword runs before any mutation of the cluster object (a live reference
         // from HybridStorage, not a copy); if it throws, no metadata has been changed yet.
-        if (masterUserPassword != null && !masterUserPassword.isBlank()) {
+        if (passwordChanged) {
             containerManager.alterUserPassword(clusters.accountId(), clusterIdentifier,
                     cluster.getMasterUsername(), masterUserPassword);
             cluster.setMasterPassword(masterUserPassword);
@@ -894,6 +933,20 @@ public class RedshiftService implements ManagedSecretRotator {
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         registerAuditLogging(clusters.accountId(), cluster);
+        if (passwordChanged) {
+            emitEvent(RedshiftEventCatalog.ADMIN_CREDENTIALS_UPDATED, clusterIdentifier,
+                    "Your admin credentials for your Amazon Redshift cluster: " + clusterIdentifier
+                            + " were updated at " + eventTime() + ".");
+        }
+        if (parameterGroupChanged) {
+            emitEvent(RedshiftEventCatalog.CLUSTER_PARAMETER_GROUP_CHANGED, clusterIdentifier,
+                    "Your Amazon Redshift cluster " + clusterIdentifier + " was modified to use parameter group "
+                            + clusterParameterGroupName + " at " + eventTime() + ".");
+        }
+        if (securityGroupsChanged) {
+            emitEvent(RedshiftEventCatalog.CLUSTER_SECURITY_GROUPS_UPDATED, clusterIdentifier,
+                    "VPC security groups for cluster " + clusterIdentifier + " updated at " + eventTime() + ".");
+        }
         return cluster;
     }
 
@@ -1242,6 +1295,8 @@ public class RedshiftService implements ManagedSecretRotator {
 
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
+        emitEvent(RedshiftEventCatalog.CLUSTER_REBOOTED, clusterIdentifier, "Your Amazon Redshift cluster "
+                + clusterIdentifier + " was rebooted at " + eventTime() + ".");
         return cluster;
     }
 
@@ -1340,6 +1395,10 @@ public class RedshiftService implements ManagedSecretRotator {
         if (!dumpFile.startsWith(dumpDir)) {
             throw new AwsException("InvalidParameterValue", "Invalid snapshot identifier", 400);
         }
+        boolean finalSnapshot = retentionPeriod != null;
+        emitEvent(finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_STARTED : RedshiftEventCatalog.SNAPSHOT_STARTED,
+                snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "A user snapshot '") + snapshotIdentifier
+                        + "' for Amazon Redshift cluster '" + clusterIdentifier + "' started at " + eventTime() + ".");
         boolean committed = false;
         try {
             Files.createDirectories(dumpDir);
@@ -1360,6 +1419,10 @@ public class RedshiftService implements ManagedSecretRotator {
                     e.addSuppressed(cleanupFailure);
                 }
             }
+            emitEvent(finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_FAILED : RedshiftEventCatalog.SNAPSHOT_FAILED,
+                    snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "The user snapshot '")
+                            + snapshotIdentifier + "' for your Amazon Redshift cluster '" + clusterIdentifier
+                            + "' failed at " + eventTime() + ".");
             if (e instanceof AwsException awsFailure) {
                 throw awsFailure;
             }
@@ -1369,6 +1432,10 @@ public class RedshiftService implements ManagedSecretRotator {
             throw failure;
         }
 
+        emitEvent(finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_COMPLETED : RedshiftEventCatalog.SNAPSHOT_COMPLETED,
+                snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "The user snapshot '")
+                        + snapshotIdentifier + "' for your Amazon Redshift cluster '" + clusterIdentifier
+                        + "' completed successfully at " + eventTime() + ".");
         return snapshot;
     }
 
@@ -1419,6 +1486,9 @@ public class RedshiftService implements ManagedSecretRotator {
             }
         }
         snapshot.setStatus("deleted");
+        emitEvent(RedshiftEventCatalog.SNAPSHOT_DELETED, snapshotIdentifier, "The cluster snapshot '"
+                + snapshotIdentifier + "' for Amazon Redshift cluster '" + snapshot.getClusterIdentifier()
+                + "' was deleted at " + eventTime() + ".");
         return snapshot;
     }
 
@@ -1529,6 +1599,9 @@ public class RedshiftService implements ManagedSecretRotator {
         cluster.setUserActivityLoggingEnabled(userActivityLoggingEnabled(DEFAULT_PARAMETER_GROUP_NAME));
         cluster.setClusterStatus("creating");
         storeCluster(cluster);
+        emitEvent(RedshiftEventCatalog.CLUSTER_RESTORE_STARTED, clusterIdentifier,
+                "Your restore operation to create a new Amazon Redshift cluster '" + clusterIdentifier
+                        + "' snapshot '" + snapshotIdentifier + "' was started at " + eventTime() + ".");
 
         // Hoisted out of the try so a failure after allocateProxyPort() still returns the port.
         int proxyPort = -1;
@@ -1554,13 +1627,18 @@ public class RedshiftService implements ManagedSecretRotator {
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
             rollbackSnapshotRestore(cluster, proxyPort);
+            emitClusterRestoreFailure(clusterIdentifier, snapshotIdentifier);
             throw e;
         } catch (Exception e) {
             rollbackSnapshotRestore(cluster, proxyPort);
+            emitClusterRestoreFailure(clusterIdentifier, snapshotIdentifier);
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
         }
 
         storeCluster(cluster);
+        emitEvent(RedshiftEventCatalog.CLUSTER_RESTORED, clusterIdentifier, "Amazon Redshift cluster '"
+                + clusterIdentifier + "' was successfully created from snapshot '" + snapshotIdentifier
+                + "' and is available for use.");
         return cluster;
     }
 
@@ -1577,6 +1655,8 @@ public class RedshiftService implements ManagedSecretRotator {
         ClusterParameterGroup group = new ClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
+        emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_CREATED, parameterGroupName,
+                "Cluster parameter group '" + parameterGroupName + "' was created.");
         return group;
     }
 
@@ -1654,7 +1734,13 @@ public class RedshiftService implements ManagedSecretRotator {
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
         refreshClustersForActivityParameter(parameterGroupName, group);
+        emitParameterGroupUpdated(parameterGroupName);
         return group;
+    }
+
+    private void emitParameterGroupUpdated(String parameterGroupName) {
+        emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_UPDATED, parameterGroupName, "Cluster parameter group '"
+                + parameterGroupName + "' was updated at " + eventTime() + ".");
     }
 
     private boolean userActivityLoggingEnabled(String parameterGroupName) {
@@ -1714,6 +1800,7 @@ public class RedshiftService implements ManagedSecretRotator {
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
         refreshClustersForActivityParameter(parameterGroupName, group);
+        emitParameterGroupUpdated(parameterGroupName);
     }
 
     private void refreshClustersForActivityParameter(String parameterGroupName, ClusterParameterGroup group) {
@@ -1768,7 +1855,70 @@ public class RedshiftService implements ManagedSecretRotator {
         ClusterParameterGroup group = groupOpt.get();
         parameterGroups.delete(parameterGroupName);
         parameterGroups.flush();
+        emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_DELETED, parameterGroupName,
+                "Cluster parameter group '" + parameterGroupName + "' was deleted at " + eventTime() + ".");
         return group;
+    }
+
+    // ── Event Operations ─────────────────────────────────────────────────────
+
+    private RedshiftEventService eventService() {
+        if (events == null) {
+            throw new IllegalStateException("Redshift events are not available in this service instance");
+        }
+        return events;
+    }
+
+    private void emitClusterRestoreFailure(String clusterIdentifier, String snapshotIdentifier) {
+        emitEvent(RedshiftEventCatalog.CLUSTER_RESTORE_FAILED, clusterIdentifier,
+                "The restore operation to create Amazon Redshift cluster '" + clusterIdentifier
+                        + "' from snapshot '" + snapshotIdentifier + "' failed at " + eventTime() + ".");
+    }
+
+    /** Whether the named source exists; Floci does not model cluster security groups or scheduled actions. */
+    private boolean eventSourceExists(String sourceType, String sourceIdentifier) {
+        return switch (sourceType) {
+            case RedshiftEventCatalog.CLUSTER -> clusters.get(sourceIdentifier).isPresent();
+            case RedshiftEventCatalog.PARAMETER_GROUP -> DEFAULT_PARAMETER_GROUP_NAME.equals(sourceIdentifier)
+                    || parameterGroups.get(sourceIdentifier).isPresent();
+            case RedshiftEventCatalog.SNAPSHOT -> snapshots.get(sourceIdentifier).isPresent();
+            default -> false;
+        };
+    }
+
+    public PaginatedResult<RedshiftEvent> describeEvents(String sourceIdentifier, String sourceType,
+                                                         Instant startTime, Instant endTime, Integer duration,
+                                                         Integer maxRecords, String marker) {
+        return eventService().describeEvents(sourceIdentifier, sourceType, startTime, endTime, duration,
+                maxRecords, marker);
+    }
+
+    public Map<String, List<EventInfo>> describeEventCategories(String sourceType) {
+        return eventService().describeEventCategories(sourceType);
+    }
+
+    public EventSubscription createEventSubscription(String name, String snsTopicArn, String sourceType,
+                                                     List<String> sourceIds, List<String> categories,
+                                                     String severity, Boolean enabled, Map<String, String> tags) {
+        return eventService().createSubscription(name, snsTopicArn, sourceType, sourceIds, categories, severity,
+                enabled, tags, this::eventSourceExists);
+    }
+
+    public EventSubscription modifyEventSubscription(String name, String snsTopicArn, String sourceType,
+                                                     List<String> sourceIds, List<String> categories,
+                                                     String severity, Boolean enabled) {
+        return eventService().modifySubscription(name, snsTopicArn, sourceType, sourceIds, categories, severity,
+                enabled, this::eventSourceExists);
+    }
+
+    public void deleteEventSubscription(String name) {
+        eventService().deleteSubscription(name);
+    }
+
+    public PaginatedResult<EventSubscription> describeEventSubscriptions(String name, List<String> tagKeys,
+                                                                         List<String> tagValues, Integer maxRecords,
+                                                                         String marker) {
+        return eventService().describeSubscriptions(name, tagKeys, tagValues, maxRecords, marker);
     }
 
     // ── Cluster Subnet Group Operations ──────────────────────────────────────
@@ -2382,6 +2532,13 @@ public class RedshiftService implements ManagedSecretRotator {
                         "snapshotschedule", s.getTags(), tagKeysFilter);
             }
         }
+        if (events != null && (resourceType == null || "eventsubscription".equalsIgnoreCase(resourceType))) {
+            for (EventSubscription subscription : events.describeSubscriptions(null, null, null, null, null).items()) {
+                addTaggedResources(result, regionResolver.buildArn("redshift", regionResolver.getRegion(),
+                                "eventsubscription:" + subscription.getCustSubscriptionId()),
+                        "eventsubscription", subscription.getTags(), tagKeysFilter);
+            }
+        }
         return result;
     }
 
@@ -2472,6 +2629,11 @@ public class RedshiftService implements ManagedSecretRotator {
         String id = resource.substring(sep + 1);
 
         return switch (type) {
+            case "eventsubscription" -> {
+                EventSubscription subscription = eventService().describeSubscriptions(id, null, null, null, null)
+                        .items().getFirst();
+                yield new TagHandle(subscription.getTags(), updated -> eventService().replaceSubscriptionTags(id, updated));
+            }
             case "cluster" -> {
                 Cluster cluster = clusters.get(id)
                         .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + id + " not found", 404));
