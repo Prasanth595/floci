@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -87,6 +88,7 @@ public class IotService {
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
+    private static final Pattern THING_TYPE_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]+");
     private static final Pattern SHADOW_NAME_PATTERN = Pattern.compile("[$a-zA-Z0-9:_-]{1,64}");
     /** The {@code FirehoseSeparator} shape of the IoT API model. */
     private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
@@ -296,8 +298,8 @@ public class IotService {
     /** {@code attributes} is null when the request carries none, which leaves the stored ones as they are. */
     public Thing updateThing(String thingName, Map<String, String> attributes, boolean merge, String thingTypeName,
                              boolean removeThingType, Long expectedVersion, String region) {
-        if (thingTypeName != null && !THING_NAME_PATTERN.matcher(thingTypeName).matches()) {
-            throw new AwsException("InvalidRequestException", "Invalid thing type name: " + thingTypeName, 400);
+        if (thingTypeName != null) {
+            validateThingTypeName(thingTypeName);
         }
         if (removeThingType && thingTypeName != null) {
             throw new AwsException("InvalidRequestException", "Cannot remove thing type when thing type is not null", 400);
@@ -1686,6 +1688,21 @@ public class IotService {
     private void validateThingName(String thingName) {
         if (thingName == null || !THING_NAME_PATTERN.matcher(thingName).matches()) {
             throw new AwsException("InvalidRequestException", "Invalid thing name: " + thingName, 400);
+        }
+    }
+
+    private static void validateThingTypeName(String thingTypeName) {
+        List<String> violations = new ArrayList<>();
+        String length = SmithyValidationErrors.lengthOutOfRange("thingTypeName", thingTypeName, 1, 128);
+        if (length != null) {
+            violations.add(length);
+        }
+        if (!THING_TYPE_NAME_PATTERN.matcher(thingTypeName).matches()) {
+            violations.add(SmithyValidationErrors.pattern("thingTypeName", thingTypeName,
+                    THING_TYPE_NAME_PATTERN.pattern()));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.exception("InvalidRequestException", violations);
         }
     }
 

@@ -35,6 +35,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -1731,17 +1732,43 @@ class IotServiceTest {
         service.createThingType("sensor-type", mapper.createObjectNode(), REGION);
         service.createThing("typed", Map.of("a", "1"), "sensor-type", REGION);
 
-        for (String thingTypeName : List.of("", "  ", "bad type")) {
+        String tooLong = "a".repeat(129);
+        String tooLongWithSpace = "a".repeat(128) + " ";
+        String emptyMessage = "2 validation errors detected: "
+                + "Value '' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1; "
+                + "Value '' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+";
+        Map<String, String> expectedMessages = new LinkedHashMap<>();
+        expectedMessages.put("", emptyMessage);
+        expectedMessages.put("  ", "1 validation error detected: "
+                + "Value '  ' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+");
+        expectedMessages.put("bad type", "1 validation error detected: "
+                + "Value 'bad type' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+");
+        expectedMessages.put(tooLong, "1 validation error detected: "
+                + "Value '" + tooLong + "' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128");
+        expectedMessages.put(tooLongWithSpace, "2 validation errors detected: "
+                + "Value '" + tooLongWithSpace + "' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128; "
+                + "Value '" + tooLongWithSpace + "' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+");
+
+        for (Map.Entry<String, String> expected : expectedMessages.entrySet()) {
+            String thingTypeName = expected.getKey();
             AwsException e = assertThrows(AwsException.class,
                     () -> service.updateThing("typed", null, false, thingTypeName, false, null, REGION));
             assertEquals("InvalidRequestException", e.getErrorCode(), thingTypeName);
             assertEquals(400, e.getHttpStatus(), thingTypeName);
-            assertEquals("Invalid thing type name: " + thingTypeName, e.getMessage(), thingTypeName);
+            assertEquals(expected.getValue(), e.getMessage(), thingTypeName);
         }
         AwsException removeWithEmpty = assertThrows(AwsException.class,
                 () -> service.updateThing("typed", null, false, "", true, null, REGION));
         assertEquals("InvalidRequestException", removeWithEmpty.getErrorCode());
         assertEquals(400, removeWithEmpty.getHttpStatus());
+        assertEquals(emptyMessage, removeWithEmpty.getMessage());
 
         Thing unchanged = service.describeThing("typed", REGION);
         assertEquals("sensor-type", unchanged.getThingTypeName());
