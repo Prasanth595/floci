@@ -1610,6 +1610,9 @@ public class Ec2QueryHandler {
         String instanceId = p.getFirst("InstanceId");
         List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings = parseLaunchTemplateBlockDeviceMappings(p, "");
         if (!blockDeviceMappings.isEmpty()) {
+            if (instanceId == null || instanceId.isBlank()) {
+                throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
+            }
             // AWS takes one attribute per call. Refusing the others named with the devices keeps a
             // call from changing some of what it names and then failing on the rest.
             // The generic form names its attribute in Attribute and sets it through Value.
@@ -1628,6 +1631,7 @@ public class Ec2QueryHandler {
                 throw new AwsException("InvalidParameterCombination",
                         "Fields for multiple attribute types specified: " + String.join(",", named), 400);
             }
+            checkDryRun(p);
             service.modifyInstanceBlockDeviceMappings(region, instanceId, blockDeviceMappings);
             return booleanResponse("ModifyInstanceAttribute");
         }

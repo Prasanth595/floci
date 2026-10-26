@@ -5567,7 +5567,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * ModifyInstanceAttribute with {@code BlockDeviceMapping}: sets DeleteOnTermination on the
      * volumes attached at the devices it names, true where an entry leaves it unset, as AWS
-     * documents. A device the instance has no volume at is refused before anything changes. The
+     * documents. An entry that is NoDevice or names an instance store volume, without an Ebs
+     * block, describes no EBS setting and leaves its device as it is. A device the instance has no volume at is refused before anything changes. The
      * volumes are read again under all their locks before any is changed, so a device whose
      * volume a TerminateInstances or DetachVolume took in the meantime is refused and no device
      * is changed.
@@ -5598,8 +5599,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             for (LaunchTemplateData.BlockDeviceMapping mapping : mappings) {
                 changes.put(mapping, attachmentsAt(held, instanceId, mapping));
             }
-            changes.forEach((mapping, at) -> at.forEach(attachment -> attachment.setDeleteOnTermination(
-                    mapping.getEbs() == null || !Boolean.FALSE.equals(mapping.getEbs().getDeleteOnTermination()))));
+            changes.forEach((mapping, at) -> {
+                if (mapping.getEbs() == null && (mapping.getNoDevice() != null || mapping.namesInstanceStore())) {
+                    return;
+                }
+                at.forEach(attachment -> attachment.setDeleteOnTermination(
+                        mapping.getEbs() == null || !Boolean.FALSE.equals(mapping.getEbs().getDeleteOnTermination())));
+            });
             current.forEach(volume -> volumes.put(key(region, volume.getVolumeId()), volume));
         });
     }

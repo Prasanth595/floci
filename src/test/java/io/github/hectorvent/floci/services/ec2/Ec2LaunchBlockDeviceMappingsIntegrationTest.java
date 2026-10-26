@@ -281,6 +281,49 @@ class Ec2LaunchBlockDeviceMappingsIntegrationTest {
     }
 
     @Test
+    void aDryRunOfModifyInstanceAttributeChangesNothing() {
+        String account = account();
+        String instance = launch(account, "ami-0abcdef1234567890");
+
+        request(account, "ModifyInstanceAttribute", "InstanceId", instance, "DryRun", "true",
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false")
+                .post("/").then().statusCode(412)
+                .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+
+        assertEquals("true", ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getString(INSTANCE + ".blockDeviceMapping.item[0].ebs.deleteOnTermination"));
+    }
+
+    @Test
+    void modifyInstanceAttributeLeavesDeleteOnTerminationForAnEntryWithoutAnEbsVolume() {
+        String account = account();
+        String instance = launch(account, "ami-0abcdef1234567890",
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdg",
+                "BlockDeviceMapping.1.Ebs.VolumeSize", "5",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false");
+
+        ec2(account, "ModifyInstanceAttribute", "InstanceId", instance,
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdg",
+                "BlockDeviceMapping.1.NoDevice", "",
+                "BlockDeviceMapping.2.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.2.VirtualName", "ephemeral0");
+
+        assertEquals(List.of("true", "false"), ec2(account, "DescribeInstances", "InstanceId.1", instance)
+                .getList(INSTANCE + ".blockDeviceMapping.item.ebs.deleteOnTermination", String.class));
+    }
+
+    @Test
+    void modifyInstanceAttributeWithoutAnInstanceIdIsRefused() {
+        request(account(), "ModifyInstanceAttribute",
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("MissingParameter"))
+                .body("Response.Errors.Error.Message", equalTo("The request must contain the parameter InstanceId"));
+    }
+
+    @Test
     void describeInstanceAttributeListsTheBlockDeviceMapping() {
         String account = account();
         String instance = launch(account, "ami-0abcdef1234567890",
