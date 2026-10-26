@@ -118,6 +118,40 @@ class DynamoDbVectorBilledSizeIntegrationTest {
             .body("ConsumedCapacity[0].CapacityUnits", equalTo(2.0f));
     }
 
+    @Test
+    @Order(4)
+    void anIndexAddedLaterBillsWhateverTheAttributeHoldsOnceActive() {
+        String table = TABLE + "-later";
+        ddb("CreateTable", """
+                {"TableName":"%s","AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],
+                 "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"BillingMode":"PAY_PER_REQUEST"}
+                """.formatted(table))
+            .statusCode(200);
+        // 4084 bytes besides the string, so 4096 once it costs 12 bytes as a 3 dimension vector.
+        ddb("PutItem", """
+                {"TableName":"%s","Item":{"pk":{"S":"s"},"embedding":{"S":"%s"},"pad":{"S":"%s"}}}
+                """.formatted(table, "x".repeat(2000), "x".repeat(4084 - 2 - 1 - 9 - 3)))
+            .statusCode(200);
+        String get = """
+                {"TableName":"%s","Key":{"pk":{"S":"s"}},"ConsistentRead":true,"ReturnConsumedCapacity":"TOTAL"}
+                """.formatted(table);
+
+        ddb("UpdateTable", """
+                {"TableName":"%s","VectorIndexUpdates":[{"Create":{"IndexName":"vix",
+                 "VectorAttribute":{"AttributeName":"embedding"},"Dimensions":3,"DistanceFunction":"COSINE",
+                 "Projection":{"ProjectionType":"KEYS_ONLY"}}}]}
+                """.formatted(table))
+            .statusCode(200);
+        ddb("GetItem", get).statusCode(200).body("ConsumedCapacity.CapacityUnits", equalTo(2.0f));
+
+        ddb("DescribeTable", """
+                {"TableName":"%s"}
+                """.formatted(table))
+            .statusCode(200)
+            .body("Table.VectorIndexes[0].IndexStatus", equalTo("ACTIVE"));
+        ddb("GetItem", get).statusCode(200).body("ConsumedCapacity.CapacityUnits", equalTo(1.0f));
+    }
+
     private static ValidatableResponse put(String item) {
         return ddb("PutItem", """
                 {"TableName":"%s","Item":%s,"ReturnConsumedCapacity":"TOTAL"}

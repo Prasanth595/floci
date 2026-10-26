@@ -277,12 +277,23 @@ class DynamoDbWriteCapacityTest {
     }
 
     @Test
-    void aListThatIsNotAVectorOfTheIndexKeepsItsStoredSize() {
-        ObjectNode shortList = item("""
-                {"pk": {"S": "a2"}, "embedding": {"L": [{"N": "1"}, {"N": "0"}]}}
-                """);
-        assertEquals(DynamoDbItemSize.calculateItemSize(shortList),
-                DynamoDbItemSize.billedItemSize(vectorTable(), shortList));
+    void anyValueUnderTheVectorAttributeCostsFourBytesPerDimension() {
+        ObjectNode written = item("""
+                {"pk": {"S": "s1"}, "embedding": {"S": "%s"}}
+                """.formatted("x".repeat(2000)));
+        // 4 for the key, 9 for the vector's name and 12 for its dimensions.
+        assertEquals(25, DynamoDbItemSize.billedItemSize(vectorTable(), written));
+    }
+
+    @Test
+    void aVectorIndexStillCreatingLeavesTheStoredSize() {
+        TableDefinition creating = vectorTable();
+        creating.getVectorIndexes().forEach(index -> index.setIndexStatus("CREATING"));
+        ObjectNode written = item("""
+                {"pk": {"S": "s1"}, "embedding": {"S": "%s"}}
+                """.formatted("x".repeat(2000)));
+        assertEquals(DynamoDbItemSize.calculateItemSize(written),
+                DynamoDbItemSize.billedItemSize(creating, written));
     }
 
     @Test

@@ -174,9 +174,10 @@ final class DynamoDbItemSize {
     }
 
     /**
-     * The size a read or write of the base table item is billed at. An attribute a vector
-     * index reads costs its name plus four bytes per dimension there. The 400KB limit and
-     * every secondary index copy still count the numbers it holds.
+     * The size a read or write of the base table item is billed at. Once a vector index is
+     * ACTIVE, the attribute it reads costs its name plus four bytes per dimension there, even
+     * when an item written before the index holds something other than a vector. The 400KB
+     * limit and every secondary index copy still count what the attribute holds.
      */
     static int billedItemSize(TableDefinition table, JsonNode item, int storedSize) {
         List<VectorIndex> indexes = table.getVectorIndexes();
@@ -188,9 +189,8 @@ final class DynamoDbItemSize {
         for (VectorIndex index : indexes) {
             String name = index.getVectorAttributeName();
             JsonNode vector = item.get(name);
-            long dimensions = index.getDimensions();
-            if (vector != null && vector.path("L").size() == dimensions && counted.add(name)) {
-                size += (int) (VECTOR_COMPONENT_BYTES * dimensions) - attributeValueSize(vector);
+            if (vector != null && "ACTIVE".equals(index.getIndexStatus()) && counted.add(name)) {
+                size += (int) (VECTOR_COMPONENT_BYTES * index.getDimensions()) - attributeValueSize(vector);
             }
         }
         return size;
