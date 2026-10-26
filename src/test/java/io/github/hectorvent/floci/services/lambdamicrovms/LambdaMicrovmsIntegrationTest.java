@@ -504,6 +504,11 @@ class LambdaMicrovmsIntegrationTest {
                 .body("Configuration.VpcEgressConfiguration.SubnetIds", contains("subnet-0000000000000ver1"))
                 .body("$", not(hasKey("LatestVersion")))
                 .body("$", not(hasKey("LastUpdateStatus")));
+        given().when().get(CORE + "/network-connectors/" + arn + ":2")
+                .then().statusCode(200)
+                .body("Version", equalTo(2))
+                .body("Configuration.VpcEgressConfiguration.SubnetIds",
+                        contains("subnet-0000000000000ver1", "subnet-0000000000000ver2"));
         given().when().get(CORE + "/network-connectors/" + arn + ":4")
                 .then().statusCode(404)
                 .body("message", equalTo("Network connector not found: " + arn + ":4"));

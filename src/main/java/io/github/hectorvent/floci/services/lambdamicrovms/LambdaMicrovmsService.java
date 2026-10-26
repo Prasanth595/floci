@@ -544,7 +544,7 @@ public class LambdaMicrovmsService {
      * The identifier is an id, a name or an ARN, each with an optional {@code :<version>}. AWS names
      * the full ARN, with the version asked for, when either is missing.
      */
-    public ConnectorVersion getConnectorVersion(String region, String identifier) {
+    public synchronized ConnectorVersion getConnectorVersion(String region, String identifier) {
         ConnectorRef ref = ConnectorRef.parse(identifier);
         NetworkConnector connector = find(region, ref);
         String suffix = ref.version() == null ? "" : ":" + ref.version();
@@ -557,24 +557,25 @@ public class LambdaMicrovmsService {
     }
 
     /** Oldest first. */
-    public List<NetworkConnectorVersion> listConnectorVersions(String region, String identifier) {
+    public synchronized List<NetworkConnectorVersion> listConnectorVersions(String region, String identifier) {
         ConnectorRef ref = ConnectorRef.parse(identifier);
         if (ref.version() != null) {
             throw new AwsException("InvalidParameterValueException",
                     "Identifier must not include a version qualifier", 400);
         }
-        return find(region, ref).versions;
+        return List.copyOf(find(region, ref).versions);
     }
 
     private record ConnectorRef(String unqualified, boolean arn, String idOrName, Long version) {
 
         static ConnectorRef parse(String identifier) {
             boolean arn = AwsArnUtils.isArn(identifier);
+            // network-connector:<id>, with an optional :<version>
+            String[] resource = arn ? AwsArnUtils.parse(identifier).resource().split(":", -1) : null;
             String unqualified = identifier;
             Long version = null;
             int colon = identifier.lastIndexOf(':');
-            // arn:<partition>:lambda:<region>:<account>:network-connector:<id>:<version>
-            if (colon >= 0 && (!arn || identifier.split(":", -1).length == 8)
+            if (colon >= 0 && (!arn || resource.length == 3)
                     && CONNECTOR_VERSION.matcher(identifier.substring(colon + 1)).matches()) {
                 unqualified = identifier.substring(0, colon);
                 version = Long.parseLong(identifier.substring(colon + 1));
@@ -618,12 +619,12 @@ public class LambdaMicrovmsService {
      * UpdateNetworkConnector: every member is optional and a null one leaves the connector's value
      * as it is. As on AWS, an update that changes the configuration or the operator role makes the
      * next version, one that changes nothing keeps the version, and the compute resource types
-     * cannot change.
+     * cannot change. Updates hold the service lock, so a version names the one update that made it.
      */
-    public NetworkConnector updateConnector(String region, String id,
-                                            List<String> subnetIds, List<String> securityGroupIds,
-                                            String operatorRole, String networkProtocol,
-                                            List<String> computeResourceTypes) {
+    public synchronized NetworkConnector updateConnector(String region, String id,
+                                                         List<String> subnetIds, List<String> securityGroupIds,
+                                                         String operatorRole, String networkProtocol,
+                                                         List<String> computeResourceTypes) {
         NetworkConnector connector = getConnector(region, id);
         if (computeResourceTypes != null && !computeResourceTypes.isEmpty()
                 && !Set.copyOf(computeResourceTypes).equals(Set.copyOf(connector.associatedComputeResourceTypes))) {
@@ -669,7 +670,7 @@ public class LambdaMicrovmsService {
     }
 
     /** Deletes the connector, or only the version the identifier names. Returns what was deleted. */
-    public ConnectorVersion deleteConnector(String region, String identifier) {
+    public synchronized ConnectorVersion deleteConnector(String region, String identifier) {
         ConnectorVersion named = getConnectorVersion(region, identifier);
         NetworkConnector connector = named.connector();
         if (!named.qualified()) {

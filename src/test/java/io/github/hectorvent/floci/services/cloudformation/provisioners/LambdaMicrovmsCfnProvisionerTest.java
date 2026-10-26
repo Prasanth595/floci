@@ -210,6 +210,8 @@ class LambdaMicrovmsCfnProvisionerTest {
         assertEquals(arn, r.getAttributes().get("Arn"));
         assertEquals("nc-1", r.getAttributes().get("Id"));
         assertEquals("nc", r.getAttributes().get("Name"));
+        assertEquals("1", r.getAttributes().get("LatestVersion"));
+        assertEquals(arn + ":1", r.getAttributes().get("LatestVersionArn"));
     }
 
     @Test
@@ -241,8 +243,12 @@ class LambdaMicrovmsCfnProvisionerTest {
         prior.setPhysicalId(arn);
         prior.getAttributes().put("Name", "nc");
         when(service.getConnector(REGION, arn)).thenReturn(connector("nc-1", "nc"));
+        LambdaMicrovmsService.NetworkConnector attempted = connector("nc-1", "nc");
+        attempted.latestVersion = 2;
+        LambdaMicrovmsService.NetworkConnector restored = connector("nc-1", "nc");
+        restored.latestVersion = 3;
         when(service.updateConnector(anyString(), anyString(), any(), any(), any(), any(), any()))
-                .thenReturn(connector("nc-1", "nc"));
+                .thenReturn(attempted, restored);
         ObjectNode props = connectorProps("nc", "subnet-2");
         props.put("OperatorRole", "arn:aws:iam::000000000000:role/operator-v2");
         ObjectNode vpc = (ObjectNode) props.path("Configuration").path("VpcEgressConfiguration");
@@ -253,9 +259,12 @@ class LambdaMicrovmsCfnProvisionerTest {
 
         verify(service).updateConnector(REGION, arn, List.of("subnet-2"), List.of("sg-1"),
                 "arn:aws:iam::000000000000:role/operator-v2", "DUAL_STACK", List.of("MICROVM"));
+        assertEquals(arn + ":2", updated.getAttributes().get("LatestVersionArn"));
         assertTrue(provisioner.rollbackUpdate(updated));
         verify(service).updateConnector(REGION, arn, List.of("subnet-1"), List.of("sg-1"), OPERATOR_ROLE, "IPv4",
                 List.of("MICROVM"));
+        assertEquals("3", updated.getAttributes().get("LatestVersion"));
+        assertEquals(arn + ":3", updated.getAttributes().get("LatestVersionArn"));
         assertFalse(updated.getAttributes().containsKey(CfnRollback.NETWORK_CONNECTOR_UPDATE_SNAPSHOT_ATTR),
                 "the snapshot is spent");
     }
