@@ -91,9 +91,10 @@ public class RedshiftEventService {
     public void record(EventInfo info, String sourceIdentifier, String message) {
         try {
             Instant now = clock.instant();
+            long eventSequence = sequence.incrementAndGet();
             RedshiftEvent event = new RedshiftEvent();
             event.setKey(String.format(Locale.ROOT, "%019d-%010d-%s", now.toEpochMilli(),
-                    sequence.incrementAndGet(), UUID.randomUUID().toString().substring(0, 8)));
+                    eventSequence, UUID.randomUUID().toString().substring(0, 8)));
             event.setDate(now);
             event.setSeverity(info.severity());
             event.setEventId(info.id());
@@ -102,7 +103,7 @@ public class RedshiftEventService {
             event.setEventCategories(new ArrayList<>(List.of(info.category())));
             event.setMessage(message);
             events.put(key(event.getKey()), event);
-            if (sequence.get() % PRUNE_EVERY == 0) {
+            if (eventSequence % PRUNE_EVERY == 0) {
                 prune(now);
             }
             deliver(event);
@@ -113,9 +114,9 @@ public class RedshiftEventService {
 
     private void prune(Instant now) {
         Instant floor = now.minus(RETENTION);
-        for (RedshiftEvent event : events.scan(this::inRegion)) {
-            if (event.getDate().isBefore(floor)) {
-                events.delete(key(event.getKey()));
+        for (Map.Entry<String, RedshiftEvent> entry : events.scanAllAccountsWithRawKeys().entrySet()) {
+            if (entry.getValue().getDate().isBefore(floor)) {
+                events.deleteRaw(entry.getKey());
             }
         }
     }
@@ -155,16 +156,24 @@ public class RedshiftEventService {
                     AwsArnUtils.parse(topicArn).region());
         } catch (AwsException e) {
             if ("NotFound".equals(e.getErrorCode())) {
-                subscription.setStatus("topic-not-exist");
-                subscriptions.put(key(subscription.getCustSubscriptionId()), subscription);
+                updateFailureStatus(subscription, topicArn, "topic-not-exist");
             } else if (isAuthorizationFailure(e)) {
-                subscription.setStatus("no-permission");
-                subscriptions.put(key(subscription.getCustSubscriptionId()), subscription);
+                updateFailureStatus(subscription, topicArn, "no-permission");
             }
             LOG.warnv(e, "Could not publish Redshift event {0} to {1}", event.getEventId(), topicArn);
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not publish Redshift event {0} to {1}", event.getEventId(), topicArn);
         }
+    }
+
+    private synchronized void updateFailureStatus(EventSubscription attempted, String topicArn, String status) {
+        String storageKey = key(attempted.getCustSubscriptionId());
+        subscriptions.get(storageKey)
+                .filter(current -> current == attempted && topicArn.equals(current.getSnsTopicArn()))
+                .ifPresent(current -> {
+                    current.setStatus(status);
+                    subscriptions.put(storageKey, current);
+                });
     }
 
     /** AWS does not document the notification body, so this carries the same facts DescribeEvents reports. */

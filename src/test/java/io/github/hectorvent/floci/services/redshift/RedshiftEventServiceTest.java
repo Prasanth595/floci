@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -7,12 +8,15 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.model.EventSubscription;
 import io.github.hectorvent.floci.services.redshift.model.RedshiftEvent;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
@@ -22,6 +26,12 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiPredicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,6 +44,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -51,6 +62,82 @@ class RedshiftEventServiceTest {
     private MutableClock clock;
     private RedshiftEventService service;
     private StorageFactory factory;
+
+    @ParameterizedTest
+    @CsvSource({"NotFound,deleted", "NotFound,recreated", "NotFound,retargeted",
+            "AuthorizationError,deleted", "AuthorizationError,recreated", "AuthorizationError,retargeted"})
+    void failedNotificationDoesNotOverwriteConcurrentSubscriptionChange(String errorCode, String change) throws Exception {
+        create("watcher", null, List.of(), List.of(), null);
+        String replacementTopic = "arn:aws:sns:us-east-1:000000000000:replacement";
+        CountDownLatch publishing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            publishing.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS), "SNS publish was not released");
+            throw new AwsException(errorCode, "Topic delivery failed", 400);
+        }).when(sns).publish(eq(TOPIC), any(), anyString(), anyString(), anyString());
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> recording = executor.submit(() ->
+                    service.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created"));
+            try {
+                assertTrue(publishing.await(5, TimeUnit.SECONDS), "SNS publish did not start");
+                switch (change) {
+                    case "deleted" -> service.deleteSubscription("watcher");
+                    case "recreated" -> {
+                        service.deleteSubscription("watcher");
+                        create("watcher", null, List.of(), List.of(), null);
+                    }
+                    case "retargeted" -> service.modifySubscription("watcher", replacementTopic,
+                            null, null, null, null, null, ALL_SOURCES_EXIST);
+                    default -> throw new IllegalArgumentException(change);
+                }
+            } finally {
+                release.countDown();
+            }
+            recording.get(5, TimeUnit.SECONDS);
+        }
+
+        List<EventSubscription> remaining = service.describeSubscriptions(null, null, null, null, null).items();
+        if ("deleted".equals(change)) {
+            assertTrue(remaining.isEmpty(), "A late SNS failure must not recreate a deleted subscription");
+        } else {
+            assertEquals(1, remaining.size());
+            assertEquals("active", remaining.getFirst().getStatus());
+            assertEquals("retargeted".equals(change) ? replacementTopic : TOPIC, remaining.getFirst().getSnsTopicArn());
+        }
+    }
+
+    @Test
+    void pruningRemovesExpiredHistoryAcrossAccountsAndRegionsDuringAlternatingTraffic() {
+        AccountAwareStorageBackend<RedshiftEvent> backend = factory.create("redshift", "redshift-events.json",
+                new TypeReference<Map<String, RedshiftEvent>>() { });
+        Instant expired = clock.instant().minus(RedshiftEventService.RETENTION).minusSeconds(1);
+        for (String scope : List.of("000000000000/us-east-1", "000000000000/us-west-2", "111111111111/us-east-1")) {
+            RedshiftEvent event = new RedshiftEvent();
+            event.setKey("expired");
+            event.setDate(expired);
+            int separator = scope.indexOf('/');
+            backend.putForAccount(scope.substring(0, separator), scope.substring(separator + 1) + "/expired", event);
+        }
+        RedshiftEvent recent = new RedshiftEvent();
+        recent.setKey("recent");
+        recent.setDate(clock.instant());
+        backend.putForAccount("111111111111", "us-west-2/recent", recent);
+        AtomicReference<String> region = new AtomicReference<>("us-east-1");
+        RegionResolver resolver = mock(RegionResolver.class);
+        when(resolver.getRegion()).thenAnswer(invocation -> region.get());
+        RedshiftEventService alternating = new RedshiftEventService(factory, sns, resolver, objectMapper, clock);
+        for (int index = 0; index < 200; index++) {
+            region.set(index % 2 == 0 ? "us-east-1" : "us-west-2");
+            alternating.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created");
+        }
+
+        Map<String, RedshiftEvent> stored = backend.scanAllAccountsWithRawKeys();
+        assertEquals(201, stored.size());
+        assertTrue(stored.values().stream().noneMatch(event -> event.getDate().equals(expired)));
+        assertTrue(stored.containsKey("111111111111/us-west-2/recent"));
+    }
 
     @BeforeEach
     void setUp() {
