@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -122,17 +123,8 @@ final class DynamoDbPartiQLKeyPlan {
         return branch.filters().stream().anyMatch(filter -> switch (filter) {
             case Cond.Not not -> not.operand() instanceof Cond.Leaf leaf
                     && !(leaf instanceof Cond.SizeCmp) && namesAKey(leaf);
-            default -> mentionsAKey(filter);
+            default -> anyLeaf(filter, this::namesAKey);
         });
-    }
-
-    private boolean mentionsAKey(Cond cond) {
-        return switch (cond) {
-            case Cond.Leaf leaf -> namesAKey(leaf);
-            case Cond.And and   -> and.operands().stream().anyMatch(this::mentionsAKey);
-            case Cond.Or or     -> or.operands().stream().anyMatch(this::mentionsAKey);
-            case Cond.Not ignored -> false;
-        };
     }
 
     private boolean namesAKey(Cond.Leaf leaf) {
@@ -222,7 +214,7 @@ final class DynamoDbPartiQLKeyPlan {
                 }
                 yield spread;
             }
-            case Cond.Or or when namesKey(or) -> {
+            case Cond.Or or when anyLeaf(or, this::isKeyCondition) -> {
                 List<Spread> spread = or.operands().stream().flatMap(operand -> spread(operand).stream()).toList();
                 tooManyBranches |= spread.size() > MAX_BRANCHES;
                 yield spread;
@@ -239,11 +231,11 @@ final class DynamoDbPartiQLKeyPlan {
         return left.stream().flatMap(l -> right.stream().map(l::and)).toList();
     }
 
-    private boolean namesKey(Cond cond) {
+    private static boolean anyLeaf(Cond cond, Predicate<Cond.Leaf> test) {
         return switch (cond) {
-            case Cond.Leaf leaf -> isKeyCondition(leaf);
-            case Cond.And and   -> and.operands().stream().anyMatch(this::namesKey);
-            case Cond.Or or     -> or.operands().stream().anyMatch(this::namesKey);
+            case Cond.Leaf leaf -> test.test(leaf);
+            case Cond.And and   -> and.operands().stream().anyMatch(operand -> anyLeaf(operand, test));
+            case Cond.Or or     -> or.operands().stream().anyMatch(operand -> anyLeaf(operand, test));
             case Cond.Not ignored -> false;
         };
     }
