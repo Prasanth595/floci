@@ -272,6 +272,26 @@ class RedshiftServerlessAdminSecretsServiceTest {
     }
 
     @Test
+    void namespaceRollbackLeavesCredentialsUnchangedWhenSecretRestoreConflicts() {
+        createManaged();
+        attachWorkgroup();
+        RedshiftServerlessService.NamespaceUpdateSnapshot snapshot = service.snapshotNamespaceUpdate(NAME, REGION);
+        Namespace current = update(null, ORIGINAL_PASSWORD, false);
+        clearInvocations(runtime, secrets);
+        AwsException conflict = new AwsException("ResourceExistsException", "Secret name has been reused", 400);
+        doThrow(conflict).when(secrets).restoreManagedSecret(any(Secret.class), eq(REGION));
+
+        assertSame(conflict, assertThrows(AwsException.class, () -> service.restoreNamespaceUpdate(snapshot, REGION)));
+
+        assertSame(current, service.getNamespace(NAME, REGION));
+        assertEquals(ORIGINAL_PASSWORD, current.getAdminUserPassword());
+        assertNull(current.getAdminPasswordSecretArn());
+        verify(runtime, never()).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
+        verify(runtime, never()).restoreMasterPassword(any(), any(), any(), any(), any(), any());
+        verify(secrets, never()).deleteSecret(any(), any(), anyBoolean(), any());
+    }
+
+    @Test
     void namespaceRollbackRemovesNewManagedSecretAndRestoresUnmanagedPassword() {
         createUnmanaged();
         attachWorkgroup();

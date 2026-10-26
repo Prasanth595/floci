@@ -1195,6 +1195,13 @@ public class SecretsManagerService implements ResourceProvider {
         }
         synchronized (lockFor(snapshot.getArn())) {
             throwIfManagedRelease(snapshot.getArn());
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(snapshot.getArn());
+            String currentArn = findArnByName(arn.accountId(), snapshot.getName(), region).orElse(null);
+            if (currentArn != null && !snapshot.getArn().equals(currentArn)) {
+                throw new AwsException("ResourceExistsException",
+                        "Cannot restore managed secret " + snapshot.getArn()
+                                + " because another secret already uses the name " + snapshot.getName() + ".", 400);
+            }
             persist(snapshot, region);
         }
     }
