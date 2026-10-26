@@ -397,6 +397,12 @@ A greedy resource captures only the path segments after its parent. For example,
 `/api/v1/auth/signup/{proxy}` forwards the prefix once. Greedy parameter names other
 than `proxy` are supported, including in `integration.request.path.*` mappings.
 
+A greedy resource may sit below ordinary path parameters: `/catalog/{kind}/{name+}` serves
+`/catalog/scopes/a/b` with `kind` set to `scopes` and `name` to `a/b`. When several resources
+match a request, they are ranked as on AWS: more literal segments first, then more segments
+before the greedy parameter, then the resource whose literal comes first at the first position
+where they differ. A resource that does not declare the request's method yields to the next one.
+
 REST `HTTP_PROXY` and `HTTP` integrations also accept `context.*` sources in header, query
 and path parameter mappings. Supported request fields are `accountId`, `apiId`, `deploymentId`,
 `httpMethod`, `path` (including the stage), `protocol`, `requestId`, `resourceId`, `resourcePath`,
