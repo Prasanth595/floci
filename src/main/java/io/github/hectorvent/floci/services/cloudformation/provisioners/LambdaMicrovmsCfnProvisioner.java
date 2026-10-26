@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.LongNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
@@ -54,6 +55,14 @@ public class LambdaMicrovmsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public Set<String> resourceTypes() {
         return Set.of("AWS::Lambda::MicrovmImage", "AWS::Lambda::NetworkConnector");
+    }
+
+    @Override
+    public JsonNode attributeValue(String resourceType, String attributeName, String value) {
+        if (NETWORK_CONNECTOR.equals(resourceType) && "LatestVersion".equals(attributeName)) {
+            return LongNode.valueOf(Long.parseLong(value));
+        }
+        return CfnResourceProvisioner.super.attributeValue(resourceType, attributeName, value);
     }
 
     @Override

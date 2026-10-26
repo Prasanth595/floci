@@ -648,7 +648,8 @@ a list is `Template format error: unsupported structure.`
 
 ## Attribute types
 
-`AWS::EC2::PrefixList` `Version` remains numeric when used as another resource's property.
+`AWS::EC2::PrefixList` `Version` and `AWS::Lambda::NetworkConnector` `LatestVersion` remain numeric when used as
+another resource's property.
 Numeric attributes are rejected in string outputs and `Fn::Join`, `Fn::Sub`,
 `Fn::Split`, and `Fn::Base64`, including selected `Fn::If` and `Fn::Select` values.
 Literal numbers and Number-parameter references retain their existing string coercion.

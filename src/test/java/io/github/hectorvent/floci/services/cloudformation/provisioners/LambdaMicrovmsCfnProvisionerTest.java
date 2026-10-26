@@ -215,6 +215,13 @@ class LambdaMicrovmsCfnProvisionerTest {
     }
 
     @Test
+    void latestVersionIsTheOnlyNumericConnectorAttribute() {
+        assertTrue(provisioner.attributeValue(CONNECTOR_TYPE, "LatestVersion", "2").isIntegralNumber());
+        assertTrue(provisioner.attributeValue(CONNECTOR_TYPE, "LatestVersionArn", "arn:2").isTextual());
+        assertTrue(provisioner.attributeValue("AWS::Lambda::MicrovmImage", "LatestVersion", "2").isTextual());
+    }
+
+    @Test
     void aConnectorUpdateThatKeepsTheNameUpdatesTheExistingConnector() {
         when(service.createConnector(anyString(), anyString(), anyString(), any(), any(), any(), anyString(), any(),
                 any())).thenAnswer(inv -> connector("nc-1", inv.getArgument(2)));

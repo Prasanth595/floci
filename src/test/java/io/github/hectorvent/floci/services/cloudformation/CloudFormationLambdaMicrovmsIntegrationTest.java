@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -157,6 +158,49 @@ class CloudFormationLambdaMicrovmsIntegrationTest {
                         .get("/2026-04-04/network-connectors/" + connectorArn)
                         .then()
                         .statusCode(404));
+    }
+
+    @Test
+    void latestVersionIsAnIntegerSoAStringOutputFailsTheStack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-microvm-version-" + suffix;
+        String connectorName = "cfn-microvm-version-connector-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Connector": {
+                      "Type": "AWS::Lambda::NetworkConnector",
+                      "Properties": {
+                        "Name": "%s",
+                        "OperatorRole": "arn:aws:iam::000000000000:role/cfn-microvm-connector-operator",
+                        "Configuration": {
+                          "VpcEgressConfiguration": {
+                            "AssociatedComputeResourceTypes": ["WebFunction"],
+                            "SubnetIds": ["subnet-0cfn000000000001"],
+                            "SecurityGroupIds": ["sg-0cfn000000000001"],
+                            "NetworkProtocol": "IPv4"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "LatestVersion": {"Value": {"Fn::GetAtt": ["Connector", "LatestVersion"]}}
+                  }
+                }
+                """.formatted(connectorName);
+
+        cloudFormation(stackName, "CreateStack", template);
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName, CFN_AUTH);
+        assertEquals("ROLLBACK_COMPLETE", state.status(), state.reason());
+        given()
+            .when()
+            .get("/2026-04-04/network-connectors/" + connectorName)
+            .then()
+            .statusCode(404);
+
+        cloudFormation(stackName, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stackName, CFN_AUTH);
     }
 
     private static String refTemplate(String connectorName, String subnetId) {
