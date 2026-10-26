@@ -1340,6 +1340,7 @@ public class SecretsManagerService implements ResourceProvider {
         }
 
         boolean managedReservationAcquired = false;
+        boolean rotationPrepared = false;
         try {
             if (managedToken != null && managedRotator != null) {
                 managedRotator.reserve(secret.getArn(), region);
@@ -1348,6 +1349,9 @@ public class SecretsManagerService implements ResourceProvider {
             synchronized (lockFor(secret.getArn())) {
                 if (managedToken != null && managedRotator != null) {
                     secret = resolveSecret(secret.getArn(), region);
+                    if (secret.getVersions() != null && secret.getVersions().containsKey(managedToken)) {
+                        return secret;
+                    }
                     managedReleases.add(secret.getArn());
                 }
                 SecretVersion pendingVersion = findVersionByStage(secret, "AWSPENDING");
@@ -1372,15 +1376,17 @@ public class SecretsManagerService implements ResourceProvider {
                 // on success would leave the background sweep retrying it on every tick forever.
                 secret.setNextRotationDate(computeNextRotationDate(secret.getRotationRules(), Instant.now()));
                 persist(secret, region);
+                rotationPrepared = true;
             }
-        } catch (RuntimeException e) {
-            if (managedToken != null && managedRotator != null) {
-                clearManagedRotation(secret.getArn(), managedToken);
+        } finally {
+            if (!rotationPrepared) {
+                if (managedToken != null && managedRotator != null) {
+                    clearManagedRotation(secret.getArn(), managedToken);
+                }
+                if (managedReservationAcquired) {
+                    managedRotator.release(secret.getArn(), region);
+                }
             }
-            if (managedReservationAcquired) {
-                managedRotator.release(secret.getArn(), region);
-            }
-            throw e;
         }
 
         if (serviceManaged) {

@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.List;
@@ -168,6 +170,77 @@ class ManagedSecretRotationServiceTest {
             }
             assertEquals("ResourceNotFoundException", rotation.get(5, TimeUnit.SECONDS).getErrorCode());
             assertEquals(0, releases.get());
+        } finally {
+            finishReservation.countDown();
+            service.shutdown();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void versionSavedDuringReservationSurvivesWithoutRunningOwner(boolean ownerFails) throws Exception {
+        CountDownLatch reserving = new CountDownLatch(1);
+        CountDownLatch finishReservation = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        AtomicInteger changes = new AtomicInteger();
+        AtomicInteger reservations = new AtomicInteger();
+        SecretsManagerService service = service(new ManagedSecretRotator() {
+            public boolean supports(String arn, String region) {
+                return true;
+            }
+
+            public void reserve(String arn, String region) {
+                if (reservations.incrementAndGet() > 1) {
+                    throw new AwsException("InvalidRequestException", "Owner unavailable", 400);
+                }
+                reserving.countDown();
+                try {
+                    assertTrue(finishReservation.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            }
+
+            public void rotate(String arn, String region, Rotation rotation) {
+                changes.incrementAndGet();
+                if (ownerFails) {
+                    throw new IllegalStateException("backend refused password");
+                }
+                rotation.commit(() -> "rotated-password", () -> fail("unexpected rollback"));
+            }
+
+            public void release(String arn, String region) {
+                released.countDown();
+            }
+        });
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Secret original = create(service);
+            String token = UUID.randomUUID().toString();
+            Future<Secret> rotation = executor.submit(() -> service.rotateSecret(
+                    original.getArn(), token, null, rules(), true, REGION));
+            try {
+                assertTrue(reserving.await(5, TimeUnit.SECONDS));
+                service.putSecretValue(original.getArn(), "saved-password", null, token, REGION, null);
+            } finally {
+                finishReservation.countDown();
+            }
+            Secret result = rotation.get(5, TimeUnit.SECONDS);
+            assertTrue(released.await(5, TimeUnit.SECONDS));
+            assertEquals("saved-password",
+                    service.getSecretValue(original.getArn(), token, null, REGION).getSecretString());
+            assertEquals(token, result.getCurrentVersionId());
+            assertEquals(0, changes.get());
+            assertFalse(result.isRotationEnabled());
+            assertNull(result.getLastRotatedDate());
+            service.rotateSecret(original.getArn(), token, null, rules(), true, REGION);
+            assertEquals(1, reservations.get());
+            assertDoesNotThrow(() -> service.putSecretValue(
+                    original.getArn(), "updated-password", null, null, REGION, null));
+            AwsException unavailable = assertThrows(AwsException.class, () -> service.rotateSecret(
+                    original.getArn(), UUID.randomUUID().toString(), null, rules(), true, REGION));
+            assertEquals("Owner unavailable", unavailable.getMessage());
+            assertEquals(2, reservations.get());
         } finally {
             finishReservation.countDown();
             service.shutdown();
