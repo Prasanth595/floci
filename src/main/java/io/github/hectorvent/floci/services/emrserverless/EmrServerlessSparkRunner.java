@@ -45,7 +45,8 @@ import java.util.zip.GZIPOutputStream;
  * supplies at run time, which the public image lacks, so the runner starts {@code spark-submit} itself,
  * in local mode: the container holds the driver and its executors. The container reaches Floci as the
  * other containers Floci launches do, with the run's execution role as its credentials, and S3A, which
- * takes {@code s3://} on every release, is pointed at Floci's S3. Once the driver ends, its standard output
+ * takes {@code s3://} on every release, is pointed at Floci's S3. The driver's output goes to Floci's log and,
+ * while it runs, to the run's CloudWatch log streams, when it has some; once it ends, its standard output
  * and error go, gzipped, to the run's log folder in Floci's S3, when it has one.
  */
 @ApplicationScoped
@@ -141,7 +142,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (launch.stopRequested || progress.cancelled()) {
                 return Outcome.halted();
             }
-            logHandle = logStreamer.attachConsoleOnly(containerId, job.service() + ":" + job.runId());
+            logHandle = attachLog(containerId, job);
             progress.started();
             Outcome outcome = awaitEnd(containerId, job, launch, progress);
             writeLogs(job, launch);
@@ -226,6 +227,17 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             LOG.warnv("Could not remove the {0} Spark drivers an earlier Floci process left: {1}", service,
                     e.getMessage());
         }
+    }
+
+    // Floci's log always gets the driver's output, and the job's CloudWatch log streams too when it has some.
+    private Closeable attachLog(String containerId, Job job) {
+        String prefix = job.service() + ":" + job.runId();
+        CloudWatchLogs cloudWatch = job.cloudWatchLogs();
+        if (cloudWatch == null) {
+            return logStreamer.attachConsoleOnly(containerId, prefix);
+        }
+        return logStreamer.attachByStreamForAccount(job.accountId(), containerId, cloudWatch.logGroup(),
+                cloudWatch.stdoutStream(), cloudWatch.stderrStream(), job.region(), prefix);
     }
 
     /**

@@ -60,6 +60,7 @@ class EmrServerlessSparkRunnerTest {
     private final DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
     private final SparkJobRunner.Progress progress = mock(SparkJobRunner.Progress.class);
     private final S3Service s3 = mock(S3Service.class);
+    private final ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
 
     @Test
     void sparkSubmitRunsLocallyOnFlocisS3ThenTheRunsOwnSettings() {
@@ -355,6 +356,27 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void theDriversOutputGoesToTheJobsCloudWatchLogStreamsWhileItRuns() {
+        EmrServerlessSparkRunner runner = runner();
+        String driver = "/applications/00f0000000000000/jobs/00f0000000000001/SPARK_DRIVER/";
+
+        runner.run(job(new SparkJobRunner.CloudWatchLogs("/aws/emr-serverless", driver + "stdout", driver + "stderr")),
+                progress);
+
+        verify(logStreamer).attachByStreamForAccount("123456789012", "driver", "/aws/emr-serverless",
+                driver + "stdout", driver + "stderr", "eu-west-1", "emr-serverless:00f0000000000001");
+        verify(logStreamer, never()).attachConsoleOnly(anyString(), anyString());
+    }
+
+    @Test
+    void withoutCloudWatchLogStreamsTheDriversOutputGoesOnlyToFlocisLog() {
+        runner().run(job(Duration.ZERO), progress);
+
+        verify(logStreamer).attachConsoleOnly("driver", "emr-serverless:00f0000000000001");
+        verify(logStreamer, never()).attachByStreamForAccount(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void aRunWithoutALogFolderReadsNoOutput() {
         runner().run(job(Duration.ZERO), progress);
 
@@ -396,7 +418,7 @@ class EmrServerlessSparkRunnerTest {
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("driver", Map.of()));
         when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenReturn(false);
         when(docker.inspectContainerCmd("driver").exec().getState().getExitCodeLong()).thenReturn(0L);
-        return new EmrServerlessSparkRunner(builder, lifecycle, mock(ContainerLogStreamer.class),
+        return new EmrServerlessSparkRunner(builder, lifecycle, logStreamer,
                 mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class), s3, config,
                 new MutableClock(), Duration.ZERO);
     }
@@ -440,7 +462,11 @@ class EmrServerlessSparkRunnerTest {
     }
 
     private static SparkJobRunner.Job job(String logFolder) {
-        return job(null, List.of("s3://bucket/jobs/app.jar"), Map.of(), Duration.ZERO, logFolder);
+        return job(null, List.of("s3://bucket/jobs/app.jar"), Map.of(), Duration.ZERO, logFolder, null);
+    }
+
+    private static SparkJobRunner.Job job(SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
+        return job(null, List.of("s3://bucket/jobs/app.jar"), Map.of(), Duration.ZERO, null, cloudWatchLogs);
     }
 
     private static SparkJobRunner.Job job(List<String> application, Map<String, String> sparkDefaults) {
@@ -449,18 +475,19 @@ class EmrServerlessSparkRunnerTest {
 
     private static SparkJobRunner.Job job(List<String> application, Map<String, String> sparkDefaults,
                                           Duration timeout) {
-        return job(null, application, sparkDefaults, timeout, null);
+        return job(null, application, sparkDefaults, timeout, null, null);
     }
 
     private static SparkJobRunner.Job job(String imageTemplate, List<String> application,
                                           Map<String, String> sparkDefaults, Duration timeout) {
-        return job(imageTemplate, application, sparkDefaults, timeout, null);
+        return job(imageTemplate, application, sparkDefaults, timeout, null, null);
     }
 
     private static SparkJobRunner.Job job(String imageTemplate, List<String> application,
-                                          Map<String, String> sparkDefaults, Duration timeout, String logFolder) {
+                                          Map<String, String> sparkDefaults, Duration timeout, String logFolder,
+                                          SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 imageTemplate, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, application,
-                timeout, logFolder);
+                timeout, logFolder, cloudWatchLogs);
     }
 }

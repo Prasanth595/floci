@@ -82,6 +82,7 @@ class EmrServiceContainerStepsTest {
         assertEquals(Map.of("spark.executor.cores", "2"), job.sparkDefaults());
         assertEquals(Duration.ZERO, job.timeout());
         assertNull(job.logFolder());
+        assertNull(job.cloudWatchLogs());
     }
 
     @Test

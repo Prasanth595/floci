@@ -264,6 +264,79 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(Duration.ofMinutes(30), job.timeout());
         assertEquals(Duration.ZERO, runner.jobs.get(1).timeout());
         assertNull(job.logFolder());
+        assertNull(job.cloudWatchLogs());
+    }
+
+    @Test
+    void aRunsDriverOutputGoesToCloudWatchWhenItsOwnOrTheApplicationsLoggingIsEnabled() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        CreateApplicationRequest create = new CreateApplicationRequest();
+        create.setName("watched");
+        create.setReleaseLabel("emr-7.5.0");
+        create.setType("SPARK");
+        create.setClientToken(UUID.randomUUID().toString());
+        create.setMonitoringConfiguration(cloudWatchLogging(Map.of("enabled", true)));
+        String watched = applications.createApplication(create).getApplicationId();
+        StartJobRunRequest own = request(null, null);
+        own.setConfigurationOverrides(Map.of("monitoringConfiguration", Map.of("cloudWatchLoggingConfiguration",
+                Map.of("enabled", true, "logGroupName", "spark-jobs", "logStreamNamePrefix", "nightly",
+                        "logTypes", Map.of("SPARK_DRIVER", List.of("STDERR"))))));
+        // "To remove cloudWatchLogging, pass the enabled flag as false."
+        StartJobRunRequest removed = request(null, null);
+        removed.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("cloudWatchLoggingConfiguration", Map.of("enabled", false))));
+
+        String inherited = service.startJobRun(watched, request(null, null)).getJobRunId();
+        String overridden = service.startJobRun(watched, own).getJobRunId();
+        service.startJobRun(watched, removed);
+        for (int i = 0; i < 3; i++) {
+            runNext();
+        }
+
+        String driver = "/applications/" + watched + "/jobs/" + inherited + "/SPARK_DRIVER/";
+        assertEquals(new SparkJobRunner.CloudWatchLogs("/aws/emr-serverless", driver + "stdout", driver + "stderr"),
+                runner.jobs.get(0).cloudWatchLogs());
+        assertEquals(new SparkJobRunner.CloudWatchLogs("spark-jobs", null,
+                "nightly/applications/" + watched + "/jobs/" + overridden + "/SPARK_DRIVER/stderr"),
+                runner.jobs.get(1).cloudWatchLogs());
+        assertNull(runner.jobs.get(2).cloudWatchLogs());
+    }
+
+    @Test
+    void aRetriedRunsCloudWatchLogStreamsAreUnderItsAttempt() {
+        Application app = new Application();
+        app.setMonitoringConfiguration(cloudWatchLogging(Map.of("enabled", true)));
+
+        assertEquals("/applications/app/jobs/run/attempts/1/SPARK_DRIVER/stdout",
+                EmrServerlessJobRunService.driverCloudWatchLogs(app, run("emr-7.1.0", "STREAMING", null))
+                        .stdoutStream());
+        assertEquals("/applications/app/jobs/run/SPARK_DRIVER/stdout",
+                EmrServerlessJobRunService.driverCloudWatchLogs(app, run("emr-7.0.0", "STREAMING", null))
+                        .stdoutStream());
+    }
+
+    @Test
+    void logTypesThatNameOnlyTheExecutorsSendNoneOfTheDriversOutput() {
+        Application app = new Application();
+        // "If you don't specify any log types, driver STDOUT and STDERR logs will be published to CloudWatch Logs
+        // by default."
+        app.setMonitoringConfiguration(cloudWatchLogging(Map.of("enabled", true,
+                "logTypes", Map.of("SPARK_EXECUTOR", List.of("STDOUT", "STDERR")))));
+
+        assertNull(EmrServerlessJobRunService.driverCloudWatchLogs(app, run("emr-7.5.0", "BATCH", null)));
+
+        app.setMonitoringConfiguration(cloudWatchLogging(Map.of("enabled", true, "logTypes", Map.of())));
+
+        assertEquals(new SparkJobRunner.CloudWatchLogs("/aws/emr-serverless",
+                "/applications/app/jobs/run/SPARK_DRIVER/stdout", "/applications/app/jobs/run/SPARK_DRIVER/stderr"),
+                EmrServerlessJobRunService.driverCloudWatchLogs(app, run("emr-7.5.0", "BATCH", null)));
+    }
+
+    private static MonitoringConfiguration cloudWatchLogging(Map<String, Object> configuration) {
+        MonitoringConfiguration monitoring = new MonitoringConfiguration();
+        monitoring.setProperty("cloudWatchLoggingConfiguration", configuration);
+        return monitoring;
     }
 
     @Test
