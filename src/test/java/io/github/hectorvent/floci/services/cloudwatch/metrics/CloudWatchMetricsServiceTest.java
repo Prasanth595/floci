@@ -666,6 +666,22 @@ class CloudWatchMetricsServiceTest {
                 summaries(history("dated", null, null, null, null, null, null)));
     }
 
+    @Test
+    void aWriteInOneAccountPrunesExpiredHistoryOfEveryAccount() {
+        InMemoryStorage<String, AlarmHistoryItem> raw = new InMemoryStorage<>();
+        String foreignKey = "111111111111/" + REGION + "::00000000000000000001";
+        raw.put(foreignKey, new AlarmHistoryItem(1, "foreign", "MetricAlarm",
+                Instant.now().minus(Duration.ofDays(40)).toEpochMilli(), "StateUpdate", "expired", "{}"));
+        service = new CloudWatchMetricsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new AccountAwareStorageBackend<>(raw, null, "000000000000"),
+                new RegionResolver(REGION, "000000000000"), null);
+
+        putAlarm("writer");
+
+        assertFalse(raw.keys().contains(foreignKey));
+        assertEquals(1, raw.keys().size());
+    }
+
     private MetricAlarm putAlarm(String name) {
         MetricAlarm alarm = new MetricAlarm();
         alarm.setAlarmName(name);

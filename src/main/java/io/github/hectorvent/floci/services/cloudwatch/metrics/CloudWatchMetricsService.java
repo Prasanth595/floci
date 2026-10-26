@@ -194,13 +194,16 @@ public class CloudWatchMetricsService {
      */
     public void deleteMetricDataBefore(String namespace, Instant cutoff) {
         long cutoffSeconds = cutoff.getEpochSecond();
-        Predicate<MetricDatum> expired = d -> namespace.equals(d.getNamespace()) && d.getTimestamp() < cutoffSeconds;
-        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+        deleteInEveryAccount(metricStore, d -> namespace.equals(d.getNamespace()) && d.getTimestamp() < cutoffSeconds);
+    }
+
+    private static <V> void deleteInEveryAccount(StorageBackend<String, V> store, Predicate<V> expired) {
+        if (store instanceof AccountAwareStorageBackend<V> aware) {
             aware.deleteAllAccountsMatching(expired);
             return;
         }
-        for (String key : List.copyOf(metricStore.keys())) {
-            metricStore.get(key).filter(expired).ifPresent(ignored -> metricStore.delete(key));
+        for (String key : List.copyOf(store.keys())) {
+            store.get(key).filter(expired).ifPresent(ignored -> store.delete(key));
         }
     }
 
@@ -698,12 +701,8 @@ public class CloudWatchMetricsService {
     private void recordHistory(Alarm alarm, String region, String type, String summary, ObjectNode data) {
         Instant now = Instant.now();
         if (!now.isBefore(nextHistoryPrune)) {
-            long expired = epochMicros(now.minus(HISTORY_RETENTION));
-            for (String key : List.copyOf(historyStore.keys())) {
-                if (Long.parseLong(key.substring(key.lastIndexOf("::") + 2)) < expired) {
-                    historyStore.delete(key);
-                }
-            }
+            long cutoffMillis = now.minus(HISTORY_RETENTION).toEpochMilli();
+            deleteInEveryAccount(historyStore, item -> item.timestamp() < cutoffMillis);
             nextHistoryPrune = now.plus(Duration.ofHours(1));
         }
         lastHistorySequence = Math.max(epochMicros(now), lastHistorySequence + 1);
