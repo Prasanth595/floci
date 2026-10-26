@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.Comparator;
 import java.util.List;
 import java.util.function.Function;
@@ -69,6 +71,45 @@ public final class Pagination {
         }
         String prefix = namespace + ":";
         return slice(all, cursorOf, limit, decodeCursor(nextToken, prefix, invalidToken), prefix);
+    }
+
+    /** Validates service-specific bounds before applying the existing namespaced cursor format. */
+    public static <T> PaginatedResult<T> paginate(List<T> all, Function<T, String> cursorOf,
+                                                  Integer maxResults, String nextToken,
+                                                  int defaultPageSize, int maxResultsLimit, int maxTokenLength,
+                                                  String errorCode, String namespace) {
+        if (maxResults != null && (maxResults < 1 || maxResults > maxResultsLimit)) {
+            throw new AwsException(errorCode, "Page size must be between 1 and " + maxResultsLimit + ".", 400);
+        }
+        if (nextToken != null && nextToken.length() > maxTokenLength) {
+            throw new AwsException(errorCode, "Pagination token must not exceed " + maxTokenLength + " characters.", 400);
+        }
+        return paginate(all, cursorOf, maxResults == null ? defaultPageSize : maxResults, nextToken, namespace,
+                token -> new AwsException(errorCode, "Invalid pagination token.", 400));
+    }
+
+    /** Reads an optional JSON page size without coercing strings, fractions, or overflowing integers. */
+    public static Integer parseMaxResults(JsonNode request, String field, String errorCode) {
+        JsonNode value = request.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new AwsException(errorCode, field + " must be an integer.", 400);
+        }
+        return value.intValue();
+    }
+
+    /** Reads an optional JSON cursor; bounds and scope are checked by the namespaced pager. */
+    public static String parseNextToken(JsonNode request, String field, String errorCode) {
+        JsonNode value = request.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException(errorCode, field + " must be a string.", 400);
+        }
+        return value.textValue();
     }
 
     private static <T> PaginatedResult<T> slice(List<T> all, Function<T, String> cursorOf, int limit,
