@@ -25,6 +25,22 @@
 | `DescribePatchBaselines` | List AWS-owned predefined patch baselines (filter by `OWNER`, `OPERATING_SYSTEM`, `NAME_PREFIX`) |
 | `GetDefaultPatchBaseline` | Get the default patch baseline id for an operating system |
 
+`DescribeParameters` includes the stored parameter's `ARN` in each metadata entry, matching
+`GetParameter`. This applies to filtered and paginated results as well.
+
+`GetParametersByPath` supports `Type` and `KeyId` entries in `ParameterFilters`, with `Equals`
+(the default) or `BeginsWith`. Values within one filter combine with OR; multiple
+filters combine with AND. Filtering also applies to public AMI parameters and
+respects `Path`, `Recursive`, and region selection. Unknown or missing keys and keys
+not allowed for this action are rejected with `InvalidFilterKey`.
+`Label` filters accept only `Equals` and return the stored versions carrying the requested
+labels, including older versions. Moving or removing a label changes subsequent results.
+The same OR/AND rules apply to label filters, and a version matching several requested
+labels appears only once. Type and KeyId filters match the labeled version's metadata.
+Public AMI parameters have no stored labels and are excluded from label queries.
+`MaxResults` and `NextToken` paginate the matching versions in name/version order; queries
+without a label filter continue to return the latest version of each parameter.
+
 ### Run Command
 
 | Action | Description |
@@ -136,9 +152,16 @@ architectures and Kubernetes versions, so `GetParameter`, `GetParameters` and `G
 resolve them to the catalog's AMI ids. As on AWS they are read-only and belong to no account,
 so they do not appear in `DescribeParameters`.
 
+Floci also answers the Amazon Linux 2023 ECS optimized AMI `recommended/image_id` and
+`recommended` parameters under `/aws/service/ecs/optimized-ami/`. The image ID points to
+the catalog's x86_64 Amazon Linux 2023 image. The `recommended` value is JSON with the
+matching image ID and name; its ECS agent and runtime versions are `unknown` because
+the catalog image is synthetic and does not represent an installed ECS runtime.
+
 ```bash
 aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id
+aws ssm get-parameter --name /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
 ```
 
 ## Secrets Manager References
@@ -173,3 +196,24 @@ All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.
 
 !!! note
     `SecureString` parameters are stored as-is without actual KMS encryption in Floci. The type is preserved and returned correctly, but the value is not encrypted at rest.
+
+## Parameter Store Change events
+
+Like AWS, Floci publishes a `Parameter Store Change` event (`source: aws.ssm`) to the account's
+**default** EventBridge bus after a successful parameter write, so a rule matching `aws.ssm` fires
+from Parameter Store activity. `resources` holds the parameter ARN, and the event carries the
+account and region of the call.
+
+| Call | Events | `detail` |
+|---|---|---|
+| `PutParameter`, new name | one `Create` | `operation`, `name`, `type`, and `description` when set |
+| `PutParameter` overwriting an existing name | one `Update`, even when the value is unchanged | as for `Create` |
+| `DeleteParameter` | one `Delete` | as for `Create` |
+| `DeleteParameters` | one `Delete` per deleted name, none for a missing name | as for `Create` |
+| `LabelParameterVersion` | one `LabelParameterVersion` per valid label it attaches or moves | as for `Create`, from the labelled version, plus `label`, `fromVersion` (the version the label left as a string, `""` for a new label) and `toVersion` |
+| `UnlabelParameterVersion` | one `UnlabelParameterVersion` when it removes a label, none otherwise | as for `Create`, from the unlabelled version, plus `labels` (the labels removed), `fromVersion` (that version as a string) and `toVersion` (`""`) |
+
+Parameters a CloudFormation stack creates or deletes publish the same events. A call that fails,
+such as a `PutParameter` on an existing name without `Overwrite`, publishes nothing, and so do
+`AddTagsToResource`, a label already on the requested version and an invalid label. Publishing
+is best effort: a delivery failure is logged and never fails or undoes the write.

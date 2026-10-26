@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnRequests;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
@@ -8,7 +9,7 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.WafV2Requests.waf;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
@@ -28,8 +29,6 @@ class CloudFormationWafV2WebAclAssociationIntegrationTest {
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
-    private static final String WAF_JSON = "application/x-amz-json-1.1";
-    private static final String WAF_TARGET_PREFIX = "AWSWAF_20190729.";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -131,11 +130,7 @@ class CloudFormationWafV2WebAclAssociationIntegrationTest {
     }
 
     private void cfn(String action, String stackName, String template) {
-        RequestSpecification request = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", action)
-            .formParam("StackName", stackName);
+        RequestSpecification request = CfnRequests.cfn(action, stackName).header("Authorization", CFN_AUTH);
         if (template != null) {
             request.formParam("TemplateBody", template);
         }
@@ -143,11 +138,8 @@ class CloudFormationWafV2WebAclAssociationIntegrationTest {
     }
 
     private ValidatableResponse describeStack(String stackName) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
+        return CfnRequests.cfn("DescribeStacks", stackName)
             .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
@@ -161,15 +153,5 @@ class CloudFormationWafV2WebAclAssociationIntegrationTest {
     private ValidatableResponse resourcesForWebAcl(String webAclArn) {
         return waf("ListResourcesForWebACL",
                 "{\"WebACLArn\":\"" + webAclArn + "\",\"ResourceType\":\"COGNITO_USER_POOL\"}").statusCode(200);
-    }
-
-    private ValidatableResponse waf(String action, String body) {
-        return given()
-            .contentType(WAF_JSON)
-            .header("X-Amz-Target", WAF_TARGET_PREFIX + action)
-            .body(body)
-        .when()
-            .post("/")
-        .then();
     }
 }

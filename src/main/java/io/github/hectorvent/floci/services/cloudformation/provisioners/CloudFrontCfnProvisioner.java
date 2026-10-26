@@ -557,6 +557,18 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
                 if (!originAccessControlId.isEmpty()) {
                     origin.setOriginAccessControlId(originAccessControlId);
                 }
+                Integer connectionAttempts = cfnInt(node, "ConnectionAttempts", engine);
+                if (connectionAttempts != null) {
+                    origin.setConnectionAttempts(connectionAttempts);
+                }
+                Integer connectionTimeout = cfnInt(node, "ConnectionTimeout", engine);
+                if (connectionTimeout != null) {
+                    origin.setConnectionTimeout(connectionTimeout);
+                }
+                Integer responseCompletionTimeout = cfnInt(node, "ResponseCompletionTimeout", engine);
+                if (responseCompletionTimeout != null) {
+                    origin.setResponseCompletionTimeout(responseCompletionTimeout);
+                }
                 JsonNode originCustomHeaders = node.path("OriginCustomHeaders");
                 if (originCustomHeaders.isArray()) {
                     List<Map<String, String>> customHeaders = new ArrayList<>();
@@ -576,6 +588,14 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
                     coc.put("HTTPSPort", cfnTextOrDefault(custom, "HTTPSPort", engine, "443"));
                     coc.put("OriginProtocolPolicy",
                             cfnTextOrDefault(custom, "OriginProtocolPolicy", engine, "https-only"));
+                    Integer originReadTimeout = cfnInt(custom, "OriginReadTimeout", engine);
+                    if (originReadTimeout != null) {
+                        coc.put("OriginReadTimeout", originReadTimeout);
+                    }
+                    Integer originKeepaliveTimeout = cfnInt(custom, "OriginKeepaliveTimeout", engine);
+                    if (originKeepaliveTimeout != null) {
+                        coc.put("OriginKeepaliveTimeout", originKeepaliveTimeout);
+                    }
                     origin.setCustomOriginConfig(coc);
                 } else {
                     // No CustomOriginConfig => S3 origin (S3OriginConfig may be present or defaulted).
@@ -664,5 +684,24 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
     private boolean cfnBool(JsonNode parent, String field, CloudFormationTemplateEngine engine, boolean dflt) {
         String value = cfnText(parent, field, engine);
         return value.isEmpty() ? dflt : "true".equalsIgnoreCase(value);
+    }
+
+    /**
+     * A template value the registry schema types as an integer. Template properties arrive as text,
+     * and an uncaught {@link NumberFormatException} would surface as a 500 instead of the failed
+     * validation it is. A missing or null property stays unset so the model's own default stands.
+     */
+    private Integer cfnInt(JsonNode parent, String field, CloudFormationTemplateEngine engine) {
+        String value = cfnText(parent, field, engine);
+        if (value.isEmpty()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException notAnInteger) {
+            throw new AwsException("ValidationError",
+                    "AWS::CloudFront::Distribution origin " + field + " must be an integer, but was '"
+                            + value + "'", 400);
+        }
     }
 }

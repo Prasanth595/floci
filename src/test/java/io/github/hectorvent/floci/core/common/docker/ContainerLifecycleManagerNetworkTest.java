@@ -118,14 +118,21 @@ class ContainerLifecycleManagerNetworkTest {
         verify(connectCmd).exec();
     }
 
-    @Test
-    void createRemovesContainerWhenNetworkAttachFails() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createRemovesContainerWhenNetworkAttachFails(boolean ephemeral) {
         RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class, RETURNS_SELF);
         lenient().when(dockerClient.removeContainerCmd("container-id")).thenReturn(removeCmd);
         doThrow(new IllegalStateException("network gone")).when(connectCmd).exec();
 
-        assertThrows(IllegalStateException.class, () -> manager().create(specWithLinkLocalIp(Map.of())));
-
+        assertThrows(IllegalStateException.class, () -> {
+            if (ephemeral) {
+                manager().createAndStartEphemeral(specWithLinkLocalIp(Map.of()));
+            } else {
+                manager().create(specWithLinkLocalIp(Map.of()));
+            }
+        });
+        verify(removeCmd, ephemeral ? times(1) : never()).withRemoveVolumes(true);
         verify(dockerClient).removeContainerCmd("container-id");
     }
 
@@ -276,6 +283,37 @@ class ContainerLifecycleManagerNetworkTest {
         ContainerInfo info = manager().createAndStart(spec("container:sibling", Map.of(9200, 9400), List.of(9200)));
 
         assertEquals(new EndpointInfo("localhost", 9200), info.getEndpoint(9200));
+    }
+
+    @Test
+    void resolveEndpointFailsClosedWhenNativePortBindingIsMissing() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        InspectContainerResponse inspect = inspectOf("container-id");
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(inspect.getNetworkSettings()).thenReturn(networks);
+        when(networks.getPorts()).thenReturn(new Ports());
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> manager().resolveEndpoint("container-id", 5432));
+
+        assertTrue(failure.getMessage().contains("no published binding"));
+    }
+
+    @Test
+    void resolveEndpointFailsClosedWhenContainerAddressIsMissing() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerResponse inspect = inspectOf("container-id");
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(inspect.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        when(inspect.getNetworkSettings()).thenReturn(networks);
+        when(networks.getNetworks()).thenReturn(Map.of(
+                "floci-net", new ContainerNetwork().withIpv4Address("")));
+        when(networks.getIpAddress()).thenReturn("");
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> manager().resolveEndpoint("container-id", 5432, "floci-net"));
+
+        assertTrue(failure.getMessage().contains("no reachable address"));
     }
 
     @Test

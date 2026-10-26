@@ -461,6 +461,27 @@ class CodeArtifactNuGetDockerIntegrationTest {
         assertEquals(Digests.sha256Hex(nupkg), hashes.get("SHA-256"));
     }
 
+    /**
+     * Bridges to the same real BaGetter sidecar {@link #listPackageVersionAssetsBridgesToTheRealBagetterSidecar}
+     * already pushed {@code ListAssets.Package}'s {@link #VERSION} to, reading the flat
+     * container's {@code index.json} version list plus the NuGet V3 Registration resource's
+     * {@code catalogEntry.published} for ordering, instead of one version's own asset.
+     */
+    @Test
+    @Order(16)
+    void listPackageVersionsBridgesToTheRealBagetterSidecar() {
+        given().header("Authorization", AUTH)
+                .post("/v1/package/versions?domain=" + DOMAIN + "&repository=" + REPO + "&format=nuget"
+                        + "&package=ListAssets.Package")
+                .then().statusCode(200)
+                .body("package", equalTo("ListAssets.Package"))
+                .body("defaultDisplayVersion", equalTo(VERSION))
+                .body("versions.size()", equalTo(1))
+                .body("versions[0].version", equalTo(VERSION))
+                .body("versions[0].status", equalTo("Published"))
+                .body("versions[0].origin.originType", equalTo("INTERNAL"));
+    }
+
     private static long describeDomainAssetSizeBytes() {
         return given().header("Authorization", AUTH)
                 .get("/v1/domain?domain=" + DOMAIN)

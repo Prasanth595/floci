@@ -19,6 +19,7 @@ final class LambdaWebErrorPages {
     static final Page FORBIDDEN = new Page(403, "Forbidden", null, "You are not authorized to access this endpoint.");
     static final Page INVALID_ENDPOINT = new Page(404, "Not Found", "Platform.InvalidEndpoint",
             "The requested endpoint could not be found.");
+    static final Page ENDPOINT_NOT_ACTIVE = new Page(409, "Conflict", "Platform.EndpointNotActive", APPLICATION_ERROR);
     static final Page ENDPOINT_DISABLED = new Page(503, "Service Unavailable", "Platform.EndpointDisabled",
             "The service is temporarily unable to handle your request. Please try again later.");
     static final Page REQUEST_TIMEOUT = new Page(504, "Gateway Timeout", "Runtime.RequestTimeout",
@@ -31,6 +32,7 @@ final class LambdaWebErrorPages {
     static final Page IMPORT_CODE_ERROR = new Page(502, "Bad Gateway", "Runtime.ImportCodeError", APPLICATION_ERROR);
     static final Page RUNTIME_EXIT = new Page(502, "Bad Gateway", "Runtime.Exit", APPLICATION_ERROR);
     static final Page RUNTIME_EXIT_ERROR = new Page(502, "Bad Gateway", "Runtime.ExitError", APPLICATION_ERROR);
+    static final Page CANNOT_ASSUME_ROLE = new Page(502, "Bad Gateway", "Platform.CannotAssumeRole", APPLICATION_ERROR);
     private static final String RATE_EXCEEDED = "Request rate exceeded. Please try again later.";
     static final Page ENDPOINT_MAX_ENV_THROTTLE = new Page(429, "Too Many Requests",
             "Platform.EndpointMaxEnvThrottle", RATE_EXCEEDED);

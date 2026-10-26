@@ -31,6 +31,7 @@ public class DsqlCluster {
     private String policyVersion;
     private String witnessRegion;
     private List<String> linkedClusterArns;
+    private boolean databaseReady;
 
     public String getIdentifier() { return identifier; }
     public void setIdentifier(String identifier) { this.identifier = identifier; }
@@ -66,4 +67,7 @@ public class DsqlCluster {
     public void setWitnessRegion(String witnessRegion) { this.witnessRegion = witnessRegion; }
     public List<String> getLinkedClusterArns() { return linkedClusterArns; }
     public void setLinkedClusterArns(List<String> linkedClusterArns) { this.linkedClusterArns = linkedClusterArns; }
+    /** Whether the cluster's database answers, which a multi-Region cluster waits for after peering. */
+    public boolean isDatabaseReady() { return databaseReady; }
+    public void setDatabaseReady(boolean databaseReady) { this.databaseReady = databaseReady; }
 }

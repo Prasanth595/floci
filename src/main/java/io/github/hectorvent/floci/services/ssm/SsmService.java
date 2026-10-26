@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ssm;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -49,12 +50,17 @@ public class SsmService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
     private static final String PUBLIC_PARAMETER_PREFIX = "/aws/service/";
+    private static final String ECS_AL2023_RECOMMENDED =
+            "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended";
+    private static final String ECS_AL2023_ARM64_RECOMMENDED =
+            "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended";
     private static final DateTimeFormatter SOURCE_RESULT_DATE =
             DateTimeFormatter.ofPattern("MMM d, yyyy, h:mm:ss a", Locale.US).withZone(ZoneOffset.UTC);
     static final String SECRET_REFERENCE_PREFIX = "/aws/reference/secretsmanager/";
     // Label is a ParameterStringFilter key too, but only GetParametersByPath accepts it.
     private static final Set<String> DESCRIBE_PARAMETERS_FILTER_KEYS =
             Set.of("Name", "Type", "KeyId", "Path", "Tier", "DataType");
+    private static final Set<String> GET_PARAMETERS_BY_PATH_FILTER_KEYS = Set.of("Type", "KeyId", "Label");
     private static final String DEFAULT_SSM_KEY_ID = "alias/aws/ssm";
     private static final int STANDARD_TIER_MAX_VALUE_BYTES = 4096;
     private static final Set<String> PARAMETER_TIERS = Set.of("Standard", "Advanced", "Intelligent-Tiering");
@@ -91,10 +97,12 @@ public class SsmService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final Ec2ImageCatalog imageCatalog;
     private final SecretsManagerService secretsManager;
+    private final SsmEventPublisher eventPublisher;
 
     @Inject
     public SsmService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                      Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager) {
+                      Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager,
+                      SsmEventPublisher eventPublisher) {
         this(
                 storageFactory.create("ssm", "ssm-parameters.json",
                         new TypeReference<>() {
@@ -117,7 +125,8 @@ public class SsmService implements ResourceProvider {
                 config.services().ssm().maxParameterHistory(),
                 regionResolver,
                 imageCatalog,
-                secretsManager
+                secretsManager,
+                eventPublisher
         );
     }
 
@@ -177,6 +186,20 @@ public class SsmService implements ResourceProvider {
                StorageBackend<String, SsmAssociation> associationStore,
                int maxParameterHistory, RegionResolver regionResolver,
                Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager) {
+        this(parameterStore, historyStore, documentPermissionStore, documentStore, serviceSettingStore,
+                associationStore, maxParameterHistory, regionResolver, imageCatalog, secretsManager,
+                new SsmEventPublisher(null, new ObjectMapper()));
+    }
+
+    SsmService(StorageBackend<String, Parameter> parameterStore,
+               StorageBackend<String, List<ParameterHistory>> historyStore,
+               StorageBackend<String, List<String>> documentPermissionStore,
+               StorageBackend<String, SsmDocument> documentStore,
+               StorageBackend<String, ServiceSetting> serviceSettingStore,
+               StorageBackend<String, SsmAssociation> associationStore,
+               int maxParameterHistory, RegionResolver regionResolver,
+               Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager,
+               SsmEventPublisher eventPublisher) {
         this.parameterStore = parameterStore;
         this.historyStore = historyStore;
         this.documentPermissionStore = documentPermissionStore;
@@ -187,6 +210,7 @@ public class SsmService implements ResourceProvider {
         this.regionResolver = regionResolver;
         this.imageCatalog = imageCatalog;
         this.secretsManager = secretsManager;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -255,14 +279,18 @@ public class SsmService implements ResourceProvider {
             }
         }
 
+        Parameter stored;
         // Same monitor as the other synchronized SSM writers: the version read and the write are one step.
         synchronized (this) {
-            return storeParameter(name, value, type, description, overwrite, tags, keyId, allowedPattern,
+            stored = storeParameter(name, value, type, description, overwrite, tags, keyId, allowedPattern,
                     tier, policies, region);
         }
+        // A new parameter starts at version 1, an overwrite never does.
+        eventPublisher.parameterChanged(stored.getVersion() == 1 ? "Create" : "Update", stored, region);
+        return stored.getVersion();
     }
 
-    private long storeParameter(String name, String value, String type, String description,
+    private Parameter storeParameter(String name, String value, String type, String description,
                                 boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
                                 String tier, List<JsonNode> policies, String region) {
         String storageKey = regionKey(region, name);
@@ -279,9 +307,7 @@ public class SsmService implements ResourceProvider {
         Parameter parameter = new Parameter(name, value, type != null ? type : "String");
         parameter.setVersion(version);
         parameter.setDescription(description);
-        if ("SecureString".equals(parameter.getType())) {
-            parameter.setKeyId(keyId);
-        }
+        parameter.setKeyId(keyIdOf(parameter.getType(), keyId));
         parameter.setAllowedPattern(allowedPattern);
         // AWS keeps existing policies until new ones, or an empty list, are sent.
         if (policies == null) {
@@ -311,7 +337,7 @@ public class SsmService implements ResourceProvider {
         addHistory(storageKey, parameter);
 
         LOG.infov("Put parameter: {0} in region {1} (version {2})", name, region, version);
-        return version;
+        return parameter;
     }
 
     /** AWS's form is {@code parameter/<name>} whether or not the name starts with a slash. */
@@ -508,15 +534,23 @@ public class SsmService implements ResourceProvider {
                         : h.getLabels() != null && h.getLabels().contains(selector))
                 .max(Comparator.comparingLong(ParameterHistory::getVersion))
                 .map(h -> {
-                    Parameter parameter = new Parameter(baseName, h.getValue(), h.getType());
-                    parameter.setVersion(h.getVersion());
-                    parameter.setDescription(h.getDescription());
-                    parameter.setLastModifiedDate(h.getLastModifiedDate());
-                    parameter.setArn(current.get().getArn());
-                    parameter.setDataType(current.get().getDataType());
+                    Parameter parameter = historicalParameter(current.get(), h);
                     parameter.setSelector(":" + selector);
                     return parameter;
                 });
+    }
+
+    private static Parameter historicalParameter(Parameter current, ParameterHistory history) {
+        Parameter parameter = new Parameter(current.getName(), history.getValue(), history.getType());
+        parameter.setVersion(history.getVersion());
+        parameter.setDescription(history.getDescription());
+        parameter.setLastModifiedDate(history.getLastModifiedDate());
+        // Older stored history has no KeyId; only the current version can recover it reliably.
+        parameter.setKeyId(history.getKeyId() != null ? history.getKeyId()
+                : history.getVersion() == current.getVersion() ? current.getKeyId() : null);
+        parameter.setArn(current.getArn());
+        parameter.setDataType(current.getDataType());
+        return parameter;
     }
 
     /**
@@ -531,11 +565,47 @@ public class SsmService implements ResourceProvider {
             return Optional.empty();
         }
         return imageCatalog.findByPublicParameterName(name).map(image -> {
-            Parameter parameter = new Parameter(name, image.imageId, "String");
+            String value = image.imageId;
+            if (name.startsWith(ECS_AL2023_RECOMMENDED)
+                    || name.startsWith(ECS_AL2023_ARM64_RECOMMENDED)) {
+                ObjectNode metadata = JsonNodeFactory.instance.objectNode();
+                metadata.put("schema_version", 1);
+                metadata.put("image_name", image.name);
+                metadata.put("image_id", image.imageId);
+                metadata.put("os", "Amazon Linux 2023");
+                // The catalog image is synthetic; do not claim an installed ECS agent or runtime version.
+                metadata.put("ecs_agent_version", "unknown");
+                metadata.put("ecs_runtime_version", "unknown");
+                String recommendedName = name.startsWith(ECS_AL2023_ARM64_RECOMMENDED)
+                        ? ECS_AL2023_ARM64_RECOMMENDED : ECS_AL2023_RECOMMENDED;
+                value = name.equals(recommendedName) ? metadata.toString()
+                        : metadata.required(name.substring(recommendedName.length() + 1)).asText();
+            }
+            Parameter parameter = new Parameter(name, value, "String");
             parameter.setArn(AwsArnUtils.Arn.of("ssm", region, "", parameterResource(name)).toString());
             parameter.setLastModifiedDate(Instant.parse(image.creationDate));
             return parameter;
         });
+    }
+
+    public List<Parameter> getParametersByPath(String path, boolean recursive,
+                                              List<ParameterStringFilter> filters, String region) {
+        filters.forEach(SsmService::validateGetParametersByPathFilter);
+        List<ParameterStringFilter> matchingFilters = filters.stream().filter(filter -> !"Label".equals(filter.key())).toList();
+        List<ParameterStringFilter> labelFilters = filters.stream().filter(filter -> "Label".equals(filter.key())).toList();
+        if (labelFilters.isEmpty()) {
+            return getParametersByPath(path, recursive, region).stream()
+                    .filter(parameter -> matchingFilters.stream().allMatch(filter -> matchesParameterFilter(parameter, filter)))
+                    .toList();
+        }
+        // Labels belong to versions, so matching only the latest parameter would lose older releases.
+        return getParametersByPath(path, recursive, region).stream()
+                .flatMap(parameter -> historyStore.get(regionKey(region, parameter.getName())).orElse(List.of()).stream()
+                        .filter(history -> history.getLabels() != null && labelFilters.stream().allMatch(filter ->
+                                filter.values().stream().anyMatch(history.getLabels()::contains)))
+                        .map(history -> historicalParameter(parameter, history))
+                        .filter(history -> matchingFilters.stream().allMatch(filter -> matchesParameterFilter(history, filter))))
+                .toList();
     }
 
     public List<Parameter> getParametersByPath(String path, boolean recursive, String region) {
@@ -570,27 +640,35 @@ public class SsmService implements ResourceProvider {
         return !paramName.substring(normalizedPath.length()).contains("/");
     }
 
-    public synchronized void deleteParameter(String name, String region) {
+    public void deleteParameter(String name, String region) {
         String storageKey = regionKey(region, name);
-        if (parameterStore.get(storageKey).isEmpty()) {
-            throw new AwsException("ParameterNotFound",
-                    "Parameter " + name + " not found.", 400);
+        Parameter removed;
+        synchronized (this) {
+            removed = parameterStore.get(storageKey).orElseThrow(() ->
+                    new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400));
+            parameterStore.delete(storageKey);
+            historyStore.delete(storageKey);
         }
-        parameterStore.delete(storageKey);
-        historyStore.delete(storageKey);
+        eventPublisher.parameterChanged("Delete", removed, region);
         LOG.infov("Deleted parameter: {0}", name);
     }
 
-    public synchronized List<String> deleteParameters(List<String> names, String region) {
+    public List<String> deleteParameters(List<String> names, String region) {
         List<String> deleted = new ArrayList<>();
-        for (String name : names) {
-            String storageKey = regionKey(region, name);
-            if (parameterStore.get(storageKey).isPresent()) {
-                parameterStore.delete(storageKey);
-                historyStore.delete(storageKey);
-                deleted.add(name);
+        List<Parameter> removed = new ArrayList<>();
+        synchronized (this) {
+            for (String name : names) {
+                String storageKey = regionKey(region, name);
+                Optional<Parameter> parameter = parameterStore.get(storageKey);
+                if (parameter.isPresent()) {
+                    parameterStore.delete(storageKey);
+                    historyStore.delete(storageKey);
+                    deleted.add(name);
+                    removed.add(parameter.get());
+                }
             }
         }
+        removed.forEach(parameter -> eventPublisher.parameterChanged("Delete", parameter, region));
         return deleted;
     }
 
@@ -632,9 +710,7 @@ public class SsmService implements ResourceProvider {
                     : "Name".equals(key) ? Set.of("Equals", "BeginsWith", "Contains")
                     : Set.of("Equals", "BeginsWith");
             if (!options.contains(filter.option())) {
-                throw new AwsException("InvalidFilterOption",
-                        "The specified filter option isn't valid. Valid options are Equals and BeginsWith. "
-                                + "For Path filter, valid options are Recursive and OneLevel.", 400);
+                throw invalidFilterOption();
             }
         }
         // Every key but a tag needs at least one value, and a path value must be absolute.
@@ -644,6 +720,30 @@ public class SsmService implements ResourceProvider {
             throw new AwsException("InvalidFilterValue",
                     "The filter value isn't valid. Verify the value and try again.", 400);
         }
+    }
+
+    private static void validateGetParametersByPathFilter(ParameterStringFilter filter) {
+        String key = filter.key();
+        if (key == null || !GET_PARAMETERS_BY_PATH_FILTER_KEYS.contains(key)) {
+            throw new AwsException("InvalidFilterKey", "The specified key isn't valid.", 400);
+        }
+        if (!"Label".equals(key)) {
+            validateDescribeParametersFilter(filter);
+            return;
+        }
+        if (filter.option() != null && !"Equals".equals(filter.option())) {
+            throw invalidFilterOption();
+        }
+        if (filter.values().isEmpty()) {
+            throw new AwsException("InvalidFilterValue",
+                    "The filter value isn't valid. Verify the value and try again.", 400);
+        }
+    }
+
+    private static AwsException invalidFilterOption() {
+        return new AwsException("InvalidFilterOption",
+                "The specified filter option isn't valid. Valid options are Equals and BeginsWith. "
+                        + "For Path filter, valid options are Recursive and OneLevel.", 400);
     }
 
     private static boolean matchesParameterFilter(Parameter parameter, ParameterStringFilter filter) {
@@ -670,6 +770,11 @@ public class SsmService implements ResourceProvider {
         return actual != null && matchesAny(actual, filter);
     }
 
+    /** The account the current request acts in; parameter storage is partitioned by it. */
+    String accountId() {
+        return regionResolver.getAccountId();
+    }
+
     /** Parameters stored before Floci kept a tier are Standard, as AWS defaults them. */
     static String tierOf(Parameter parameter) {
         return parameter.getTier() != null ? parameter.getTier() : "Standard";
@@ -677,10 +782,14 @@ public class SsmService implements ResourceProvider {
 
     /** A SecureString put without a KeyId is encrypted with the AWS managed key. */
     static String keyIdOf(Parameter parameter) {
-        if (!"SecureString".equals(parameter.getType())) {
+        return keyIdOf(parameter.getType(), parameter.getKeyId());
+    }
+
+    static String keyIdOf(String type, String keyId) {
+        if (!"SecureString".equals(type)) {
             return null;
         }
-        return parameter.getKeyId() != null ? parameter.getKeyId() : DEFAULT_SSM_KEY_ID;
+        return keyId != null ? keyId : DEFAULT_SSM_KEY_ID;
     }
 
     private static boolean matchesAny(String actual, ParameterStringFilter filter) {
@@ -694,8 +803,18 @@ public class SsmService implements ResourceProvider {
 
     public record LabelParameterVersionResult(long parameterVersion, List<String> invalidLabels) {}
 
-    public synchronized LabelParameterVersionResult labelParameterVersion(String name, Long parameterVersion,
+    public LabelParameterVersionResult labelParameterVersion(String name, Long parameterVersion,
                                                              List<String> labels, String region) {
+        List<Runnable> events = new ArrayList<>();
+        LabelParameterVersionResult result = applyLabels(name, parameterVersion, labels, region, events);
+        events.forEach(Runnable::run);
+        return result;
+    }
+
+    /** Collects the events instead of publishing them: EventBridge delivers to targets while it runs. */
+    private synchronized LabelParameterVersionResult applyLabels(String name, Long parameterVersion,
+                                                                 List<String> labels, String region,
+                                                                 List<Runnable> events) {
         validateLabelList(labels);
 
         String storageKey = regionKey(region, name);
@@ -744,9 +863,11 @@ public class SsmService implements ResourceProvider {
                 : new ArrayList<>();
 
         int newLabelCount = targetLabels.size();
+        Map<String, String> fromVersions = new LinkedHashMap<>();
         for (String validLabel : validLabels) {
             if (!targetLabels.contains(validLabel)) {
                 newLabelCount++;
+                fromVersions.put(validLabel, "");
             }
         }
         if (newLabelCount > 10) {
@@ -756,6 +877,9 @@ public class SsmService implements ResourceProvider {
 
         for (ParameterHistory h : updatedHistory) {
             if (h.getVersion() != targetVersion && h.getLabels() != null) {
+                for (String label : h.getLabels()) {
+                    fromVersions.computeIfPresent(label, (key, from) -> String.valueOf(h.getVersion()));
+                }
                 List<String> otherLabels = new ArrayList<>(h.getLabels());
                 if (otherLabels.removeAll(validLabels)) {
                     h.setLabels(otherLabels);
@@ -771,11 +895,14 @@ public class SsmService implements ResourceProvider {
         targetCopy.setLabels(targetLabels);
 
         historyStore.put(storageKey, updatedHistory);
+        ParameterHistory labelled = targetCopy;
+        fromVersions.forEach((label, from) ->
+                events.add(() -> eventPublisher.labelChanged(current.getArn(), labelled, label, from, region)));
         LOG.infov("Labeled parameter {0} version {1} with labels {2}", name, targetVersion, validLabels);
         return new LabelParameterVersionResult(targetVersion, invalidLabels);
     }
 
-    public synchronized LabelParameterVersionResult labelParameterVersion(String name, long parameterVersion,
+    public LabelParameterVersionResult labelParameterVersion(String name, long parameterVersion,
                                                              List<String> labels, String region) {
         return labelParameterVersion(name, Long.valueOf(parameterVersion), labels, region);
     }
@@ -789,8 +916,18 @@ public class SsmService implements ResourceProvider {
      * {@code invalidLabels} the order of the request, and error messages echo the name as sent
      * although the lookup ignores surrounding whitespace.
      */
-    public synchronized UnlabelParameterVersionResult unlabelParameterVersion(String name, long parameterVersion,
-                                                                             List<String> labels, String region) {
+    public UnlabelParameterVersionResult unlabelParameterVersion(String name, long parameterVersion,
+                                                                List<String> labels, String region) {
+        List<Runnable> events = new ArrayList<>();
+        UnlabelParameterVersionResult result = removeLabels(name, parameterVersion, labels, region, events);
+        events.forEach(Runnable::run);
+        return result;
+    }
+
+    /** Collects the event instead of publishing it, as {@link #applyLabels} does. */
+    private synchronized UnlabelParameterVersionResult removeLabels(String name, long parameterVersion,
+                                                                    List<String> labels, String region,
+                                                                    List<Runnable> events) {
         validateLabelList(labels);
         String trimmed = name.strip();
         if (AwsArnUtils.isArn(trimmed)) {
@@ -809,9 +946,8 @@ public class SsmService implements ResourceProvider {
         }
 
         String storageKey = regionKey(region, trimmed);
-        if (parameterStore.get(storageKey).isEmpty()) {
-            throw new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400);
-        }
+        Parameter current = parameterStore.get(storageKey).orElseThrow(() ->
+                new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400));
 
         List<ParameterHistory> existingHistory = historyStore.get(storageKey).orElse(List.of());
         List<ParameterHistory> updatedHistory = new ArrayList<>(existingHistory.size());
@@ -840,6 +976,8 @@ public class SsmService implements ResourceProvider {
             targetLabels.removeAll(requested);
             targetCopy.setLabels(targetLabels);
             historyStore.put(storageKey, updatedHistory);
+            ParameterHistory unlabelled = targetCopy;
+            events.add(() -> eventPublisher.labelsRemoved(current.getArn(), unlabelled, removedLabels, region));
             LOG.infov("Removed labels {0} from parameter {1} version {2}", removedLabels, trimmed, parameterVersion);
         }
         return new UnlabelParameterVersionResult(removedLabels, invalidLabels);
@@ -858,7 +996,7 @@ public class SsmService implements ResourceProvider {
      */
     static String labelListViolation(List<String> labels) {
         if (labels == null) {
-            return "Value null at 'labels' failed to satisfy constraint: Member must not be null";
+            return SmithyValidationErrors.notNull("labels");
         }
         String prefix = "Value '" + labels + "' at 'labels' failed to satisfy constraint: ";
         if (labels.isEmpty()) {

@@ -16,7 +16,9 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsLinuxParameters;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
@@ -79,10 +81,11 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -125,12 +128,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // what every such caller already expects.
     private final EcsServiceDiscoveryRegistrar discoveryRegistrar;
     private final CloudWatchMetricsService cloudWatchMetricsService;
+    private final Clock clock;
     private final boolean dockerMode;
     private final boolean sweepLeftoverContainers;
     private final String baseUrl;
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
     private volatile ScheduledExecutorService reconciler = newReconciler();
     private final Object reconcilerLock = new Object();
+    private final Object reconciliationPassLock = new Object();
     // False until a previous run's task containers are confirmed gone; no task starts before.
     private volatile boolean leftoverContainersRemoved = true;
     private volatile boolean leftoverTaskVolumesRemoved;
@@ -229,6 +234,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final Map<String, ServiceDeployment> serviceDeployments = new ConcurrentHashMap<>();
     // serviceRevisionArn → ServiceRevision
     private final Map<String, ServiceRevision> serviceRevisions = new ConcurrentHashMap<>();
+    // accountId::serviceKey → the Container Insights sample last written for that service
+    private final Map<String, InsightsSample> publishedInsights = new ConcurrentHashMap<>();
     // targetArn → List<Attribute>
     private Map<String, List<Attribute>> attributes = new ConcurrentHashMap<>();
     // name → value (account-level settings)
@@ -248,6 +255,17 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                       EcsExecSessionRegistry execSessions,
                       EcsServiceDiscoveryRegistrar discoveryRegistrar,
                       CloudWatchMetricsService cloudWatchMetricsService) {
+        this(regionResolver, containerManager, config, lbRegistrar, storageFactory, eventPublisher,
+                execSessions, discoveryRegistrar, cloudWatchMetricsService, Clock.systemUTC());
+    }
+
+    /** With the clock that dates Container Insights samples, which a test pins. */
+    EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
+               EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
+               StorageFactory storageFactory, EcsEventPublisher eventPublisher,
+               EcsExecSessionRegistry execSessions,
+               EcsServiceDiscoveryRegistrar discoveryRegistrar,
+               CloudWatchMetricsService cloudWatchMetricsService, Clock clock) {
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
@@ -260,6 +278,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         this.execSessions = execSessions;
         this.discoveryRegistrar = discoveryRegistrar;
         this.cloudWatchMetricsService = cloudWatchMetricsService;
+        this.clock = clock;
     }
 
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
@@ -425,8 +444,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     @Override
     public void clear() {
-        // The stores hold the ECS state and afterReset() restarts the reconciler.
+        // The stores hold the ECS state and afterReset() restarts the reconciler. The reset also
+        // wipes CloudWatch, so the Container Insights samples it held must be written again.
         launchFailures.clear();
+        publishedInsights.clear();
     }
 
     /**
@@ -2114,10 +2135,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 continue;
             }
             for (NetworkBinding binding : container.getNetworkBindings()) {
-                addresses.add(new EcsTaskAddress(host, binding.hostPort()));
-                if (!EcsTaskAddress.isLoopback(host)) {
-                    addresses.add(new EcsTaskAddress(host, binding.containerPort()));
-                }
+                int port = EcsTaskAddress.isLoopback(host) ? binding.hostPort() : binding.containerPort();
+                addresses.add(new EcsTaskAddress(host, port));
             }
         }
         return addresses;
@@ -2466,8 +2485,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             return 0;
         }
         try {
-            return Integer.parseInt(new String(Base64.getUrlDecoder().decode(nextToken),
-                    StandardCharsets.UTF_8));
+            return Integer.parseInt(Base64Url.decode(nextToken));
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
         }
@@ -4761,25 +4779,27 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // ── Service Reconciliation ────────────────────────────────────────────────
 
     void reconcile() {
-        try {
-            retryPreviousRunTaskVolumes();
-        } catch (Exception e) {
-            LOG.warnv(e, "ECS previous-run task volume cleanup failed: {0}", e.getMessage());
-        }
-        try {
-            reconcileTasks();
-        } catch (Exception e) {
-            LOG.warnv(e, "ECS task reconciliation tick failed: {0}", e.getMessage());
-        }
-        for (String accountId : reconcilableAccountIds()) {
-            RequestScopes.runAs(accountId, () -> {
-                try {
-                    reconcileServices();
-                } catch (Exception e) {
-                    LOG.warnv(e, "ECS service reconciliation tick failed for account {0}: {1}",
-                            accountId, e.getMessage());
-                }
-            });
+        synchronized (reconciliationPassLock) {
+            try {
+                retryPreviousRunTaskVolumes();
+            } catch (Exception e) {
+                LOG.warnv(e, "ECS previous-run task volume cleanup failed: {0}", e.getMessage());
+            }
+            try {
+                reconcileTasks();
+            } catch (Exception e) {
+                LOG.warnv(e, "ECS task reconciliation tick failed: {0}", e.getMessage());
+            }
+            for (String accountId : reconcilableAccountIds()) {
+                RequestScopes.runAs(accountId, () -> {
+                    try {
+                        reconcileServices();
+                    } catch (Exception e) {
+                        LOG.warnv(e, "ECS service reconciliation tick failed for account {0}: {1}",
+                                accountId, e.getMessage());
+                    }
+                });
+            }
         }
     }
 
@@ -5221,13 +5241,78 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     void reconcileServices() {
-        for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
-            try {
-                reconcileService(entry.getKey(), entry.getValue());
-            } catch (Exception e) {
-                LOG.debugv("Error reconciling ECS service {0}: {1}", entry.getKey(), e.getMessage());
+        synchronized (reconciliationPassLock) {
+            for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
+                try {
+                    reconcileService(entry.getKey(), entry.getValue());
+                } catch (Exception e) {
+                    LOG.debugv("Error reconciling ECS service {0}: {1}", entry.getKey(), e.getMessage());
+                }
+                try {
+                    publishContainerInsights(entry.getKey(), entry.getValue());
+                } catch (Exception e) {
+                    LOG.warnv(e, "Could not publish Container Insights task counts for ECS service {0}", entry.getKey());
+                }
             }
         }
+    }
+
+    /**
+     * Container Insights task counts for a service on a cluster whose own {@code containerInsights}
+     * setting is enabled or enhanced, one sample per minute, counted from the service's tasks once
+     * the tick has started and stopped them. As in AWS, nothing is published while the service has
+     * no RUNNING task, so an alarm sees missing data rather than a zero.
+     */
+    private void publishContainerInsights(String key, EcsServiceModel svc) {
+        if (cloudWatchMetricsService == null || !STATUS_ACTIVE.equals(svc.getStatus())) {
+            return;
+        }
+        String region = extractRegionFromServiceKey(key);
+        String clusterName = extractClusterNameFromServiceKey(key);
+        EcsCluster cluster = clusters.get(clusterKey(region, clusterName));
+        if (cluster == null || cluster.getSettings() == null || cluster.getSettings().stream().noneMatch(s ->
+                "containerInsights".equals(s.name())
+                        && ("enabled".equals(s.value()) || "enhanced".equals(s.value())))) {
+            return;
+        }
+        List<String> statuses = tasks.values().stream()
+                .filter(t -> ownedBy(t, svc, cluster))
+                .map(EcsTask::getLastStatus)
+                .toList();
+        int running = Collections.frequency(statuses, TaskStatus.RUNNING.name());
+        if (running < 1) {
+            return;
+        }
+        long minute = clock.instant().truncatedTo(ChronoUnit.MINUTES).getEpochSecond();
+        Map<String, Integer> counts = Map.of("RunningTaskCount", running,
+                "PendingTaskCount", Collections.frequency(statuses, TaskStatus.PENDING.name()),
+                "DesiredTaskCount", svc.getDesiredCount());
+        String accountId = regionResolver.getAccountId();
+        String sampleKey = accountId + "::" + key;
+        InsightsSample sample = new InsightsSample(minute, counts);
+        // A persistent metric store rewrites its file on every put, and the reconciler ticks every
+        // five seconds, so the minute's sample is written again only when a count changes.
+        if (sample.equals(publishedInsights.get(sampleKey))) {
+            return;
+        }
+        // Forgotten before writing, so a write that fails partway is repeated on the next tick
+        // even when the counts are back to the ones last written in full.
+        publishedInsights.remove(sampleKey);
+        for (Map.Entry<String, Integer> count : counts.entrySet()) {
+            MetricDatum datum = new MetricDatum();
+            datum.setMetricName(count.getKey());
+            datum.setUnit("Count");
+            datum.setDimensions(List.of(new Dimension("ClusterName", clusterName),
+                    new Dimension("ServiceName", svc.getServiceName())));
+            datum.setTimestamp(minute);
+            datum.setValue(count.getValue());
+            cloudWatchMetricsService.publishMetricForAccount(accountId, "ECS/ContainerInsights",
+                    datum, region, "ecs-container-insights");
+        }
+        publishedInsights.put(sampleKey, sample);
+    }
+
+    private record InsightsSample(long minute, Map<String, Integer> counts) {
     }
 
     /**

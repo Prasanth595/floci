@@ -199,6 +199,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
         ensureAliasesAvailable(dist.getConfig(), null);
+        validateOriginSettings(dist.getConfig());
         validateOriginCustomHeaders(dist.getConfig());
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
@@ -233,6 +234,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
         ensureAliasesAvailable(updated.getConfig(), id);
+        validateOriginSettings(updated.getConfig());
         validateOriginCustomHeaders(updated.getConfig());
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
@@ -297,6 +299,86 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             return action.get();
         }
         return iamService.supplyWithServerCertificatesHeld(action);
+    }
+
+    private static void validateOriginSettings(DistributionConfig config) {
+        if (config == null || config.getOrigins() == null) {
+            return;
+        }
+        for (Origin origin : config.getOrigins()) {
+            requireRange("InvalidArgument", "ConnectionAttempts",
+                    origin.getConnectionAttempts(),
+                    CloudFrontOriginTimeouts.MIN_CONNECTION_ATTEMPTS,
+                    CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS, "");
+            requireRange("InvalidArgument", "ConnectionTimeout",
+                    origin.getConnectionTimeout(),
+                    CloudFrontOriginTimeouts.MIN_CONNECTION_TIMEOUT_SECONDS,
+                    CloudFrontOriginTimeouts.MAX_CONNECTION_TIMEOUT_SECONDS, " seconds");
+            Map<String, Object> customOriginConfig = origin.getCustomOriginConfig();
+            int originReadTimeout = CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS;
+            if (customOriginConfig != null) {
+                requireRange("InvalidOriginReadTimeout", "OriginReadTimeout",
+                        asIntOrNull(customOriginConfig.get("OriginReadTimeout")),
+                        CloudFrontOriginTimeouts.MIN_ORIGIN_READ_TIMEOUT_SECONDS,
+                        CloudFrontOriginTimeouts.MAX_ORIGIN_READ_TIMEOUT_SECONDS, " seconds");
+                requireRange("InvalidOriginKeepaliveTimeout", "OriginKeepaliveTimeout",
+                        asIntOrNull(customOriginConfig.get("OriginKeepaliveTimeout")),
+                        CloudFrontOriginTimeouts.MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS,
+                        CloudFrontOriginTimeouts.MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS, " seconds");
+                Integer readTimeout = asIntOrNull(customOriginConfig.get("OriginReadTimeout"));
+                if (readTimeout != null) {
+                    originReadTimeout = readTimeout;
+                }
+            }
+            validateResponseCompletionTimeout(origin.getResponseCompletionTimeout(), originReadTimeout);
+        }
+    }
+
+    /**
+     * The completion timeout bounds the whole request to the origin, so it cannot be shorter than
+     * the read timeout it contains. Create and update both run this, whichever path the request
+     * came from, so a distribution created through the XML API and one created through
+     * CloudFormation are held to the same rule.
+     */
+    private static void validateResponseCompletionTimeout(Integer completionTimeout, int originReadTimeout) {
+        if (completionTimeout == null) {
+            return;
+        }
+        if (completionTimeout < 0) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter ResponseCompletionTimeout must be a non-negative integer.", 400);
+        }
+        if (completionTimeout > 0 && completionTimeout < originReadTimeout) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "The parameter ResponseCompletionTimeout must be greater than or "
+                            + "equal to OriginReadTimeout.",
+                    400);
+        }
+    }
+
+    private static void requireRange(String errorCode, String field, Integer value,
+            int min, int max, String unit) {
+        if (value != null && (value < min || value > max)) {
+            throw new AwsException(
+                    errorCode,
+                    "The parameter " + field + " must be between " + min + " and " + max + unit + ".",
+                    400);
+        }
+    }
+
+    private static Integer asIntOrNull(Object value) {
+        if (value instanceof Integer intValue) {
+            return intValue;
+        }
+        if (value instanceof String text) {
+            try {
+                return Integer.valueOf(text);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static void validateOriginCustomHeaders(DistributionConfig config) {
@@ -1285,8 +1367,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     private static String nullViolation(String member) {
-        return "Value null at 'originAccessControlConfig." + member
-                + "' failed to satisfy constraint: Member must not be null";
+        return SmithyValidationErrors.notNull("originAccessControlConfig." + member);
     }
 
     /** The kinds of Lambda origin CloudFront tells apart. */

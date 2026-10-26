@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
@@ -41,7 +42,7 @@ class FlowLogServiceTest {
     private FlowLogService serviceCallingAs(String accountId) {
         Ec2Service ec2Service = mock(Ec2Service.class);
         when(ec2Service.callerAccountId()).thenReturn(accountId);
-        when(ec2Service.describeInstances(any(), any(), any())).thenReturn(List.of());
+        when(ec2Service.describeInstances(any(), any(), anyMap())).thenReturn(List.of());
         when(ec2Service.endpointNetworkInterfaces(any())).thenReturn(List.of());
         return new FlowLogService(ec2Service, mock(S3Service.class), new InMemoryStorage<>());
     }
@@ -214,7 +215,7 @@ class FlowLogServiceTest {
     private List<String> deliver(String region, String logFormat) throws Exception {
         Ec2Service ec2Service = mock(Ec2Service.class);
         when(ec2Service.callerAccountId()).thenReturn("000000000000");
-        when(ec2Service.describeInstances(any(), any(), any()))
+        when(ec2Service.describeInstances(any(), any(), anyMap()))
                 .thenReturn(List.of(reservation(region)));
         when(ec2Service.endpointNetworkInterfaces(any())).thenReturn(List.of());
         S3Service s3Service = mock(S3Service.class);

@@ -68,6 +68,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 class CognitoServiceTest {
@@ -2469,9 +2470,9 @@ class CognitoServiceTest {
     void expiredPendingEmailCodeLeavesActiveAttributeAndVerifiedFlagUnchanged() {
         VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         CognitoMessageDispatcher messageDispatcher = inlineMock(CognitoMessageDispatcher.class);
-        when(verificationCodeService.issue(any(), any(),
+        when(verificationCodeService.issueTracked(any(), any(),
                 eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any()))
-                .thenReturn("123456");
+                .thenReturn(new VerificationCodeService.IssuedCode("123456", "test-hash"));
 
         CognitoService serviceWithVerification = new CognitoService(
                 new InMemoryStorage<>(),
@@ -2533,9 +2534,9 @@ class CognitoServiceTest {
     void verificationCodeForRequiredEmailUpdateUsesPendingDestination() {
         VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         CognitoMessageDispatcher messageDispatcher = inlineMock(CognitoMessageDispatcher.class);
-        when(verificationCodeService.issue(any(), any(),
+        when(verificationCodeService.issueTracked(any(), any(),
                 eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any()))
-                .thenReturn("123456");
+                .thenReturn(new VerificationCodeService.IssuedCode("123456", "test-hash"));
 
         CognitoService serviceWithVerification = new CognitoService(
                 new InMemoryStorage<>(),
@@ -2584,7 +2585,7 @@ class CognitoServiceTest {
         verify(messageDispatcher).dispatch(
                 eq(pool), deliveryUser.capture(),
                 eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION),
-                eq("123456"), eq(List.of("EMAIL")));
+                eq("123456"), eq(List.of("EMAIL")), isNull());
         assertEquals("new@example.com", deliveryUser.getValue().getAttributes().get("email"));
         assertEquals("old@example.com",
                 serviceWithVerification.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
@@ -2605,11 +2606,11 @@ class CognitoServiceTest {
                 "email", "admin@example.com"));
 
         CognitoUser updated = fixture.service().adminGetUser(fixture.pool().getId(), "alice");
-        assertEquals("admin@example.com", updated.getAttributes().get("email"));
+        assertEquals("old@example.com", updated.getAttributes().get("email"));
+        assertEquals("admin@example.com", updated.getPendingAttributes().get("email"));
         assertEquals("updated", updated.getAttributes().get("custom:note"));
-        assertFalse(updated.getPendingAttributes().containsKey("email"));
         assertEquals("+12025550101", updated.getPendingAttributes().get("phone_number"));
-        verify(verificationCodeService, times(2)).invalidatePrevious(
+        verify(verificationCodeService).invalidatePrevious(
                 fixture.pool().getId(), "alice",
                 VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
         verify(verificationCodeService, never()).invalidatePrevious(
@@ -2675,6 +2676,9 @@ class CognitoServiceTest {
             VerificationCodeService verificationCodeService,
             CognitoMessageDispatcher messageDispatcher) {
         when(verificationCodeService.issue(any(), any(), any(), any())).thenReturn("123456");
+        when(verificationCodeService.issueTracked(any(), any(), any(), any()))
+                .thenReturn(new VerificationCodeService.IssuedCode("123456", "test-hash"));
+        when(verificationCodeService.hasUsableCode(any(), any(), any())).thenReturn(true);
         CognitoService serviceWithVerification = new CognitoService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),

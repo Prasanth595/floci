@@ -17,6 +17,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
@@ -46,6 +47,8 @@ public class LambdaMicrovmsService {
 
     private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z0-9-_]{1,64}");
     private static final int MAX_CONNECTOR_SUBNETS = 16;
+    /** The one AWS-managed base image the catalog serves. */
+    private static final String MANAGED_IMAGE = "al2023-1";
 
     private final RegionResolver regionResolver;
     private final StorageFactory storageFactory;
@@ -293,16 +296,26 @@ public class LambdaMicrovmsService {
     }
 
     public List<Map<String, Object>> listManagedImageVersions(String region, String identifier) {
-        if (!identifier.contains("al2023-1")) {
+        if (!namesManagedImage(identifier)) {
             throw new AwsException("ResourceNotFoundException",
                     "Managed MicroVM image not found: " + identifier, 404);
         }
         return List.of(managedImage(region));
     }
 
+    /** True when {@code identifier} names the managed image, as {@link #listManagedImageVersions} reads it. */
+    public static boolean namesManagedImage(String identifier) {
+        return identifier.contains(MANAGED_IMAGE);
+    }
+
+    /** The managed image's ARN in {@code region}, owned by {@code aws} rather than the caller's account. */
+    public static String managedImageArn(String region) {
+        return AwsArnUtils.Arn.of("lambda", region, "aws", "microvm-image:" + MANAGED_IMAGE).toString();
+    }
+
     private Map<String, Object> managedImage(String region) {
         Map<String, Object> entry = new LinkedHashMap<>();
-        entry.put("imageArn", AwsArnUtils.Arn.of("lambda", region, "aws", "microvm-image:al2023-1").toString());
+        entry.put("imageArn", managedImageArn(region));
         entry.put("createdAt", 1781833144.754d);
         entry.put("updatedAt", 1784165932.388d);
         return entry;
@@ -351,12 +364,13 @@ public class LambdaMicrovmsService {
     }
 
     public Microvm getMicrovm(String region, String microvmId) {
-        Microvm vm = microvms.get(key(region, unwrap(microvmId)));
-        if (vm == null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "MicroVM not found: " + microvmId, 404);
-        }
-        return vm;
+        return findMicrovm(region, microvmId).orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                "MicroVM not found: " + microvmId, 404));
+    }
+
+    /** The MicroVM of the caller's account that {@code microvmId} names in {@code region}, looked up as every route does. */
+    public Optional<Microvm> findMicrovm(String region, String microvmId) {
+        return Optional.ofNullable(microvms.get(key(region, unwrap(microvmId))));
     }
 
     public List<Microvm> listMicrovms(String region) {

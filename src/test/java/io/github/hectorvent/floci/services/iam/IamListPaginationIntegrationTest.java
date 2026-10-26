@@ -5,7 +5,9 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.function.Function;
@@ -242,5 +244,122 @@ class IamListPaginationIntegrationTest {
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
         }
+    }
+
+    /**
+     * The API reference documents Marker as the place "where the next call should start", so a
+     * continuation returns the roles after the ones already seen, whatever happened ahead of it.
+     */
+    @Test
+    void aRoleDeletedAheadOfTheMarkerSkipsNoRoleOnTheNextPage() {
+        String tag = suffix();
+        String path = "/pg-anchor-deleted-" + tag + "/";
+        List<String> names = roleNames(tag, 5);
+        names.forEach(name -> createRole(name, path));
+        List<String> remaining = new ArrayList<>(names);
+        try {
+            Page first = rolePage(path, "2", null);
+            assertEquals(names.subList(0, 2), first.names());
+
+            deleteRole(names.getFirst());
+            remaining.remove(names.getFirst());
+
+            assertEquals(names.subList(2, 5), flatten(walk(marker -> rolePage(path, "2",
+                    marker == null ? first.marker() : marker))));
+        } finally {
+            remaining.forEach(IamListPaginationIntegrationTest::deleteRole);
+        }
+    }
+
+    @Test
+    void aRoleCreatedAheadOfTheMarkerReturnsNoRoleTwice() {
+        String tag = suffix();
+        String path = "/pg-anchor-created-" + tag + "/";
+        List<String> names = roleNames(tag, 5);
+        names.subList(1, 5).forEach(name -> createRole(name, path));
+        try {
+            Page first = rolePage(path, "2", null);
+            assertEquals(names.subList(1, 3), first.names());
+
+            createRole(names.getFirst(), path);
+
+            assertEquals(names.subList(3, 5), flatten(walk(marker -> rolePage(path, "2",
+                    marker == null ? first.marker() : marker))));
+        } finally {
+            names.forEach(IamListPaginationIntegrationTest::deleteRole);
+        }
+    }
+
+    @Test
+    void theLastRoleOfAPageDeletedBeforeTheNextPageSkipsNoRole() {
+        String tag = suffix();
+        String path = "/pg-anchor-gone-" + tag + "/";
+        List<String> names = roleNames(tag, 5);
+        names.forEach(name -> createRole(name, path));
+        List<String> remaining = new ArrayList<>(names);
+        try {
+            Page first = rolePage(path, "2", null);
+            assertEquals(names.subList(0, 2), first.names());
+
+            deleteRole(names.get(1));
+            remaining.remove(names.get(1));
+
+            assertEquals(names.subList(2, 5), flatten(walk(marker -> rolePage(path, "2",
+                    marker == null ? first.marker() : marker))));
+        } finally {
+            remaining.forEach(IamListPaginationIntegrationTest::deleteRole);
+        }
+    }
+
+    /**
+     * ListPolicies lists customer-managed policies before the AWS-managed catalog. A marker naming
+     * the last customer-managed policy, deleted before the next page, resumes at the first
+     * AWS-managed one, although its name sorts after every managed policy's ARN.
+     */
+    @Test
+    void aDeletedCustomerManagedPolicyResumesAtTheNextPolicyInListPoliciesOrder() {
+        String name = "zzzz-pg-anchor-" + suffix();
+        String arn = createPolicy(name, "/pg-anchor-policy/");
+        boolean deleted = false;
+        try {
+            List<String> all = flatten(walk(marker -> policyPage("All", null, "1000", marker)));
+            int index = all.indexOf(arn);
+            assertTrue(index >= 0, "the created policy is listed");
+            String following = all.get(index + 1);
+            assertTrue(following.startsWith("arn:aws:iam::aws:policy/"),
+                    "the policy is the last customer-managed one: " + following);
+
+            Page first = policyPage("All", null, Integer.toString(index + 1), null);
+            assertEquals(arn, first.names().getLast());
+
+            deletePolicy(arn);
+            deleted = true;
+
+            assertEquals(List.of(following), policyPage("All", null, "1", first.marker()).names());
+        } finally {
+            if (!deleted) {
+                deletePolicy(arn);
+            }
+        }
+    }
+
+    /** A marker shaped like an issued one but never issued is refused, as any other unissued marker is. */
+    @Test
+    void listRolesRejectsAnAnchoredMarkerItDidNotIssue() {
+        String forged = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString("pg-anchor-forged.not-a-signature".getBytes(StandardCharsets.UTF_8));
+
+        iam("ListRoles").formParam("Marker", forged)
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+    }
+
+    private static List<String> roleNames(String tag, int count) {
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            names.add("pg-anchor-" + tag + "-" + i);
+        }
+        return names;
     }
 }

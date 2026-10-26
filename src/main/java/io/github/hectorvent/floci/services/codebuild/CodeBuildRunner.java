@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -46,7 +47,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -862,11 +862,8 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     private void deleteDirectory(Path path) {
         try {
-            if (!Files.exists(path)) { return; }
-            Files.walk(path).sorted(Comparator.reverseOrder()).forEach(p -> {
-                try { Files.delete(p); } catch (Exception ignored) {}
-            });
-        } catch (Exception e) {
+            FileTrees.delete(path);
+        } catch (IOException e) {
             LOG.debugv("Could not delete workspace {0}: {1}", path, e.getMessage());
         }
     }

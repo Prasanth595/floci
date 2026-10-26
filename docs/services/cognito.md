@@ -315,9 +315,9 @@ passwordless pool generates a password. `TemporaryPasswordValidityDays` is not e
 | ResendConfirmationCode | Issues a new sign-up confirmation code to an unconfirmed user, replacing the previous one, and returns where it was sent. |
 | GetUser | Returns attributes for the authenticated access-token user, and the MFA settings (`UserMFASettingList`, `PreferredMfaSetting`) once any is turned on. |
 | GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, `WEB_AUTHN` once the user has registered a passkey, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the SMS, email and software-token MFA preferences set with `SetUserMFAPreference`. |
-| GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. |
+| GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. The CustomMessage trigger shapes its message, with triggerSource `CustomMessage_VerifyUserAttribute` and the request's `ClientMetadata`. |
 | VerifyUserAttribute | Verifies an email or phone_number attribute with its issued verification code. |
-| UpdateUserAttributes | Updates attributes for the authenticated access-token user. |
+| UpdateUserAttributes | Updates attributes for the authenticated access-token user. A changed email or phone_number gets a verification code once the update is stored. The CustomMessage trigger shapes its message, with triggerSource `CustomMessage_UpdateUserAttribute`, the request's `ClientMetadata` and the user as stored. A message that cannot be sent fails the request with `CodeDeliveryFailureException` and leaves the update in place, as on AWS. |
 | DeleteUserAttributes | Deletes the named attributes from the authenticated access-token user. |
 | DeleteUser | Deletes the authenticated access-token user and removes them from their groups. An API Gateway Cognito authorizer rejects the user's existing tokens afterwards. |
 | ChangePassword | Changes the authenticated user's password. |
@@ -524,6 +524,19 @@ empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`
 the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
 `USER_AUTH` must list the matching `ALLOW_` value.
 
+## Custom Message Trigger
+
+`CustomMessage` requests include the `{####}` code placeholder, the `{##Click Here##}`
+link placeholder, and the user's current `cognito:user_status` in `userAttributes`.
+`usernameParameter` is `null` except for an AdminCreateUser invitation, where it is
+`{username}`. The initial `response` contains `emailMessage`, `emailSubject`, and
+`smsMessage`, each set to `null` for the function to customize.
+
+`CustomMessage` events omit `request.clientMetadata` when metadata is absent or empty,
+including `CustomMessage_Authentication`, which does not forward `InitiateAuth`
+metadata. Custom Email Sender events retain the key with `null` when
+there is no metadata; their event shape is distinct.
+
 ## Custom Email Sender Trigger
 
 A pool whose `LambdaConfig` names a `CustomEmailSender` function (`{"LambdaArn": ..., "LambdaVersion": "V1_0"}`)
@@ -579,6 +592,17 @@ attribute to `true`.
 
 Without the setting, `UpdateUserAttributes` replaces the value immediately and
 sets the matching `*_verified` attribute to `false` until verification succeeds.
+A failed hand-over of its code to `CustomEmailSender` still keeps the complete
+attribute update, including other attributes in the same request. The request
+returns the delivery error, and the undelivered code is withdrawn so another
+verification code can be requested after the sender is working again.
+Codes issued for earlier destinations of changed contacts are also withdrawn,
+including when the replacement is pending. Codes for unchanged contacts that
+the failed delivery did not reach remain usable.
+`AdminUpdateUserAttributes` uses the same contact update and failed-sender handling.
+It skips verification delivery when the request sets the matching `*_verified`
+attribute to `true`. Otherwise, retrying an identical admin update sends a new
+code if the previous delivery failed and left no usable code.
 A verification code is still sent to the replacement value, but Cognito no
 longer retains or exposes the old value. For alias attributes, the old alias is
 removed immediately and the replacement becomes usable for sign-in only after

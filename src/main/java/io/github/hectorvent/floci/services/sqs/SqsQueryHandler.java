@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorMessages;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
@@ -173,11 +174,16 @@ public class SqsQueryHandler {
 
     private Response handleListQueues(MultivaluedMap<String, String> params, String region) {
         String prefix = getParam(params, "QueueNamePrefix");
-        List<Queue> queues = sqsService.listQueues(prefix, region);
+        Integer maxResults = getOptionalIntParam(params, "MaxResults");
+        String nextToken = getParam(params, "NextToken");
+        PaginatedResult<Queue> page = sqsService.listQueues(prefix, maxResults, nextToken, region);
 
         XmlBuilder xml = new XmlBuilder();
-        for (Queue q : queues) {
+        for (Queue q : page.items()) {
             xml.elem("QueueUrl", q.getQueueUrl());
+        }
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
         }
         return Response.ok(AwsQueryResponse.envelope("ListQueues", null, xml.build())).build();
     }

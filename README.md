@@ -55,6 +55,9 @@ The fastest way to run Floci is with the official [CLI](https://github.com/floci
 floci start
 ```
 
+No Docker? Each [release](https://github.com/floci-io/floci/releases) also ships a standalone `floci-aws`
+binary for Linux, macOS and Windows; see [Native binary](https://floci.io/docs/getting-started/installation/#native-binary).
+
 Export the AWS environment variables:
 
 ```bash
@@ -337,7 +340,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | CloudWatch OAM | In-process | Full 15-operation sink, policy, cross-account link, and tagging API |
 | ElastiCache | Real Docker | Redis / Valkey protocol, IAM auth, SigV4 validation |
 | MemoryDB | Real Docker | Redis / Valkey protocol via real containers; JSON 1.1 control plane; reuses ElastiCache RESP proxy |
-| Aurora DSQL | In-process | Control plane and `AWS::DSQL::Cluster`: clusters, policies, tags; clusters have no database behind them |
+| Aurora DSQL | Real Docker, mock mode available | PostgreSQL 16 per cluster behind a TLS endpoint with IAM token auth, `AWS IAM GRANT` role mappings; not yet DSQL's limits and async indexes |
 | RDS | Real Docker | PostgreSQL, MySQL, MariaDB, IAM auth, JDBC-compatible engines |
 | Timestream for InfluxDB | Real Docker, mock mode available | InfluxDB 2.x DB instances and read replica clusters via `influxdb:2.7`; initial auth secret in Secrets Manager; backups and restore through the influx CLI |
 | RDS Data API | REST JSON over real RDS containers | Raw SQL execution and transactions for local MySQL / MariaDB RDS resources |

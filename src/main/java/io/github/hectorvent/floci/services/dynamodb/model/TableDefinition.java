@@ -37,6 +37,7 @@ public class TableDefinition {
     private boolean ttlEnabled;
     private boolean pointInTimeRecoveryEnabled;
     private int pointInTimeRecoveryRecoveryPeriodInDays;
+    private Instant pointInTimeRecoveryStartDateTime;
     private boolean deletionProtectionEnabled;
     private boolean streamEnabled;
     private String streamArn;
@@ -167,6 +168,11 @@ public class TableDefinition {
     public int getPointInTimeRecoveryRecoveryPeriodInDays() { return pointInTimeRecoveryRecoveryPeriodInDays; }
     public void setPointInTimeRecoveryRecoveryPeriodInDays(int pointInTimeRecoveryRecoveryPeriodInDays) {
         this.pointInTimeRecoveryRecoveryPeriodInDays = pointInTimeRecoveryRecoveryPeriodInDays;
+    }
+
+    public Instant getPointInTimeRecoveryStartDateTime() { return pointInTimeRecoveryStartDateTime; }
+    public void setPointInTimeRecoveryStartDateTime(Instant pointInTimeRecoveryStartDateTime) {
+        this.pointInTimeRecoveryStartDateTime = pointInTimeRecoveryStartDateTime;
     }
 
     public boolean isDeletionProtectionEnabled() { return deletionProtectionEnabled; }

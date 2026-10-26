@@ -8,8 +8,11 @@ import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
+import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.emr.model.EmrBlockPublicAccess;
 import io.github.hectorvent.floci.services.emr.model.EmrCluster;
 import io.github.hectorvent.floci.services.emr.model.EmrInstanceFleet;
@@ -21,6 +24,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -96,6 +100,10 @@ public class EmrHandler {
                         .build();
             };
         } catch (AwsException e) {
+            if (e.getExtendedData() != null) {
+                // Members an error adds to its message, such as InvalidRequestException's ErrorCode.
+                return JsonErrorResponseUtils.createErrorResponse(e);
+            }
             return Response.status(e.getHttpStatus())
                     .entity(new AwsErrorResponse(e.jsonType(), e.getMessage()))
                     .build();
@@ -167,38 +175,45 @@ public class EmrHandler {
 
     private Response handleListClusters(JsonNode request, String region) {
         List<String> states = stringList(request.path("ClusterStates"));
+        Instant createdAfter = AwsJsonTimestamp.epochSeconds(request, "CreatedAfter", "InvalidRequestException");
+        Instant createdBefore = AwsJsonTimestamp.epochSeconds(request, "CreatedBefore", "InvalidRequestException");
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Clusters");
-        for (EmrCluster c : service.listClusters(region, states)) {
+        for (EmrCluster c : service.listClusters(region, states, createdAfter, createdBefore)) {
             arr.add(clusterSummaryNode(c));
         }
         return Response.ok(response).build();
     }
 
     private Response handleTerminateJobFlows(JsonNode request) {
+        requireMembers(request, "JobFlowIds");
         service.terminateJobFlows(stringList(request.path("JobFlowIds")));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleSetTerminationProtection(JsonNode request) {
+        requireMembers(request, "JobFlowIds", "TerminationProtected");
         service.setTerminationProtection(stringList(request.path("JobFlowIds")),
                 request.path("TerminationProtected").asBoolean(false));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleSetVisibleToAllUsers(JsonNode request) {
+        requireMembers(request, "JobFlowIds", "VisibleToAllUsers");
         service.setVisibleToAllUsers(stringList(request.path("JobFlowIds")),
                 request.path("VisibleToAllUsers").asBoolean(true));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleSetKeepAlive(JsonNode request) {
+        requireMembers(request, "JobFlowIds", "KeepJobFlowAliveWhenNoSteps");
         service.setKeepJobFlowAliveWhenNoSteps(stringList(request.path("JobFlowIds")),
                 request.path("KeepJobFlowAliveWhenNoSteps").asBoolean(false));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleSetUnhealthyNodeReplacement(JsonNode request) {
+        requireMembers(request, "JobFlowIds", "UnhealthyNodeReplacement");
         service.setUnhealthyNodeReplacement(stringList(request.path("JobFlowIds")),
                 request.path("UnhealthyNodeReplacement").asBoolean(false));
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -240,6 +255,7 @@ public class EmrHandler {
     }
 
     private Response handleCancelSteps(JsonNode request) {
+        requireMembers(request, "StepIds");
         List<EmrService.CancelStepInfo> infos = service.cancelSteps(
                 text(request, "ClusterId"), stringList(request.path("StepIds")));
         ObjectNode response = objectMapper.createObjectNode();
@@ -301,7 +317,7 @@ public class EmrHandler {
         EmrCluster cluster = service.getClusterForInstances(text(request, "ClusterId"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Instances");
-        boolean terminated = "TERMINATED".equals(cluster.getState());
+        boolean terminated = EmrClusterLifecycle.isTerminated(cluster.getState());
         List<String> states = stringList(request.path("InstanceStates"));
         if ((!states.isEmpty() && !states.contains(terminated ? "TERMINATED" : "RUNNING"))
                 || (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now()))) {
@@ -650,6 +666,12 @@ public class EmrHandler {
         if (step.getStateChangeReason() != null) {
             status.putObject("StateChangeReason").put("Message", step.getStateChangeReason());
         }
+        if (step.getFailureReason() != null) {
+            ObjectNode failure = status.putObject("FailureDetails").put("Reason", step.getFailureReason());
+            if (step.getFailureMessage() != null) {
+                failure.put("Message", step.getFailureMessage());
+            }
+        }
         ObjectNode timeline = status.putObject("Timeline");
         putEpoch(timeline, "CreationDateTime", step.getCreationDateTime());
         putEpoch(timeline, "StartDateTime", step.getStartDateTime());
@@ -856,6 +878,25 @@ public class EmrHandler {
         return values;
     }
 
+    /**
+     * Refuses a request that leaves out members its model requires, which would otherwise read as an
+     * empty list or a default flag and succeed on nothing. The wording is AWS's framework validation, as
+     * for RunJobFlow's Name; an explicitly empty JobFlowIds is still a valid list.
+     */
+    private static void requireMembers(JsonNode request, String... members) {
+        List<String> violations = new ArrayList<>();
+        for (String member : members) {
+            JsonNode value = request.path(member);
+            if (value.isMissingNode() || value.isNull()) {
+                violations.add(SmithyValidationErrors.notNull(
+                        Character.toLowerCase(member.charAt(0)) + member.substring(1)));
+            }
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+    }
+
     private String text(JsonNode request, String field) {
         JsonNode node = request.path(field);
         return node.isMissingNode() || node.isNull() ? null : node.asText(null);
@@ -876,13 +917,13 @@ public class EmrHandler {
         }
     }
 
-    private long epoch(Instant instant) {
-        return instant == null ? 0L : instant.getEpochSecond();
+    private BigDecimal epoch(Instant instant) {
+        return instant == null ? BigDecimal.ZERO : BigDecimal.valueOf(instant.toEpochMilli(), 3);
     }
 
     private void putEpoch(ObjectNode node, String field, Instant instant) {
         if (instant != null) {
-            node.put(field, instant.getEpochSecond());
+            node.put(field, epoch(instant));
         }
     }
 }

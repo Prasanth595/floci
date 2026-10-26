@@ -169,7 +169,56 @@ class CloudFrontCfnProvisionerTest {
         assertEquals("b.s3.amazonaws.com", origin.getDomainName());
         // No CustomOriginConfig means an S3 origin.
         assertNull(origin.getCustomOriginConfig());
+        // Settings the template never mentions stay on the model's own AWS defaults.
+        assertEquals(3, origin.getConnectionAttempts());
+        assertEquals(10, origin.getConnectionTimeout());
         assertEquals("redirect-to-https", config.getDefaultCacheBehavior().getViewerProtocolPolicy());
+    }
+
+    @Test
+    void copiesTheOriginConnectionSettingsTheTemplateDeclares() throws Exception {
+        when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        StackResource r = resource(DISTRIBUTION);
+
+        provisioner.provision(r, json("""
+                {"DistributionConfig": {
+                   "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
+                                "ConnectionAttempts": 2, "ConnectionTimeout": 5,
+                                "ResponseCompletionTimeout": 90,
+                                "CustomOriginConfig": {"OriginProtocolPolicy": "https-only",
+                                                       "OriginReadTimeout": 45,
+                                                       "OriginKeepaliveTimeout": 120}}],
+                   "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
+                }}
+                """), distributionCtx(null));
+
+        ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
+        verify(cloudFront).createDistribution(sent.capture(), any());
+        Origin origin = sent.getValue().getConfig().getOrigins().getFirst();
+        assertEquals(2, origin.getConnectionAttempts());
+        assertEquals(5, origin.getConnectionTimeout());
+        // ResponseCompletionTimeout lives on the origin, where the serving layer reads it.
+        assertEquals(Integer.valueOf(90), origin.getResponseCompletionTimeout());
+        // OriginReadTimeout lives on CustomOriginConfig, where the serving layer reads it.
+        assertEquals(Integer.valueOf(45), origin.getCustomOriginConfig().get("OriginReadTimeout"));
+        assertEquals(Integer.valueOf(120), origin.getCustomOriginConfig().get("OriginKeepaliveTimeout"));
+    }
+
+    @Test
+    void aNonNumericOriginConnectionSettingFailsTheStackInsteadOfAServerError() {
+        StackResource r = resource(DISTRIBUTION);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, json("""
+                {"DistributionConfig": {
+                   "Origins": [{"Id": "o1", "DomainName": "origin.example.com", "ConnectionTimeout": "lots"}],
+                   "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
+                }}
+                """), distributionCtx(null)));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("AWS::CloudFront::Distribution origin ConnectionTimeout must be an integer, but was 'lots'",
+                e.getMessage());
+        verify(cloudFront, never()).createDistribution(any(), any());
     }
 
     @Test

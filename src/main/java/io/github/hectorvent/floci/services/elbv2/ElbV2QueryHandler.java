@@ -245,7 +245,9 @@ public class ElbV2QueryHandler {
                 .start("SetSecurityGroupsResponse", AwsNamespaces.ELB_V2)
                 .start("SetSecurityGroupsResult")
                   .start("SecurityGroupIds");
-        for (String sg : sgs) xml.start("member").elem("member", sg).end("member");
+        for (String sg : sgs) {
+            xml.elem("member", sg);
+        }
         xml.end("SecurityGroupIds")
            .end("SetSecurityGroupsResult")
            .raw(AwsQueryResponse.responseMetadata())
@@ -256,7 +258,7 @@ public class ElbV2QueryHandler {
     private Response handleSetSubnets(MultivaluedMap<String, String> p, String region) {
         String arn = p.getFirst("LoadBalancerArn");
         List<String> subnets = ElbV2Service.requestedSubnets(memberList(p, "Subnets"), subnetMappingSubnetIds(p));
-        service.setSubnets(region, arn, subnets);
+        service.setSubnetsFromRequest(region, arn, subnets);
         return voidResponse("SetSubnetsResponse");
     }
 
@@ -468,6 +470,7 @@ public class ElbV2QueryHandler {
         String listenerArn = p.getFirst("ListenerArn");
         String protocol = p.getFirst("Protocol");
         Integer port = parseIntOrNull(p.getFirst("Port"));
+        ElbV2Service.validatePort(port, "port");
         String sslPolicy = p.getFirst("SslPolicy");
         List<String> certs = parseCertificateList(p, "Certificates");
         List<Action> defaultActions = parseActions(p, "DefaultActions", false);

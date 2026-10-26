@@ -6,13 +6,25 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.backup.model.*;
+import io.github.hectorvent.floci.services.backup.model.BackupJob;
+import io.github.hectorvent.floci.services.backup.model.BackupPlan;
+import io.github.hectorvent.floci.services.backup.model.BackupRule;
+import io.github.hectorvent.floci.services.backup.model.BackupSelection;
+import io.github.hectorvent.floci.services.backup.model.BackupVault;
+import io.github.hectorvent.floci.services.backup.model.BackupVaultNotifications;
+import io.github.hectorvent.floci.services.backup.model.Lifecycle;
+import io.github.hectorvent.floci.services.backup.model.RecoveryPoint;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import io.quarkus.runtime.Startup;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -21,13 +33,19 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
+@Startup
 public class BackupService {
 
     private static final Logger LOG = Logger.getLogger(BackupService.class);
@@ -40,7 +58,7 @@ public class BackupService {
     private final StorageBackend<String, BackupVault>     vaultStore;
     private final StorageBackend<String, BackupPlan>      planStore;
     private final StorageBackend<String, BackupSelection> selectionStore;
-    private final StorageBackend<String, BackupJob>       jobStore;
+    private final AccountAwareStorageBackend<BackupJob> jobStore;
     private final StorageBackend<String, RecoveryPoint>   recoveryStore;
     private final StorageBackend<String, String>          accessPolicyStore;
     private final StorageBackend<String, BackupVaultNotifications> notificationStore;
@@ -84,6 +102,53 @@ public class BackupService {
     @PreDestroy
     void shutdown() {
         scheduler.shutdownNow();
+    }
+
+    @PostConstruct
+    void resumeJobs() {
+        for (AccountAwareStorageBackend.AccountEntry<BackupJob> entry : jobStore.scanAllAccountEntries(k -> true)) {
+            BackupJob job = entry.value();
+            if (!List.of("CREATED", "RUNNING", "ABORTING").contains(job.getState())) {
+                continue;
+            }
+            String region = AwsArnUtils.regionOrDefault(job.getBackupVaultArn(), regionResolver.getDefaultRegion());
+            if ("ABORTING".equals(job.getState())) {
+                scheduler.execute(() -> RequestScopes.runAs(entry.accountId(), region, () -> abortJob(entry.key())));
+            } else {
+                scheduleJob(entry.key(), job, entry.accountId(), region);
+            }
+        }
+    }
+
+    private void scheduleJob(String jobId, BackupJob job, String accountId, String region) {
+        long now = Instant.now().getEpochSecond();
+        if ("CREATED".equals(job.getState()) && job.getStartBy() != null && job.getStartBy() < now) {
+            scheduler.execute(() -> RequestScopes.runAs(accountId, region, () -> {
+                synchronized (lockFor(jobLockKey(jobId))) {
+                    jobStore.get(jobId).ifPresent(current -> {
+                        if ("CREATED".equals(current.getState())) {
+                            current.setState("EXPIRED");
+                            current.setStatusMessage("The job did not start before its start window expired");
+                            current.setCompletionDate(Instant.now().getEpochSecond());
+                            jobStore.put(jobId, current);
+                        }
+                    });
+                }
+            }));
+            return;
+        }
+        long completion = job.getExpectedCompletionDate() == null
+                ? job.getCreationDate() + jobCompletionDelaySeconds : job.getExpectedCompletionDate();
+        scheduler.schedule(() -> RequestScopes.runAs(accountId, region,
+                () -> transitionJob(jobId, job.getBackupVaultName(), region)),
+                Math.max(0, Math.min(job.getCreationDate() + 1, completion) - now), TimeUnit.SECONDS);
+        scheduler.schedule(() -> RequestScopes.runAs(accountId, region,
+                () -> completeJob(jobId, job.getBackupVaultName(), region)),
+                Math.max(0, completion - now), TimeUnit.SECONDS);
+    }
+
+    private String jobLockKey(String jobId) {
+        return "job:" + regionResolver.getAccountId() + ":" + jobId;
     }
 
     // ── Vault ──────────────────────────────────────────────────────────────────
@@ -214,6 +279,18 @@ public class BackupService {
                 .filter(v -> byVaultType == null || byVaultType.equals(
                         v.getVaultType() == null ? "BACKUP_VAULT" : v.getVaultType()))
                 .toList();
+    }
+
+    public PaginatedResult<BackupVault> listBackupVaults(String region, String byVaultType,
+                                                        Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 1000)) {
+            throw new AwsException("InvalidParameterValueException", "maxResults must be between 1 and 1000", 400);
+        }
+        String namespace = "backup:ListBackupVaults:" + regionResolver.getAccountId() + ":" + region + ":"
+                + (byVaultType == null ? "all" : "type:" + byVaultType);
+        return Pagination.paginate(listBackupVaults(region, byVaultType), BackupVault::getBackupVaultName,
+                maxResults == null ? 1000 : maxResults, nextToken, namespace,
+                token -> new AwsException("InvalidParameterValueException", "Invalid nextToken.", 400));
     }
 
     private static void requireNotAirGapped(BackupVault vault, String action) {
@@ -653,6 +730,7 @@ public class BackupService {
         job.setBackupJobId(jobId);
         job.setBackupVaultName(vaultName);
         job.setBackupVaultArn(vault.getBackupVaultArn());
+        job.setVaultId(vault.getVaultId());
         job.setResourceArn(resourceArn);
         job.setResourceType(inferResourceType(resourceArn));
         job.setIamRoleArn(iamRoleArn);
@@ -664,16 +742,7 @@ public class BackupService {
         String accountId = regionResolver.getAccountId();
         job.setAccountId(accountId);
         jobStore.put(jobId, job);
-        // Pinned now, not looked up by name at completion: if this vault is deleted and the name
-        // reused while the job runs, the job must not notify the replacement vault's topic.
-        String notificationKey = subResourceKey(region, vault);
-
-        // The scheduler thread has no request context; run in the caller's account
-        // so the account-aware stores and buildArn resolve the right partition.
-        scheduler.schedule(() -> RequestScopes.runAs(accountId,
-                () -> transitionJob(jobId, vaultName, region)), 1, TimeUnit.SECONDS);
-        scheduler.schedule(() -> RequestScopes.runAs(accountId,
-                () -> completeJob(jobId, vaultName, region, notificationKey)), jobCompletionDelaySeconds, TimeUnit.SECONDS);
+        scheduleJob(jobId, job, accountId, region);
 
         return job;
     }
@@ -684,17 +753,20 @@ public class BackupService {
     }
 
     public void stopBackupJob(String jobId) {
-        BackupJob job = describeBackupJob(jobId);
-        String state = job.getState();
-        if ("COMPLETED".equals(state) || "ABORTED".equals(state) || "FAILED".equals(state)) {
-            throw new AwsException("InvalidRequestException",
-                    "Job cannot be stopped in state: " + state, 400);
+        synchronized (lockFor(jobLockKey(jobId))) {
+            BackupJob job = describeBackupJob(jobId);
+            String state = job.getState();
+            if (List.of("COMPLETED", "ABORTED", "FAILED", "EXPIRED", "PARTIAL").contains(state)) {
+                throw new AwsException("InvalidRequestException",
+                        "Job cannot be stopped in state: " + state, 400);
+            }
+            job.setState("ABORTING");
+            job.setStatusMessage("Job stop requested");
+            jobStore.put(jobId, job);
+            String accountId = regionResolver.getAccountId();
+            String region = AwsArnUtils.regionOrDefault(job.getBackupVaultArn(), regionResolver.getDefaultRegion());
+            scheduler.schedule(() -> RequestScopes.runAs(accountId, region, () -> abortJob(jobId)), 1, TimeUnit.SECONDS);
         }
-        job.setState("ABORTING");
-        job.setStatusMessage("Job stop requested");
-        jobStore.put(jobId, job);
-        String accountId = regionResolver.getAccountId();
-        scheduler.schedule(() -> RequestScopes.runAs(accountId, () -> abortJob(jobId)), 1, TimeUnit.SECONDS);
     }
 
     public List<BackupJob> listBackupJobs(String byVaultName, String byState,
@@ -743,20 +815,22 @@ public class BackupService {
      * passes would be describing AWS behaviour that needs a specific permission to reproduce.
      */
     public void deleteRecoveryPoint(String vaultName, String recoveryPointArn, String region) {
-        BackupVault vault = describeBackupVault(vaultName, region);
-        RecoveryPoint rp = describeRecoveryPoint(vaultName, recoveryPointArn, region);
-        if (vault.isLocked() && vault.getMinRetentionDays() != null) {
-            long ageDays = ChronoUnit.DAYS.between(
-                    Instant.ofEpochSecond(rp.getCreationDate()), Instant.now());
-            if (ageDays < vault.getMinRetentionDays()) {
-                throw new AwsException("InvalidRequestException",
-                        "Recovery point is protected by a vault lock until its minimum retention of "
-                                + vault.getMinRetentionDays() + " day(s) has elapsed: " + recoveryPointArn,
-                        400);
+        synchronized (lockFor(vaultKey(region, vaultName))) {
+            BackupVault vault = describeBackupVault(vaultName, region);
+            RecoveryPoint rp = describeRecoveryPoint(vaultName, recoveryPointArn, region);
+            if (vault.isLocked() && vault.getMinRetentionDays() != null) {
+                long ageDays = ChronoUnit.DAYS.between(
+                        Instant.ofEpochSecond(rp.getCreationDate()), Instant.now());
+                if (ageDays < vault.getMinRetentionDays()) {
+                    throw new AwsException("InvalidRequestException",
+                            "Recovery point is protected by a vault lock until its minimum retention of "
+                                    + vault.getMinRetentionDays() + " day(s) has elapsed: " + recoveryPointArn,
+                            400);
+                }
             }
+            recoveryStore.delete(recoveryPointArn);
+            decrementVaultCount(vaultName, region);
         }
-        recoveryStore.delete(recoveryPointArn);
-        decrementVaultCount(vaultName, region);
     }
 
     // ── Tags ───────────────────────────────────────────────────────────────────
@@ -782,24 +856,28 @@ public class BackupService {
     // ── Private helpers ────────────────────────────────────────────────────────
 
     private void transitionJob(String jobId, String vaultName, String region) {
-        jobStore.get(jobId).ifPresent(job -> {
-            if ("CREATED".equals(job.getState())) {
-                job.setState("RUNNING");
-                job.setPercentDone("50.0");
-                jobStore.put(jobId, job);
-            }
-        });
-    }
-
-    private void completeJob(String jobId, String vaultName, String region, String notificationKey) {
-        // Under the vault-name monitor, so the vault cannot be deleted or recreated between the
-        // incarnation check and the recovery point landing in it.
-        synchronized (lockFor(vaultKey(region, vaultName))) {
-            completeJobLocked(jobId, vaultName, region, notificationKey);
+        synchronized (lockFor(jobLockKey(jobId))) {
+            jobStore.get(jobId).ifPresent(job -> {
+                if ("CREATED".equals(job.getState())) {
+                    job.setState("RUNNING");
+                    job.setPercentDone("50.0");
+                    jobStore.put(jobId, job);
+                }
+            });
         }
     }
 
-    private void completeJobLocked(String jobId, String vaultName, String region, String notificationKey) {
+    private void completeJob(String jobId, String vaultName, String region) {
+        // Under the vault-name monitor, so the vault cannot be deleted or recreated between the
+        // incarnation check and the recovery point landing in it.
+        synchronized (lockFor(jobLockKey(jobId))) {
+            synchronized (lockFor(vaultKey(region, vaultName))) {
+                completeJobLocked(jobId, vaultName, region);
+            }
+        }
+    }
+
+    private void completeJobLocked(String jobId, String vaultName, String region) {
         jobStore.get(jobId).ifPresent(job -> {
             if ("RUNNING".equals(job.getState())) {
                 long now = Instant.now().getEpochSecond();
@@ -807,9 +885,10 @@ public class BackupService {
                 // vault holds the name now. A vault deleted mid-job (allowed: it held no recovery
                 // point yet) and recreated unlocked would otherwise receive a recovery point its
                 // creator's lock was meant to protect, deletable inside that lock's retention.
-                boolean sameVault = vaultStore.get(vaultKey(region, vaultName))
-                        .map(v -> subResourceKey(region, v).equals(notificationKey))
-                        .orElse(false);
+                Optional<BackupVault> vault = vaultStore.get(vaultKey(region, vaultName));
+                boolean sameVault = vault.filter(v -> v.getBackupVaultArn().equals(job.getBackupVaultArn())
+                        && (job.getVaultId() != null ? job.getVaultId().equals(v.getVaultId())
+                        : v.getCreationDate() <= job.getCreationDate())).isPresent();
                 if (!sameVault) {
                     job.setState("FAILED");
                     job.setStatusMessage("Backup vault was deleted before the job completed: " + vaultName);
@@ -817,9 +896,31 @@ public class BackupService {
                     jobStore.put(jobId, job);
                     return;
                 }
-                String rpArn = regionResolver.buildArn("backup", region,
-                        "recovery-point:" + UUID.randomUUID());
-
+                BackupVault currentVault = vault.orElseThrow();
+                String notificationKey = subResourceKey(region, currentVault);
+                String rpArn = job.getRecoveryPointArn() != null ? job.getRecoveryPointArn()
+                        : regionResolver.buildArn("backup", region, "recovery-point:" + jobId);
+                if (recoveryStore.get(rpArn).isEmpty()) {
+                    RecoveryPoint rp = new RecoveryPoint();
+                    rp.setRecoveryPointArn(rpArn);
+                    rp.setBackupVaultName(vaultName);
+                    rp.setBackupVaultArn(job.getBackupVaultArn());
+                    rp.setResourceArn(job.getResourceArn());
+                    rp.setResourceType(job.getResourceType());
+                    rp.setIamRoleArn(job.getIamRoleArn());
+                    rp.setStatus("COMPLETED");
+                    rp.setCreationDate(job.getCreationDate());
+                    rp.setCompletionDate(now);
+                    rp.setBackupSizeInBytes(0L);
+                    rp.setStorageClass("WARM");
+                    rp.setEncrypted(false);
+                    recoveryStore.put(rpArn, rp);
+                    currentVault.setNumberOfRecoveryPoints(currentVault.getNumberOfRecoveryPoints() + 1);
+                } else {
+                    currentVault.setNumberOfRecoveryPoints((int) recoveryStore.scan(k -> true).stream()
+                            .filter(point -> currentVault.getBackupVaultArn().equals(point.getBackupVaultArn())).count());
+                }
+                vaultStore.put(vaultKey(region, vaultName), currentVault);
                 job.setState("COMPLETED");
                 job.setPercentDone("100.0");
                 job.setCompletionDate(now);
@@ -827,23 +928,6 @@ public class BackupService {
                 job.setBackupSizeInBytes(0L);
                 job.setBytesTransferred(0L);
                 jobStore.put(jobId, job);
-
-                RecoveryPoint rp = new RecoveryPoint();
-                rp.setRecoveryPointArn(rpArn);
-                rp.setBackupVaultName(vaultName);
-                rp.setBackupVaultArn(job.getBackupVaultArn());
-                rp.setResourceArn(job.getResourceArn());
-                rp.setResourceType(job.getResourceType());
-                rp.setIamRoleArn(job.getIamRoleArn());
-                rp.setStatus("COMPLETED");
-                rp.setCreationDate(job.getCreationDate());
-                rp.setCompletionDate(now);
-                rp.setBackupSizeInBytes(0L);
-                rp.setStorageClass("WARM");
-                rp.setEncrypted(false);
-                recoveryStore.put(rpArn, rp);
-
-                incrementVaultCount(vaultName, region);
                 LOG.infov("Backup job {0} completed, recovery point: {1}", jobId, rpArn);
                 notifyJobCompleted(job, vaultName, region, notificationKey);
             }
@@ -885,20 +969,15 @@ public class BackupService {
     }
 
     private void abortJob(String jobId) {
-        jobStore.get(jobId).ifPresent(job -> {
-            if ("ABORTING".equals(job.getState())) {
-                job.setState("ABORTED");
-                job.setCompletionDate(Instant.now().getEpochSecond());
-                jobStore.put(jobId, job);
-            }
-        });
-    }
-
-    private void incrementVaultCount(String vaultName, String region) {
-        vaultStore.get(vaultKey(region, vaultName)).ifPresent(vault -> {
-            vault.setNumberOfRecoveryPoints(vault.getNumberOfRecoveryPoints() + 1);
-            vaultStore.put(vaultKey(region, vaultName), vault);
-        });
+        synchronized (lockFor(jobLockKey(jobId))) {
+            jobStore.get(jobId).ifPresent(job -> {
+                if ("ABORTING".equals(job.getState())) {
+                    job.setState("ABORTED");
+                    job.setCompletionDate(Instant.now().getEpochSecond());
+                    jobStore.put(jobId, job);
+                }
+            });
+        }
     }
 
     private void decrementVaultCount(String vaultName, String region) {

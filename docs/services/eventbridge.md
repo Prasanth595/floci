@@ -16,7 +16,7 @@
 | `PutRule` | Create or update a rule with a schedule or event pattern |
 | `DeleteRule` | Delete a rule |
 | `DescribeRule` | Get rule details |
-| `ListRules` | List rules |
+| `ListRules` | List rules, paged by `Limit` (1 to 100, default 100) and `NextToken` |
 | `EnableRule` | Enable a disabled rule |
 | `DisableRule` | Disable a rule |
 | `PutTargets` | Add targets to a rule |
@@ -94,6 +94,17 @@ aws events put-events \
   }]' \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+## Target Settings
+
+`PutTargets` defaults omitted ECS `TaskCount` to `1`, and `EnableECSManagedTags` and
+`EnableExecuteCommand` to `false`. Explicit values are preserved. A task count below
+one or a malformed target `RoleArn` or `DeadLetterConfig.Arn` returns a
+`ValidationException` before any targets in the request are stored.
+Role ARNs must identify an IAM role with a non-empty name; dead-letter ARNs must
+identify an SQS queue with a region. Both require a published AWS partition and a
+12-digit account ID. Queue names are limited to 80 characters, including a FIFO
+suffix when present. These checks do not verify resource existence or permissions.
 
 ## Default Event Bus
 

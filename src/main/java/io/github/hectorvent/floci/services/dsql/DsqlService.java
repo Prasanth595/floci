@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
-import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -16,7 +16,9 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -26,11 +28,9 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -72,6 +72,7 @@ public class DsqlService implements Resettable {
     private final DsqlPrincipals principals;
     private final IamPolicyEvaluator policyEvaluator;
     private final ObjectMapper objectMapper;
+    private final boolean enabled;
     private final Map<String, Object> locks = new ConcurrentHashMap<>();
 
     @Inject
@@ -79,12 +80,13 @@ public class DsqlService implements Resettable {
                        DsqlDataPlane dataPlane, DsqlPrincipals principals, IamPolicyEvaluator policyEvaluator,
                        ObjectMapper objectMapper) {
         this(storageFactory.create("dsql", "dsql-clusters.json", new TypeReference<>() {}), regionResolver,
-                config.services().dsql().endpointSuffix(), dataPlane, principals, policyEvaluator, objectMapper);
+                config.services().dsql().endpointSuffix(), dataPlane, principals, policyEvaluator, objectMapper,
+                config.services().dsql().enabled());
     }
 
     DsqlService(AccountAwareStorageBackend<DsqlCluster> clusters, RegionResolver regionResolver,
                 String endpointSuffix, DsqlDataPlane dataPlane, DsqlPrincipals principals,
-                IamPolicyEvaluator policyEvaluator, ObjectMapper objectMapper) {
+                IamPolicyEvaluator policyEvaluator, ObjectMapper objectMapper, boolean enabled) {
         this.clusters = clusters;
         this.regionResolver = regionResolver;
         this.endpointSuffix = endpointSuffix;
@@ -92,6 +94,7 @@ public class DsqlService implements Resettable {
         this.principals = principals;
         this.policyEvaluator = policyEvaluator;
         this.objectMapper = objectMapper;
+        this.enabled = enabled;
     }
 
     // ── Clusters ──────────────────────────────────────────────────────────────
@@ -233,22 +236,6 @@ public class DsqlService implements Resettable {
         return cluster;
     }
 
-    /** The cluster whose endpoint is {@code host}, in any account: what the data plane serves. */
-    public Optional<DsqlCluster> clusterForEndpoint(String host) {
-        if (host == null) {
-            return Optional.empty();
-        }
-        String wanted = host.toLowerCase(Locale.ROOT);
-        return clusters.scanAllAccounts().stream()
-                .filter(cluster -> wanted.equals(cluster.getEndpoint()))
-                .findFirst();
-    }
-
-    /** Every cluster in every account, for the data plane to bring back after a restart. */
-    public List<DsqlCluster> allClusters() {
-        return clusters.scanAllAccounts();
-    }
-
     // ── VPC endpoint service ──────────────────────────────────────────────────
 
     public String vpcEndpointServiceName(String region, String identifier) {
@@ -344,13 +331,9 @@ public class DsqlService implements Resettable {
 
     private boolean deniesCaller(String policy, String clusterArn, String region, String action) {
         CallerArns caller = principals.caller();
-        Map<String, List<String>> context = new HashMap<>();
-        caller.putPrincipalKeys(context);
-        String accountId = regionResolver.getAccountId();
-        Map<String, List<String>> effective = IamConditionContextResolver.withGlobalContext(
-                context, clusterArn, region, accountId, accountId);
-        return policyEvaluator.evaluateResourcePolicyFor(List.of(policy), RequestPrincipal.caller(caller),
-                action, clusterArn, effective) == ResourcePolicyDecision.EXPLICIT_DENY;
+        return policyEvaluator.evaluateResourcePolicyFor(List.of(policy), RequestPrincipal.caller(caller), action,
+                clusterArn, principals.policyContext(caller, clusterArn, region, Map.of()))
+                == ResourcePolicyDecision.EXPLICIT_DENY;
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
@@ -378,6 +361,31 @@ public class DsqlService implements Resettable {
         }
     }
 
+    /**
+     * Brings every cluster's database back when Floci starts with clusters in its storage, and
+     * finishes a deletion that a stop interrupted.
+     */
+    void onStart(@Observes StartupEvent ignored) {
+        if (!enabled) {
+            return;
+        }
+        for (DsqlCluster cluster : clusters.scanAllAccounts()) {
+            String accountId = cluster.getAccountId();
+            String region = cluster.getRegion();
+            String identifier = cluster.getIdentifier();
+            if (DELETING.equals(cluster.getStatus())) {
+                dataPlane.deprovision(cluster, () -> {
+                    clusters.deleteForAccount(accountId, key(region, identifier));
+                    locks.remove(cluster.getArn());
+                });
+            } else if (!FAILED.equals(cluster.getStatus())) {
+                cluster.setDatabaseReady(false);
+                clusters.putForAccount(accountId, key(region, identifier), cluster);
+                dataPlane.provision(cluster, ready -> markReady(accountId, region, identifier, ready));
+            }
+        }
+    }
+
     @Override
     public void clear() {
         for (DsqlCluster cluster : clusters.scanAllAccounts()) {
@@ -389,10 +397,22 @@ public class DsqlService implements Resettable {
 
     // ── Internals ─────────────────────────────────────────────────────────────
 
+    /**
+     * Records whether the cluster's database came up. A cluster being created becomes ACTIVE or
+     * FAILED; one still waiting for its peers stays PENDING_SETUP until peering, unless its database
+     * failed.
+     */
     private void markReady(String accountId, String region, String identifier, boolean ready) {
-        clusters.getForAccount(accountId, key(region, identifier)).ifPresent(cluster -> {
-            if (CREATING.equals(cluster.getStatus())) {
-                cluster.setStatus(ready ? ACTIVE : FAILED);
+        clusters.getForAccount(accountId, key(region, identifier)).ifPresent(found -> {
+            synchronized (lockFor(found.getArn())) {
+                DsqlCluster cluster = clusters.getForAccount(accountId, key(region, identifier)).orElse(null);
+                if (cluster == null) {
+                    return;
+                }
+                cluster.setDatabaseReady(ready);
+                if (CREATING.equals(cluster.getStatus()) || (!ready && PENDING_SETUP.equals(cluster.getStatus()))) {
+                    cluster.setStatus(ready ? ACTIVE : FAILED);
+                }
                 clusters.putForAccount(accountId, key(region, identifier), cluster);
             }
         });
@@ -416,8 +436,9 @@ public class DsqlService implements Resettable {
 
     /**
      * Brings out of {@code PENDING_SETUP} every cluster of {@code cluster}'s group once each names
-     * every other, as DSQL does when the last peer is updated (measured: both ACTIVE after about
-     * 100 s; here at once).
+     * every other, as DSQL does when the last peer is updated (measured: CREATING, then both ACTIVE
+     * after about 100 s; here ACTIVE at once if the cluster's database answers, else CREATING until
+     * it does).
      */
     private void completePeering(DsqlCluster cluster) {
         if (cluster.getLinkedClusterArns() == null) {
@@ -439,14 +460,15 @@ public class DsqlService implements Resettable {
         for (DsqlCluster member : group) {
             synchronized (lockFor(member.getArn())) {
                 if (PENDING_SETUP.equals(member.getStatus())) {
-                    member.setStatus(ACTIVE);
+                    member.setStatus(member.isDatabaseReady() ? ACTIVE : CREATING);
                     clusters.put(key(member.getRegion(), member.getIdentifier()), member);
                 }
             }
         }
     }
 
-    private Optional<DsqlCluster> clusterOfArn(String arn) {
+    /** The cluster {@code arn} names in the caller's account, if there is one. */
+    public Optional<DsqlCluster> clusterOfArn(String arn) {
         AwsArnUtils.Arn parsed = clusterArnOrNull(arn);
         if (parsed == null || !regionResolver.getAccountId().equals(parsed.accountId())) {
             return Optional.empty();
@@ -465,15 +487,14 @@ public class DsqlService implements Resettable {
         if (parsed == null) {
             throw new AwsException("AccessDeniedException", "Invalid input for 'resourceArn'. The cluster ARN that you"
                     + " specified isn't valid. Provide the cluster ARN in the format"
-                    + " 'arn:partition:dsql:region:account-id:cluster/cluster-id' and try again.User: " + caller
-                    + " is not authorized to perform: dsql:" + action + " on resource: * with an explicit deny in a"
-                    + " resource-based policy", 403);
+                    + " 'arn:partition:dsql:region:account-id:cluster/cluster-id' and try again."
+                    + DsqlPrincipals.notAuthorized(caller, "dsql:" + action, "*",
+                            DsqlPrincipals.EXPLICIT_RESOURCE_DENY), 403);
         }
         if (!regionResolver.getAccountId().equals(parsed.accountId())) {
             // Measured: another account's cluster is refused, not looked up in the caller's.
-            throw new AwsException("AccessDeniedException", "User: " + caller + " is not authorized to perform: dsql:"
-                    + action + " on resource: " + arn + " because no resource-based policy allows the dsql:" + action
-                    + " action", 403);
+            throw new AwsException("AccessDeniedException", DsqlPrincipals.notAuthorized(caller, "dsql:" + action, arn,
+                    "because no resource-based policy allows the dsql:" + action + " action"), 403);
         }
         if (!region.equals(parsed.region())) {
             throw new AwsException("BadRequestException", "Invalid input resource arn: expected region " + region, 400);
@@ -604,7 +625,7 @@ public class DsqlService implements Resettable {
 
     private static String[] tokenPosition(String nextToken) {
         try {
-            String[] position = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8)
+            String[] position = Base64Url.decode(nextToken)
                     .split(" ", 2);
             if (position.length == 2) {
                 Instant.parse(position[0]);

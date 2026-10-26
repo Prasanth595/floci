@@ -83,6 +83,18 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     @Override
+    public void putAllAtomically(Map<String, V> entries) {
+        putAllAtomicallyForAccount(prefix(), entries);
+    }
+
+    public void putAllAtomicallyForAccount(String accountId, Map<String, V> entries) {
+        Map<String, V> prefixedEntries = new LinkedHashMap<>();
+        entries.forEach((key, value) -> prefixedEntries.put(accountId + "/" + key, value));
+        delegate.putAllAtomically(prefixedEntries);
+        trackOwner(accountId);
+    }
+
+    @Override
     public Optional<V> get(String key) {
         String prefixedKey = prefixed(key);
         Optional<V> result = delegate.get(prefixedKey);
@@ -426,6 +438,54 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         delegate.delete(accountId + "/" + key);
     }
 
+    @Override
+    public void deleteAllAtomically(Set<String> keys) {
+        deleteAllAtomicallyForAccounts(Map.of(prefix(), keys));
+    }
+
+    public void deleteAllAtomicallyForAccounts(Map<String, Set<String>> keysByAccount) {
+        Set<String> rawKeys = new LinkedHashSet<>();
+        keysByAccount.forEach((account, keys) -> keys.forEach(key -> rawKeys.add(account + "/" + key)));
+        delegate.deleteAllAtomically(rawKeys);
+    }
+
+    // --- Entry writes, for map-valued stores whose backend persists one entry at a time ---
+
+    /** Whether the backend persists one map entry at a time; the entry methods require it. */
+    public boolean writesEntries() {
+        return delegate instanceof MapEntryWriter<?>;
+    }
+
+    public <E> void putEntry(String key, String entryKey, E entryValue) {
+        putEntryForAccount(prefix(), key, entryKey, entryValue);
+    }
+
+    public void removeEntry(String key, String entryKey) {
+        removeEntryForAccount(prefix(), key, entryKey);
+    }
+
+    public <E> void putEntryForAccount(String accountId, String key, String entryKey, E entryValue) {
+        this.<E>entryWriter().putEntry(accountId + "/" + key, entryKey, entryValue);
+        trackOwner(accountId);
+    }
+
+    public void removeEntryForAccount(String accountId, String key, String entryKey) {
+        entryWriter().removeEntry(accountId + "/" + key, entryKey);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <E> MapEntryWriter<E> entryWriter() {
+        if (delegate instanceof MapEntryWriter<?> writer) {
+            return (MapEntryWriter<E>) writer;
+        }
+        throw new UnsupportedOperationException("This store does not persist single map entries");
+    }
+
+    /** Deletes the entry stored under {@code rawKey} exactly, as {@link #scanAllAccountsWithRawKeys} reports it. */
+    public void deleteRaw(String rawKey) {
+        delegate.delete(rawKey);
+    }
+
     public List<V> scanForAccount(String accountId, Predicate<String> keyFilter) {
         String prefix = accountId + "/";
         return delegate.scan(k -> k.startsWith(prefix) && keyFilter.test(k.substring(prefix.length())));
@@ -544,7 +604,8 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return prefix() + "/" + key;
     }
 
-    private static boolean hasAccountPrefix(String key) {
+    /** Whether {@code key} starts with a 12-digit account id and a slash, as account-scoped keys do. */
+    public static boolean hasAccountPrefix(String key) {
         if (key.length() < 13 || key.charAt(12) != '/') {
             return false;
         }

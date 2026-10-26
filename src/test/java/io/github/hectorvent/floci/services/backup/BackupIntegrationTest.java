@@ -1,8 +1,12 @@
 package io.github.hectorvent.floci.services.backup;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.backup.model.BackupJob;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -30,6 +34,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class BackupIntegrationTest {
+
+    @Inject BackupService backupService;
+    @Inject ObjectMapper mapper;
 
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/backup/aws4_request";
     private static final String VAULT_NAME = "test-vault";
@@ -1941,4 +1948,45 @@ class BackupIntegrationTest {
             .body("NumberOfRecoveryPoints", equalTo(0));
     }
 
+    @Test
+    @Order(201)
+    void describeAndListJobsHideCapturedIdentityWithoutRemovingStoredOrPublicFields() {
+        String vault = "job-api-identity-vault";
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+                .when().put("/backup-vaults/" + vault).then().statusCode(200);
+        String jid = given().header("Authorization", AUTH).contentType("application/json")
+                .body("""
+                    {"BackupVaultName":"%s","ResourceArn":"%s","IamRoleArn":"%s"}
+                    """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+                .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+        BackupJob stored = backupService.describeBackupJob(jid);
+        String capturedId = backupService.describeBackupVault(vault, "us-east-1").getVaultId();
+        assertEquals(capturedId, stored.getVaultId());
+        JsonNode before = mapper.valueToTree(stored);
+        assertEquals(capturedId, before.path("FlociVaultId").asText());
+        given().header("Authorization", AUTH)
+                .when().get("/backup-jobs/" + jid).then().statusCode(200)
+                .body("$", not(hasKey("FlociVaultId")))
+                .body("BackupJobId", equalTo(jid))
+                .body("BackupVaultName", equalTo(vault))
+                .body("BackupVaultArn", equalTo(stored.getBackupVaultArn()))
+                .body("ResourceArn", equalTo(RESOURCE_ARN))
+                .body("CreationDate", notNullValue())
+                .body("State", notNullValue());
+        given().header("Authorization", AUTH).queryParam("byBackupVaultName", vault)
+                .when().get("/backup-jobs/").then().statusCode(200)
+                .body("BackupJobs", hasSize(1))
+                .body("BackupJobs[0]", not(hasKey("FlociVaultId")))
+                .body("BackupJobs[0].BackupJobId", equalTo(jid))
+                .body("BackupJobs[0].BackupVaultName", equalTo(vault))
+                .body("BackupJobs[0].ResourceArn", equalTo(RESOURCE_ARN))
+                .body("BackupJobs[0].CreationDate", notNullValue())
+                .body("BackupJobs[0].State", notNullValue());
+        JsonNode after = mapper.valueToTree(backupService.describeBackupJob(jid));
+        assertEquals(before.path("FlociVaultId"), after.path("FlociVaultId"));
+        awaitJobCompleted(jid);
+        String point = backupService.describeBackupJob(jid).getRecoveryPointArn();
+        backupService.deleteRecoveryPoint(vault, point, "us-east-1");
+        backupService.deleteBackupVault(vault, "us-east-1");
+    }
 }

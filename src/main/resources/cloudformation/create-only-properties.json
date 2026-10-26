@@ -279,6 +279,7 @@
     "RuleNumber",
     "NetworkAclId"
   ],
+  "AWS::EC2::PrefixList": [],
   "AWS::EC2::Route": [
     "RouteTableId",
     "DestinationCidrBlock",
@@ -769,6 +770,9 @@
   "AWS::WAFv2::IPSet": [
     "Name",
     "Scope"
+  ],
+  "AWS::WAFv2::LoggingConfiguration": [
+    "ResourceArn"
   ],
   "AWS::WAFv2::WebACL": [
     "Name",
