@@ -521,7 +521,7 @@ S/MIME certificate associations are stored per region and never used: Floci does
 | `IsRoleAddress` | `HIGH` when the local part, without a `+label`, is a common role name such as `admin`, `info`, `noreply`, `postmaster` or `support`; otherwise `LOW` |
 | `IsDisposable`, `IsRandomInput` | Always `LOW` |
 
-Deviations from AWS: every domain that is not reserved is taken to have valid DNS records, Floci keeps no disposable-domain list and detects no random input, and an address with a non-ASCII character in its local part or domain (an internationalized domain name included) is rated `LOW` everywhere, as a send would reject it; AWS's verdicts for such an address were not probed.
+Deviations from AWS: every domain that is not reserved is taken to have valid DNS records, Floci keeps no disposable-domain list and detects no random input, and an address with a non-ASCII character in its domain (an internationalized domain name included) or in an unquoted local part is rated `LOW` everywhere, as a send would reject it, while a quoted local part, which a send does not inspect, is rated like any other; AWS's verdicts for such addresses were not probed.
 
 ### Request member types
 

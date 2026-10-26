@@ -103,6 +103,18 @@ class SesMailboxValidationTest {
     }
 
     @Test
+    void nonAsciiOutsideQuotesIsLowEverywhere() {
+        assertEquals(ALL_LOW, SesMailboxValidation.evaluate("é@gmail.com"));
+        assertEquals(ALL_LOW, SesMailboxValidation.evaluate("user@bücher.de"));
+    }
+
+    @Test
+    void nonAsciiInAQuotedLocalPartIsRatedAsASendAcceptsIt() {
+        // a send does not inspect a quoted local part, so the verdicts follow the send check
+        assertEquals(result(HIGH, HIGH, HIGH, MEDIUM, LOW), SesMailboxValidation.evaluate("\"é\"@gmail.com"));
+    }
+
+    @Test
     void blankAddressIsLowEverywhere() {
         assertEquals(ALL_LOW, SesMailboxValidation.evaluate("   "));
     }
