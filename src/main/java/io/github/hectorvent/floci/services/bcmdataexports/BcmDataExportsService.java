@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -118,7 +117,8 @@ public class BcmDataExportsService {
 
     /** Returns one account-scoped page for {@code ListExports}. */
     public PaginatedResult<Export> listExports(Integer maxResults, String nextToken) {
-        return paginate(exportStore.scan(key -> true), Export::getExportArn, maxResults, nextToken,
+        return Pagination.paginate(exportStore.scan(key -> true), Export::getExportArn, maxResults, nextToken,
+                MAX_PAGE_SIZE, MAX_PAGE_SIZE, 8192, "ValidationException",
                 "ListExports:" + regionResolver.getAccountId());
     }
 
@@ -199,21 +199,9 @@ public class BcmDataExportsService {
                     "Export " + exportArn + " not found.", 400);
         }
         String prefix = exportArn + "::";
-        return paginate(executionStore.scan(key -> key.startsWith(prefix)), ExportExecution::getExecutionId,
-                maxResults, nextToken, "ListExecutions:" + regionResolver.getAccountId() + ":" + exportArn);
-    }
-
-    private static <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf,
-                                                 Integer maxResults, String nextToken, String namespace) {
-        int limit = maxResults != null ? maxResults : MAX_PAGE_SIZE;
-        if (limit < 1 || limit > MAX_PAGE_SIZE) {
-            throw new AwsException("ValidationException", "MaxResults must be between 1 and 300.", 400);
-        }
-        if (nextToken != null && nextToken.length() > 8192) {
-            throw new AwsException("ValidationException", "NextToken must not exceed 8192 characters.", 400);
-        }
-        return Pagination.paginate(items, cursorOf, limit, nextToken, namespace,
-                token -> new AwsException("ValidationException", "Invalid NextToken.", 400));
+        return Pagination.paginate(executionStore.scan(key -> key.startsWith(prefix)), ExportExecution::getExecutionId,
+                maxResults, nextToken, MAX_PAGE_SIZE, MAX_PAGE_SIZE, 8192, "ValidationException",
+                "ListExecutions:" + regionResolver.getAccountId() + ":" + exportArn);
     }
 
     /** {@code GetExecution} — returns one execution record. */

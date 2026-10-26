@@ -763,17 +763,9 @@ public class CloudMapService {
     private <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf,
                                            Integer maxResults, String nextToken,
                                            String action, String region, Object query) {
-        int limit = maxResults == null ? 100 : maxResults;
-        if (limit < 1 || limit > 100) {
-            throw new AwsException("InvalidInput", "MaxResults must be between 1 and 100.", 400);
-        }
-        if (nextToken != null && nextToken.length() > 4096) {
-            throw new AwsException("InvalidInput", "NextToken must not exceed 4096 characters.", 400);
-        }
         String namespace = action + ":" + regionResolver.getAccountId() + ":" + region + ":"
                 + Digests.sha256Hex(objectMapper.valueToTree(query).toString());
-        return Pagination.paginate(items, cursorOf, limit, nextToken, namespace,
-                token -> new AwsException("InvalidInput", "Invalid NextToken.", 400));
+        return Pagination.paginate(items, cursorOf, maxResults, nextToken, 100, 100, 4096, "InvalidInput", namespace);
     }
 
     private boolean matchesOperationFilters(Operation op, Map<String, List<String>> filters) {
