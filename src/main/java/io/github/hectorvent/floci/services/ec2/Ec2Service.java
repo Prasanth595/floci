@@ -1427,9 +1427,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public void ensureDefaultResources(String region) {
         String ownerAccountId = callerAccountId();
         String seedScope = ownerAccountId + "::" + region;
-        if (!seededAccountRegions.add(seedScope)) {
+        if (seededAccountRegions.contains(seedScope)) {
             return;
         }
+        // Mark the scope only once it is seeded: a concurrent first call waits here instead of
+        // reading a half-built default network (#6247).
+        synchronized (seededAccountRegions) {
+            if (seededAccountRegions.contains(seedScope)) {
+                return;
+            }
+            seedDefaultResources(region, ownerAccountId);
+            seededAccountRegions.add(seedScope);
+        }
+    }
+
+    private void seedDefaultResources(String region, String ownerAccountId) {
         List<Vpc> existingVpcs = vpcs.scan(k -> k.startsWith(region + "::"));
         // Already provisioned in a previous run and reloaded from persistent storage: the default
         // VPC (and everything else) is present, so don't re-seed and create duplicates (#1297).
