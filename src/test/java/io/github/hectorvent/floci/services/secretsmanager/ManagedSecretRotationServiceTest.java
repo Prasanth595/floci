@@ -75,13 +75,7 @@ class ManagedSecretRotationServiceTest {
                 if (reservations.incrementAndGet() != 1) {
                     throw new AwsException("InvalidRequestException", "Owner already reserved", 400);
                 }
-                reserving.countDown();
-                try {
-                    assertTrue(finishReservation.await(5, TimeUnit.SECONDS));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException(e);
-                }
+                blockReserve(reserving, finishReservation);
             }
 
             public void rotate(String arn, String region, Rotation rotation) {
@@ -136,13 +130,7 @@ class ManagedSecretRotationServiceTest {
             }
 
             public void reserve(String arn, String region) {
-                reserving.countDown();
-                try {
-                    assertTrue(finishReservation.await(5, TimeUnit.SECONDS));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException(e);
-                }
+                blockReserve(reserving, finishReservation);
                 throw new AwsException("ResourceNotFoundException", "Owner deleted", 400);
             }
 
@@ -193,13 +181,7 @@ class ManagedSecretRotationServiceTest {
                 if (reservations.incrementAndGet() > 1) {
                     throw new AwsException("InvalidRequestException", "Owner unavailable", 400);
                 }
-                reserving.countDown();
-                try {
-                    assertTrue(finishReservation.await(5, TimeUnit.SECONDS));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException(e);
-                }
+                blockReserve(reserving, finishReservation);
             }
 
             public void rotate(String arn, String region, Rotation rotation) {
@@ -415,6 +397,16 @@ class ManagedSecretRotationServiceTest {
                 releaseAction.run();
             }
         };
+    }
+
+    private static void blockReserve(CountDownLatch reserving, CountDownLatch finishReservation) {
+        reserving.countDown();
+        try {
+            assertTrue(finishReservation.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
     }
 
     private static void await(BooleanSupplier condition) throws Exception {
