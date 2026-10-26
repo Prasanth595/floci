@@ -110,7 +110,8 @@ class RedshiftServerlessCfnProvisionerTest {
     @Test
     void createNamespaceSendsPropertiesAndRecordsEveryDottedAttribute() {
         when(service.createNamespace(eq("my-ns"), eq("admin"), eq("Secret123"), eq("analytics"), isNull(),
-                isNull(), anyList(), anyList(), anyMap(), eq(REGION))).thenReturn(namespace("my-ns"));
+                isNull(), anyList(), anyList(), anyMap(), isNull(), isNull(), eq(REGION)))
+                .thenReturn(namespace("my-ns"));
         ObjectNode props = mapper.createObjectNode();
         props.put("NamespaceName", "my-ns");
         props.put("AdminUsername", "admin");
@@ -137,7 +138,7 @@ class RedshiftServerlessCfnProvisionerTest {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, String>> tags = ArgumentCaptor.forClass(Map.class);
         verify(service).createNamespace(eq("my-ns"), eq("admin"), eq("Secret123"), eq("analytics"), isNull(),
-                isNull(), anyList(), anyList(), tags.capture(), eq(REGION));
+                isNull(), anyList(), anyList(), tags.capture(), isNull(), isNull(), eq(REGION));
         assertEquals(Map.of("env", "dev"), tags.getValue());
     }
 
@@ -152,7 +153,7 @@ class RedshiftServerlessCfnProvisionerTest {
         when(service.reconcileNamespace(eq("existing-ns"), any(), any(), any(), any(), anyList(), anyList(),
                 eq(false), any(), eq(REGION))).thenReturn(namespace("existing-ns"));
         StackResource resource = resource(NAMESPACE_TYPE, "existing-ns");
-        resource.getAttributes().put("Namespace.AdminPasswordSecretArn", ADMIN_SECRET_ARN);
+        resource.getAttributes().put("Namespace.NamespaceArn", NAMESPACE_ARN);
         Map<String, String> previousAttributes = Map.copyOf(resource.getAttributes());
         provisioner.provision(resource, mapper.readTree("""
                 {"NamespaceName":"existing-ns", "AdminUserPassword":"Changed123!", "ManageAdminPassword":false}
@@ -192,7 +193,7 @@ class RedshiftServerlessCfnProvisionerTest {
     }
 
     @Test
-    void createNamespacePassesManagedCredentialPropertiesAndExposesSecretAttributes() {
+    void createNamespacePassesManagedCredentialPropertiesWithoutExposingSecretAttributes() {
         Namespace namespace = namespace("managed-ns");
         namespace.setAdminPasswordSecretArn(ADMIN_SECRET_ARN);
         namespace.setAdminPasswordSecretKmsKeyId(ADMIN_SECRET_KEY);
@@ -208,12 +209,12 @@ class RedshiftServerlessCfnProvisionerTest {
 
         verify(service).createNamespace(eq("managed-ns"), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
                 anyList(), anyMap(), eq(true), eq(ADMIN_SECRET_KEY), eq(REGION));
-        assertEquals(ADMIN_SECRET_ARN, resource.getAttributes().get("Namespace.AdminPasswordSecretArn"));
-        assertEquals(ADMIN_SECRET_KEY, resource.getAttributes().get("Namespace.AdminPasswordSecretKmsKeyId"));
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretArn"));
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretKmsKeyId"));
     }
 
     @Test
-    void updateNamespacePassesManagedCredentialPropertiesAndRefreshesSecretAttributes() {
+    void updateNamespacePassesManagedCredentialPropertiesWithoutExposingSecretAttributes() {
         Namespace namespace = namespace("managed-ns");
         namespace.setAdminPasswordSecretArn(ADMIN_SECRET_ARN);
         namespace.setAdminPasswordSecretKmsKeyId(ADMIN_SECRET_KEY);
@@ -231,20 +232,18 @@ class RedshiftServerlessCfnProvisionerTest {
 
         verify(service).reconcileNamespace(eq("managed-ns"), isNull(), isNull(), isNull(), isNull(), anyList(),
                 anyList(), eq(true), eq(ADMIN_SECRET_KEY), eq(REGION));
-        assertEquals(ADMIN_SECRET_ARN, resource.getAttributes().get("Namespace.AdminPasswordSecretArn"));
-        assertEquals(ADMIN_SECRET_KEY, resource.getAttributes().get("Namespace.AdminPasswordSecretKmsKeyId"));
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretArn"));
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretKmsKeyId"));
     }
 
     @Test
-    void updateNamespaceRemovesSecretAttributesWhenManagementIsDisabled() {
+    void updateNamespaceDisablesManagementWithoutExposingSecretAttributes() {
         Namespace namespace = namespace("managed-ns");
         when(service.getNamespace("managed-ns", REGION)).thenReturn(namespace);
         when(service.reconcileNamespace(eq("managed-ns"), isNull(), isNull(), isNull(), isNull(), anyList(),
                 anyList(), eq(false), isNull(), eq(REGION))).thenReturn(namespace);
         when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of());
         StackResource resource = resource(NAMESPACE_TYPE, "managed-ns");
-        resource.getAttributes().put("Namespace.AdminPasswordSecretArn", ADMIN_SECRET_ARN);
-        resource.getAttributes().put("Namespace.AdminPasswordSecretKmsKeyId", ADMIN_SECRET_KEY);
 
         provisioner.provision(resource, mapper.createObjectNode(), ctx("managed-ns"));
 
@@ -255,7 +254,7 @@ class RedshiftServerlessCfnProvisionerTest {
     @Test
     void anUnnamedNamespaceGetsALowercaseGeneratedNameThatIsStableAcrossUpdates() {
         when(service.createNamespace(any(), any(), any(), any(), any(), any(), anyList(), anyList(), anyMap(),
-                eq(REGION)))
+                isNull(), isNull(), eq(REGION)))
                 .thenAnswer(inv -> namespace(inv.getArgument(0)));
         StackResource created = resource(NAMESPACE_TYPE, null);
 
@@ -294,7 +293,7 @@ class RedshiftServerlessCfnProvisionerTest {
         provisioner.provision(r, props, ctx("my-ns"));
 
         verify(service, never()).createNamespace(any(), any(), any(), any(), any(), any(), anyList(), anyList(),
-                anyMap(), any());
+                anyMap(), any(), any(), any());
         verify(service).untagResource(NAMESPACE_ARN, List.of("old"), REGION);
         verify(service).tagResource(NAMESPACE_ARN, Map.of("keep", "2"), REGION);
         assertEquals("my-ns", r.getPhysicalId());

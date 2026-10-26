@@ -79,7 +79,6 @@ class RedshiftServerlessCfnIntegrationTest {
             "NsId": {"Value": {"Fn::GetAtt": ["Ns", "Namespace.NamespaceId"]}},
             "NsDb": {"Value": {"Fn::GetAtt": ["Ns", "Namespace.DbName"]}},
             "NsStatus": {"Value": {"Fn::GetAtt": ["Ns", "Namespace.Status"]}},
-            "NsSecretArn": {"Value": {"Fn::GetAtt": ["Ns", "Namespace.AdminPasswordSecretArn"]}},
             "WgRef": {"Value": {"Ref": "Wg"}},
             "WgArn": {"Value": {"Fn::GetAtt": ["Wg", "Workgroup.WorkgroupArn"]}},
             "WgId": {"Value": {"Fn::GetAtt": ["Wg", "Workgroup.WorkgroupId"]}},
@@ -122,9 +121,9 @@ class RedshiftServerlessCfnIntegrationTest {
     @Test
     void failedStackUpdateRestoresManagedCredentialsAndOriginalSecret() {
         cloudFormation("CreateStack", "32");
-        String created = describeStacks("CREATE_COMPLETE");
-        String arn = outputValue(created, "NsSecretArn");
+        describeStacks("CREATE_COMPLETE");
         Namespace original = serverless.getNamespace(NAMESPACE, "us-east-1");
+        String arn = original.getAdminPasswordSecretArn();
         Secret originalSecret = secrets.describeSecret(arn, "us-east-1");
         String originalVersion = originalSecret.getCurrentVersionId();
         String originalValue = secrets.getSecretValue(arn, null, null, "us-east-1").getSecretString();
@@ -159,7 +158,8 @@ class RedshiftServerlessCfnIntegrationTest {
         assertEquals(WORKGROUP, outputValue(created, "WgRef"));
         assertEquals("analytics", outputValue(created, "NsDb"));
         assertEquals("AVAILABLE", outputValue(created, "NsStatus"));
-        assertTrue(outputValue(created, "NsSecretArn").startsWith("arn:aws:secretsmanager:"));
+        String secretArn = serverless.getNamespace(NAMESPACE, "us-east-1").getAdminPasswordSecretArn();
+        assertTrue(secretArn.startsWith("arn:aws:secretsmanager:"));
         assertEquals("AVAILABLE", outputValue(created, "WgStatus"));
         assertEquals(NAMESPACE, outputValue(created, "WgNamespace"));
         assertEquals("32", outputValue(created, "WgBase"));
@@ -172,7 +172,7 @@ class RedshiftServerlessCfnIntegrationTest {
                 .statusCode(200)
                 .body("namespace.namespaceArn", equalTo(outputValue(created, "NsArn")))
                 .body("namespace.namespaceId", equalTo(outputValue(created, "NsId")))
-                .body("namespace.adminPasswordSecretArn", equalTo(outputValue(created, "NsSecretArn")))
+                .body("namespace.adminPasswordSecretArn", equalTo(secretArn))
                 .body("namespace.logExports", hasItem("userlog"));
         call("GetWorkgroup", "{\"workgroupName\":\"" + WORKGROUP + "\"}")
                 .statusCode(200)

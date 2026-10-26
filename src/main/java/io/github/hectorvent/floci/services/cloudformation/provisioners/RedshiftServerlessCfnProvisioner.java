@@ -168,15 +168,9 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
                     adminPasswordSecretKmsKeyId, ctx.region());
             reconcileTags(namespace.getNamespaceArn(), tags, ctx);
         } else {
-            if (manageAdminPassword == null && adminPasswordSecretKmsKeyId == null) {
-                namespace = service.createNamespace(name, adminUsername, adminUserPassword,
-                        ctx.resolveOptional(props, "DbName"), kmsKeyId, defaultIamRoleArn, iamRoles, logExports,
-                        tags, ctx.region());
-            } else {
-                namespace = service.createNamespace(name, adminUsername, adminUserPassword,
-                        ctx.resolveOptional(props, "DbName"), kmsKeyId, defaultIamRoleArn, iamRoles, logExports,
-                        tags, manageAdminPassword, adminPasswordSecretKmsKeyId, ctx.region());
-            }
+            namespace = service.createNamespace(name, adminUsername, adminUserPassword,
+                    ctx.resolveOptional(props, "DbName"), kmsKeyId, defaultIamRoleArn, iamRoles, logExports,
+                    tags, manageAdminPassword, adminPasswordSecretKmsKeyId, ctx.region());
         }
 
         r.setPhysicalId(name);
@@ -191,16 +185,6 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
         r.getAttributes().put("Namespace.LogExports", String.join(",", namespace.getLogExports()));
         if (namespace.getAdminUsername() != null) {
             r.getAttributes().put("Namespace.AdminUsername", namespace.getAdminUsername());
-        }
-        if (namespace.getAdminPasswordSecretArn() != null) {
-            r.getAttributes().put("Namespace.AdminPasswordSecretArn", namespace.getAdminPasswordSecretArn());
-        } else {
-            r.getAttributes().remove("Namespace.AdminPasswordSecretArn");
-        }
-        if (namespace.getAdminPasswordSecretKmsKeyId() != null) {
-            r.getAttributes().put("Namespace.AdminPasswordSecretKmsKeyId", namespace.getAdminPasswordSecretKmsKeyId());
-        } else {
-            r.getAttributes().remove("Namespace.AdminPasswordSecretKmsKeyId");
         }
         if (namespace.getDefaultIamRoleArn() != null) {
             r.getAttributes().put("Namespace.DefaultIamRoleArn", namespace.getDefaultIamRoleArn());
