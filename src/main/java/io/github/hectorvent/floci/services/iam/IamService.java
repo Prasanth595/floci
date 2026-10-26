@@ -6015,13 +6015,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public Optional<HeldPolicies> heldPolicies(String accessKeyId) {
         Optional<AccessKey> key = accessKeys.get(accessKeyId);
         if (key.isPresent()) {
-            return users.get(key.get().getUserName())
-                    .map(user -> new HeldPolicies(userPolicies(user), user.getPermissionsBoundaryArn()));
+            return users.get(key.get().getUserName()).map(this::heldPolicies);
         }
-        return findSessionForCallerContext(accessKeyId)
-                .filter(session -> session.getDelegatedApproverArn() == null && !isFederatedUserSession(session))
-                .flatMap(session -> roleFromArnOrName(session.getRoleArn()))
+        Optional<SessionCredential> session = findSessionForCallerContext(accessKeyId)
+                .filter(found -> found.getDelegatedApproverArn() == null && !isFederatedUserSession(found));
+        if (session.isPresent() && session.get().getRoleArn() == null) {
+            // GetSessionToken credentials act with the policies of the user that minted them.
+            return session.filter(found -> found.getPresignedAction() == null)
+                    .flatMap(this::issuingUser)
+                    .map(this::heldPolicies);
+        }
+        return session.flatMap(found -> roleFromArnOrName(found.getRoleArn()))
                 .map(role -> new HeldPolicies(rolePolicies(role), role.getPermissionsBoundaryArn()));
+    }
+
+    private HeldPolicies heldPolicies(IamUser user) {
+        return new HeldPolicies(userPolicies(user), user.getPermissionsBoundaryArn());
     }
 
     private List<String> collectUserPolicies(String userArnOrName) {
