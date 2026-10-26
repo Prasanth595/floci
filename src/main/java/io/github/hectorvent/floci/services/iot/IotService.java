@@ -99,6 +99,8 @@ public class IotService {
 
     /** One lock for every shadow update and delete, so a shadow's previous, current and version stay consistent. */
     private final Object shadowWriteLock = new Object();
+    /** One lock for every UpdateThing and DeleteThing, so a merge, a version check and the write are one step. */
+    private final Object thingWriteLock = new Object();
 
     /** certificateId to the partition and key it was last found under; see {@link #findRegisteredCertificate}. */
     private final Map<String, CertificateLocation> certificateLocations = new ConcurrentHashMap<>();
@@ -294,29 +296,33 @@ public class IotService {
     /** {@code attributes} is null when the request carries none, which leaves the stored ones as they are. */
     public Thing updateThing(String thingName, Map<String, String> attributes, boolean merge, String thingTypeName,
                              boolean removeThingType, Long expectedVersion, String region) {
-        String typeName = blankToNull(thingTypeName);
-        if (removeThingType && typeName != null) {
+        if (thingTypeName != null && !THING_NAME_PATTERN.matcher(thingTypeName).matches()) {
+            throw new AwsException("InvalidRequestException", "Invalid thing type name: " + thingTypeName, 400);
+        }
+        if (removeThingType && thingTypeName != null) {
             throw new AwsException("InvalidRequestException", "Cannot remove thing type when thing type is not null", 400);
         }
-        Thing thing = describeThing(thingName, region);
-        if (typeName != null && describeThingType(typeName, region).isDeprecated()) {
-            throw new AwsException("InvalidRequestException",
-                    "Can not update a thing to use deprecated thing type: " + typeName, 400);
+        synchronized (thingWriteLock) {
+            Thing thing = describeThing(thingName, region);
+            if (thingTypeName != null && describeThingType(thingTypeName, region).isDeprecated()) {
+                throw new AwsException("InvalidRequestException",
+                        "Can not update a thing to use deprecated thing type: " + thingTypeName, 400);
+            }
+            requireThingVersion(thing, expectedVersion);
+            if (attributes != null) {
+                Map<String, String> updated = merge ? new HashMap<>(thing.getAttributes()) : new HashMap<>();
+                updated.putAll(attributes);
+                updated.values().removeIf(String::isEmpty);
+                thing.setAttributes(updated);
+            }
+            if (thingTypeName != null || removeThingType) {
+                thing.setThingTypeName(thingTypeName);
+            }
+            thing.setVersion(thing.getVersion() + 1);
+            thing.setLastModifiedDate(Instant.now());
+            thingStore.put(thingKey(region, thingName), thing);
+            return thing;
         }
-        requireThingVersion(thing, expectedVersion);
-        if (attributes != null) {
-            Map<String, String> updated = merge ? new HashMap<>(thing.getAttributes()) : new HashMap<>();
-            updated.putAll(attributes);
-            updated.values().removeIf(String::isEmpty);
-            thing.setAttributes(updated);
-        }
-        if (typeName != null || removeThingType) {
-            thing.setThingTypeName(typeName);
-        }
-        thing.setVersion(thing.getVersion() + 1);
-        thing.setLastModifiedDate(Instant.now());
-        thingStore.put(thingKey(region, thingName), thing);
-        return thing;
     }
 
     public void deleteThing(String thingName, String region) {
@@ -324,13 +330,15 @@ public class IotService {
     }
 
     public void deleteThing(String thingName, Long expectedVersion, String region) {
-        requireThingVersion(describeThing(thingName, region), expectedVersion);
-        thingStore.delete(thingKey(region, thingName));
-        for (String key : thingGroupMembershipStore.keys()) {
-            if (key.startsWith("thing-group-membership:" + region + ":")) {
-                Set<String> members = new HashSet<>(thingGroupMembershipStore.get(key).orElse(Set.of()));
-                if (members.remove(thingName)) {
-                    thingGroupMembershipStore.put(key, members);
+        synchronized (thingWriteLock) {
+            requireThingVersion(describeThing(thingName, region), expectedVersion);
+            thingStore.delete(thingKey(region, thingName));
+            for (String key : thingGroupMembershipStore.keys()) {
+                if (key.startsWith("thing-group-membership:" + region + ":")) {
+                    Set<String> members = new HashSet<>(thingGroupMembershipStore.get(key).orElse(Set.of()));
+                    if (members.remove(thingName)) {
+                        thingGroupMembershipStore.put(key, members);
+                    }
                 }
             }
         }

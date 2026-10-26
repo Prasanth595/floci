@@ -34,6 +34,7 @@ import org.mockito.ArgumentCaptor;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +44,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -73,7 +75,7 @@ import static org.mockito.Mockito.when;
  * Also the five-version cap on a policy, including under racing creates, the device shadow
  * events that reach MQTT subscribers and topic rules on the AWS response topics, and one stored
  * registration when identical RegisterCertificateWithoutCA calls race. Last, how UpdateThing and
- * DeleteThing treat the attributes, the thing type and the expected version.
+ * DeleteThing treat the attributes, the thing type and the expected version, including racing merges.
  */
 class IotServiceTest {
 
@@ -1721,6 +1723,67 @@ class IotServiceTest {
         assertNull(unchanged.getThingTypeName());
         assertEquals(Map.of("a", "1"), unchanged.getAttributes());
         assertEquals(1L, unchanged.getVersion());
+    }
+
+    @Test
+    void updateThingRejectsAnEmptyOrMalformedThingTypeName() {
+        service.createThingType("sensor-type", mapper.createObjectNode(), REGION);
+        service.createThing("typed", Map.of("a", "1"), "sensor-type", REGION);
+
+        for (String thingTypeName : List.of("", "  ", "bad type")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.updateThing("typed", null, false, thingTypeName, false, null, REGION));
+            assertEquals("InvalidRequestException", e.getErrorCode(), thingTypeName);
+            assertEquals(400, e.getHttpStatus(), thingTypeName);
+            assertEquals("Invalid thing type name: " + thingTypeName, e.getMessage(), thingTypeName);
+        }
+        AwsException removeWithEmpty = assertThrows(AwsException.class,
+                () -> service.updateThing("typed", null, false, "", true, null, REGION));
+        assertEquals("InvalidRequestException", removeWithEmpty.getErrorCode());
+        assertEquals(400, removeWithEmpty.getHttpStatus());
+
+        Thing unchanged = service.describeThing("typed", REGION);
+        assertEquals("sensor-type", unchanged.getThingTypeName());
+        assertEquals(Map.of("a", "1"), unchanged.getAttributes());
+        assertEquals(1L, unchanged.getVersion());
+    }
+
+    @Test
+    void concurrentMergeUpdatesKeepEveryAttribute() throws Exception {
+        service.createThing("raced", Map.of(), REGION);
+        int writers = 8;
+        int updatesPerWriter = 50;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<?>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                int writer = i;
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    for (int update = 0; update < updatesPerWriter; update++) {
+                        service.updateThing("raced", Map.of("t" + writer + "-" + update, "v"), true, null, false, null, REGION);
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> outcome : outcomes) {
+                outcome.get(60, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        Map<String, String> expected = new HashMap<>();
+        for (int writer = 0; writer < writers; writer++) {
+            for (int update = 0; update < updatesPerWriter; update++) {
+                expected.put("t" + writer + "-" + update, "v");
+            }
+        }
+        Thing raced = service.describeThing("raced", REGION);
+        assertEquals(expected, raced.getAttributes());
+        assertEquals(writers * updatesPerWriter + 1L, raced.getVersion());
     }
 
     @Test
