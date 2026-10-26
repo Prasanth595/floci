@@ -61,6 +61,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.awaitility.Awaitility;
 import org.bouncycastle.openssl.PEMKeyPair;
@@ -101,7 +102,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
@@ -4574,49 +4574,33 @@ class Ec2ServiceTest {
 
     /**
      * A second CreateKeyPair or ImportKeyPair for a name, arriving after the first has found the name
-     * free but before its key pair is stored, is refused as a duplicate. The store holds the first
+     * free but before its key pair is stored, is refused as a duplicate. The store parks the first
      * request's write until the second has finished or waits on a lock the first holds, which forces
      * that interleaving on every run.
      */
     @ParameterizedTest
     @CsvSource({"create, create", "import, import", "create, import", "import, create"})
     void secondRequestForAKeyPairNameBeingStoredIsRefused(String first, String second) throws Exception {
-        CountDownLatch firstStoring = new CountDownLatch(1);
-        CountDownLatch releaseFirst = new CountDownLatch(1);
-        AtomicBoolean holdNextPut = new AtomicBoolean(true);
-        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<KeyPair>(
-                new InMemoryStorage<>(), null, "000000000000") {
-            @Override
-            public void put(String key, KeyPair value) {
-                if (holdNextPut.compareAndSet(true, false)) {
-                    firstStoring.countDown();
-                    try {
-                        assertTrue(releaseFirst.await(30, TimeUnit.SECONDS), "the first write was never released");
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new IllegalStateException(e);
-                    }
-                }
-                super.put(key, value);
-            }
-        };
+        ParkingStore<KeyPair> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<>(parking, null, "000000000000");
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
         String publicKey = Ec2KeyMaterial.generateRsa().openSshPublicKey();
         Function<String, KeyPair> request = action -> "create".equals(action)
-                ? service.createKeyPair("us-east-1", "contested")
+                ? service.createKeyPair("us-east-1", "contested", "ed25519", null)
                 : service.importKeyPair("us-east-1", "contested", publicKey);
         AtomicReference<Thread> firstWorker = new AtomicReference<>();
         AtomicReference<Thread> secondWorker = new AtomicReference<>();
+        parking.parkNextWrite();
         ExecutorService workers = Executors.newFixedThreadPool(2);
         try {
             Future<KeyPair> firstResult = workers.submit(() -> {
                 firstWorker.set(Thread.currentThread());
                 return request.apply(first);
             });
-            assertTrue(firstStoring.await(10, TimeUnit.SECONDS), "the first request never stored its key pair");
+            assertTrue(parking.awaitParked(), "the first request never stored its key pair");
             Future<KeyPair> secondResult = workers.submit(() -> {
                 secondWorker.set(Thread.currentThread());
                 return request.apply(second);
@@ -4624,7 +4608,7 @@ class Ec2ServiceTest {
             Awaitility.await("the second request to finish or to wait in storeNewKeyPair")
                     .atMost(Duration.ofSeconds(30)).until(() -> secondResult.isDone()
                     || isBlockedIn(secondWorker.get(), "storeNewKeyPair", firstWorker.get()));
-            releaseFirst.countDown();
+            parking.release();
 
             KeyPair stored = firstResult.get(30, TimeUnit.SECONDS);
             ExecutionException refusal = assertThrows(ExecutionException.class,
@@ -4636,7 +4620,7 @@ class Ec2ServiceTest {
             assertEquals(List.of(stored.getKeyPairId()), service.describeKeyPairs("us-east-1", List.of(), List.of())
                     .stream().map(KeyPair::getKeyPairId).toList());
         } finally {
-            releaseFirst.countDown();
+            parking.release();
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
         }
@@ -4645,34 +4629,20 @@ class Ec2ServiceTest {
     /**
      * A DeleteKeyPair arriving while a tag write has read the key pair and not yet written it back
      * waits for that write, so the tag write cannot put back the key pair the delete removes, and the
-     * freed name then goes to one new key pair. The store holds the tag write until the delete has
-     * finished or waits on a lock the tag write holds.
+     * freed name then goes to one new key pair. Armed once the key pair is created, the store parks the
+     * next write, which is the tag write's, until the delete has finished or waits on a lock the tag
+     * write holds.
      */
     @Test
     void deleteKeyPairWaitsForATagWriteOnTheKeyPair() throws Exception {
-        CountDownLatch tagWriteStoring = new CountDownLatch(1);
-        CountDownLatch releaseTagWrite = new CountDownLatch(1);
-        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<KeyPair>(
-                new InMemoryStorage<>(), null, "000000000000") {
-            @Override
-            public void put(String key, KeyPair value) {
-                if (!value.getTags().isEmpty() && tagWriteStoring.getCount() > 0) {
-                    tagWriteStoring.countDown();
-                    try {
-                        assertTrue(releaseTagWrite.await(30, TimeUnit.SECONDS), "the tag write was never released");
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new IllegalStateException(e);
-                    }
-                }
-                super.put(key, value);
-            }
-        };
+        ParkingStore<KeyPair> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<>(parking, null, "000000000000");
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
         KeyPair original = service.createKeyPair("us-east-1", "retagged", "ed25519", null);
+        parking.parkNextWrite();
         AtomicReference<Thread> tagWorker = new AtomicReference<>();
         AtomicReference<Thread> deleteWorker = new AtomicReference<>();
         ExecutorService workers = Executors.newFixedThreadPool(2);
@@ -4681,7 +4651,7 @@ class Ec2ServiceTest {
                 tagWorker.set(Thread.currentThread());
                 service.createTags("us-east-1", List.of(original.getKeyPairId()), List.of(new Tag("Team", "blue")));
             });
-            assertTrue(tagWriteStoring.await(10, TimeUnit.SECONDS), "the tag write never stored the key pair");
+            assertTrue(parking.awaitParked(), "the tag write never stored the key pair");
             Future<KeyPair> deleting = workers.submit(() -> {
                 deleteWorker.set(Thread.currentThread());
                 return service.deleteKeyPair("us-east-1", "retagged", null);
@@ -4689,7 +4659,7 @@ class Ec2ServiceTest {
             Awaitility.await("the delete to finish or to wait in deleteKeyPair")
                     .atMost(Duration.ofSeconds(30)).until(() -> deleting.isDone()
                     || isBlockedIn(deleteWorker.get(), "deleteKeyPair", tagWorker.get()));
-            releaseTagWrite.countDown();
+            parking.release();
             tagging.get(30, TimeUnit.SECONDS);
 
             assertEquals(original.getKeyPairId(), deleting.get(30, TimeUnit.SECONDS).getKeyPairId());
@@ -4699,7 +4669,7 @@ class Ec2ServiceTest {
             assertEquals(List.of(recreated.getKeyPairId()), service.describeKeyPairs("us-east-1", List.of(), List.of())
                     .stream().map(KeyPair::getKeyPairId).toList());
         } finally {
-            releaseTagWrite.countDown();
+            parking.release();
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
         }
