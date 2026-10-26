@@ -56,7 +56,7 @@ public class RedshiftInterceptingBridge {
 
     private static final int PUMP_READ_TIMEOUT_MS = 200;
     private static final int CLIENT_READ_TIMEOUT_MS = 10_000;
-    private static final long PUMP_PARK_WAIT_MS = 2_000L;
+    static final long PUMP_PARK_WAIT_MS = 2_000L;
     /** Bounded read timeout while an exchange owns the backend, so a stalled backend cannot hang the session. */
     private static final int EXCHANGE_READ_TIMEOUT_MS = 60_000;
     private static final long BUSY_BACKOFF_NANOS = 2_000_000L;
@@ -83,6 +83,8 @@ public class RedshiftInterceptingBridge {
     private final BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
 
     private final ReentrantLock backendLock;
+    /** Budget of {@link #runWithBackendOwned} only; the Extended Query paths keep {@link #PUMP_PARK_WAIT_MS}. */
+    private final long ownershipWaitMillis;
     private volatile boolean pumpBetweenMessages = true;
     private volatile boolean pumpFinished = false;
     private boolean extendedSpectrumError;
@@ -133,19 +135,25 @@ public class RedshiftInterceptingBridge {
                                       String defaultIamRoleArn, RedshiftAuditLogPublisher auditLogPublisher,
                                       String databaseUser) {
         this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor,
-                clusterKey, databaseName, defaultIamRoleArn, auditLogPublisher, databaseUser, new ReentrantLock(true));
+                clusterKey, databaseName, defaultIamRoleArn, auditLogPublisher, databaseUser, new ReentrantLock(true),
+                PUMP_PARK_WAIT_MS);
     }
 
-    /** For tests: a bridge with no services, whose fair backend lock the caller supplies. */
-    RedshiftInterceptingBridge(Socket client, Socket backend, ReentrantLock backendLock) {
-        this(client, backend, null, null, null, List.of(), null, null, null, null, null, null, backendLock);
+    /**
+     * For tests: a bridge with no services, whose fair backend lock and {@link #runWithBackendOwned}
+     * budget the caller supplies.
+     */
+    RedshiftInterceptingBridge(Socket client, Socket backend, ReentrantLock backendLock, long ownershipWaitMillis) {
+        this(client, backend, null, null, null, List.of(), null, null, null, null, null, null, backendLock,
+                ownershipWaitMillis);
     }
 
     private RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
                                        String clusterAccountId, List<String> iamRoleArns,
                                        SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
                                        String defaultIamRoleArn, RedshiftAuditLogPublisher auditLogPublisher,
-                                       String databaseUser, ReentrantLock backendLock) {
+                                       String databaseUser, ReentrantLock backendLock,
+                                       long ownershipWaitMillis) {
         this.client = client;
         this.backend = backend;
         this.s3Service = s3Service;
@@ -160,6 +168,7 @@ public class RedshiftInterceptingBridge {
         this.databaseUser = databaseUser;
         this.relationalBackend = new PostgresExtendedBackendSession(backend);
         this.backendLock = backendLock;
+        this.ownershipWaitMillis = ownershipWaitMillis;
     }
 
     private SpectrumSession spectrumSession() {
@@ -789,11 +798,12 @@ public class RedshiftInterceptingBridge {
 
     /**
      * Take exclusive ownership of an idle backend at a wire-message boundary, run {@code exchange},
-     * then release it. Returns {@code false} if the backend could not be caught idle within
-     * {@link #PUMP_PARK_WAIT_MS}; the caller must then forward the original {@code 'Q'} unmodified.
+     * then release it. Returns {@code false} if the backend could not be caught idle within the
+     * ownership budget ({@link #PUMP_PARK_WAIT_MS} outside tests); the caller must then forward the
+     * original {@code 'Q'} unmodified.
      */
     boolean runWithBackendOwned(BackendExchange exchange) throws IOException {
-        long deadlineNanos = System.nanoTime() + PUMP_PARK_WAIT_MS * 1_000_000L;
+        long deadlineNanos = System.nanoTime() + ownershipWaitMillis * 1_000_000L;
         while (true) {
             if (pumpFinished) {
                 return false;

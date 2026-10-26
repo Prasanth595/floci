@@ -38,7 +38,8 @@ class RedshiftBackendOwnershipTest {
     @Timeout(10)
     void retainsItsPlaceWhileAnIdlePumpFinishesReading() throws Exception {
         DelayedWaiterLock lock = new DelayedWaiterLock();
-        RedshiftInterceptingBridge bridge = bridgeWithLock(lock);
+        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(client, backend, lock,
+                RedshiftInterceptingBridge.PUMP_PARK_WAIT_MS);
         AtomicBoolean stopped = new AtomicBoolean();
         AtomicReference<Throwable> pumpFailure = new AtomicReference<>();
         Thread pump = Thread.ofVirtual().start(() -> {
@@ -77,7 +78,8 @@ class RedshiftBackendOwnershipTest {
     @Timeout(10)
     void doesNotRunAnExchangeWhenTheBackendRemainsOwned() throws Exception {
         ReentrantLock lock = new ReentrantLock(true);
-        RedshiftInterceptingBridge bridge = bridgeWithLock(lock);
+        // A short budget is enough to show the call gives up; the handoff case keeps the production one.
+        RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(client, backend, lock, 100);
         CountDownLatch held = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         Thread pump = Thread.ofVirtual().start(() -> {
@@ -105,10 +107,6 @@ class RedshiftBackendOwnershipTest {
             pump.join(1000);
             assertFalse(pump.isAlive());
         }
-    }
-
-    private RedshiftInterceptingBridge bridgeWithLock(ReentrantLock lock) {
-        return new RedshiftInterceptingBridge(client, backend, lock);
     }
 
     private static final class DelayedWaiterLock extends ReentrantLock {
