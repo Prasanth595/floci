@@ -3,7 +3,11 @@ package io.github.hectorvent.floci.services.athena;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.athena.model.CreateWorkGroupRequest;
 import io.github.hectorvent.floci.services.athena.model.QueryExecution;
 import io.github.hectorvent.floci.services.athena.model.QueryExecutionContext;
@@ -15,7 +19,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,11 +33,13 @@ public class AthenaJsonHandler {
 
     private final AthenaService athenaService;
     private final ObjectMapper mapper;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public AthenaJsonHandler(AthenaService athenaService, ObjectMapper mapper) {
+    public AthenaJsonHandler(AthenaService athenaService, ObjectMapper mapper, RegionResolver regionResolver) {
         this.athenaService = athenaService;
         this.mapper = mapper;
+        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
@@ -99,8 +109,7 @@ public class AthenaJsonHandler {
                 athenaService.updateWorkGroup(updateRequest, region);
                 yield Response.ok(Map.of()).build();
             }
-            case "ListDataCatalogs" ->
-                    Response.ok(Map.of("DataCatalogsSummary", athenaService.listDataCatalogs(region))).build();
+            case "ListDataCatalogs" -> listDataCatalogs(request, region);
             case "GetDataCatalog" -> {
                 String name = request.has("Name") ? request.get("Name").asText() : AthenaService.DEFAULT_CATALOG;
                 yield Response.ok(Map.of("DataCatalog", athenaService.getDataCatalog(region, name))).build();
@@ -164,6 +173,45 @@ public class AthenaJsonHandler {
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    private Response listDataCatalogs(JsonNode request, String region) {
+        Integer maxResults = Pagination.parseMaxResults(request, "MaxResults", "InvalidRequestException");
+        int limit = maxResults == null ? 50 : maxResults;
+        if (limit < 2 || limit > 50) {
+            throw new AwsException("InvalidRequestException", "MaxResults must be between 2 and 50.", 400);
+        }
+        String token = Pagination.parseNextToken(request, "NextToken", "InvalidRequestException");
+        String namespace = "athena:ListDataCatalogs:" + Digests.sha256Hex(regionResolver.getAccountId() + ":" + region);
+        PaginatedResult<Map<String, Object>> page = Pagination.paginate(athenaService.listDataCatalogs(region), catalog -> {
+            String name = (String) catalog.get("CatalogName");
+            return AthenaService.DEFAULT_CATALOG.equals(name) ? "0" : "1" + name;
+        }, limit, dataCatalogCursor(token), namespace,
+                invalid -> new AwsException("InvalidRequestException", "Invalid NextToken.", 400));
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("DataCatalogsSummary", page.items());
+        if (page.nextToken() != null) {
+            String payload = Base64Url.decode(page.nextToken());
+            response.put("NextToken", Base64Url.encode(payload.getBytes(StandardCharsets.UTF_16BE)));
+        }
+        return Response.ok(response).build();
+    }
+
+    private static String dataCatalogCursor(String token) {
+        if (token == null) {
+            return null;
+        }
+        if (token.isEmpty() || token.length() > 1024) {
+            throw new AwsException("InvalidRequestException", "NextToken must contain 1 to 1024 characters.", 400);
+        }
+        try {
+            // UTF-16BE keeps maximum-length Unicode catalog names within Athena's token bound.
+            String payload = StandardCharsets.UTF_16BE.newDecoder()
+                    .decode(ByteBuffer.wrap(Base64.getUrlDecoder().decode(token))).toString();
+            return Base64Url.encode(payload);
+        } catch (IllegalArgumentException | CharacterCodingException e) {
+            throw new AwsException("InvalidRequestException", "Invalid NextToken.", 400);
+        }
     }
 
     private static String text(JsonNode request, String field) {
