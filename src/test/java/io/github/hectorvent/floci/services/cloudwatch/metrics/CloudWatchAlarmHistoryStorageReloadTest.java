@@ -29,29 +29,35 @@ class CloudWatchAlarmHistoryStorageReloadTest {
     @ValueSource(strings = {"persistent", "hybrid", "wal"})
     void historyOfADeletedAlarmSurvivesReloadAndKeepsAppendingAndPaging(String mode) {
         StorageFactory first = factory(mode);
-        CloudWatchMetricsService service = new CloudWatchMetricsService(first, new RegionResolver(REGION, ACCOUNT));
         MetricAlarm alarm = new MetricAlarm();
         alarm.setAlarmName("reloaded");
-        service.putMetricAlarm(alarm, REGION);
-        service.setAlarmState("reloaded", "ALARM", "breached", "{\"x\":1}", REGION);
-        service.deleteAlarms(List.of("reloaded"), REGION);
-        List<AlarmHistoryItem> before = service.describeAlarmHistory(
-                "reloaded", null, null, null, null, null, null, null, REGION).items();
+        List<AlarmHistoryItem> before;
+        try {
+            CloudWatchMetricsService service = new CloudWatchMetricsService(first, new RegionResolver(REGION, ACCOUNT));
+            service.putMetricAlarm(alarm, REGION);
+            service.setAlarmState("reloaded", "ALARM", "breached", "{\"x\":1}", REGION);
+            service.deleteAlarms(List.of("reloaded"), REGION);
+            before = service.describeAlarmHistory("reloaded", null, null, null, null, null, null, null, REGION).items();
+        } finally {
+            first.shutdownAll();
+        }
         assertEquals(3, before.size());
-        first.shutdownAll();
 
         StorageFactory second = factory(mode);
-        service = new CloudWatchMetricsService(second, new RegionResolver(REGION, ACCOUNT));
-        service.putMetricAlarm(alarm, REGION);
         List<AlarmHistoryItem> pages = new ArrayList<>();
-        String token = null;
-        do {
-            PaginatedResult<AlarmHistoryItem> page = service.describeAlarmHistory(
-                    "reloaded", null, null, null, null, 2, token, null, REGION);
-            pages.addAll(page.items());
-            token = page.nextToken();
-        } while (token != null);
-        second.shutdownAll();
+        try {
+            CloudWatchMetricsService service = new CloudWatchMetricsService(second, new RegionResolver(REGION, ACCOUNT));
+            service.putMetricAlarm(alarm, REGION);
+            String token = null;
+            do {
+                PaginatedResult<AlarmHistoryItem> page = service.describeAlarmHistory(
+                        "reloaded", null, null, null, null, 2, token, null, REGION);
+                pages.addAll(page.items());
+                token = page.nextToken();
+            } while (token != null);
+        } finally {
+            second.shutdownAll();
+        }
 
         assertEquals(4, pages.size());
         assertEquals("Alarm \"reloaded\" created", pages.getFirst().historySummary());
