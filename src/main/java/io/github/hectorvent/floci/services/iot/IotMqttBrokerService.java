@@ -152,6 +152,11 @@ public class IotMqttBrokerService implements Resettable {
     private final AtomicInteger pendingRuleEvaluations = new AtomicInteger();
     private final AtomicBoolean ruleEvaluationsThrottled = new AtomicBoolean();
     /**
+     * The packet identifier of every publish the broker sends. Vert.x draws its own from an unsynchronized
+     * per-endpoint counter, so two threads fanning out to one client could send two QoS 1 copies under one.
+     */
+    private final AtomicInteger packetIds = new AtomicInteger();
+    /**
      * Rule admission in one value: the {@link #RULES_RESETTING} and {@link #RULES_STOPPED} bits suspend rules, and
      * every change also adds {@link #RULE_STATE_STEP}, so an evaluation runs its rules only while the state is still
      * the one it was admitted under.
@@ -805,7 +810,8 @@ public class IotMqttBrokerService implements Resettable {
                 continue;
             }
             try {
-                session.endpoint().publish(topic, Buffer.buffer(safePayload), MqttQoS.valueOf(Math.min(qos, granted)), false, false);
+                session.endpoint().publish(topic, Buffer.buffer(safePayload), MqttQoS.valueOf(Math.min(qos, granted)), false, false,
+                        nextPacketId());
             } catch (IllegalStateException e) {
                 LOG.debugv("IoT MQTT client {0} closed before the publish on {1} reached it", session.clientId(), topic);
             }
@@ -819,6 +825,11 @@ public class IotMqttBrokerService implements Resettable {
                 .mapToInt(Subscription::qos)
                 .max()
                 .orElse(-1);
+    }
+
+    // ponytail: one counter for every client, so an identifier repeats after 65535 publishes broker-wide; per-session counters if a client ever holds that many unacknowledged.
+    private int nextPacketId() {
+        return packetIds.updateAndGet(id -> id % 65535 + 1);
     }
 
     private void deliverRetained(ClientSession session, List<Subscription> subscriptions) {
@@ -835,8 +846,9 @@ public class IotMqttBrokerService implements Resettable {
                 continue;
             }
             byte[] payload = Base64.getDecoder().decode(retained.getPayload());
+            // Publish kept a qos outside 0 and 1 as sent before it refused one, so a stored message may carry one.
             session.endpoint().publish(retained.getTopic(), Buffer.buffer(payload),
-                    MqttQoS.valueOf(Math.min(retained.getQos(), granted)), false, true);
+                    MqttQoS.valueOf(Math.clamp(retained.getQos(), 0, granted)), false, true, nextPacketId());
         }
     }
 
