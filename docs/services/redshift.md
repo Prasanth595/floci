@@ -66,6 +66,16 @@ aws --endpoint-url http://localhost:4566 redshift describe-events \
   --source-type cluster-parameter-group --source-identifier event-demo
 ```
 
+### CloudFormation
+
+`AWS::Redshift::EventSubscription` creates a real subscription. `Ref` returns its
+name; `Fn::GetAtt` supports `CustomerAwsId`, `CustSubscriptionId`, `Status`,
+`SubscriptionCreationTime`, `SourceIdsList` and `EventCategoriesList`, with the last
+two returned as lists. Updating filters, enabled state, topic and tags reconciles the
+existing subscription; changing `SubscriptionName` replaces it. Removing optional
+filters from the template clears them. Stack deletion removes the subscription.
+The attributes follow the [CloudFormation resource schema](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-redshift-eventsubscription.html).
+
 ### EventBridge
 
 Successful Redshift management writes also emit a simulated API event to the default
