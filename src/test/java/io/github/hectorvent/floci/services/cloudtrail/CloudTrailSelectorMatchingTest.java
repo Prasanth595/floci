@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
 import io.github.hectorvent.floci.services.iam.IamService;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 
@@ -178,6 +180,38 @@ class CloudTrailSelectorMatchingTest {
     }
 
     // --- a ReadOnly trail ---
+
+    @ParameterizedTest
+    @CsvSource({
+            "us-east-1,us-east-1,false,true",
+            "us-east-1,eu-west-1,false,false",
+            "us-east-1,eu-west-1,true,true",
+            "us-east-1,cn-north-1,true,false",
+            "us-east-1,us-gov-west-1,true,false",
+            "cn-north-1,cn-northwest-1,true,true",
+            "cn-north-1,us-east-1,true,false",
+            "us-gov-west-1,us-gov-east-1,true,true",
+            "us-gov-west-1,us-east-1,true,false"
+    })
+    void multiRegionTrailsMatchOnlyWithinTheirPartition(String homeRegion, String eventRegion,
+                                                       boolean multiRegion, boolean expected) {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenReturn(AccountAwareStorageBackend.inMemory(ACCOUNT));
+        CloudTrailService service = new CloudTrailService(storageFactory, new RegionResolver(homeRegion, ACCOUNT),
+                mock(IamService.class), new ObjectMapper());
+        service.createTrail(homeRegion, "partition-trail", "trail-logs", null, null,
+                false, multiRegion, false, false);
+        service.putEventSelectors(homeRegion, "partition-trail", List.of(new EventSelector("All", false,
+                List.of(new DataResource("AWS::S3::Object", List.of("arn:aws:s3:::source/"))), List.of())));
+        service.startLogging(homeRegion, "partition-trail");
+
+        service.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
+                .region(eventRegion).eventName("PutObject").bucketName("source").key("example.txt").build());
+
+        assertEquals(expected ? 1 : 0, service.pendingRecordCount(
+                new CloudTrailService.TrailKey(homeRegion, "partition-trail", eventRegion)));
+    }
 
     /**
      * A denial is recorded under the name of the operation refused, so a read IAM denies reaches a
