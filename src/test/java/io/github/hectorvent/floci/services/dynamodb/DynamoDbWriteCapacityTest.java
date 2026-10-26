@@ -261,6 +261,31 @@ class DynamoDbWriteCapacityTest {
     }
 
     @Test
+    void tableUnitsCountTheVectorAtFourBytesPerDimensionOnce() {
+        ObjectNode wide = item("""
+                {"pk": {"S": "a3"},
+                 "embedding": {"L": [{"N": "%1$s"}, {"N": "%1$s"}, {"N": "%1$s"}]}}
+                """.formatted("12345678901234567890123456789012345678"));
+        // 4 for the key, 9 for the vector's name and 12 for its dimensions leave 999 for the pad.
+        wide.set("pad", item("""
+                {"S": "%s"}
+                """.formatted("x".repeat(996))));
+        assertTrue(DynamoDbItemSize.calculateItemSize(wide) > 1024, "the stored numbers take it past 1KB");
+
+        assertEquals(1024, DynamoDbItemSize.billedItemSize(vectorTable(), wide));
+        assertEquals(1.0, DynamoDbWriteCapacity.forWrite(vectorTable(), null, wide).table());
+    }
+
+    @Test
+    void aListThatIsNotAVectorOfTheIndexKeepsItsStoredSize() {
+        ObjectNode shortList = item("""
+                {"pk": {"S": "a2"}, "embedding": {"L": [{"N": "1"}, {"N": "0"}]}}
+                """);
+        assertEquals(DynamoDbItemSize.calculateItemSize(shortList),
+                DynamoDbItemSize.billedItemSize(vectorTable(), shortList));
+    }
+
+    @Test
     void itemMissingTheSearchSchemaHashEntersNoVectorIndex() {
         TableDefinition partitioned = new TableDefinition();
         partitioned.setKeySchema(List.of(new KeySchemaElement("pk", "HASH")));

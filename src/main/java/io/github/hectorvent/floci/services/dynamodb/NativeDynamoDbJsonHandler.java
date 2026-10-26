@@ -663,7 +663,9 @@ public class NativeDynamoDbJsonHandler {
         }
 
         JsonNode item = dynamoDbService.getItem(tableName, key, region);
-        var itemBytes = item != null ? DynamoDbItemSize.calculateItemSize(item) : 0;
+        var itemBytes = item != null
+                ? DynamoDbItemSize.billedItemSize(dynamoDbService.requireTableForItemCall(tableName, region), item)
+                : 0;
         if (item != null && projectionExpression != null) {
             item = ProjectionEvaluator.project(item, projectionExpression, exprAttrNames);
         } else if (item != null && attributesToGet != null) {
