@@ -119,6 +119,12 @@ class ElbClassicAccountIsolationTest {
             assertEquals("OutOfService", health.state());
             assertEquals("Instance", health.reasonCode());
         });
+
+        // And it recovers, which the other account's default TCP:80 check could not report.
+        backendStatus.set(200);
+        healthChecker.runArmedChecks();
+        await().pollInSameThread().atMost(Duration.ofSeconds(5))
+                .until(() -> "InService".equals(health().state()));
     }
 
     private void createWeb() {
@@ -133,9 +139,10 @@ class ElbClassicAccountIsolationTest {
 
     /**
      * Gives the stored balancer a check that one probe settles and re-arms the checker, as
-     * ConfigureHealthCheck does but past the thresholds that action enforces. The interval is
-     * the longest the API allows, so no timer fires during a test: the test runs each round of
-     * checks itself through {@link ElbClassicHealthChecker#runArmedChecks()}.
+     * ConfigureHealthCheck does but with a timeout and thresholds below the minimums that action
+     * enforces. The interval is the longest the API allows, so the periodic timer never fires
+     * during a test: the probe that registration schedules settles the instance here, and the
+     * tests run later rounds themselves through {@link ElbClassicHealthChecker#runArmedChecks()}.
      */
     private void registerHealthyInstance() {
         ClassicHealthCheck check = new ClassicHealthCheck();
@@ -148,7 +155,6 @@ class ElbClassicAccountIsolationTest {
         lb.setHealthCheck(check);
         healthChecker.healthCheckChanged(lb);
         service.registerInstances(REGION, "web", List.of(INSTANCE));
-        healthChecker.runArmedChecks();
         await().pollInSameThread().atMost(Duration.ofSeconds(5))
                 .until(() -> "InService".equals(health().state()));
     }

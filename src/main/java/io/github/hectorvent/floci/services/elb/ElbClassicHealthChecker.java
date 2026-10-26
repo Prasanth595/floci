@@ -66,8 +66,8 @@ public class ElbClassicHealthChecker implements Resettable {
     // "account|region|lbName" → the periodic check armed for it
     private final Map<String, ArmedCheck> timers = new ConcurrentHashMap<>();
 
-    /** A periodic check: its Vert.x timer and the load balancer each tick probes. */
-    private record ArmedCheck(long id, ClassicLoadBalancer lb) {}
+    /** A periodic check: its Vert.x timer and the tick that timer runs. */
+    private record ArmedCheck(long id, Runnable tick) {}
 
     @Inject
     public ElbClassicHealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service) {
@@ -93,7 +93,8 @@ public class ElbClassicHealthChecker implements Resettable {
         stopTimer(k);
         int interval = lb.getHealthCheck() != null && lb.getHealthCheck().getInterval() != null
                 ? lb.getHealthCheck().getInterval() : 30;
-        timers.put(k, new ArmedCheck(vertx.setPeriodic(interval * 1000L, id -> probeAll(lb)), lb));
+        Runnable tick = () -> probeAll(lb);
+        timers.put(k, new ArmedCheck(vertx.setPeriodic(interval * 1000L, id -> tick.run()), tick));
     }
 
     /**
@@ -101,7 +102,7 @@ public class ElbClassicHealthChecker implements Resettable {
      * tests need not wait out a check interval. The timers themselves keep their schedule.
      */
     void runArmedChecks() {
-        List.copyOf(timers.values()).forEach(timer -> probeAll(timer.lb()));
+        List.copyOf(timers.values()).forEach(timer -> timer.tick().run());
     }
 
     public void stopMonitoring(ClassicLoadBalancer lb) {
