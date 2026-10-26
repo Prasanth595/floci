@@ -11,12 +11,22 @@
     "DescribeRegistry": "DescribeRegistryRequest",
     "PutRegistryScanningConfiguration": "PutRegistryScanningConfigurationRequest",
     "GetRegistryScanningConfiguration": "GetRegistryScanningConfigurationRequest",
+    "BatchGetRepositoryScanningConfiguration": "BatchGetRepositoryScanningConfigurationRequest",
     "CreateRepositoryCreationTemplate": "CreateRepositoryCreationTemplateRequest",
     "UpdateRepositoryCreationTemplate": "UpdateRepositoryCreationTemplateRequest",
     "DescribeRepositoryCreationTemplates": "DescribeRepositoryCreationTemplatesRequest",
     "DeleteRepositoryCreationTemplate": "DeleteRepositoryCreationTemplateRequest"
   },
   "shapes": {
+    "BatchGetRepositoryScanningConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "repositoryNames"
+      ],
+      "members": {
+        "repositoryNames": "ScanningConfigurationRepositoryNameList"
+      }
+    },
     "CreateRepositoryCreationTemplateRequest": {
       "type": "structure",
       "required": [
@@ -298,6 +308,12 @@
       "max": 256,
       "pattern": "^(?:[a-z0-9]+(?:[._-][a-z0-9]*)*/)*[a-z0-9]*(?:[._-][a-z0-9]*)*$"
     },
+    "RepositoryName": {
+      "type": "string",
+      "min": 2,
+      "max": 256,
+      "pattern": "[a-z0-9]+((\\.|_|__|-+)[a-z0-9]+)*(\\/[a-z0-9]+((\\.|_|__|-+)[a-z0-9]+)*)*"
+    },
     "RepositoryPolicyText": {
       "type": "string",
       "min": 0,
@@ -321,6 +337,12 @@
         "BASIC",
         "ENHANCED"
       ]
+    },
+    "ScanningConfigurationRepositoryNameList": {
+      "type": "list",
+      "min": 1,
+      "max": 25,
+      "member": "RepositoryName"
     },
     "ScanningRepositoryFilter": {
       "type": "structure",

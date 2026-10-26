@@ -126,7 +126,11 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBProxies` | List DB proxies |
 | `CreateDBProxy` | Create a DB proxy |
 | `ModifyDBProxy` | Update mutable DB proxy authentication, logging, timeout, TLS, role, and security-group settings |
-| `DeleteDBProxy` | Delete a DB proxy |
+| `DeleteDBProxy` | Delete a DB proxy and its endpoints |
+| `CreateDBProxyEndpoint` | Add a read/write or read-only endpoint to a DB proxy; see the proxy note below |
+| `DescribeDBProxyEndpoints` | List proxy endpoints, each proxy's default endpoint first, filtered by `DBProxyName` and `DBProxyEndpointName` |
+| `ModifyDBProxyEndpoint` | Rename a proxy endpoint or replace its security groups |
+| `DeleteDBProxyEndpoint` | Delete a proxy endpoint |
 | `RegisterDBProxyTargets` | Register a cluster or instance as a proxy target |
 | `DeregisterDBProxyTargets` | Remove a cluster or instance from a proxy target group |
 | `DescribeDBProxyTargetGroups` | List a proxy's target groups |
@@ -197,6 +201,12 @@ checked against the instance's other window. Modifications apply immediately —
     `Copy`, `Delete` and the `restore` attribute behave as they do for instance snapshots, under
     `arn:aws:rds:<region>:<account>:cluster-snapshot:<name>`. RDS reserved instances aren't
     modeled (there's no reserved-instance API), so tagging doesn't apply to them.
+
+## Cluster parameter groups
+
+`DescribeDBClusterParameterGroups` includes `DBClusterParameterGroupArn` for managed `default.*`
+groups as well as customer-created groups, in both named and list responses. Managed default ARNs
+use the request's account, region, and partition with the `cluster-pg:<group-name>` resource form.
 
 ## Boolean parameters
 
@@ -346,6 +356,15 @@ services:
     is rejected with `InvalidParameterValue` unless the proxy's VPC and every subnet in
     `VpcSubnetIds` already carry an associated IPv6 CIDR block, matching AWS's own network
     prerequisites for RDS Proxy.
+    Proxy endpoints report the proxy's own host, so a client connects through one as through the
+    proxy, and an IAM token signed for that host verifies there. The host is read from the proxy
+    for each response, so when a restore gives the proxy a new host every endpoint reports it. `TargetRole` is recorded: Floci
+    proxies have one target, so a `READ_ONLY` endpoint reaches the same target as the proxy rather
+    than an Aurora reader. Each proxy's default endpoint (`default`, `IsDefault` true, `READ_WRITE`)
+    is built from the proxy, has no ARN, and cannot be modified or deleted
+    (`InvalidDBProxyEndpointStateFault`). Endpoint names are unique per account and Region, a proxy
+    holds at most 20 endpoints (`DBProxyEndpointQuotaExceededFault`), and an endpoint with no
+    `VpcSecurityGroupIds` gets its VPC's default security group.
 
 ## Aurora Serverless v2 scaling
 
@@ -534,6 +553,29 @@ mysql -h 127.0.0.1 -P 7002 -u root -psecret123
 
 Override the image per-instance with the `--engine-version` flag or globally via environment variables.
 Aurora MySQL versions such as `8.0.mysql_aurora.3.08.0` use the MySQL version in front, so that example runs `mysql:8.0`.
+
+## Parameter groups
+
+A MySQL or MariaDB database runs with its parameter group: an Aurora MySQL cluster with its DB
+cluster parameter group, with the writer instance's DB parameter group on top (so an
+instance-level value such as `max_connections` wins, as on AWS), and a standalone instance with
+its DB parameter group. Floci passes each override to the server when it starts the database
+container, so a value set in the group is the engine's value; creating a cluster's writer restarts
+the cluster's container when the writer's group changes anything. A later change to a group, or a
+new `DBClusterParameterGroupName` on `ModifyDBCluster` or `DBParameterGroupName` on
+`ModifyDBInstance`, takes effect the next time the container starts: `RebootDBInstance` on the
+writer or on a standalone instance, a stop and start, or a Floci restart. A cluster's members share
+one database, so rebooting the writer restarts it for every member, and a reader's own DB
+parameter group is not applied. `time_zone` is passed as `--default-time-zone`, and Aurora's
+`binlog_format` of `OFF` turns binary logging off. A parameter the server does not know, such as
+one only Aurora has, is skipped with a warning in the database log. A formula value such as
+`{DBInstanceClassMemory*3/4}` keeps the server's default, and so do `port`, `bind_address`,
+`socket`, `datadir` and `skip_networking`, which Floci needs to reach the database, and
+`require_secure_transport` and `skip_grant_tables`, which would lock out Floci's proxy (it talks
+to the server without TLS). When the server refuses a value and stops, the instance, or every
+member of the cluster, reports `incompatible-parameters` and Floci logs the server's error; correct
+the group and reboot to start it again. PostgreSQL and SQL Server databases do not take parameter
+group values yet.
 
 ## Option Groups
 
@@ -740,6 +782,14 @@ fail while release is in progress; unrelated secrets remain available.
 A failed backend password rotation retains the managed secret and stored credentials.
 If Secrets Manager support is unavailable, opt-out fails before changing cluster state.
 This does not provide a transaction across database backends and persistent storage.
+
+## PostgreSQL restore connections
+
+Snapshot and point in time restores drop the target's non-template databases with
+`DROP DATABASE ... WITH (FORCE)` before replaying the dump. This terminates connections
+on the restore target, including preloaded workers such as pg_cron; the source is unchanged.
+Custom PostgreSQL images must support this syntax (PostgreSQL 13 or later). Prepared
+transactions and active logical replication slots or subscriptions can still prevent a drop.
 
 ## Point in time restore
 

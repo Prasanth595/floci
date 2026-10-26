@@ -133,6 +133,7 @@ public class StackSetService implements PassedRoleLookup {
         if ("SELF_MANAGED".equals(resolvedPermissionModel) && (autoDeploymentEnabled || retainStacksOnAccountRemoval)) {
             throw new AwsException("ValidationError", "AutoDeployment is valid only for SERVICE_MANAGED StackSets.", 400);
         }
+        requireValidTemplate(templateBody);
         // Every instance is deployed with these parameters, so a template parameter left without a
         // value would fail each one; refuse the stack set instead.
         cfnService.requireParameterValues(templateBody, parameters);
@@ -210,8 +211,9 @@ public class StackSetService implements PassedRoleLookup {
         StackSet ss = getStackSetOrThrow(name);
         // Checked against the template and parameters the update leaves the stack set with, before
         // either is changed or an operation is recorded.
-        cfnService.requireParameterValues(
-                templateBody != null && !templateBody.isBlank() ? templateBody : ss.getTemplateBody(),
+        String keptTemplate = templateBody != null && !templateBody.isBlank() ? templateBody : ss.getTemplateBody();
+        requireValidTemplate(keptTemplate);
+        cfnService.requireParameterValues(keptTemplate,
                 parameters != null && !parameters.isEmpty() ? parameters : ss.getParameters());
         String operationId = reserveOperation(name, "UPDATE", requestedOperationId).getOperationId();
         if (templateBody != null && !templateBody.isBlank()) {
@@ -719,6 +721,21 @@ public class StackSetService implements PassedRoleLookup {
         boolean anyFailed = deployedInstances.stream()
                 .anyMatch(i -> "FAILED".equals(i.getDetailedStatus()));
         return anyFailed ? "FAILED" : "SUCCEEDED";
+    }
+
+    /**
+     * Refuses a body that is no template, or a template holding a null value, before the stack set
+     * stores it, as CreateStackSet and UpdateStackSet do (measured, eu-west-1, 2026-10-20 and
+     * 2026-10-21). StackSets passes CloudFormation's message on with the details of the service
+     * exception it came in.
+     */
+    private void requireValidTemplate(String templateBody) {
+        try {
+            cfnService.requireValidTemplate(templateBody);
+        } catch (AwsException e) {
+            throw new AwsException(e.getErrorCode(), CloudFormationTemplateEngine.sdkErrorMessage(
+                    e.getMessage(), "AmazonCloudFormation", e.getHttpStatus(), e.getErrorCode()), e.getHttpStatus());
+        }
     }
 
     private StackSet getStackSetOrThrow(String name) {

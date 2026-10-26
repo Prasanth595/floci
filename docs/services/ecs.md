@@ -196,6 +196,11 @@ other case, the injected `FLUENT_HOST` (the router's container IP) must be reach
 config is written to `/fluent-bit/etc/fluent-bit.conf`. Fluentd config is
 written to `/fluentd/etc/fluent.conf` and uses `@type` (not `Name`) for output plugins; Floci
 does not inject an `endpoint` into Fluentd outputs.
+FireLens configuration archive uploads retry transient Docker connection failures up to six
+attempts, with exponential backoff starting at 500 ms. Each attempt sends the complete prebuilt
+archive through a fresh byte-backed stream, without a streaming pipe or writer thread.
+The router and application containers start only after the upload succeeds;
+permanent errors or exhausted retries follow the existing task-launch cleanup path.
 `config-file-type=s3` follows where ECS itself draws the line. `RegisterTaskDefinition` rejects
 it for a Fargate-compatible task definition, with `Fargate launch type does not support
 FirelensConfiguration config file from 's3'`, and rejects a `config-file-value` that is not an S3
@@ -531,6 +536,30 @@ Known differences from AWS:
 - `SERVICE_DEPLOYMENT_FAILED` is not emitted.
 - `SubmitTaskStateChange` / `SubmitContainerStateChange` remain ACK-only; Floci drives
   the task lifecycle itself rather than via agent submissions.
+
+#### Container Insights metrics
+
+A service on a cluster whose own `containerInsights` setting is `enabled` or `enhanced`, set
+through `CreateCluster`, `UpdateCluster`, `UpdateClusterSettings` or CloudFormation
+`ClusterSettings`, publishes its task counts to CloudWatch, one sample a minute, in both docker
+and mock mode.
+
+| Namespace | Metrics | Dimensions | Unit |
+|---|---|---|---|
+| `ECS/ContainerInsights` | `RunningTaskCount`, `PendingTaskCount`, `DesiredTaskCount` | `ClusterName`, `ServiceName` | `Count` |
+
+As on AWS, nothing is published while the service has no `RUNNING` task, so an alarm on
+`RunningTaskCount` sees missing data rather than a zero: set `TreatMissingData` to `breaching`
+to alarm on a stopped service.
+
+Known differences from AWS:
+
+- Only these three service task counts are published. CPU, memory, network and storage metrics,
+  the cluster and task dimension sets, and the performance log events are not.
+- The account default set with `PutAccountSettingDefault` does not turn metrics on for a cluster;
+  only the cluster's own setting does.
+- A stack update that removes `ClusterSettings` leaves the cluster's settings in place: declare
+  `containerInsights` as `disabled` to stop the metrics.
 
 #### Service discovery
 
@@ -1017,9 +1046,31 @@ services:
 
 ### Host access to awsvpc task ports
 
-By default, Floci preserves the isolation expected from `awsvpc`: native runs use a dynamic Docker host port, while Floci-in-Docker exposes the container port only on the configured Docker network. A process running directly on the Docker host therefore has no stable port for an `awsvpc` task.
+Native runs publish `awsvpc` task ports on dynamically allocated Docker host ports.
+When Floci runs in Docker, task ports remain private to the configured Docker network
+unless `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST=true` is set.
 
-Set `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST=true` to opt into stable host publishing. Floci binds each `containerPort` to the same host port, or uses an explicit non-zero `hostPort` when one is present. A host-side Terraform provider can then connect to `localhost:<port>`.
+Enabling host publishing preserves stable ports by default: an explicit non-zero
+`hostPort` is used, otherwise the host port equals `containerPort`. Existing host-side
+clients can keep using `localhost:<hostPort>`. Only one task at a time can reserve each
+stable port on the shared Docker host.
+
+To run tasks with matching container ports concurrently, including rolling-deployment
+revisions, also set `FLOCI_SERVICES_ECS_DYNAMIC_AWSVPC_HOST_PORTS=true`
+(`floci.services.ecs.dynamic-awsvpc-host-ports`, default `false`). Docker then allocates
+an available host port per task, including tasks declaring an explicit `hostPort`.
+Discover the actual published address and port in `DescribeTasks`:
+
+```bash
+aws ecs describe-tasks --cluster my-cluster --tasks "$TASK_ARN" \
+  --query 'tasks[].containers[].networkBindings[]'
+```
+
+Published `awsvpc` ports bind to `127.0.0.1` by default. Set
+`floci.services.ecs.host-port-bind-address` (`FLOCI_SERVICES_ECS_HOST_PORT_BIND_ADDRESS`)
+to another Docker-host interface if clients need one. The same stable or dynamic
+allocation and interface settings apply to security-group network-namespace helpers.
+These are interfaces on the Docker daemon's host, which may differ from Floci's host.
 
 ```yaml
 services:
@@ -1029,9 +1080,15 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST: "true"
+      FLOCI_SERVICES_ECS_DYNAMIC_AWSVPC_HOST_PORTS: "true"
+      FLOCI_SERVICES_ECS_HOST_PORT_BIND_ADDRESS: "127.0.0.1"
 ```
 
-This setting is an emulator-specific networking convenience and defaults to `false`. Docker cannot bind the same host port twice, so use it only when at most one running task publishes each port.
+Host publishing is an emulator convenience and defaults to `false` in Docker mode.
+With dynamic allocation enabled, host-side clients must use each task's reported host
+port. Load balancers inside Docker use the container's Docker-network address and
+container port; native load balancers use the published host port. Bridge/host-mode
+explicit bindings retain their existing fixed-port behavior.
 
 ## Examples
 

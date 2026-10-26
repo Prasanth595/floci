@@ -16,9 +16,12 @@ import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -31,8 +34,12 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class AutoScalingService {
+public class AutoScalingService implements PassedRoleLookup {
 
+    /** The tag Auto Scaling puts on every instance it launches or attaches, valued with the group's name. */
+    static final String GROUP_NAME_TAG = "aws:autoscaling:groupName";
+
+    private static final Logger LOG = Logger.getLogger(AutoScalingService.class);
     private static final String FULLY_FORMED_LAUNCH_TEMPLATE = "You must use a valid fully-formed launch template. ";
     static final String MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE =
             FULLY_FORMED_LAUNCH_TEMPLATE + "The request must contain the parameter ImageId";
@@ -104,8 +111,7 @@ public class AutoScalingService {
             "GroupAndWarmPoolDesiredCapacity", "GroupAndWarmPoolTotalCapacity");
     public static final String METRICS_GRANULARITY = "1Minute";
     static final String MISSING_GRANULARITY_MESSAGE =
-            "1 validation error detected: Value null at 'granularity' failed to satisfy constraint: "
-                    + "Member must not be null";
+            SmithyValidationErrors.message(List.of(SmithyValidationErrors.notNull("granularity")));
     public static final String INVALID_GRANULARITY_MESSAGE =
             "Granularity must be 1Minute. 1Minute is the only valid value.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
@@ -195,12 +201,9 @@ public class AutoScalingService {
             throw new AwsException("ValidationError", INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE, 400);
         }
         if (notBlank(instanceId) && ec2Service != null) {
-            List<Instance> sourceInstances = ec2Service.describeInstances(region, List.of(instanceId), Map.of())
-                    .stream()
-                    .flatMap(reservation -> reservation.getInstances().stream())
-                    .collect(Collectors.toList());
-            if (!sourceInstances.isEmpty()) {
-                Instance source = sourceInstances.getFirst();
+            Optional<Instance> sourceInstance = sourceInstance(region, instanceId);
+            if (sourceInstance.isPresent()) {
+                Instance source = sourceInstance.get();
                 if (isBlank(imageId)) {
                     imageId = source.getImageId();
                 }
@@ -282,6 +285,29 @@ public class AutoScalingService {
         if (value != null && !List.of(allowed).contains(value)) {
             violations.add("Value '" + value + "' at 'metadataOptions." + member + "' failed to satisfy constraint:"
                     + " Member must satisfy enum value set: [" + String.join(", ", allowed) + "]");
+        }
+    }
+
+    /** The EC2 instance a launch configuration is made from, which it derives what the request leaves out from. */
+    private Optional<Instance> sourceInstance(String region, String instanceId) {
+        return ec2Service.describeInstances(region, List.of(instanceId), Map.of()).stream()
+                .flatMap(reservation -> reservation.getInstances().stream())
+                .findFirst();
+    }
+
+    /** The instance profile a launch configuration made from the instance takes, for the {@code iam:PassRole} check. */
+    @Override
+    public Optional<String> launchConfigurationInstanceProfile(String instanceId, String region) {
+        if (ec2Service == null || isBlank(instanceId)) {
+            return Optional.empty();
+        }
+        try {
+            return sourceInstance(region, instanceId).map(Instance::getIamInstanceProfileArn)
+                    .filter(profile -> !isBlank(profile));
+        } catch (AwsException e) {
+            // An instance that does not exist is the operation's to refuse, and passes no role.
+            LOG.debugv("Instance {0} passes no role: {1}", instanceId, e.getMessage());
+            return Optional.empty();
         }
     }
 
@@ -824,25 +850,77 @@ public class AutoScalingService {
         return instanceId != null && asg.getInstances().stream().anyMatch(i -> instanceId.equals(i.getInstanceId()));
     }
 
+    /**
+     * The tags an instance carries as a member of {@code asg}: the launch template's instance tags,
+     * then the group's PropagateAtLaunch tags, which win a key both set, then the group-name tag,
+     * which names {@code asg} whatever the other two say.
+     */
+    static List<Tag> propagatedInstanceTags(AutoScalingGroup asg, List<Tag> templateTags) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        templateTags.forEach(tag -> tags.put(tag.getKey(), tag.getValue()));
+        asg.getTags().forEach((key, value) -> {
+            if (asg.getTagPropagateAtLaunch().getOrDefault(key, false)) {
+                tags.put(key, value);
+            }
+        });
+        tags.put(GROUP_NAME_TAG, asg.getAutoScalingGroupName());
+        return tags.entrySet().stream().map(entry -> new Tag(entry.getKey(), entry.getValue())).toList();
+    }
+
     public void attachInstances(String region, String name, List<String> instanceIds) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        for (String id : instanceIds) {
-            AsgInstance inst = new AsgInstance();
-            inst.setInstanceId(id);
-            inst.setLifecycleState("InService");
-            inst.setHealthStatus("Healthy");
-            inst.setAvailabilityZone(
-                    asg.getAvailabilityZones().isEmpty() ? region + "a" : asg.getAvailabilityZones().get(0));
-            inst.setLaunchConfigurationName(asg.getLaunchConfigurationName());
-            inst.setLaunchTemplateId(asg.getLaunchTemplateId());
-            inst.setLaunchTemplateName(asg.getLaunchTemplateName());
-            inst.setLaunchTemplateVersion(asg.getLaunchTemplateVersion());
-            asg.getInstances().add(inst);
+        // An instance joins once, however often the request names it.
+        List<String> requested = new ArrayList<>(new LinkedHashSet<>(instanceIds));
+        // The region lock keeps two groups from each attaching the same instance at once.
+        synchronized (lockFor(region)) {
+            synchronized (lockFor(asgKey(region, name))) {
+                AutoScalingGroup asg = requireGroup(region, name);
+                // An instance belongs to one group at a time, so the whole batch fails before any tag changes.
+                List<String> conflicts = new ArrayList<>();
+                for (AutoScalingGroup group : groups.values()) {
+                    if (group == null || !region.equals(group.getRegion())) {
+                        continue;
+                    }
+                    // Under the group's own lock, which guards its member list against the reconciler.
+                    synchronized (lockFor(asgKey(region, group.getAutoScalingGroupName()))) {
+                        for (AsgInstance member : group.getInstances()) {
+                            if (requested.contains(member.getInstanceId())) {
+                                conflicts.add("The Instance: " + member.getInstanceId()
+                                        + " is already part of AutoScalingGroup:" + group.getAutoScalingGroupName());
+                            }
+                        }
+                    }
+                }
+                if (!conflicts.isEmpty()) {
+                    throw new AwsException("ValidationError", conflicts.toString(), 400);
+                }
+                // Attaching does not yet refuse an ID EC2 has no instance for, as AWS does, so such
+                // an ID gets no tags: they would outlive it in EC2's DescribeTags.
+                List<String> existing = requested.stream()
+                        .filter(id -> ec2Service.findInstanceForAccount(regionResolver.getAccountId(), region, id)
+                                .isPresent())
+                        .toList();
+                if (!existing.isEmpty()) {
+                    ec2Service.createSystemTags(region, existing, propagatedInstanceTags(asg, List.of()));
+                }
+                for (String id : requested) {
+                    AsgInstance inst = new AsgInstance();
+                    inst.setInstanceId(id);
+                    inst.setLifecycleState("InService");
+                    inst.setHealthStatus("Healthy");
+                    inst.setAvailabilityZone(
+                            asg.getAvailabilityZones().isEmpty() ? region + "a" : asg.getAvailabilityZones().get(0));
+                    inst.setLaunchConfigurationName(asg.getLaunchConfigurationName());
+                    inst.setLaunchTemplateId(asg.getLaunchTemplateId());
+                    inst.setLaunchTemplateName(asg.getLaunchTemplateName());
+                    inst.setLaunchTemplateVersion(asg.getLaunchTemplateVersion());
+                    asg.getInstances().add(inst);
+                }
+                if (asg.getInstances().size() > asg.getDesiredCapacity()) {
+                    asg.setDesiredCapacity(asg.getInstances().size());
+                }
+                groups.put(asgKey(region, name), asg);
+            }
         }
-        if (asg.getInstances().size() > asg.getDesiredCapacity()) {
-            asg.setDesiredCapacity(asg.getInstances().size());
-        }
-        groups.put(asgKey(region, name), asg);
     }
 
     public void detachInstances(String region, String name, List<String> instanceIds,
@@ -852,6 +930,10 @@ public class AutoScalingService {
             AutoScalingGroup asg = requireGroup(region, name);
             List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
                     .filter(instanceIds::contains).toList();
+            if (!detached.isEmpty()) {
+                // Detaching removes only the group-name tag, and only where it still names this group.
+                ec2Service.deleteSystemTag(region, detached, GROUP_NAME_TAG, name);
+            }
             releaseRefreshOwnership(asg, detached);
             asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
             if (decrementDesiredCapacity) {
@@ -1177,8 +1259,7 @@ public class AutoScalingService {
     private static void validateLifecycleHookName(String hookName) {
         if (hookName == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at 'lifecycleHookName' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNull("lifecycleHookName"));
         }
         if (hookName.length() > 255) {
             throw SmithyValidationErrors.validationError(
@@ -1604,7 +1685,7 @@ public class AutoScalingService {
         }
     }
 
-    private static void validateCapacityReservationSpecification(CapacityReservationSpecification specification) {
+    static void validateCapacityReservationSpecification(CapacityReservationSpecification specification) {
         if (specification == null) {
             return;
         }
@@ -1614,6 +1695,10 @@ public class AutoScalingService {
         }
         if ("none".equals(preference) && specification.hasTarget()) {
             throw new AwsException("ValidationError", CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE, 400);
+        }
+        if (specification.getCapacityReservationIds().size()
+                + specification.getCapacityReservationResourceGroupArns().size() > 1) {
+            throw new AwsException("ValidationError", "Specify only one Capacity Reservation target.", 400);
         }
         for (String id : specification.getCapacityReservationIds()) {
             if (id == null || id.isEmpty() || id.length() > 255
@@ -1728,6 +1813,37 @@ public class AutoScalingService {
                 throw new AwsException("ValidationError", FULLY_FORMED_LAUNCH_TEMPLATE + invalid.getMessage(), 400);
             }
         }
+    }
+
+    /**
+     * The instance profile a group's instances get from the launch template version, resolved as the
+     * group's own validation resolves it, for the {@code iam:PassRole} check of the operations naming it.
+     */
+    @Override
+    public Optional<String> launchTemplateInstanceProfile(String templateId, String templateName, String version,
+                                                          String region) {
+        if (ec2Service == null || (isBlank(templateId) && isBlank(templateName))) {
+            return Optional.empty();
+        }
+        List<LaunchTemplate> versions;
+        try {
+            versions = ec2Service.describeLaunchTemplateVersions(region, templateId, templateName,
+                    isBlank(version) ? List.of() : List.of(version));
+        } catch (AwsException e) {
+            // A version that does not exist is the operation's to refuse, and passes no role.
+            LOG.debugv("Launch template {0} has no version {1}, so it passes no role: {2}",
+                    isBlank(templateId) ? templateName : templateId, version, e.getMessage());
+            return Optional.empty();
+        }
+        LaunchTemplateData.IamInstanceProfile profile =
+                versions.isEmpty() ? null : versions.getFirst().getData().getIamInstanceProfile();
+        if (profile == null) {
+            return Optional.empty();
+        }
+        if (!isBlank(profile.getArn())) {
+            return Optional.of(profile.getArn());
+        }
+        return isBlank(profile.getName()) ? Optional.empty() : Optional.of(profile.getName());
     }
 
     private static MixedInstancesPolicy.LaunchTemplateSpecification mixedInstancesLaunchTemplateSpecification(
@@ -1857,14 +1973,47 @@ public class AutoScalingService {
         if (!refresh.hasDesiredConfiguration()) {
             return;
         }
-        if (refresh.getDesiredLaunchTemplateId() != null || refresh.getDesiredLaunchTemplateName() != null) {
-            asg.setLaunchTemplateId(refresh.getDesiredLaunchTemplateId());
-            asg.setLaunchTemplateName(refresh.getDesiredLaunchTemplateName());
+        DesiredLaunchTemplate desired = desiredLaunchTemplate(asg, refresh.getDesiredLaunchTemplateId(),
+                refresh.getDesiredLaunchTemplateName(), refresh.getDesiredLaunchTemplateVersion());
+        if (desired.replacesTemplate()) {
             asg.setLaunchConfigurationName(null);
         }
-        if (refresh.getDesiredLaunchTemplateVersion() != null) {
-            asg.setLaunchTemplateVersion(refresh.getDesiredLaunchTemplateVersion());
+        asg.setLaunchTemplateId(desired.id());
+        asg.setLaunchTemplateName(desired.name());
+        asg.setLaunchTemplateVersion(desired.version());
+    }
+
+    /** The launch template a group launches from once a refresh's desired configuration is applied to it. */
+    private record DesiredLaunchTemplate(String id, String name, String version, boolean replacesTemplate) {
+    }
+
+    /**
+     * A desired configuration naming a template replaces the group's, and one naming a version replaces
+     * its version, so a template named without a version keeps the group's version number.
+     */
+    private static DesiredLaunchTemplate desiredLaunchTemplate(AutoScalingGroup asg, String templateId,
+                                                               String templateName, String version) {
+        boolean replacesTemplate = templateId != null || templateName != null;
+        return new DesiredLaunchTemplate(
+                replacesTemplate ? templateId : asg.getLaunchTemplateId(),
+                replacesTemplate ? templateName : asg.getLaunchTemplateName(),
+                version != null ? version : asg.getLaunchTemplateVersion(),
+                replacesTemplate);
+    }
+
+    /**
+     * The instance profile the group launches with once the refresh applies its desired configuration,
+     * merged with the group as {@link #applyDesiredConfiguration} merges it, for the {@code iam:PassRole} check.
+     */
+    @Override
+    public Optional<String> instanceRefreshInstanceProfile(String groupName, String templateId, String templateName,
+                                                           String version, String region) {
+        AutoScalingGroup asg = isBlank(groupName) ? null : groups.get(asgKey(region, groupName));
+        if (asg == null || (templateId == null && templateName == null && version == null)) {
+            return Optional.empty();
         }
+        DesiredLaunchTemplate desired = desiredLaunchTemplate(asg, templateId, templateName, version);
+        return launchTemplateInstanceProfile(desired.id(), desired.name(), desired.version(), region);
     }
 
     private static List<String> markInstancesForRefresh(AutoScalingGroup asg, InstanceRefresh refresh) {

@@ -6,15 +6,21 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.PublicAccessConditions;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
@@ -26,12 +32,12 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -40,6 +46,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,10 +57,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Control plane of Lambda Web Functions (apiVersion 2025-03-07). A revision and an endpoint are
- * stored Active and an endpoint update is stored Successful. The create and update responses show
- * the transitional state AWS reports. Invocation through an endpoint domain is not part of this
- * service.
+ * Control plane of Lambda Web Functions (apiVersion 2025-03-07). A revision is stored Active, or
+ * Failed when its code is not a zip or unzips past the size limit. An endpoint is stored Active, or
+ * Failed when CreateWebFunction gives it a Failed revision, and an endpoint update is stored
+ * Successful. The create and update responses show the transitional state AWS reports. Invocation
+ * through an endpoint domain is not part of this service.
  */
 @ApplicationScoped
 public class LambdaWebService implements Resettable {
@@ -80,22 +88,19 @@ public class LambdaWebService implements Resettable {
             "AWS_LAMBDA_HTTP_ENDPOINT", "AWS_LAMBDA_RUNTIME_API", "AWS_LAMBDA_INITIALIZATION_TYPE",
             "AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "AWS_LAMBDA_METADATA_API", "AWS_LAMBDA_METADATA_TOKEN");
     /** A wildcard principal pinned by one of these condition keys does not make a policy public. */
-    static final Set<String> TRUSTED_CONDITION_KEYS = Set.of(
-            "aws:PrincipalAccount", "aws:PrincipalArn", "aws:PrincipalOrgID", "aws:PrincipalOrgPaths",
-            "aws:SourceAccount", "aws:SourceArn", "aws:SourceOrgID", "aws:SourceOrgPaths", "aws:SourceVpc",
-            "aws:SourceVpcArn", "aws:SourceVpce", "aws:VpceAccount", "aws:VpceOrgID", "aws:VpceOrgPaths",
-            "aws:Ec2InstanceSourceVpc", "aws:UserId", "aws:PrincipalServiceName", "aws:PrincipalServiceNamesList",
-            "aws:PrincipalIsAWSService", "lambda:SourceFunctionArn");
+    static final Set<String> TRUSTED_CONDITION_KEYS =
+            PublicAccessConditions.with(PublicAccessConditions.TRUSTED_KEYS, "lambda:SourceFunctionArn");
     /** The operators whose match pins the caller. Negated and IfExists forms do not. */
     private static final Set<String> PINNING_OPERATORS = Set.of(
             "StringEquals", "StringEqualsIgnoreCase", "StringLike", "ArnEquals", "ArnLike", "Bool");
-    private static final Set<String> ARN_CONDITION_KEYS = Set.of(
-            "aws:PrincipalArn", "aws:SourceArn", "aws:SourceVpcArn", "lambda:SourceFunctionArn");
+    private static final Set<String> ARN_CONDITION_KEYS =
+            PublicAccessConditions.with(PublicAccessConditions.ARN_KEYS, "lambda:SourceFunctionArn");
     private static final Set<String> STATEMENT_KEYS = Set.of(
             "Sid", "Effect", "Principal", "NotPrincipal", "Action", "NotAction", "Resource", "NotResource", "Condition");
     private static final Set<String> PRINCIPAL_KEYS = Set.of("AWS", "Service", "Federated", "CanonicalUser");
     private static final String POLICY_SYNTAX = "Policy has syntax errors.";
     private static final String INVALID_PRINCIPAL = "The provided principal was invalid. Please check the principal and try again.";
+    private static final String NOT_A_ZIP = "Failed to read zip file: zip: not a valid zip file";
     private static final String INVALID_TAGS = "One or more of your tags are invalid. Please ensure none of your tag keys"
             + " start with \"aws:\", none are empty, and there are no duplicate tag keys.";
 
@@ -129,14 +134,18 @@ public class LambdaWebService implements Resettable {
     private static final String DOMAIN_SHARD = "001";
     private static final int DOMAIN_ID_LENGTH = 16;
     private static final int DEFAULT_PAGE_SIZE = 50;
+    static final int REVISION_CLEANUP_TARGET = 50;
     private static final String LOWERCASE_ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
 
     private final RegionResolver regionResolver;
     private final StorageFactory storageFactory;
     private final EmulatorConfig config;
     private final S3Service s3Service;
+    private final LambdaWebCode code;
     private final ObjectMapper objectMapper;
     private final Instance<RequestContext> requestContext;
+    private final LambdaWebExecutionRole executionRole;
+    private final ServiceCallAuthorizer serviceCalls;
 
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
@@ -148,13 +157,18 @@ public class LambdaWebService implements Resettable {
 
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
-                            S3Service s3Service, ObjectMapper objectMapper, Instance<RequestContext> requestContext) {
+                            S3Service s3Service, LambdaWebCode code, ObjectMapper objectMapper,
+                            Instance<RequestContext> requestContext, LambdaWebExecutionRole executionRole,
+                            ServiceCallAuthorizer serviceCalls) {
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
         this.config = config;
         this.s3Service = s3Service;
+        this.code = code;
         this.objectMapper = objectMapper;
         this.requestContext = requestContext;
+        this.executionRole = executionRole;
+        this.serviceCalls = serviceCalls;
     }
 
     @PostConstruct
@@ -173,6 +187,7 @@ public class LambdaWebService implements Resettable {
         for (WebFunction fn : all) {
             fn.endpoints.values().forEach(endpoint -> indexDomains(fn, endpoint));
         }
+        code.retainOnly(all);
     }
 
     @Override
@@ -180,13 +195,19 @@ public class LambdaWebService implements Resettable {
         functions.clear();
         domains.clear();
         originHosts.clear();
+        code.clear();
     }
 
-    /** Where a request to an endpoint domain goes. Domains are unique across accounts and regions. */
-    public record WebFunctionTarget(String accountId, String region, WebFunction function, WebFunctionEndpoint endpoint) {
+    /**
+     * Where a request to an endpoint domain goes. Domains are unique across accounts and regions.
+     * {@code region} is the function's home region and {@code servingRegion} the region of the domain.
+     */
+    public record WebFunctionTarget(String accountId, String region, WebFunction function, WebFunctionEndpoint endpoint,
+                                    String servingRegion) {
     }
 
-    private record EndpointLocator(String accountId, String region, String functionName, String endpointName) {
+    private record EndpointLocator(String accountId, String region, String functionName, String endpointName,
+                                   String servingRegion) {
     }
 
     public Optional<WebFunctionTarget> locate(String host) {
@@ -204,7 +225,7 @@ public class LambdaWebService implements Resettable {
                 }
                 WebFunction fn = copy(stored.get(), WebFunction.class);
                 return Optional.of(new WebFunctionTarget(locator.accountId(), locator.region(), fn,
-                        fn.endpoints.get(locator.endpointName())));
+                        fn.endpoints.get(locator.endpointName()), locator.servingRegion()));
             }
         });
     }
@@ -217,11 +238,19 @@ public class LambdaWebService implements Resettable {
         return Optional.ofNullable(originHosts.get(host));
     }
 
+    /**
+     * AWS serves the MultiRegion global domain in the region nearest the caller. Floci takes the default region for
+     * that when the endpoint has it, and the home region otherwise.
+     */
     private void indexDomains(WebFunction fn, WebFunctionEndpoint endpoint) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.functionArn);
-        EndpointLocator locator = new EndpointLocator(arn.accountId(), arn.region(), fn.functionName, endpoint.endpointName);
-        index(endpoint.domainName, locator);
-        endpoint.regionalDomainNames.values().forEach(domain -> index(domain, locator));
+        String defaultRegion = regionResolver.getDefaultRegion();
+        String servingRegion = "MultiRegion".equals(endpoint.endpointType) && endpoint.regions.contains(defaultRegion)
+                ? defaultRegion : arn.region();
+        index(endpoint.domainName, new EndpointLocator(arn.accountId(), arn.region(), fn.functionName,
+                endpoint.endpointName, servingRegion));
+        endpoint.regionalDomainNames.forEach((region, domain) -> index(domain, new EndpointLocator(arn.accountId(),
+                arn.region(), fn.functionName, endpoint.endpointName, region)));
     }
 
     private void index(String domain, EndpointLocator locator) {
@@ -294,12 +323,14 @@ public class LambdaWebService implements Resettable {
                     "The revisionConfig and endpointConfig must be specified.", 400);
         }
         requireValidTags(tags);
-        validateRevisionRules(revisionConfig);
+        validateRevisionRules(region, revisionConfig);
         String accountId = regionResolver.getAccountId();
         WebFunctionEndpoint endpoint = draftEndpoint(region, accountId, functionName, endpointConfig, false);
         return storeNewFunction(region, functionName, tags, fn -> {
             WebFunctionRevision revision = buildRevision(fn, revisionConfig);
+            keepCode(region, fn, revision);
             attachEndpoint(region, fn, endpoint, revision);
+            endpoint.failed = revision.failureReason != null;
             fn.revisions.put(revision.revisionId, revision);
             fn.endpoints.put(endpoint.endpointName, endpoint);
             indexDomains(fn, endpoint);
@@ -324,19 +355,29 @@ public class LambdaWebService implements Resettable {
         }
     }
 
-    /** Stores a new function under its lock, refusing a name the region already has. */
+    /**
+     * Stores a new function under its lock, refusing a name the account already has in any region.
+     * Creates of one name in every region of the account share a lock, so two regions cannot both take it.
+     */
     private WebFunction storeNewFunction(String region, String functionName, Map<String, String> tags,
                                          Consumer<WebFunction> populate) {
         String accountId = regionResolver.getAccountId();
-        synchronized (lockFor(region, functionName)) {
-            if (functions.get(key(region, functionName)).isPresent()) {
-                throw new AwsException("ConflictException",
-                        "The function " + functionArn(region, accountId, functionName) + " already exists.", 409);
+        synchronized (locks.computeIfAbsent(accountId + "/" + functionName, k -> new Object())) {
+            synchronized (lockFor(region, functionName)) {
+                if (functions.get(key(region, functionName)).isPresent()) {
+                    throw new AwsException("ConflictException",
+                            "The function " + functionArn(region, accountId, functionName) + " already exists.", 409);
+                }
+                if (!functions.scan(k -> k.endsWith("/" + functionName)).isEmpty()) {
+                    throw new AwsException("ConflictException", "A function named " + functionName
+                            + " already exists in the account. Function names must be unique across all regions"
+                            + " in an account.", 409);
+                }
+                WebFunction fn = newFunction(region, accountId, functionName, tags == null ? Map.of() : tags);
+                populate.accept(fn);
+                functions.put(key(region, functionName), fn);
+                return copy(fn, WebFunction.class);
             }
-            WebFunction fn = newFunction(region, accountId, functionName, tags == null ? Map.of() : tags);
-            populate.accept(fn);
-            functions.put(key(region, functionName), fn);
-            return copy(fn, WebFunction.class);
         }
     }
 
@@ -376,6 +417,7 @@ public class LambdaWebService implements Resettable {
             WebFunction fn = function(region, functionName);
             fn.endpoints.values().forEach(this::unindexDomains);
             functions.delete(key(region, functionName));
+            code.deleteFunction(AwsArnUtils.parse(fn.functionArn).accountId(), region, functionName);
         }
         LOG.infov("Deleted web function {0}", functionName);
     }
@@ -391,22 +433,55 @@ public class LambdaWebService implements Resettable {
         LambdaWebValidation validation = new LambdaWebValidation();
         validateRevisionShape(validation, request, "");
         validation.throwIfAny();
-        validateRevisionRules(request);
         String functionName = resolveFunctionName(region, functionNameOrArn, "CreateWebFunctionRevision");
+        validateRevisionRules(region, request);
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             WebFunctionRevision revision = buildRevision(fn, request);
+            keepCode(region, fn, revision);
             fn.revisions.put(revision.revisionId, revision);
+            // Before the endpoints move, as AWS keeps the revision a LatestRevision endpoint leaves.
+            List<String> cleanedUp = revision.failureReason == null ? cleanUpRevisions(fn, revision) : List.of();
             for (WebFunctionEndpoint endpoint : fn.endpoints.values()) {
-                if ("LatestRevision".equals(endpoint.autoDeploymentMode)) {
+                if ("LatestRevision".equals(endpoint.autoDeploymentMode) && revision.failureReason == null) {
                     endpoint.revisionWeights = List.of(weight(revision.revisionId, 100));
                     endpoint.updatedAt = now();
                 }
             }
             fn.updatedAt = now();
             persist(region, fn);
+            String accountId = AwsArnUtils.parse(fn.functionArn).accountId();
+            cleanedUp.forEach(id -> code.deleteRevision(accountId, region, functionName, id));
             return copy(revision, WebFunctionRevision.class);
         }
+    }
+
+    /**
+     * AWS deletes the oldest revisions that no endpoint uses, Failed ones too, once one becomes Active
+     * while the function has more than 50.
+     */
+    private static List<String> cleanUpRevisions(WebFunction fn, WebFunctionRevision activated) {
+        List<WebFunctionRevision> unused = fn.revisions.values().stream()
+                .filter(r -> r != activated && endpointsUsing(fn, r.revisionId).isEmpty())
+                .sorted(Comparator.comparing((WebFunctionRevision r) -> r.createdAt))
+                .toList();
+        List<String> deleted = new ArrayList<>();
+        for (WebFunctionRevision old : unused) {
+            if (fn.revisions.size() <= REVISION_CLEANUP_TARGET) {
+                break;
+            }
+            fn.revisions.remove(old.revisionId);
+            deleted.add(old.revisionId);
+        }
+        return deleted;
+    }
+
+    private static List<String> endpointsUsing(WebFunction fn, String revisionId) {
+        return fn.endpoints.values().stream()
+                .filter(e -> e.revisionWeights.stream().anyMatch(w -> w.revisionId.equals(revisionId)))
+                .map(e -> e.endpointName)
+                .sorted()
+                .toList();
     }
 
     public WebFunctionRevision getRevision(String region, String functionNameOrArn, String revisionIdOrArn) {
@@ -424,9 +499,10 @@ public class LambdaWebService implements Resettable {
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             List<WebFunctionRevision> snapshots = fn.revisions.values().stream()
+                    .filter(r -> list.matchesState(r.failureReason == null ? "Active" : "Failed"))
                     .map(r -> copy(r, WebFunctionRevision.class))
                     .toList();
-            return page(list.matchesState("Active") ? snapshots : List.of(), list,
+            return page(snapshots, list,
                     scope("ListWebFunctionRevisions", region, functionName, list), LambdaWebService::newestFirst);
         }
     }
@@ -443,11 +519,7 @@ public class LambdaWebService implements Resettable {
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             WebFunctionRevision revision = revision(fn, revisionId);
-            List<String> using = fn.endpoints.values().stream()
-                    .filter(e -> e.revisionWeights.stream().anyMatch(w -> w.revisionId.equals(revision.revisionId)))
-                    .map(e -> e.endpointName)
-                    .sorted()
-                    .toList();
+            List<String> using = endpointsUsing(fn, revision.revisionId);
             if (!using.isEmpty()) {
                 throw new AwsException("ConflictException", "The revision " + revision.revisionId
                         + " cannot be deleted because the endpoints " + using
@@ -456,6 +528,7 @@ public class LambdaWebService implements Resettable {
             fn.revisions.remove(revision.revisionId);
             fn.updatedAt = now();
             persist(region, fn);
+            code.deleteRevision(AwsArnUtils.parse(fn.functionArn).accountId(), region, functionName, revisionId);
         }
     }
 
@@ -494,8 +567,12 @@ public class LambdaWebService implements Resettable {
     }
 
     /** The rules a revision request must meet before the function is looked up. */
-    private static void validateRevisionRules(JsonNode request) {
+    private void validateRevisionRules(String region, JsonNode request) {
         JsonNode service = LambdaWebJson.structure(request, "serviceConfig");
+        String role = LambdaWebJson.text(service, "executionRoleArn");
+        if (!AwsArnUtils.parse(role).accountId().equals(regionResolver.getAccountId())) {
+            throw new LambdaWebAccessDeniedException("Cross-account pass role is not allowed.");
+        }
         Map<String, String> environment = LambdaWebJson.stringMap(service, "environmentVariables", false);
         if (environment != null) {
             List<String> reserved = environment.keySet().stream().filter(RESERVED_ENVIRONMENT_KEYS::contains).toList();
@@ -509,6 +586,7 @@ public class LambdaWebService implements Resettable {
             throw new AwsException("ValidationException", "The logGroup " + logGroup
                     + " is invalid. Log group names starting with aws/ (case-insensitive) are reserved for AWS.", 400);
         }
+        executionRole.requireAssumable(region, role);
     }
 
     private WebFunctionRevision buildRevision(WebFunction fn, JsonNode request) {
@@ -520,7 +598,6 @@ public class LambdaWebService implements Resettable {
         }
         revision.serviceConfig = serviceConfigOf(LambdaWebJson.structure(request, "serviceConfig"),
                 defaultLogGroup(fn.functionName));
-        requireCodeObject(revision.buildConfig);
         revision.description = LambdaWebJson.text(request, "description");
         revision.kmsKeyArn = LambdaWebJson.text(request, "kmsKeyArn");
         String revisionId;
@@ -575,18 +652,81 @@ public class LambdaWebService implements Resettable {
         return LambdaWebJson.structure(LambdaWebJson.structure(service, "telemetryConfig"), "loggingConfig");
     }
 
-    /** The code object must exist in the bucket's current version or the version the request pins. */
-    private void requireCodeObject(WebFunctionRevision.BuildConfig build) {
+    /** Copies the code a revision runs: the bucket's current version, or the version the request pins. */
+    private void keepCode(String region, WebFunction fn, WebFunctionRevision revision) {
         if (s3Service == null) {
             return;
         }
+        String accountId = AwsArnUtils.parse(fn.functionArn).accountId();
+        WebFunctionRevision.BuildConfig build = revision.buildConfig;
+        long size;
+        try (S3Service.ObjectRead object = openCode(build)) {
+            if (build.versionId == null && object.object().getVersionId() == null) {
+                throw new AwsException("ValidationException", "You must enable S3 versioning for your S3 bucket"
+                        + " when S3ObjectStorageMode is set to REFERENCE.", 400);
+            }
+            // AWS accepts an object of exactly this size, despite the wording.
+            if (LambdaWebCode.MAX_BYTES < object.object().getSize()) {
+                throw new AwsException("ValidationException", "Zipped size must be smaller than "
+                        + LambdaWebCode.MAX_BYTES + " bytes", 400);
+            }
+            requireLambdaCanRead(fn, revision,
+                    build.versionId != null ? build.versionId : object.object().getVersionId());
+            size = code.store(accountId, region, fn.functionName, revision.revisionId, object.body());
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not close the code object s3://" + build.bucket + "/" + build.key, e);
+        }
+        if (size == 0) {
+            // An empty object is an internal error on AWS.
+            code.deleteRevision(accountId, region, fn.functionName, revision.revisionId);
+            throw new LambdaWebInternalServerException();
+        }
+        OptionalLong unzipped = code.unzippedSize(accountId, region, fn.functionName, revision.revisionId);
+        if (unzipped.isEmpty()) {
+            revision.failureReason = NOT_A_ZIP;
+        } else if (Long.compareUnsigned(LambdaWebCode.MAX_BYTES, unzipped.getAsLong()) < 0) {
+            revision.failureReason = "Uncompressed code size " + Long.toUnsignedString(unzipped.getAsLong())
+                    + " bytes exceeds the maximum allowed size of " + LambdaWebCode.MAX_BYTES + " bytes";
+        }
+        if (revision.failureReason != null) {
+            code.deleteRevision(accountId, region, fn.functionName, revision.revisionId);
+        }
+    }
+
+    /** AWS evaluates only s3:GetObjectVersion, although its message names both actions. */
+    private void requireLambdaCanRead(WebFunction fn, WebFunctionRevision revision, String versionId) {
+        WebFunctionRevision.BuildConfig build = revision.buildConfig;
+        AwsArnUtils.Arn function = AwsArnUtils.parse(fn.functionArn);
+        String objectArn = AwsArnUtils.Arn.global(function.partition(), "s3", "", build.bucket + "/" + build.key)
+                .toString();
+        if (serviceCalls.authorize("lambda", "s3:GetObjectVersion", objectArn, revision.revisionArn,
+                function.accountId(), Map.of(IamConditionContextResolver.VERSION_ID, List.of(versionId)))
+                == Decision.DENY) {
+            throw new AwsException("ValidationException", "Lambda service principal " + ServicePrincipals.of("lambda")
+                    + " does not have s3:GetObject and s3:GetObjectVersion permission on s3://" + build.bucket + "/"
+                    + build.key + ". Update the bucket policy to grant the Lambda service principal access and retry.",
+                    400);
+        }
+    }
+
+    private S3Service.ObjectRead openCode(WebFunctionRevision.BuildConfig build) {
         try {
-            s3Service.headObject(build.bucket, build.key, build.versionId);
+            return s3Service.openObject(build.bucket, build.key, build.versionId);
         } catch (AwsException e) {
             LOG.debugv("Web function code object s3://{0}/{1} is not readable: {2}", build.bucket, build.key,
                     e.getMessage());
-            throw new AwsException("ValidationException", "The specified S3 object does not exist: s3://"
-                    + build.bucket + "/" + build.key + ". Verify the object exists in the bucket.", 400);
+            String object = "s3://" + build.bucket + "/" + build.key;
+            if (build.versionId == null) {
+                throw new AwsException("ValidationException", "The specified S3 object does not exist: " + object
+                        + ". Verify the object exists in the bucket.", 400);
+            }
+            if (e.getHttpStatus() == 404) {
+                throw new AwsException("ValidationException", "The specified S3 object does not exist: " + object
+                        + " (versionId=" + build.versionId + "). Verify the object exists and the versionId is correct.",
+                        400);
+            }
+            throw new AwsException("ValidationException", "The S3 object " + object + " (versionId=" + build.versionId
+                    + ") is inaccessible. Verify the request parameters and permissions are correct.", 400);
         }
     }
 
@@ -691,9 +831,10 @@ public class LambdaWebService implements Resettable {
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             List<WebFunctionEndpoint> snapshots = fn.endpoints.values().stream()
+                    .filter(e -> list.matchesState(e.failed ? "Failed" : "Active"))
                     .map(e -> copy(e, WebFunctionEndpoint.class))
                     .toList();
-            return page(list.matchesState("Active") ? snapshots : List.of(), list,
+            return page(snapshots, list,
                     scope("ListWebFunctionEndpoints", region, functionName, list), e -> e.endpointName);
         }
     }
@@ -714,6 +855,10 @@ public class LambdaWebService implements Resettable {
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
             WebFunctionEndpoint endpoint = endpoint(fn, endpointName);
+            if (endpoint.failed) {
+                throw new AwsException("ConflictException", "The endpoint " + endpoint.endpointName
+                        + " is in Failed state. The operation is allowed only when the endpoint is in Active state.", 409);
+            }
             WebFunctionEndpoint before = copy(endpoint, WebFunctionEndpoint.class);
 
             String effectiveMode = mode != null ? mode : endpoint.autoDeploymentMode;
@@ -849,8 +994,9 @@ public class LambdaWebService implements Resettable {
         if ("MultiRegion".equals(endpoint.endpointType)) {
             endpoint.domainName = randomLowercase(DOMAIN_ID_LENGTH) + ".lambda-web.global." + host;
         } else {
+            String id = randomLowercase(DOMAIN_ID_LENGTH);
             for (String each : endpoint.regions) {
-                endpoint.regionalDomainNames.put(each, regionalDomain(each, host));
+                endpoint.regionalDomainNames.put(each, regionalDomain(id, each, host));
             }
             endpoint.domainName = endpoint.regionalDomainNames.get(region);
         }
@@ -858,8 +1004,8 @@ public class LambdaWebService implements Resettable {
         endpoint.updatedAt = endpoint.createdAt;
     }
 
-    private static String regionalDomain(String region, String host) {
-        return randomLowercase(DOMAIN_ID_LENGTH) + "." + DOMAIN_SHARD + ".lambda-web." + region + "." + host;
+    private static String regionalDomain(String id, String region, String host) {
+        return id + "." + DOMAIN_SHARD + ".lambda-web." + region + "." + host;
     }
 
     private static void requireModeAllowed(String mode, String endpointType) {
@@ -917,18 +1063,29 @@ public class LambdaWebService implements Resettable {
     private static List<WebFunctionEndpoint.RevisionWeight> resolveWeights(WebFunction fn,
                                                                            List<WebFunctionEndpoint.RevisionWeight> weights) {
         for (WebFunctionEndpoint.RevisionWeight weight : weights) {
-            if (!fn.revisions.containsKey(weight.revisionId)) {
+            WebFunctionRevision revision = fn.revisions.get(weight.revisionId);
+            if (revision == null) {
                 throw new AwsException("ResourceNotFoundException",
                         "The revision " + weight.revisionId + " does not exist.", 404);
+            }
+            if (revision.failureReason != null) {
+                throw new AwsException("ConflictException", "The revision " + weight.revisionId
+                        + " is in Failed state and cannot be deployed. Only revisions in Active state can be deployed.", 409);
             }
         }
         return List.copyOf(weights);
     }
 
+    /** The newest revision, which LatestRevision mode deploys. */
     private static Optional<String> latestRevision(WebFunction fn) {
-        return fn.revisions.values().stream()
-                .max(Comparator.comparing((WebFunctionRevision r) -> r.createdAt))
-                .map(r -> r.revisionId);
+        Optional<WebFunctionRevision> latest = fn.revisions.values().stream()
+                .max(Comparator.comparing((WebFunctionRevision r) -> r.createdAt));
+        if (latest.isPresent() && latest.get().failureReason != null) {
+            throw new AwsException("ConflictException", "The latest revision " + latest.get().revisionId
+                    + " is in Failed state and cannot be deployed. Only revisions in Active state can be deployed."
+                    + " Create a new revision.", 409);
+        }
+        return latest.map(r -> r.revisionId);
     }
 
     private static WebFunctionEndpoint.RevisionWeight weight(String revisionId, int weight) {
@@ -1310,15 +1467,9 @@ public class LambdaWebService implements Resettable {
             each.add(values.asText());
         }
         for (String value : each) {
-            String checked = value;
-            if (ARN_CONDITION_KEYS.contains(key)) {
-                String[] fields = value.split(":", 6);
-                if (fields.length < 6) {
-                    return false;
-                }
-                checked = fields[4];
-            }
-            if (checked.contains("*") || checked.contains("?")) {
+            boolean pins = ARN_CONDITION_KEYS.contains(key)
+                    ? PublicAccessConditions.pinsAccount(value) : !PublicAccessConditions.hasWildcard(value);
+            if (!pins) {
                 return false;
             }
         }
@@ -1513,7 +1664,7 @@ public class LambdaWebService implements Resettable {
     private static AwsException tokenError(String token) {
         String decoded;
         try {
-            decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            decoded = Base64Url.decode(token);
         } catch (IllegalArgumentException expected) {
             // Not base64, so not a token Floci issued.
             decoded = "";

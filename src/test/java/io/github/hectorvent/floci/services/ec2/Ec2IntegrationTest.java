@@ -8,6 +8,9 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -158,8 +161,32 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .contentType("application/xml")
             .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.networkBorderGroup",
+                    everyItem(equalTo("us-east-1")))
             .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneName",
                     startsWith("us-east-1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"eu-west-1", "us-gov-west-1", "cn-north-1"})
+    @Order(337)
+    void availabilityZoneBorderGroupUsesTheRequestedRegion(String region) {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Version", "2016-11-15")
+            .formParam("ZoneName.1", region + "b")
+            .header("Authorization", AUTH_HEADER.replace("us-east-1", region))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(1))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].networkBorderGroup",
+                    equalTo(region))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneName",
+                    equalTo(region + "b"))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneType",
+                    equalTo("availability-zone"));
     }
 
     // DescribeAvailabilityZones parameter validation and filtering
@@ -791,6 +818,33 @@ class Ec2IntegrationTest {
             .body("DescribeImagesResponse.imagesSet.item.imageId",
                     containsInAnyOrder("ami-ubuntu2404-arm64", "ami-ubuntu2404-cloud-arm64"))
             .body("DescribeImagesResponse.imagesSet.item.architecture", everyItem(equalTo("arm64")));
+    }
+
+    @ParameterizedTest
+    @Order(9)
+    @CsvSource({
+        "679593333241, openSUSE-Leap-16-0-*, ami-opensuse-leap160",
+        "679593333241, suse-sles-15-sp6-byos-v*-hvm-ssd-x86_64, ami-sles15sp6-byos",
+        "013907871322, suse-sles-15-sp6-v*-hvm-ssd-x86_64, ami-sles15sp6",
+        "792107900819, Rocky-9-EC2-Base-9*, ami-rocky9",
+        "309956199498, RHEL-9.5.0_HVM-*, ami-rhel9"
+    })
+    void describeImagesFindsSuseAndRedHatFamilyImagesByOwnerAndName(String owner, String name, String imageId) {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", owner)
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", name)
+            .formParam("Filter.2.Name", "architecture")
+            .formParam("Filter.2.Value.1", "x86_64")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo(imageId))
+            .body("DescribeImagesResponse.imagesSet.item.imageOwnerId", equalTo(owner));
     }
 
     @Test
@@ -2540,7 +2594,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ImportKeyPair")
             .formParam("KeyName", importedKeyName)
-            .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
+            .formParam("PublicKeyMaterial", encodedPublicKey())
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -2556,7 +2610,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ImportKeyPair")
             .formParam("KeyName", importedKeyName)
-            .formParam("PublicKeyMaterial", "c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFD")
+            .formParam("PublicKeyMaterial", encodedPublicKey())
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -2597,6 +2651,12 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    /** A whole RSA public key, base64-encoded as ImportKeyPair takes it: EC2 refuses a partial one. */
+    private static String encodedPublicKey() {
+        return Base64.getEncoder().encodeToString(
+                Ec2KeyMaterial.generateRsa().openSshPublicKey().getBytes(StandardCharsets.UTF_8));
     }
 
     @Test

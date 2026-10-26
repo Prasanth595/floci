@@ -315,9 +315,9 @@ passwordless pool generates a password. `TemporaryPasswordValidityDays` is not e
 | ResendConfirmationCode | Issues a new sign-up confirmation code to an unconfirmed user, replacing the previous one, and returns where it was sent. |
 | GetUser | Returns attributes for the authenticated access-token user, and the MFA settings (`UserMFASettingList`, `PreferredMfaSetting`) once any is turned on. |
 | GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, `WEB_AUTHN` once the user has registered a passkey, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the SMS, email and software-token MFA preferences set with `SetUserMFAPreference`. |
-| GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. |
+| GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. The CustomMessage trigger shapes its message, with triggerSource `CustomMessage_VerifyUserAttribute` and the request's `ClientMetadata`. |
 | VerifyUserAttribute | Verifies an email or phone_number attribute with its issued verification code. |
-| UpdateUserAttributes | Updates attributes for the authenticated access-token user. |
+| UpdateUserAttributes | Updates attributes for the authenticated access-token user. A changed email or phone_number gets a verification code once the update is stored. The CustomMessage trigger shapes its message, with triggerSource `CustomMessage_UpdateUserAttribute`, the request's `ClientMetadata` and the user as stored. A message that cannot be sent fails the request with `CodeDeliveryFailureException` and leaves the update in place, as on AWS. |
 | DeleteUserAttributes | Deletes the named attributes from the authenticated access-token user. |
 | DeleteUser | Deletes the authenticated access-token user and removes them from their groups. An API Gateway Cognito authorizer rejects the user's existing tokens afterwards. |
 | ChangePassword | Changes the authenticated user's password. |
@@ -360,9 +360,13 @@ first factor returns `MFA_SETUP` instead of tokens for a user without a verified
 Call `AssociateSoftwareToken` with that session, then `VerifySoftwareToken` with the
 returned session and a six-digit TOTP code. Finish with `RespondToAuthChallenge`
 (`MFA_SETUP`) to receive tokens. Later sign-ins return `SOFTWARE_TOKEN_MFA`, which
-requires a fresh code in `SOFTWARE_TOKEN_MFA_CODE`. Both token-management actions
-also accept an access token for an already authenticated user. Sessions expire with
-the app client's `AuthSessionValidity` and cannot be replayed after completion.
+requires a fresh code in `SOFTWARE_TOKEN_MFA_CODE`. Its `ChallengeParameters` carry
+`USER_ID_FOR_SRP`, the user's actual username rather than an alias (the `sub` in a pool
+with `UsernameAttributes`), to send back as `USERNAME` and to compute `SECRET_HASH` from,
+plus `FRIENDLY_DEVICE_NAME` when `VerifySoftwareToken` was given a `FriendlyDeviceName`.
+Both token-management actions also accept an access token for an already authenticated
+user. Sessions expire with the app client's `AuthSessionValidity` and cannot be replayed
+after completion.
 
 Completing `MFA_SETUP` turns software-token MFA on for the user and, when no other factor is
 preferred, makes it the preferred one, so `GetUser` and `AdminGetUser` report it.
@@ -520,6 +524,19 @@ empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`
 the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
 `USER_AUTH` must list the matching `ALLOW_` value.
 
+## Custom Message Trigger
+
+`CustomMessage` requests include the `{####}` code placeholder, the `{##Click Here##}`
+link placeholder, and the user's current `cognito:user_status` in `userAttributes`.
+`usernameParameter` is `null` except for an AdminCreateUser invitation, where it is
+`{username}`. The initial `response` contains `emailMessage`, `emailSubject`, and
+`smsMessage`, each set to `null` for the function to customize.
+
+`CustomMessage` events omit `request.clientMetadata` when metadata is absent or empty,
+including `CustomMessage_Authentication`, which does not forward `InitiateAuth`
+metadata. Custom Email Sender events retain the key with `null` when
+there is no metadata; their event shape is distinct.
+
 ## Custom Email Sender Trigger
 
 A pool whose `LambdaConfig` names a `CustomEmailSender` function (`{"LambdaArn": ..., "LambdaVersion": "V1_0"}`)
@@ -575,6 +592,17 @@ attribute to `true`.
 
 Without the setting, `UpdateUserAttributes` replaces the value immediately and
 sets the matching `*_verified` attribute to `false` until verification succeeds.
+A failed hand-over of its code to `CustomEmailSender` still keeps the complete
+attribute update, including other attributes in the same request. The request
+returns the delivery error, and the undelivered code is withdrawn so another
+verification code can be requested after the sender is working again.
+Codes issued for earlier destinations of changed contacts are also withdrawn,
+including when the replacement is pending. Codes for unchanged contacts that
+the failed delivery did not reach remain usable.
+`AdminUpdateUserAttributes` uses the same contact update and failed-sender handling.
+It skips verification delivery when the request sets the matching `*_verified`
+attribute to `true`. Otherwise, retrying an identical admin update sends a new
+code if the previous delivery failed and left no usable code.
 A verification code is still sent to the replacement value, but Cognito no
 longer retains or exposes the old value. For alias attributes, the old alias is
 removed immediately and the replacement becomes usable for sign-in only after
@@ -713,7 +741,8 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 
 1. `GET /cognito-idp/oauth2/authorize` redirects to `/cognito-idp/login` with the request's
    parameters, `login_hint` included. If the browser already has a managed login session in the
-   pool, it skips the form and redirects straight to the callback with a code, as AWS does. A
+   pool, it skips the form and redirects straight to the callback with a code, as AWS does; the
+   code's tokens carry the `auth_time` of the session's sign-in, not of this request. A
    `scope` the client's `AllowedOAuthScopes` does not include is refused first, as on AWS, with a
    redirect to the callback carrying `error=invalid_request`, `error_description=invalid_scope`
    and the `state`.
@@ -878,9 +907,16 @@ Floci mirrors AWS's access-token / ID-token split:
 - **ID token:** `sub`, `cognito:username`, `aud`, and readable user attributes (`email`,
   `email_verified`, `phone_number`, `custom:*`, ...). Attribute claims are filtered by the app client's
   `ReadAttributes` (an unset/empty list means all attributes are readable).
+- **Both tokens:** `auth_time` is when the user signed in, as on AWS. Tokens from an authorization
+  code carry the time the user signed in at the login page or the identity provider, also when a
+  managed login session skipped the form, and tokens from `REFRESH_TOKEN_AUTH`,
+  `GetTokensFromRefreshToken` or the token endpoint's `refresh_token` grant keep the `auth_time` of
+  the sign-in that issued the refresh token. A
+  refresh token issued by an older Floci does not carry its sign-in time, so its tokens get the time
+  it was issued.
 
-As on AWS, a pre token generation trigger cannot suppress or override `sub`, the access token's
-`username` or the ID token's `cognito:username`; Floci ignores those entries in its response.
+As on AWS, a pre token generation trigger cannot suppress or override `sub`, `auth_time`, the access
+token's `username` or the ID token's `cognito:username`; Floci ignores those entries in its response.
 
 Not-found errors (`ResourceNotFoundException`, `UserNotFoundException`) return HTTP `400`, matching the
 Cognito JSON protocol.

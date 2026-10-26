@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.codebuild;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -18,10 +22,14 @@ import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -30,6 +38,9 @@ import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class CodeBuildService {
+
+    private static final int LIST_PROJECTS_PAGE_SIZE = 100;
+    private static final ObjectMapper PAGE_TOKEN_MAPPER = new ObjectMapper();
 
     // key: region -> name -> project
     private Map<String, Map<String, Project>> projects = new ConcurrentHashMap<>();
@@ -249,6 +260,39 @@ public class CodeBuildService {
         return new ArrayList<>(projectsFor(region).keySet());
     }
 
+    public List<String> listProjects(String region, String sortBy, String sortOrder) {
+        if (sortBy == null && sortOrder == null) {
+            return listProjects(region);
+        }
+        return projectSortKeys(region).stream()
+                .sorted(listComparator(sortBy, sortOrder))
+                .map(ListSortKey::name)
+                .toList();
+    }
+
+    public ProjectPage listProjectsPage(String region, String sortBy, String sortOrder, String nextToken) {
+        if (sortBy == null && sortOrder == null && nextToken == null) {
+            List<String> names = listProjects(region);
+            if (names.size() <= LIST_PROJECTS_PAGE_SIZE) {
+                return new ProjectPage(names, null);
+            }
+        }
+
+        SortedListPage page = paginateList(projectSortKeys(region), region, sortBy, sortOrder,
+                LIST_PROJECTS_PAGE_SIZE, nextToken, "ListProjects", null);
+        return new ProjectPage(page.keys().stream().map(ListSortKey::name).toList(), page.nextToken());
+    }
+
+    public record ProjectPage(List<String> projects, String nextToken) {
+    }
+
+    private List<ListSortKey> projectSortKeys(String region) {
+        return projectsFor(region).values().stream()
+                .map(project -> new ListSortKey(project.getCreated(), project.getLastModified(),
+                        project.getName(), project.getName()))
+                .toList();
+    }
+
     // ---- Report Groups ----
 
     public ReportGroup createReportGroup(String region, String account,
@@ -317,6 +361,117 @@ public class CodeBuildService {
 
     public List<String> listReportGroups(String region) {
         return new ArrayList<>(reportGroupsFor(region).keySet());
+    }
+
+    public ReportGroupPage listReportGroupsPage(String region, String sortBy, String sortOrder,
+                                                int maxResults, String nextToken) {
+        if (maxResults < 1 || maxResults > 100) {
+            throw new AwsException("InvalidInputException", "maxResults must be between 1 and 100", 400);
+        }
+        String criterion = sortBy == null ? "NAME" : sortBy;
+        String order = sortOrder == null ? "ASCENDING" : sortOrder;
+        List<ListSortKey> keys = reportGroupsFor(region).values().stream()
+                .map(group -> new ListSortKey(group.getCreated(), group.getLastModified(),
+                        group.getName(), group.getArn()))
+                .toList();
+        SortedListPage page = paginateList(keys, region, criterion, order, maxResults, nextToken,
+                "ListReportGroups", "lastArn");
+        return new ReportGroupPage(page.keys().stream().map(ListSortKey::id).toList(), page.nextToken());
+    }
+
+    private SortedListPage paginateList(List<ListSortKey> keys, String region, String sortBy,
+                                         String sortOrder, int pageSize, String nextToken,
+                                         String action, String idField) {
+        Comparator<ListSortKey> comparator = listComparator(sortBy, sortOrder);
+        List<ListSortKey> sorted = keys.stream().sorted(comparator).toList();
+        int start = 0;
+        if (nextToken != null) {
+            ListSortKey anchor = decodeListToken(nextToken, region, sortBy, sortOrder, action, idField);
+            while (start < sorted.size() && comparator.compare(sorted.get(start), anchor) <= 0) {
+                start++;
+            }
+        }
+        int end = Math.min(start + pageSize, sorted.size());
+        List<ListSortKey> page = sorted.subList(start, end);
+        String token = end < sorted.size()
+                ? encodeListToken(page.getLast(), region, sortBy, sortOrder, action, idField) : null;
+        return new SortedListPage(page, token);
+    }
+
+    private Comparator<ListSortKey> listComparator(String sortBy, String sortOrder) {
+        Comparator<ListSortKey> comparator = switch (sortBy == null ? "NAME" : sortBy) {
+            case "NAME" -> Comparator.comparing(ListSortKey::name);
+            case "CREATED_TIME" -> Comparator.comparing(ListSortKey::created,
+                    Comparator.nullsFirst(Comparator.naturalOrder()));
+            case "LAST_MODIFIED_TIME" -> Comparator.comparing(ListSortKey::lastModified,
+                    Comparator.nullsFirst(Comparator.naturalOrder()));
+            default -> throw new AwsException("InvalidInputException", "Invalid sortBy: " + sortBy, 400);
+        };
+        if (isDescendingSortOrder(sortOrder, false)) {
+            comparator = comparator.reversed();
+        }
+        return comparator.thenComparing(ListSortKey::name).thenComparing(ListSortKey::id);
+    }
+
+    private ListSortKey decodeListToken(String token, String region, String sortBy,
+                                        String sortOrder, String action, String idField) {
+        if (token.isEmpty()) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        JsonNode cursor;
+        try {
+            cursor = PAGE_TOKEN_MAPPER.readTree(Base64.getUrlDecoder().decode(token));
+        } catch (IllegalArgumentException | IOException e) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        JsonNode lastName = cursor == null ? null : cursor.path("lastName");
+        JsonNode sortValue = cursor == null ? null : cursor.path("sortValue");
+        JsonNode lastId = cursor == null || idField == null ? null : cursor.path(idField);
+        if (cursor == null || !action.equals(cursor.path("action").asText(null))
+                || !region.equals(cursor.path("region").asText(null))
+                || !cursor.has("sortBy") || !Objects.equals(sortBy, cursor.path("sortBy").asText(null))
+                || !cursor.has("sortOrder") || !Objects.equals(sortOrder, cursor.path("sortOrder").asText(null))
+                || !lastName.isTextual() || lastName.asText().isEmpty()
+                || idField != null && (!lastId.isTextual() || lastId.asText().isEmpty())
+                || (sortBy == null || "NAME".equals(sortBy)) && !sortValue.isNull()
+                || !sortValue.isNull() && !sortValue.isNumber()) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        Double value = sortValue.isNull() ? null : sortValue.asDouble();
+        if (value != null && !Double.isFinite(value)) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        String name = lastName.asText();
+        return new ListSortKey(value, value, name, idField == null ? name : lastId.asText());
+    }
+
+    private String encodeListToken(ListSortKey last, String region, String sortBy,
+                                    String sortOrder, String action, String idField) {
+        Double value = switch (sortBy == null ? "NAME" : sortBy) {
+            case "CREATED_TIME" -> last.created();
+            case "LAST_MODIFIED_TIME" -> last.lastModified();
+            default -> null;
+        };
+        ObjectNode cursor = PAGE_TOKEN_MAPPER.createObjectNode();
+        cursor.put("action", action);
+        cursor.put("region", region);
+        cursor.put("sortBy", sortBy);
+        cursor.put("sortOrder", sortOrder);
+        if (idField != null) {
+            cursor.put(idField, last.id());
+        }
+        cursor.put("lastName", last.name());
+        cursor.put("sortValue", value);
+        return Base64Url.encode(cursor.toString());
+    }
+
+    public record ReportGroupPage(List<String> reportGroups, String nextToken) {
+    }
+
+    private record ListSortKey(Double created, Double lastModified, String name, String id) {
+    }
+
+    private record SortedListPage(List<ListSortKey> keys, String nextToken) {
     }
 
     // ---- Source Credentials ----
@@ -497,23 +652,35 @@ public class CodeBuildService {
                 .collect(Collectors.toList());
     }
 
-    public List<String> listBuilds(String region, String account) {
-        return buildsFor(account, region).values().stream()
-                .sorted((a, b) -> Double.compare(
-                        b.getStartTime() != null ? b.getStartTime() : 0,
-                        a.getStartTime() != null ? a.getStartTime() : 0))
-                .map(Build::getId)
-                .collect(Collectors.toList());
+    public List<String> listBuilds(String region, String account, String sortOrder) {
+        Comparator<String> comparator = Comparator.naturalOrder();
+        if (isDescendingSortOrder(sortOrder, true)) {
+            comparator = comparator.reversed();
+        }
+        return buildsFor(account, region).keySet().stream()
+                .sorted(comparator)
+                .toList();
     }
 
-    public List<String> listBuildsForProject(String region, String account, String projectName) {
+    public List<String> listBuildsForProject(String region, String account, String projectName,
+                                             String sortOrder) {
+        Comparator<Build> comparator = Comparator.comparing(Build::getBuildNumber)
+                .thenComparing(Build::getId);
+        if (isDescendingSortOrder(sortOrder, true)) {
+            comparator = comparator.reversed();
+        }
         return buildsFor(account, region).values().stream()
                 .filter(b -> projectName.equals(b.getProjectName()))
-                .sorted((a, b) -> Double.compare(
-                        b.getStartTime() != null ? b.getStartTime() : 0,
-                        a.getStartTime() != null ? a.getStartTime() : 0))
+                .sorted(comparator)
                 .map(Build::getId)
-                .collect(Collectors.toList());
+                .toList();
+    }
+
+    private boolean isDescendingSortOrder(String sortOrder, boolean defaultDescending) {
+        if (sortOrder != null && !"ASCENDING".equals(sortOrder) && !"DESCENDING".equals(sortOrder)) {
+            throw new AwsException("InvalidInputException", "Invalid sortOrder: " + sortOrder, 400);
+        }
+        return sortOrder == null ? defaultDescending : "DESCENDING".equals(sortOrder);
     }
 
     public void stopBuild(String region, String account, String buildId) {

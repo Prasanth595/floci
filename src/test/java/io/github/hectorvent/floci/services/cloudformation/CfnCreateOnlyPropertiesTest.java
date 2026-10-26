@@ -77,6 +77,15 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void isCreateOnly_loggingConfigurationReplacesOnlyForResourceArn() {
+        String type = "AWS::WAFv2::LoggingConfiguration";
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "ResourceArn"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "LogDestinationConfigs"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "RedactedFields"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "LoggingFilter"));
+    }
+
+    @Test
     void isCreateOnly_treatsEmptySchemaListAsAuthoritative() {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGateway::RestApi", "Name"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Cognito::UserPool", "UserPoolName"));

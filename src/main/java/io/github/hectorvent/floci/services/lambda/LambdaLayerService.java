@@ -3,28 +3,22 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.Base64Url;
-import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
+import io.github.hectorvent.floci.services.lambda.zip.DeploymentPackage;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -58,10 +52,8 @@ public class LambdaLayerService {
     private static final int MAX_LAYER_VERSION_ARN_LENGTH = 140;
     private static final int MAX_ITEMS_LIMIT = 50;
 
-    private static final char MARKER_SEPARATOR = '.';
-
-    /** Signing key for pagination markers, per process; see {@link #encodeMarker}. */
-    private static final byte[] MARKER_KEY = newMarkerKey();
+    /** Signs pagination markers; see {@link #decodeMarker}. */
+    private final SignedMarkers markers = new SignedMarkers();
 
     private static final List<String> COMPATIBLE_ARCHITECTURES = List.of("x86_64", "arm64");
 
@@ -137,61 +129,62 @@ public class LambdaLayerService {
                 ? (List<String>) request.get("CompatibleArchitectures") : null;
 
         // Resolve the zip content
-        byte[] zipBytes = resolveLayerContent(content);
-        if (content.get("ZipFile") != null
-                && zipBytes.length > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
-            throw new AwsException("RequestEntityTooLargeException",
-                    "Request must be smaller than 52428800 bytes.", 413);
+        try (DeploymentPackage zip = resolveLayerContent(content, layersRoot())) {
+            if (content.get("ZipFile") != null
+                    && zip.size() > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
+                throw new AwsException("RequestEntityTooLargeException",
+                        "Request must be smaller than 52428800 bytes.", 413);
+            }
+
+            String accountId = regionResolver.getAccountId();
+
+            // Determine the next version number
+            long nextVersion = layerStore.getLatestVersion(region, layerName) + 1;
+
+            // Extract the layer zip to disk
+            Path layerPath = getLayerCodePath(accountId, region, layerName, nextVersion);
+            try {
+                zip.extractTo(zipExtractor, layerPath, configuredZipMaxEntries(), null);
+            } catch (IOException e) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Failed to extract layer archive: " + e.getMessage(), 400);
+            }
+
+            // Compute SHA-256
+            String codeSha256 = zip.sha256();
+
+            // Build the layer version
+            String layerArn = AwsArnUtils.Arn.of("lambda", region, accountId, "layer:" + layerName).toString();
+            String layerVersionArn = layerArn + ":" + nextVersion;
+
+            LambdaLayerVersion layerVersion = new LambdaLayerVersion();
+            layerVersion.setLayerName(layerName);
+            layerVersion.setLayerArn(layerArn);
+            layerVersion.setLayerVersionArn(layerVersionArn);
+            layerVersion.setVersion(nextVersion);
+            layerVersion.setDescription(description);
+            layerVersion.setLicenseInfo(licenseInfo);
+            layerVersion.setCompatibleRuntimes(compatibleRuntimes != null ? new ArrayList<>(compatibleRuntimes) : null);
+            layerVersion.setCompatibleArchitectures(compatibleArchitectures != null ? new ArrayList<>(compatibleArchitectures) : null);
+            layerVersion.setCreatedDate(DateTimeFormatter.ISO_INSTANT.format(Instant.now().atOffset(ZoneOffset.UTC)));
+            layerVersion.setCodeSizeBytes(zip.size());
+            layerVersion.setCodeSha256(codeSha256);
+            layerVersion.setCodeLocalPath(layerPath.toAbsolutePath().normalize().toString());
+
+            // Store the archive before persisting the version so a load-bearing store failure
+            // (kubernetes executor) fails the publish instead of leaving a version pods cannot use.
+            boolean stored = storeLayerArchive(region, accountId, layerName, nextVersion, zip);
+            if (!stored && LambdaService.requiresStoredTasksObject(config)) {
+                throw new AwsException("ServiceException",
+                        "Could not store the layer archive for '" + layerName + "' v" + nextVersion
+                                + " in Floci's S3, which the kubernetes Lambda executor needs. The "
+                                + "layer version was not published.", 500);
+            }
+            layerVersion.setArchiveStored(stored);
+            layerStore.save(region, layerVersion);
+            LOG.infov("Published layer version: {0} v{1} in region {2}", layerName, nextVersion, region);
+            return layerVersion;
         }
-
-        String accountId = regionResolver.getAccountId();
-
-        // Determine the next version number
-        long nextVersion = layerStore.getLatestVersion(region, layerName) + 1;
-
-        // Extract the layer zip to disk
-        Path layerPath = getLayerCodePath(accountId, region, layerName, nextVersion);
-        try {
-            zipExtractor.extractTo(zipBytes, layerPath, configuredZipMaxEntries());
-        } catch (IOException e) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Failed to extract layer archive: " + e.getMessage(), 400);
-        }
-
-        // Compute SHA-256
-        String codeSha256 = computeSha256(zipBytes);
-
-        // Build the layer version
-        String layerArn = AwsArnUtils.Arn.of("lambda", region, accountId, "layer:" + layerName).toString();
-        String layerVersionArn = layerArn + ":" + nextVersion;
-
-        LambdaLayerVersion layerVersion = new LambdaLayerVersion();
-        layerVersion.setLayerName(layerName);
-        layerVersion.setLayerArn(layerArn);
-        layerVersion.setLayerVersionArn(layerVersionArn);
-        layerVersion.setVersion(nextVersion);
-        layerVersion.setDescription(description);
-        layerVersion.setLicenseInfo(licenseInfo);
-        layerVersion.setCompatibleRuntimes(compatibleRuntimes != null ? new ArrayList<>(compatibleRuntimes) : null);
-        layerVersion.setCompatibleArchitectures(compatibleArchitectures != null ? new ArrayList<>(compatibleArchitectures) : null);
-        layerVersion.setCreatedDate(DateTimeFormatter.ISO_INSTANT.format(Instant.now().atOffset(ZoneOffset.UTC)));
-        layerVersion.setCodeSizeBytes(zipBytes.length);
-        layerVersion.setCodeSha256(codeSha256);
-        layerVersion.setCodeLocalPath(layerPath.toAbsolutePath().normalize().toString());
-
-        // Store the archive before persisting the version so a load-bearing store failure
-        // (kubernetes executor) fails the publish instead of leaving a version pods cannot use.
-        boolean stored = storeLayerArchive(region, accountId, layerName, nextVersion, zipBytes);
-        if (!stored && LambdaService.requiresStoredTasksObject(config)) {
-            throw new AwsException("ServiceException",
-                    "Could not store the layer archive for '" + layerName + "' v" + nextVersion
-                            + " in Floci's S3, which the kubernetes Lambda executor needs. The "
-                            + "layer version was not published.", 500);
-        }
-        layerVersion.setArchiveStored(stored);
-        layerStore.save(region, layerVersion);
-        LOG.infov("Published layer version: {0} v{1} in region {2}", layerName, nextVersion, region);
-        return layerVersion;
     }
 
     private int configuredZipMaxEntries() {
@@ -210,9 +203,9 @@ public class LambdaLayerService {
      * Best-effort unless the active Lambda executor requires stored tasks-bucket objects.
      */
     private boolean storeLayerArchive(String region, String accountId, String layerName,
-                                      long version, byte[] zipBytes) {
+                                      long version, DeploymentPackage zip) {
         return LambdaService.putTasksObjectQuietly(s3Service, region,
-                LambdaService.layerObjectKey(accountId, layerName, version), zipBytes,
+                LambdaService.layerObjectKey(accountId, layerName, version), zip,
                 "layer archive for " + layerName + " v" + version);
     }
 
@@ -285,7 +278,7 @@ public class LambdaLayerService {
         return true;
     }
 
-    private static <T> PaginatedResult<T> page(List<T> items, Function<T, String> cursorOf,
+    private <T> PaginatedResult<T> page(List<T> items, Function<T, String> cursorOf,
                                                Integer maxItems, String marker) {
         String after = decodeMarker(marker);
         List<T> remaining = after == null ? items
@@ -294,7 +287,7 @@ public class LambdaLayerService {
                 .limit(maxItems != null ? maxItems : MAX_ITEMS_LIMIT)
                 .toList();
         String nextMarker = pageItems.size() < remaining.size()
-                ? encodeMarker(cursorOf.apply(pageItems.get(pageItems.size() - 1)))
+                ? markers.issue(cursorOf.apply(pageItems.get(pageItems.size() - 1)))
                 : null;
         return new PaginatedResult<>(pageItems, nextMarker);
     }
@@ -358,47 +351,15 @@ public class LambdaLayerService {
      * silently skipped or empty page. A marker from an earlier run is stale for the same
      * reason, matching a client that replays an expired token against AWS.
      */
-    private static String encodeMarker(String cursor) {
-        String signed = cursor + MARKER_SEPARATOR + sign(cursor);
-        return Base64Url.encode(signed);
-    }
-
-    private static String decodeMarker(String marker) {
+    private String decodeMarker(String marker) {
         if (marker == null) {
             return null;
         }
-        String decoded;
-        try {
-            decoded = new String(Base64.getUrlDecoder().decode(marker), StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            throw invalidPaginationKey();
-        }
-        int separator = decoded.lastIndexOf(MARKER_SEPARATOR);
-        if (separator < 0) {
-            throw invalidPaginationKey();
-        }
-        String cursor = decoded.substring(0, separator);
-        byte[] presented = decoded.substring(separator + 1).getBytes(StandardCharsets.UTF_8);
-        if (!MessageDigest.isEqual(presented, sign(cursor).getBytes(StandardCharsets.UTF_8))) {
+        String cursor = markers.cursorOf(marker);
+        if (cursor == null) {
             throw invalidPaginationKey();
         }
         return cursor;
-    }
-
-    private static String sign(String cursor) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(MARKER_KEY, "HmacSHA256"));
-            return Base64Url.encode(mac.doFinal(cursor.getBytes(StandardCharsets.UTF_8)));
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("HmacSHA256 is required to paginate layers", e);
-        }
-    }
-
-    private static byte[] newMarkerKey() {
-        byte[] key = new byte[32];
-        new SecureRandom().nextBytes(key);
-        return key;
     }
 
     private static AwsException invalidPaginationKey() {
@@ -448,8 +409,7 @@ public class LambdaLayerService {
     public LambdaLayerVersion getLayerVersionByArn(String layerVersionArn) {
         if (layerVersionArn == null || layerVersionArn.isEmpty()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'arn' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNull("arn"));
         }
         if (layerVersionArn.length() > MAX_LAYER_VERSION_ARN_LENGTH
                 || !LAYER_VERSION_ARN.matcher(layerVersionArn).matches()) {
@@ -506,6 +466,36 @@ public class LambdaLayerService {
     }
 
     /**
+     * Resolves initialization input against the stored function's scope. Provisioned workers
+     * run outside a request; the ambient account must not select another account's layer.
+     * Cross-account sharing remains unsupported.
+     */
+    public LambdaLayerVersion resolveLayerByArnForAccount(
+            String layerVersionArn, String accountId, String functionRegion) {
+        AwsArnUtils.Arn arn = parseLayerVersionArn(layerVersionArn);
+        if (arn == null || accountId == null || accountId.isBlank()
+                || functionRegion == null || functionRegion.isBlank()
+                || !"lambda".equals(arn.service())
+                || AwsArnUtils.isForeignPartition(arn, AwsRegions.partitionFor(functionRegion))
+                || AwsArnUtils.isForeignAccount(arn, accountId)) {
+            return null;
+        }
+        String[] resourceParts = arn.resource().split(":");
+        if (resourceParts.length != 3) {
+            return null;
+        }
+        long version;
+        try {
+            version = Long.parseLong(resourceParts[2]);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        return layerStore.getForAccount(accountId, arn.region(), resourceParts[1], version)
+                .filter(layer -> layerVersionArn.equals(layer.getLayerVersionArn()))
+                .orElse(null);
+    }
+
+    /**
      * True when the ARN is a well-formed layer version ARN naming an account or partition other
      * than the caller's, so Floci cannot decide whether it exists. On the live service such a
      * layer resolves through its resource policy, measured against ap-southeast-1: an ARN in
@@ -551,10 +541,10 @@ public class LambdaLayerService {
                 || AwsArnUtils.isForeignAccount(arn, regionResolver.getAccountId());
     }
 
-    private byte[] resolveLayerContent(Map<String, Object> content) {
+    private DeploymentPackage resolveLayerContent(Map<String, Object> content, Path stagingDir) {
         String zipFileBase64 = (String) content.get("ZipFile");
         if (zipFileBase64 != null) {
-            return Base64.getDecoder().decode(zipFileBase64);
+            return DeploymentPackage.of(Base64.getDecoder().decode(zipFileBase64));
         }
 
         String s3Bucket = (String) content.get("S3Bucket");
@@ -564,8 +554,7 @@ public class LambdaLayerService {
                 throw new AwsException("ServiceUnavailableException", "S3 service not available", 503);
             }
             try {
-                S3Object obj = s3Service.getObject(s3Bucket, s3Key);
-                return obj.getData();
+                return DeploymentPackage.read(s3Service.openObject(s3Bucket, s3Key, null), stagingDir);
             } catch (Exception e) {
                 throw new AwsException("InvalidParameterValueException",
                         "Unable to fetch layer content from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
@@ -574,6 +563,10 @@ public class LambdaLayerService {
 
         throw new AwsException("InvalidParameterValueException",
                 "Layer content must include either ZipFile or S3Bucket/S3Key", 400);
+    }
+
+    private Path layersRoot() {
+        return Path.of(config.services().lambda().codePath()).resolve("layers");
     }
 
     private Path getLayerCodePath(String accountId, String region, String layerName, long version) {
@@ -591,24 +584,9 @@ public class LambdaLayerService {
         return sanitized.isEmpty() || sanitized.chars().allMatch(c -> c == '.') ? "_" : sanitized;
     }
 
-    private String computeSha256(byte[] data) {
-        return Base64.getEncoder().encodeToString(Digests.sha256(data));
-    }
-
     private void deleteDirectory(Path dir) {
-        if (!Files.exists(dir)) {
-            return;
-        }
         try {
-            Files.walk(dir)
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(p -> {
-                        try {
-                            Files.delete(p);
-                        } catch (IOException e) {
-                            LOG.warnv("Failed to delete {0}: {1}", p, e.getMessage());
-                        }
-                    });
+            FileTrees.delete(dir);
         } catch (IOException e) {
             LOG.warnv("Failed to delete layer directory {0}: {1}", dir, e.getMessage());
         }

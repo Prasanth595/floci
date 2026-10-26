@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsErrorMessages;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsQueryLists;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
@@ -22,6 +23,7 @@ import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
+import io.github.hectorvent.floci.services.rds.model.DbProxyEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
@@ -169,6 +171,10 @@ public class RdsQueryHandler {
                 case "CreateDBProxy" -> handleCreateDbProxy(params, region);
                 case "ModifyDBProxy" -> handleModifyDbProxy(params, region);
                 case "DeleteDBProxy" -> handleDeleteDbProxy(params, region);
+                case "CreateDBProxyEndpoint" -> handleCreateDbProxyEndpoint(params, region);
+                case "DescribeDBProxyEndpoints" -> handleDescribeDbProxyEndpoints(params, region);
+                case "ModifyDBProxyEndpoint" -> handleModifyDbProxyEndpoint(params, region);
+                case "DeleteDBProxyEndpoint" -> handleDeleteDbProxyEndpoint(params, region);
                 case "RegisterDBProxyTargets" -> handleRegisterDbProxyTargets(params, region);
                 case "DeregisterDBProxyTargets" -> handleDeregisterDbProxyTargets(params, region);
                 case "DescribeDBProxyTargetGroups" -> handleDescribeDbProxyTargetGroups(params, region);
@@ -760,7 +766,8 @@ public class RdsQueryHandler {
             DbInstance instance = service.modifyDbInstance(
                     id, newPassword, iamEnabled, dbSubnetGroupName,
                     vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                    settings, publiclyAccessible, scaling, deletionProtection);
+                    settings, publiclyAccessible, scaling, deletionProtection,
+                    params.getFirst("DBParameterGroupName"));
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1417,7 +1424,8 @@ public class RdsQueryHandler {
             }
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
                     serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                    manageMasterUserPassword, masterUserSecretKmsKeyId, region);
+                    manageMasterUserPassword, masterUserSecretKmsKeyId,
+                    params.getFirst("DBClusterParameterGroupName"), region);
             if (enableHttpEndpoint != null) {
                 cluster = service.setHttpEndpoint(region, id, enableHttpEndpoint);
             }
@@ -2205,6 +2213,84 @@ public class RdsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DeleteDBProxy", AwsNamespaces.RDS, result)).build();
     }
 
+    private Response handleCreateDbProxyEndpoint(MultivaluedMap<String, String> params, String region) {
+        DbProxyEndpoint endpoint = service.createDbProxyEndpoint(region,
+                params.getFirst("DBProxyName"),
+                params.getFirst("DBProxyEndpointName"),
+                memberList(params, "VpcSubnetIds"),
+                memberList(params, "VpcSecurityGroupIds"),
+                params.getFirst("TargetRole"),
+                params.getFirst("EndpointNetworkType"),
+                parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("CreateDBProxyEndpoint", AwsNamespaces.RDS,
+                dbProxyEndpointXml(endpoint))).build();
+    }
+
+    private Response handleDescribeDbProxyEndpoints(MultivaluedMap<String, String> params, String region) {
+        RdsService.ProxyEndpointPage page = service.describeDbProxyEndpoints(region,
+                params.getFirst("DBProxyName"),
+                params.getFirst("DBProxyEndpointName"),
+                optionalInt(params.getFirst("MaxRecords")),
+                params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder().start("DBProxyEndpoints");
+        for (DbProxyEndpoint endpoint : page.endpoints()) {
+            xml.start("member").raw(dbProxyEndpointInnerXml(endpoint)).end("member");
+        }
+        xml.end("DBProxyEndpoints");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeDBProxyEndpoints", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
+    private Response handleModifyDbProxyEndpoint(MultivaluedMap<String, String> params, String region) {
+        // Security groups left out of the request are kept; a list given replaces them.
+        DbProxyEndpoint endpoint = service.modifyDbProxyEndpoint(region,
+                params.getFirst("DBProxyEndpointName"),
+                params.getFirst("NewDBProxyEndpointName"),
+                hasMemberKeys(params, "VpcSecurityGroupIds") ? memberList(params, "VpcSecurityGroupIds") : null);
+        return Response.ok(AwsQueryResponse.envelope("ModifyDBProxyEndpoint", AwsNamespaces.RDS,
+                dbProxyEndpointXml(endpoint))).build();
+    }
+
+    private Response handleDeleteDbProxyEndpoint(MultivaluedMap<String, String> params, String region) {
+        DbProxyEndpoint endpoint = service.deleteDbProxyEndpoint(region, params.getFirst("DBProxyEndpointName"));
+        return Response.ok(AwsQueryResponse.envelope("DeleteDBProxyEndpoint", AwsNamespaces.RDS,
+                dbProxyEndpointXml(endpoint))).build();
+    }
+
+    private static String dbProxyEndpointXml(DbProxyEndpoint e) {
+        return new XmlBuilder().start("DBProxyEndpoint").raw(dbProxyEndpointInnerXml(e)).end("DBProxyEndpoint").build();
+    }
+
+    /** The DBProxyEndpoint members; a proxy's default endpoint has no ARN. */
+    private static String dbProxyEndpointInnerXml(DbProxyEndpoint e) {
+        XmlBuilder xml = new XmlBuilder().elem("DBProxyEndpointName", e.getDbProxyEndpointName());
+        if (e.getDbProxyEndpointArn() != null) {
+            xml.elem("DBProxyEndpointArn", e.getDbProxyEndpointArn());
+        }
+        xml.elem("DBProxyName", e.getDbProxyName())
+           .elem("Status", e.getStatus());
+        if (e.getVpcId() != null) {
+            xml.elem("VpcId", e.getVpcId());
+        }
+        xml.start("VpcSecurityGroupIds");
+        e.getVpcSecurityGroupIds().forEach(id -> xml.elem("member", id));
+        xml.end("VpcSecurityGroupIds");
+        xml.start("VpcSubnetIds");
+        e.getVpcSubnetIds().forEach(id -> xml.elem("member", id));
+        xml.end("VpcSubnetIds");
+        xml.elem("Endpoint", e.getEndpoint());
+        if (e.getCreatedDate() != null) {
+            xml.elem("CreatedDate", e.getCreatedDate().toString());
+        }
+        xml.elem("TargetRole", e.getTargetRole())
+           .elem("IsDefault", String.valueOf(e.isDefault()))
+           .elem("EndpointNetworkType", e.getEndpointNetworkType() != null ? e.getEndpointNetworkType() : "IPV4");
+        return xml.build();
+    }
+
     private Response handleRegisterDbProxyTargets(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBProxyName");
         String tgName = params.getFirst("TargetGroupName");
@@ -2858,7 +2944,7 @@ public class RdsQueryHandler {
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
         String engineStr = instanceEngine(i);
-        String statusStr = i.getStatus() != null ? statusLabel(i.getStatus()) : "available";
+        String statusStr = statusLabel(reportedStatus(i));
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("DBInstanceIdentifier", i.getDbInstanceIdentifier())
@@ -3059,6 +3145,25 @@ public class RdsQueryHandler {
                 .end("Tag"));
     }
 
+    /**
+     * The cluster's DB cluster parameter group, or the engine's default group when it was created
+     * without one, as AWS reports it. Null when the engine has no default group that
+     * DescribeDBClusterParameterGroups lists.
+     */
+    private String dbClusterParameterGroupName(DbCluster cluster, String engine) {
+        String name = cluster.getParameterGroupName();
+        if (name != null && !name.isBlank()) {
+            return name;
+        }
+        String defaultGroup;
+        try {
+            defaultGroup = "default." + service.expectedClusterParameterGroupFamily(engine, cluster.getEngineVersion());
+        } catch (AwsException e) {
+            return null;
+        }
+        return service.isManagedClusterParameterGroup(defaultGroup) ? defaultGroup : null;
+    }
+
     private String dbClusterXml(DbCluster c) {
         return new XmlBuilder().start("DBCluster").raw(dbClusterInnerXml(c)).end("DBCluster").build();
     }
@@ -3106,8 +3211,12 @@ public class RdsQueryHandler {
                .elem("Status", "active")
              .end("VpcSecurityGroupMembership")
            .end("VpcSecurityGroups")
-           .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
-           .elem("DbClusterResourceId", c.getDbClusterResourceId())
+           .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default");
+        String clusterParameterGroup = dbClusterParameterGroupName(c, engineStr);
+        if (clusterParameterGroup != null) {
+            xml.elem("DBClusterParameterGroup", clusterParameterGroup);
+        }
+        xml.elem("DbClusterResourceId", c.getDbClusterResourceId())
            .elem("DBClusterArn", c.getDbClusterArn());
         if (c.getMasterUserSecretArn() != null && !c.getMasterUserSecretArn().isBlank()) {
             xml.start("MasterUserSecret")
@@ -3351,6 +3460,13 @@ public class RdsQueryHandler {
                 .build();
     }
 
+    /** An available instance whose database refused its parameter group reports incompatible-parameters, as on AWS. */
+    private DbInstanceStatus reportedStatus(DbInstance instance) {
+        DbInstanceStatus status = instance.getStatus() != null ? instance.getStatus() : DbInstanceStatus.AVAILABLE;
+        return status == DbInstanceStatus.AVAILABLE && service.databaseRefusedParameterGroup(instance)
+                ? DbInstanceStatus.INCOMPATIBLE_PARAMETERS : status;
+    }
+
     private String statusLabel(DbInstanceStatus status) {
         return switch (status) {
             case CREATING -> "creating";
@@ -3362,6 +3478,7 @@ public class RdsQueryHandler {
             case STOPPING -> "stopping";
             case STOPPED -> "stopped";
             case STARTING -> "starting";
+            case INCOMPATIBLE_PARAMETERS -> "incompatible-parameters";
         };
     }
 
@@ -3450,49 +3567,33 @@ public class RdsQueryHandler {
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
-        return params.keySet().stream()
-                .filter(key -> key.matches(memberKeyRegex(baseName)))
-                .sorted(java.util.Comparator.comparingInt(RdsQueryHandler::numericSuffix))
-                .map(params::getFirst)
-                .filter(value -> value != null && !value.isBlank())
-                .toList();
+        return AwsQueryLists.values(params, baseName, memberName(baseName));
     }
 
     private static boolean hasMemberKeys(MultivaluedMap<String, String> params, String baseName) {
-        return params.keySet().stream().anyMatch(key -> key.matches(memberKeyRegex(baseName)));
+        Pattern keys = AwsQueryLists.memberKeys(baseName, memberName(baseName));
+        return params.keySet().stream().anyMatch(key -> keys.matcher(key).matches());
     }
 
-    private static String memberKeyRegex(String baseName) {
-        String quoted = java.util.regex.Pattern.quote(baseName);
+    /** The name the list {@code baseName}'s shape gives its members, or null for a list whose shape names none. */
+    private static String memberName(String baseName) {
         return switch (baseName) {
-            case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
-            case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
-            case "OptionsToRemove" -> quoted + "(\\.member|\\.OptionName)?\\.\\d+";
-            case "ValuesToAdd", "ValuesToRemove" -> quoted + "(\\.member|\\.AttributeValue)?\\.\\d+";
+            case "SubnetIds" -> "SubnetIdentifier";
+            case "VpcSecurityGroupIds" -> "VpcSecurityGroupId";
+            case "OptionsToRemove" -> "OptionName";
+            case "ValuesToAdd", "ValuesToRemove" -> "AttributeValue";
             default -> {
                 // Option configurations nest their membership lists under an indexed prefix,
                 // so the alternate member names have to be matched on the suffix.
                 if (baseName.endsWith("VpcSecurityGroupMemberships")) {
-                    yield quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
+                    yield "VpcSecurityGroupId";
                 }
                 if (baseName.endsWith("DBSecurityGroupMemberships")) {
-                    yield quoted + "(\\.member|\\.DBSecurityGroupName)?\\.\\d+";
+                    yield "DBSecurityGroupName";
                 }
-                yield quoted + "(\\.member)?\\.\\d+";
+                yield null;
             }
         };
-    }
-
-    private static int numericSuffix(String key) {
-        int dot = key.lastIndexOf('.');
-        if (dot < 0 || dot == key.length() - 1) {
-            return Integer.MAX_VALUE;
-        }
-        try {
-            return Integer.parseInt(key.substring(dot + 1));
-        } catch (NumberFormatException e) {
-            return Integer.MAX_VALUE;
-        }
     }
 
     private static List<DbProxyAuth> parseProxyAuth(MultivaluedMap<String, String> params) {

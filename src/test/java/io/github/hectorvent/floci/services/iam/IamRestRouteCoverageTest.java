@@ -45,11 +45,18 @@ class IamRestRouteCoverageTest {
      * Operations Floci does not serve, whose request runs as another operation instead and so is checked
      * as that one: S3 has no bucket metadata configuration, and {@code ?metadataConfiguration} on a
      * bucket falls through to ListObjects and DeleteBucket. Checking it as the metadata table action
-     * would let that action list or delete the bucket.
+     * would let that action list or delete the bucket. EKS takes an access entry's principal as the rest
+     * of the path, so an entry's access policy routes read and delete the entry of a longer principal.
      */
     private static final Map<String, String> RUN_AS_ANOTHER_OPERATION = Map.of(
             "GetBucketMetadataConfiguration", "s3:ListBucket",
-            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket");
+            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket",
+            "ListAssociatedAccessPolicies", "eks:DescribeAccessEntry",
+            "DisassociateAccessPolicy", "eks:DeleteAccessEntry");
+
+    /** Models every operation of which is checked: the services whose routes the registry maps in full. */
+    private static final Set<String> FULLY_ROUTED_MODELS =
+            Set.of("scheduler", "pipes", "eks", "lambda", "lambda-microvms", "lambda-core", "dsql");
 
     private final IamActionRegistry registry = new IamActionRegistry();
 
@@ -70,6 +77,27 @@ class IamRestRouteCoverageTest {
                         assertEquals(expected, resolve(route), route.toString());
                     }
                 }));
+            }
+        }
+        return tests.stream();
+    }
+
+    @TestFactory
+    Stream<DynamicTest> everyOperationOfAFullyRoutedServiceResolvesToItsAction() throws IOException {
+        JsonNode models = load("/aws/rest-routes.json").path("models");
+        JsonNode authorized = load("/aws/iam-authorized-actions.json").path("authorizedActions");
+        List<DynamicTest> tests = new ArrayList<>();
+        for (String model : FULLY_ROUTED_MODELS) {
+            String scope = models.path(model).path("credentialScope").asText();
+            Iterator<Map.Entry<String, JsonNode>> operations = models.path(model).path("operations").fields();
+            while (operations.hasNext()) {
+                Map.Entry<String, JsonNode> operation = operations.next();
+                Route route = new Route(scope, model, operation.getKey(), operation.getValue().path("method").asText(),
+                        operation.getValue().path("requestUri").asText());
+                String expected = RUN_AS_ANOTHER_OPERATION.getOrDefault(operation.getKey(),
+                        authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey()));
+                tests.add(DynamicTest.dynamicTest(model + " " + operation.getKey(),
+                        () -> assertEquals(expected, resolve(route), route.toString())));
             }
         }
         return tests.stream();

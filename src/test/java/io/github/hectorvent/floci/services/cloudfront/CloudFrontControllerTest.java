@@ -445,38 +445,6 @@ class CloudFrontControllerTest {
     }
 
     @Test
-    void originReadTimeoutAboveTheAwsMaximumIsRejected() {
-        CloudFrontService service = mock(CloudFrontService.class);
-        CloudFrontController controller = new CloudFrontController(service);
-
-        String body = distributionConfigBody("").replace(
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
-                        + "<OriginReadTimeout>121</OriginReadTimeout></CustomOriginConfig>");
-
-        try (Response created = controller.createDistribution(null, body)) {
-            assertEquals(400, created.getStatus());
-            assertTrue(((String) created.getEntity()).contains("InvalidOriginReadTimeout"));
-        }
-    }
-
-    @Test
-    void originKeepaliveTimeoutOfZeroIsRejected() {
-        CloudFrontService service = mock(CloudFrontService.class);
-        CloudFrontController controller = new CloudFrontController(service);
-
-        String body = distributionConfigBody("").replace(
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
-                        + "<OriginKeepaliveTimeout>0</OriginKeepaliveTimeout></CustomOriginConfig>");
-
-        try (Response created = controller.createDistribution(null, body)) {
-            assertEquals(400, created.getStatus());
-            assertTrue(((String) created.getEntity()).contains("InvalidOriginKeepaliveTimeout"));
-        }
-    }
-
-    @Test
     void nonNumericOriginReadTimeoutIsRejected() {
         CloudFrontService service = mock(CloudFrontService.class);
         CloudFrontController controller = new CloudFrontController(service);
@@ -493,15 +461,14 @@ class CloudFrontControllerTest {
     }
 
     @Test
-    void responseCompletionTimeoutBelowOriginReadTimeoutIsRejected() {
+    void nonNumericConnectionTimeoutIsRejected() {
         CloudFrontService service = mock(CloudFrontService.class);
         CloudFrontController controller = new CloudFrontController(service);
 
         String body = distributionConfigBody("").replace(
                 "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy>"
-                        + "<OriginReadTimeout>60</OriginReadTimeout></CustomOriginConfig>"
-                        + "<ResponseCompletionTimeout>30</ResponseCompletionTimeout>");
+                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
+                        + "<ConnectionTimeout>fast</ConnectionTimeout>");
 
         try (Response created = controller.createDistribution(null, body)) {
             assertEquals(400, created.getStatus());
@@ -523,22 +490,6 @@ class CloudFrontControllerTest {
 
         try (Response created = controller.createDistribution(null, body)) {
             assertEquals(201, created.getStatus());
-        }
-    }
-
-    @Test
-    void responseCompletionTimeoutBelowTheImplicitOriginReadTimeoutDefaultIsRejected() {
-        CloudFrontService service = mock(CloudFrontService.class);
-        CloudFrontController controller = new CloudFrontController(service);
-
-        String body = distributionConfigBody("").replace(
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>",
-                "<OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>"
-                        + "<ResponseCompletionTimeout>10</ResponseCompletionTimeout>");
-
-        try (Response created = controller.createDistribution(null, body)) {
-            assertEquals(400, created.getStatus());
-            assertTrue(((String) created.getEntity()).contains("InvalidArgument"));
         }
     }
 

@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.redshift;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsQueryLists;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -89,15 +91,13 @@ public class RedshiftQueryHandler {
             List<String> iamRoleArns = memberList(params, "IamRoles");
 
             String region = regionResolver.resolveRegionFromAuth(authorizationHeader);
+            String defaultIamRoleArn = params.getFirst("DefaultIamRoleArn");
             Cluster cluster = manageMasterPassword
                     ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
                             clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
-                            params.getFirst("MasterPasswordSecretKmsKeyId"), region)
-                    : iamRoleArns.isEmpty()
-                    ? service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                            clusterSubnetGroupName, vpcSecurityGroupIds)
+                            params.getFirst("MasterPasswordSecretKmsKeyId"), region, defaultIamRoleArn)
                     : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
+                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
             String parameterGroupName = params.getFirst("ClusterParameterGroupName");
             String multiAz = params.getFirst("MultiAZ");
             boolean hasParameterGroup = parameterGroupName != null && !parameterGroupName.isBlank();
@@ -139,7 +139,12 @@ public class RedshiftQueryHandler {
         }
         case "DeleteCluster" -> {
             String identifier = params.getFirst("ClusterIdentifier");
-            Cluster cluster = service.deleteCluster(identifier);
+            String rawSkip = params.getFirst("SkipFinalClusterSnapshot");
+            if (rawSkip != null && !"true".equalsIgnoreCase(rawSkip) && !"false".equalsIgnoreCase(rawSkip)) {
+                throw new AwsException("InvalidParameterValue", "SkipFinalClusterSnapshot must be a boolean.", 400);
+            }
+            Cluster cluster = service.deleteCluster(identifier, rawSkip == null ? null : Boolean.valueOf(rawSkip),
+                    params.getFirst("FinalClusterSnapshotIdentifier"), intParam(params, "FinalClusterSnapshotRetentionPeriod"));
             String xml = new XmlBuilder()
                     .start("DeleteClusterResponse")
                       .start("DeleteClusterResult")
@@ -266,6 +271,13 @@ public class RedshiftQueryHandler {
                 throw new AwsException("InvalidParameterValue", "ParameterGroupName is required", 400);
             }
             List<Parameter> parameters = service.describeClusterParameters(parameterGroupName);
+            String source = params.getFirst("Source");
+            if (source != null) {
+                if (!"user".equals(source) && !"engine-default".equals(source)) {
+                    throw new AwsException("InvalidParameterValue", "Source must be user or engine-default.", 400);
+                }
+                parameters = parameters.stream().filter(parameter -> source.equals(parameter.getSource())).toList();
+            }
 
             XmlBuilder xmlBuilder = new XmlBuilder()
                     .start("DescribeClusterParametersResponse")
@@ -300,6 +312,28 @@ public class RedshiftQueryHandler {
                         .elem("RequestId", "test-req-id")
                       .end("ResponseMetadata")
                     .end("ModifyClusterParameterGroupResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "ResetClusterParameterGroup" -> {
+            List<String> parameterNames = parseParameters(params).stream().map(Parameter::getParameterName).toList();
+            String rawResetAll = params.getFirst("ResetAllParameters");
+            if (rawResetAll != null && !"true".equalsIgnoreCase(rawResetAll) && !"false".equalsIgnoreCase(rawResetAll)) {
+                throw new AwsException("InvalidParameterValue", "ResetAllParameters must be a boolean.", 400);
+            }
+            boolean resetAll = rawResetAll == null ? parameterNames.isEmpty() : Boolean.parseBoolean(rawResetAll);
+            String parameterGroupName = params.getFirst("ParameterGroupName");
+            service.resetClusterParameterGroup(parameterGroupName, resetAll, parameterNames);
+            String xml = new XmlBuilder()
+                    .start("ResetClusterParameterGroupResponse", AwsNamespaces.REDSHIFT)
+                      .start("ResetClusterParameterGroupResult")
+                        .elem("ParameterGroupName", parameterGroupName)
+                        .elem("ParameterGroupStatus", "Your parameter group has been updated.")
+                      .end("ResetClusterParameterGroupResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ResetClusterParameterGroupResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
@@ -717,7 +751,8 @@ public class RedshiftQueryHandler {
                 throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
             }
             Cluster cluster = service.modifyClusterIamRoles(clusterIdentifier,
-                    memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"));
+                    memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"),
+                    params.getFirst("DefaultIamRoleArn"));
             String xml = new XmlBuilder()
                     .start("ModifyClusterIamRolesResponse")
                       .start("ModifyClusterIamRolesResult")
@@ -910,6 +945,9 @@ public class RedshiftQueryHandler {
             builder.end("VpcSecurityGroups");
         }
 
+        if (cluster.getDefaultIamRoleArn() != null) {
+            builder.elem("DefaultIamRoleArn", cluster.getDefaultIamRoleArn());
+        }
         if (cluster.getIamRoleArns() != null && !cluster.getIamRoleArns().isEmpty()) {
             builder.start("IamRoles");
             for (String iamRoleArn : cluster.getIamRoleArns()) {
@@ -1025,6 +1063,7 @@ public class RedshiftQueryHandler {
             .elem("ClusterIdentifier", snapshot.getClusterIdentifier())
             .elem("SnapshotArn", snapshot.getSnapshotArn())
             .elem("SnapshotCreateTime", createTime)
+            .elem("ManualSnapshotRetentionPeriod", snapshot.getManualSnapshotRetentionPeriod().toString())
             .elem("Status", snapshot.getStatus())
             .elem("Port", String.valueOf(snapshot.getPort()))
             .elem("MasterUsername", snapshot.getMasterUsername());
@@ -1203,6 +1242,7 @@ public class RedshiftQueryHandler {
         if (param.getDataType() != null) {
             builder.elem("DataType", param.getDataType());
         }
+        builder.elem("Source", param.getSource());
         return builder.end("Parameter").build();
     }
 
@@ -1301,7 +1341,7 @@ public class RedshiftQueryHandler {
             List<String> values = params.keySet().stream()
                     .filter(candidate -> candidate.matches(
                             "Filters\\.DescribeIntegrationsFilter\\." + index + "\\.Values\\.Value\\.\\d+"))
-                    .sorted(Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
+                    .sorted(Comparator.comparingInt(AwsQueryLists::memberIndex))
                     .map(params::getFirst)
                     .toList();
             byIndex.put(index, new RedshiftService.IntegrationFilter(name, values));
@@ -1322,58 +1362,51 @@ public class RedshiftQueryHandler {
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
-        return params.keySet().stream()
-                .filter(key -> key.matches(memberKeyRegex(baseName)))
-                .sorted(Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
-                .map(params::getFirst)
-                .filter(value -> value != null && !value.isBlank())
-                .toList();
+        return AwsQueryLists.values(params, baseName, memberName(baseName));
     }
 
-    // The AWS Query protocol accepts both the generic ".member.N" form and each shape's own
-    // locationName (e.g. the real Redshift SDK sends "SubnetIds.SubnetIdentifier.N", not "SubnetIds.member.N").
-    private static String memberKeyRegex(String baseName) {
-        String quoted = Pattern.quote(baseName);
+    /**
+     * The name the list {@code baseName}'s shape gives its members, which the real Redshift SDK sends
+     * ("SubnetIds.SubnetIdentifier.N", not "SubnetIds.member.N"), or null for a list whose shape names none.
+     */
+    private static String memberName(String baseName) {
         return switch (baseName) {
-            case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
-            case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
-            case "IamRoles", "AddIamRoles", "RemoveIamRoles" -> quoted + "(\\.member|\\.IamRoleArn)?\\.\\d+";
-            case "TagKeys" -> quoted + "(\\.member|\\.TagKey)?\\.\\d+";
-            case "TagValues" -> quoted + "(\\.member|\\.TagValue)?\\.\\d+";
-            case "ScheduleDefinitions" -> quoted + "(\\.member|\\.ScheduleDefinition)?\\.\\d+";
-            case "DbGroups" -> quoted + "(\\.member|\\.DbGroup)?\\.\\d+";
-            default -> quoted + "(\\.member)?\\.\\d+";
+            case "SubnetIds" -> "SubnetIdentifier";
+            case "VpcSecurityGroupIds" -> "VpcSecurityGroupId";
+            case "IamRoles", "AddIamRoles", "RemoveIamRoles" -> "IamRoleArn";
+            case "TagKeys" -> "TagKey";
+            case "TagValues" -> "TagValue";
+            case "ScheduleDefinitions" -> "ScheduleDefinition";
+            case "DbGroups" -> "DbGroup";
+            default -> null;
         };
     }
 
-    private static int numericSuffix(String key) {
-        int lastDot = key.lastIndexOf('.');
-        if (lastDot < 0 || lastDot == key.length() - 1) {
-            return Integer.MAX_VALUE;
-        }
-        try {
-            return Integer.parseInt(key.substring(lastDot + 1));
-        } catch (NumberFormatException e) {
-            return Integer.MAX_VALUE;
-        }
-    }
-
     private static List<Parameter> parseParameters(MultivaluedMap<String, String> params) {
-        List<Parameter> parsed = new ArrayList<>();
-        readParameters(params, "Parameters.member", parsed);
-        readParameters(params, "Parameters.Parameter", parsed);
-        return parsed;
-    }
-
-    private static void readParameters(MultivaluedMap<String, String> params, String prefix, List<Parameter> parsed) {
-        for (int i = 1; ; i++) {
-            String name = params.getFirst(prefix + "." + i + ".ParameterName");
-            if (name == null) {
-                break;
+        Map<String, Parameter> parsed = new LinkedHashMap<>();
+        for (String key : params.keySet().stream().sorted().toList()) {
+            if ("Parameters".equals(key)) {
+                if (!"".equals(params.getFirst(key))) {
+                    throw new AwsException("InvalidParameterValue", "Parameters must be an indexed list or empty.", 400);
+                }
+                continue;
             }
-            String value = params.getFirst(prefix + "." + i + ".ParameterValue");
-            parsed.add(new Parameter(name, value));
+            if (!key.startsWith("Parameters.")) {
+                continue;
+            }
+            if (!key.matches("Parameters\\.(?:member|Parameter)\\.[1-9]\\d*\\.[A-Za-z]+")) {
+                throw new AwsException("InvalidParameterValue", "Invalid Parameters member: " + key, 400);
+            }
+            String prefix = key.substring(0, key.lastIndexOf('.'));
+            String name = params.getFirst(prefix + ".ParameterName");
+            if (name == null || name.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "Each parameter must have a ParameterName.", 400);
+            }
+            parsed.putIfAbsent(prefix, new Parameter(name, params.getFirst(prefix + ".ParameterValue")));
         }
+        return parsed.entrySet().stream()
+                .sorted(Comparator.comparingInt(entry -> AwsQueryLists.memberIndex(entry.getKey())))
+                .map(Map.Entry::getValue).toList();
     }
 
     private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {

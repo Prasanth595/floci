@@ -110,6 +110,28 @@ FLOCI_SERVICES_BACKUP_JOB_COMPLETION_DELAY_SECONDS=3
 
 Use a shorter delay (e.g. `1`) in test environments to speed up job-completion assertions.
 
+On startup, persisted `CREATED`, `RUNNING` and `ABORTING` jobs resume in their owning
+account and original region. Existing completion deadlines are retained; older jobs without
+one use their creation time plus the configured delay. A `CREATED` job whose start window
+has elapsed becomes `EXPIRED`. Terminal jobs are not restarted and cannot be stopped.
+
+Completion writes a stable recovery point before marking the job `COMPLETED`. Recovery
+after an interrupted completion reuses that point without changing its original creation
+date, and reconciles the vault count only on this retry path. A new point increments the
+count without scanning the recovery-point store. Completion and recovery-point deletion
+share the vault monitor so retention checks, deletion and count updates stay consistent.
+
+New jobs persist the vault's internal `FlociVaultId` before scheduling.
+Completion requires the original vault ARN and captured id, so deleting and recreating a
+vault with the same name and ARN, even within one second, fails the old job without writing
+a point or notifying the replacement. Legacy jobs without `FlociVaultId` accept only a vault
+no newer than the job; historical dates cannot prove that a same-second vault is the original
+incarnation. Recovery never
+fills a missing job id from the currently resolved vault. The internal identity field stays
+in persisted JSON but is omitted from `DescribeBackupJob` and `ListBackupJobs` responses.
+Successful resumed completions use the existing SNS notification path and event filter;
+publish failures do not undo the job or recovery point.
+
 ## Supported Resource Types
 
 `GetSupportedResourceTypes` returns the following resource type codes:
@@ -225,7 +247,12 @@ Actual backup is simulated — no data is read from or written to the referenced
 - Report plans (`CreateReportPlan`, `DescribeReportPlan`, etc.)
 - Framework operations (`CreateFramework`, etc.)
 - Legal holds
-- Pagination tokens on list operations
+- Pagination tokens on list operations other than `ListBackupVaults`
+
+`ListBackupVaults` accepts `maxResults` from 1 to 1000 and returns `NextToken` when
+more vaults remain. Pass it as `nextToken` with the same region and `vaultType`
+filter to continue. Floci uses vault-name order and a page size of 1000 when the
+size is omitted; AWS does not document a default order or page size.
 
 ## Examples
 

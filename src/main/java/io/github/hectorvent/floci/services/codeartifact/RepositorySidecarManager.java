@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -189,5 +190,77 @@ public interface RepositorySidecarManager {
      */
     default void recordVersionAvailable(String repositoryContainerId, String domain, String repository,
             String namespace, String packageName, String version) {
+    }
+
+    /**
+     * One version this sidecar holds for a package, paired with when it was published, for
+     * {@link #listPackageVersions}. {@code publishedTime} is {@code null} when this sidecar's own
+     * protocol has no timestamp for that version at all; {@code CodeArtifactService} then falls
+     * back to a deterministic tie-break (the version string itself) rather than treating it as
+     * more or less recent than any other version.
+     */
+    record PackageVersionTimestamp(String version, Instant publishedTime) {}
+
+    /**
+     * Every version this sidecar holds of the named package, for bridging {@code
+     * ListPackageVersions} when there is no generic-format record to list versions from, the same
+     * reason {@link #listPackageVersionAssetNames} exists for one version's own assets. Unlike
+     * that method, there is no existing "list everything under this package" primitive to lean
+     * on: each implementation needs its own new, format-specific enumeration. The default throws
+     * {@link UnsupportedOperationException}, the same convention {@link #deletePackage} already
+     * uses for a capability not every sidecar backs; every container-backed format's own client
+     * overrides this.
+     */
+    default List<PackageVersionTimestamp> listPackageVersions(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName) {
+        throw new UnsupportedOperationException(format() + " package versions cannot be listed through this "
+                + "sidecar");
+    }
+
+    /**
+     * Marks that {@code repositoryContainerId} is about to be used for {@link
+     * #listPackageVersions}, called by {@code CodeArtifactService} right after it resolves that
+     * id and before it does anything else with it. Resolving the id and entering {@link
+     * #listPackageVersions} are two separate statements there, with a concurrent repository
+     * delete's cleanup able to run in between them; pairing this with {@link #endUse} in a
+     * {@code try}/{@code finally} around the whole {@link #listPackageVersions} call closes that
+     * window the same way {@code PypiserverSidecarClient} already closes the narrower one inside
+     * the call itself. Default is a no-op: only a sidecar whose own concurrency bookkeeping dies
+     * with the container (pypiserver) has anything here to protect; one with no such bookkeeping,
+     * or (Maven) a container that is never torn down, does not.
+     */
+    default void beginUse(String repositoryContainerId) {
+    }
+
+    /** Marks the end of one {@link #beginUse}. Default is a no-op, for the same reason. */
+    default void endUse(String repositoryContainerId) {
+    }
+
+    /**
+     * Called once per version, after every one of its assets has already been removed through
+     * {@link #deletePackageVersionAsset}, for a sidecar whose own native listing can name a
+     * version somewhere other than the per-version assets {@link #listPackageVersionAssetNames}
+     * already enumerates: Maven's artifact-level {@code maven-metadata.xml}, which {@code
+     * ReposiliteSidecarClient} overrides this to rewrite. Default is a no-op: a sidecar with no
+     * such separate listing (every format {@code DisposePackageVersions} supports besides Maven)
+     * already has nothing left to say the version ever existed once its assets are gone.
+     */
+    default void recordVersionDisposed(String repositoryContainerId, String namespace, String packageName,
+            String version) {
+    }
+
+    /**
+     * This format's own preferred "default display" version for a package, independent of publish
+     * recency, for {@code ListPackageVersions}' {@code defaultDisplayVersion}. {@code empty()} by
+     * default: every sidecar Floci currently backs besides npm has no such separate preference of
+     * its own (AWS documents Maven and PyPI's default display version as simply "the most recently
+     * published package version," which {@code CodeArtifactService} already falls back to on an
+     * empty result here). {@code VerdaccioSidecarClient} overrides this: npm's own {@code
+     * dist-tags.latest} is exactly this preference, and AWS documents the same most-recently-
+     * published fallback for npm only when that tag isn't set.
+     */
+    default Optional<String> preferredDisplayVersion(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName) {
+        return Optional.empty();
     }
 }

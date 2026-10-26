@@ -24,6 +24,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -572,6 +573,26 @@ class S3ServiceTest {
     }
 
     @Test
+    void putObjectFromStreamStoresWhatAByteArrayPutStores() {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        byte[] body = "payload".getBytes(StandardCharsets.UTF_8);
+
+        S3Object bytes = s3Service.putObject("test-bucket", "bytes", body, "application/zip", Map.of());
+        s3Service.putObjectFromStream("test-bucket", "streamed", new ByteArrayInputStream(body), "application/zip",
+                Map.of());
+
+        S3Object head = s3Service.headObject("test-bucket", "streamed");
+        assertEquals(bytes.getETag(), head.getETag());
+        assertEquals(bytes.getSize(), head.getSize());
+        assertEquals("application/zip", head.getContentType());
+        assertEquals(Map.of(), head.getMetadata());
+        assertEquals(bytes.getStorageClass(), head.getStorageClass());
+        assertEquals(bytes.getChecksum().getChecksumCRC64NVME(), head.getChecksum().getChecksumCRC64NVME());
+        assertEquals(ChecksumType.FULL_OBJECT, head.getChecksum().getChecksumType());
+        assertArrayEquals(body, s3Service.getObject("test-bucket", "streamed").getData());
+    }
+
+    @Test
     void getObjectAttributesReturnsRequestedFields() {
         s3Service.createBucket("test-bucket", "us-east-1");
         s3Service.putObject("test-bucket", "report.txt", "payload".getBytes(StandardCharsets.UTF_8),
@@ -702,7 +723,8 @@ class S3ServiceTest {
                 "application/json", null);
 
         assertEquals("ap-northeast-1", lambdaInvoker.region);
-        assertEquals("s3-notif-test", lambdaInvoker.functionName);
+        assertEquals("arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test",
+                lambdaInvoker.functionName);
         assertEquals(InvocationType.Event, lambdaInvoker.type);
         assertNotNull(lambdaInvoker.payload);
     }
@@ -741,7 +763,8 @@ class S3ServiceTest {
 
         service.putObject("test-bucket", "a.json", "{}".getBytes(StandardCharsets.UTF_8), "application/json", null);
 
-        assertEquals("s3-notif-test:PROD", lambdaInvoker.functionName);
+        assertEquals("arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test:PROD",
+                lambdaInvoker.functionName);
     }
 
     @Test

@@ -581,6 +581,11 @@ public class CloudFormationQueryHandler {
     // ── ValidateTemplate ──────────────────────────────────────────────────────
 
     private Response validateTemplate(MultivaluedMap<String, String> params) {
+        try {
+            cfnService.validateTemplate(params.getFirst("TemplateBody"), params.getFirst("TemplateURL"));
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
         String xml = new XmlBuilder()
                 .start("ValidateTemplateResponse", CF_NS)
                 .start("ValidateTemplateResult")

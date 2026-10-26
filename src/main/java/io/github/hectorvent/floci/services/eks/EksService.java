@@ -156,6 +156,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 oidcService, accessEntries, null, null);
     }
 
+    /** Called at boot so this lazily created bean runs {@link #init()}, which restarts persisted clusters. */
+    public void restorePersistedRuntime() {
+        int persistedClusters = allClusterEntries().size();
+        if (persistedClusters > 0) {
+            LOG.infov("Found {0} persisted EKS cluster record(s)", persistedClusters);
+        }
+    }
+
     @PostConstruct
     public void init() {
         backfillOidcIdentities();
@@ -734,6 +742,37 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 ? aware.getForAccount(accountId, name) : storage.get(name);
     }
 
+    /**
+     * The ARN of what an EKS route names in the caller's account, looked up as its handler looks it up: the
+     * cluster {@code clusterName} when {@code collection} is null, or else the node group, Fargate profile,
+     * add-on, access entry or Pod Identity association {@code name} in that cluster, by the route's
+     * collection segment, or for the update {@code name} the add-on it was made to. Empty when there is none,
+     * or the handler would refuse the lookup.
+     */
+    public Optional<String> findResourceArn(String clusterName, String collection, String name) {
+        Optional<Cluster> cluster = storage.get(clusterName);
+        if (cluster.isEmpty() || collection == null) {
+            return cluster.map(Cluster::getArn);
+        }
+        try {
+            return Optional.ofNullable(switch (collection) {
+                case "node-groups" -> describeNodeGroup(clusterName, name).getNodegroupArn();
+                case "fargate-profiles" -> describeFargateProfile(clusterName, name).getFargateProfileArn();
+                case "addons" -> addons.describe(cluster.get(), name).addonArn();
+                case "access-entries" -> accessEntries.describe(cluster.get(), name).accessEntryArn();
+                case "pod-identity-associations" -> podIdentityAssociations.describe(cluster.get(), name).associationArn();
+                case "updates" -> {
+                    String addon = addons.updateAddonName(cluster.get(), name);
+                    yield addon == null ? null : addons.describe(cluster.get(), addon).addonArn();
+                }
+                default -> null;
+            });
+        } catch (AwsException expected) {
+            // The handler answers this lookup with the same error, so the route names no resource to act on.
+            return Optional.empty();
+        }
+    }
+
     public Cluster describeCluster(String name) {
         Cluster cluster = storage.get(name)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -1052,13 +1091,16 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         String previousType = EksClusterManager.nodeInstanceType(currentCluster);
         currentCluster.setNodeInstanceType(selectedType);
         if (currentCluster.getContainerId() != null && !selectedType.equals(previousType)) {
-            currentCluster.setStatus(ClusterStatus.CREATING);
             try {
                 if (!clusterManager.restartForNodeCapacity(currentCluster, previousType)) {
                     nodeGroup.setStatus(NodegroupStatus.CREATE_FAILED);
                     nodeGroup.setHealth(failedNodeGroupHealth(nodegroupName,
                             "Could not apply node capacity; the previous node was restored"));
                 }
+                // Set only now: before the swap the poller would verify the old container, still
+                // answering while it stops. A failed swap restarts the previous node, so it is
+                // verified too.
+                currentCluster.setFinalizePending(true);
             } catch (RuntimeException e) {
                 currentCluster.setNodeInstanceType(previousType);
                 currentCluster.setStatus(ClusterStatus.FAILED);
@@ -1603,26 +1645,41 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     private void startReadinessPoller() {
-        poller.scheduleAtFixedRate(() -> {
-            try {
-                for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
-                    Cluster cluster = entry.value();
-                    if (cluster.getStatus() == ClusterStatus.CREATING) {
-                        if (clusterManager.isReady(cluster)) {
-                            LOG.infov("EKS cluster {0} is now ACTIVE", cluster.getName());
-                            clusterManager.finalizeCluster(cluster);
+        poller.scheduleAtFixedRate(this::pollClusterReadiness, 2, 3, TimeUnit.SECONDS);
+    }
+
+    void pollClusterReadiness() {
+        try {
+            for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+                Cluster cluster = entry.value();
+                boolean replacedNode = cluster.getStatus() == ClusterStatus.ACTIVE && cluster.isFinalizePending();
+                if (cluster.getStatus() == ClusterStatus.CREATING || replacedNode) {
+                    if (clusterManager.isReady(cluster)) {
+                        clusterManager.finalizeCluster(cluster);
+                        // A delete that ran while the API server was probed must not get its
+                        // cluster written back.
+                        synchronized (clustersBeingDeleted) {
+                            if (isClusterDeleting(entry.accountId(), cluster)) {
+                                continue;
+                            }
+                            cluster.setFinalizePending(false);
                             cluster.setStatus(ClusterStatus.ACTIVE);
                             putCluster(cluster);
-                            restoreJoinedInstancesAsync(entry.accountId(), cluster);
                         }
-                    } else if (cluster.getStatus() == ClusterStatus.ACTIVE && hasPendingJoinedInstances(cluster)) {
+                        if (replacedNode) {
+                            LOG.infov("Replaced k3s node of EKS cluster {0} is ready", cluster.getName());
+                        } else {
+                            LOG.infov("EKS cluster {0} is now ACTIVE", cluster.getName());
+                        }
                         restoreJoinedInstancesAsync(entry.accountId(), cluster);
                     }
+                } else if (cluster.getStatus() == ClusterStatus.ACTIVE && hasPendingJoinedInstances(cluster)) {
+                    restoreJoinedInstancesAsync(entry.accountId(), cluster);
                 }
-            } catch (Exception e) {
-                LOG.error("Error in EKS readiness poller", e);
             }
-        }, 2, 3, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            LOG.error("Error in EKS readiness poller", e);
+        }
     }
 
     private void restoreJoinedInstancesAsync(String accountId, Cluster cluster) {

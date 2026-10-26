@@ -181,10 +181,10 @@ public class NativeDynamoDbTableService {
     }
 
     /**
-     * Creates the target of a restore in CREATING from {@code source}, a copy of the table the
-     * backup holds, with the request's overrides applied. Like AWS, the new table gets the keys,
-     * indexes, capacity and encryption, and none of the stream, TTL, point-in-time recovery, tags,
-     * deletion protection or table class.
+     * Creates the target of a restore in CREATING from {@code source}, a copy of the table a backup
+     * holds or of the source of a point-in-time restore, with the request's overrides applied. Like
+     * AWS, the new table gets the keys, indexes, capacity and encryption, and none of the stream,
+     * TTL, point-in-time recovery, tags, deletion protection or table class.
      */
     TableDefinition restoreTable(TableDefinition source, String targetTableName, RestoreOverrides overrides,
                                  String region) {

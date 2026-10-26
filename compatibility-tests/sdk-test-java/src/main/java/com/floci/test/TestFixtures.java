@@ -50,9 +50,12 @@ import software.amazon.awssdk.services.databasemigration.DatabaseMigrationClient
 import software.amazon.awssdk.services.datasync.DataSyncClient;
 import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.dlm.DlmClient;
+import software.amazon.awssdk.services.dsql.DsqlClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.Subnet;
+import software.amazon.awssdk.services.ec2.model.Vpc;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.efs.EfsClient;
@@ -167,17 +170,27 @@ import software.amazon.awssdk.services.wafv2.Wafv2Client;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.KeyStore;
 import java.security.SecureRandom;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
@@ -278,6 +291,33 @@ public final class TestFixtures {
     }
 
     /**
+     * A default subnet in each of the first two availability zones of {@link #region()}'s default VPC,
+     * for tests that create a load balancer: CreateLoadBalancer needs subnets for every type, and an
+     * Application Load Balancer needs them in two zones.
+     */
+    public static List<String> defaultVpcSubnets() {
+        try (Ec2Client ec2 = ec2Client()) {
+            List<Vpc> defaults = ec2.describeVpcs(r -> r.filters(f -> f.name("is-default").values("true"))).vpcs();
+            if (defaults.isEmpty()) {
+                throw new IllegalStateException("no default VPC in " + REGION.id() + " to put a load balancer in");
+            }
+            String vpcId = defaults.get(0).vpcId();
+            Map<String, String> byZone = new TreeMap<>();
+            for (Subnet subnet : ec2.describeSubnets(r -> r.filters(f -> f.name("vpc-id").values(vpcId)))
+                    .subnets()) {
+                if (Boolean.TRUE.equals(subnet.defaultForAz())) {
+                    byZone.putIfAbsent(subnet.availabilityZone(), subnet.subnetId());
+                }
+            }
+            if (byZone.size() < 2) {
+                throw new IllegalStateException("default VPC " + vpcId + " has default subnets in "
+                        + byZone.keySet() + ", and an Application Load Balancer needs two availability zones");
+            }
+            return byZone.values().stream().limit(2).toList();
+        }
+    }
+
+    /**
      * The partition of {@link #region()} ({@code aws}, {@code aws-cn}, {@code aws-us-gov}, ...), from
      * the SDK's own region metadata, so a test pins the partition its clients actually sign in. A region
      * the SDK does not know is taken as commercial.
@@ -354,6 +394,28 @@ public final class TestFixtures {
      */
     public static String proxyHost() {
         return ENDPOINT.getHost();
+    }
+
+    /**
+     * A TLS context that trusts only the CA Floci serves at {@code /_floci/ca.pem}, for a client
+     * that verifies an endpoint Floci signs, such as a DSQL cluster or an encrypted cache.
+     */
+    public static SSLContext flociCaTrust() throws IOException, InterruptedException, GeneralSecurityException {
+        HttpResponse<String> ca = emulatorHttpClient().send(
+                HttpRequest.newBuilder(ENDPOINT.resolve("/_floci/ca.pem")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        KeyStore trusted = KeyStore.getInstance(KeyStore.getDefaultType());
+        trusted.load(null, null);
+        int index = 0;
+        for (Certificate certificate : CertificateFactory.getInstance("X.509").generateCertificates(
+                new ByteArrayInputStream(ca.body().getBytes(StandardCharsets.US_ASCII)))) {
+            trusted.setCertificateEntry("floci-" + index++, certificate);
+        }
+        TrustManagerFactory trust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        trust.init(trusted);
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, trust.getTrustManagers(), null);
+        return context;
     }
 
     // ============================================
@@ -1255,6 +1317,14 @@ public final class TestFixtures {
         return hostedZoneId != null && hostedZoneId.startsWith(prefix)
                 ? hostedZoneId.substring(prefix.length())
                 : hostedZoneId;
+    }
+
+    public static DsqlClient dsqlClient() {
+        return DsqlClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
     }
 
     public static RdsClient rdsClient() {

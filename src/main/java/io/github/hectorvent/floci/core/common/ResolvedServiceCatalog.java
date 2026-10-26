@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.controltower.ControlTowerControlContr
 import io.github.hectorvent.floci.services.controltower.ControlTowerController;
 import io.github.hectorvent.floci.services.detective.DetectiveController;
 import io.github.hectorvent.floci.services.dlm.DlmController;
+import io.github.hectorvent.floci.services.dsql.DsqlController;
 import io.github.hectorvent.floci.services.efs.EfsController;
 import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.fis.FisController;
@@ -65,6 +66,7 @@ import io.github.hectorvent.floci.services.s3.S3Controller;
 import io.github.hectorvent.floci.services.s3tables.S3TablesController;
 import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
 import io.github.hectorvent.floci.services.sagemaker.SageMakerRuntimeController;
+import io.github.hectorvent.floci.services.scheduler.SchedulerController;
 import io.github.hectorvent.floci.services.securityhub.SecurityHubController;
 import io.github.hectorvent.floci.services.ses.SesAccountController;
 import io.github.hectorvent.floci.services.ses.SesConfigurationSetController;
@@ -76,6 +78,7 @@ import io.github.hectorvent.floci.services.ses.SesIdentityController;
 import io.github.hectorvent.floci.services.ses.SesImportJobController;
 import io.github.hectorvent.floci.services.ses.SesInsightsController;
 import io.github.hectorvent.floci.services.ses.SesMetricsController;
+import io.github.hectorvent.floci.services.ses.SesReputationEntityController;
 import io.github.hectorvent.floci.services.ses.SesSendController;
 import io.github.hectorvent.floci.services.ses.SesSuppressionController;
 import io.github.hectorvent.floci.services.ses.SesTagController;
@@ -131,7 +134,7 @@ public class ResolvedServiceCatalog {
                         5000L, AwsNamespaces.S3, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
                         // s3express: directory-bucket (S3 Express One Zone) clients sign with it
-                        Set.of(), Set.of("s3", "s3express"), Set.of(), Set.of(S3Controller.class)),
+                        Set.of(), Set.of("s3", "s3express"), Set.of(), Set.of(S3Controller.class)).withLegacyAuthorization(),
                 descriptor("dynamodb", "dynamodb", config.services().dynamodb().enabled(), true,
                         "dynamodb", storageMode(config.storage().services().dynamodb().mode(), config.storage().mode()),
                         config.storage().services().dynamodb().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -200,6 +203,10 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("rds-data"), Set.of(), Set.of(RdsDataController.class)),
+                descriptor("dsql", "dsql", config.services().dsql().enabled(), true,
+                        "dsql", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("dsql"), Set.of(), Set.of(DsqlController.class)),
                 descriptor("neptune", "neptune", config.services().neptune().enabled(), true,
                         "neptune", storageMode(config.storage().services().neptune().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
@@ -251,7 +258,7 @@ public class ResolvedServiceCatalog {
                 descriptor("scheduler", "scheduler", config.services().scheduler().enabled(), true,
                         "scheduler", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of(), Set.of("scheduler"), Set.of(), Set.of()),
+                        Set.of(), Set.of("scheduler"), Set.of(), Set.of(SchedulerController.class)),
                 descriptor("logs", "cloudwatchlogs", config.services().cloudwatchlogs().enabled(), true,
                         "cloudwatchlogs", storageMode(config.storage().services().cloudwatchlogs().mode(), config.storage().mode()),
                         config.storage().services().cloudwatchlogs().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -332,7 +339,7 @@ public class ResolvedServiceCatalog {
                                 SesDedicatedIpController.class, SesExportJobController.class,
                                 SesIdentityController.class,
                                 SesInsightsController.class, SesMetricsController.class,
-                                SesSendController.class,
+                                SesReputationEntityController.class, SesSendController.class,
                                 SesSuppressionController.class, SesTagController.class,
                                 SesTemplateController.class, SesImportJobController.class,
                                 SesTenantController.class)),

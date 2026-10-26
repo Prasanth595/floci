@@ -401,6 +401,7 @@ public class CloudFormationService implements ResourceProvider {
                                       Map<String, String> tags, String region, String accountId,
                                       boolean attachToReviewInProgressStack, boolean fromPreviousTemplate) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
+        requireValidTemplate(resolvedTemplate);
         boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
         // An update names its stack by name or stack ID; the map is keyed by name. One that names no
         // live stack is keyed as given, so it lands in the missing-stack branch below.
@@ -1413,7 +1414,7 @@ public class CloudFormationService implements ResourceProvider {
     private static void validateContinueUpdateRollback(String stackNameOrArn, List<String> resourcesToSkip) {
         List<String> violations = new ArrayList<>();
         if (stackNameOrArn == null) {
-            violations.add("Value null at 'stackName' failed to satisfy constraint: Member must not be null");
+            violations.add(SmithyValidationErrors.notNull("stackName"));
         } else {
             if (stackNameOrArn.isEmpty()) {
                 violations.add("Value '' at 'stackName' failed to satisfy constraint:"
@@ -1566,13 +1567,7 @@ public class CloudFormationService implements ResourceProvider {
                         "One of StackName, TemplateBody or TemplateURL must be specified.", 400);
             }
         }
-        JsonNode template;
-        try {
-            template = parseTemplate(resolvedBody);
-        } catch (Exception e) {
-            throw new AwsException("ValidationError", "Template format error: " + e.getMessage(), 400);
-        }
-        return buildTemplateSummary(template);
+        return buildTemplateSummary(readTemplate(resolvedBody));
     }
 
     /** Each parameter the template declares, with its {@link #parameterType}. */
@@ -2026,7 +2021,9 @@ public class CloudFormationService implements ResourceProvider {
                             value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                             (name, output, outputRegion, roleArn) ->
                                     resolveStackOutput(accountId, name, output, outputRegion, roleArn),
-                            parameterTypes);
+                            parameterTypes,
+                            (id, attribute, value) -> dispatcher.attributeValue(
+                                    resources.path(id).path("Type").asText(), attribute, value));
 
                     StackResource resource = stack.getResources().get(logicalId);
                     StackResource previousResource = resource;
@@ -2197,7 +2194,9 @@ public class CloudFormationService implements ResourceProvider {
                     value -> dynamicReferences.resolveDynamicReferences(value, region, false),
                     (name, output, outputRegion, roleArn) ->
                             resolveStackOutput(accountId, name, output, outputRegion, roleArn),
-                    parameterTypes);
+                    parameterTypes,
+                    (id, attribute, value) -> dispatcher.attributeValue(
+                            resources.path(id).path("Type").asText(), attribute, value));
 
             // Resolve outputs before mutating stack/global export state, so failed updates do not
             // leave stale or partially registered exports behind.
@@ -2217,14 +2216,9 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, String> outputValues = new LinkedHashMap<>();
             for (Map.Entry<String, JsonNode> output : outputs.entrySet()) {
                 try {
-                    outputValues.put(output.getKey(), finalEngine.resolve(output.getValue().path("Value")));
+                    outputValues.put(output.getKey(), finalEngine.resolveString(output.getValue().path("Value"),
+                            "Template format error: Every Value member must be a string."));
                 } catch (AwsException e) {
-                    if (!CloudFormationTemplateEngine.containsGetStackOutput(output.getValue())) {
-                        throw e;
-                    }
-                    // An output whose Fn::GetStackOutput cannot be read fails the operation once the
-                    // resources exist, and the stack rolls back as for a resource that failed
-                    // (measured: a create deletes them and ends ROLLBACK_COMPLETE).
                     LOG.warnv("Stack {0} output {1} failed: {2}", stack.getStackName(), output.getKey(),
                             e.getMessage());
                     rollbackFailedExecution(stack, region, isCreate, e.getMessage(), previousState,
@@ -3938,13 +3932,28 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private JsonNode parseTemplate(String templateBody) throws Exception {
-        String trimmed = templateBody != null ? templateBody.trim() : "{}";
-        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-            return objectMapper.readTree(trimmed);
+    private JsonNode parseTemplate(String templateBody) throws CloudFormationTemplateParser.TemplateFormatException {
+        return new CloudFormationTemplateParser(objectMapper).parse(templateBody);
+    }
+
+    /**
+     * {@code templateBody} parsed, refused as CloudFormation refuses a body that is no template
+     * (measured, eu-west-1, 2026-10-21, for ValidateTemplate, CreateStack, UpdateStack,
+     * CreateChangeSet, GetTemplateSummary, CreateStackSet and UpdateStackSet):
+     * one that reads as neither JSON nor YAML, with the parser's position, and one that reads as a
+     * scalar or a list. A null template passes, for the checks that answer it.
+     */
+    private JsonNode readTemplate(String templateBody) {
+        JsonNode parsed;
+        try {
+            parsed = parseTemplate(templateBody);
+        } catch (CloudFormationTemplateParser.TemplateFormatException e) {
+            throw new AwsException("ValidationError", "Template format error: " + e.getMessage(), 400);
         }
-        // YAML template — use CF-aware parser to handle !Sub, !Ref, !GetAtt etc.
-        return new CloudFormationYamlParser(objectMapper).parse(trimmed);
+        if (parsed != null && !parsed.isNull() && !parsed.isObject()) {
+            throw new AwsException("ValidationError", "Template format error: unsupported structure.", 400);
+        }
+        return parsed;
     }
 
     private String resolveTemplate(String templateBody, String templateUrl) {
@@ -3974,6 +3983,18 @@ public class CloudFormationService implements ResourceProvider {
         try {
             S3Object obj = s3Service.getObject(ref.bucket(), ref.key());
             return new String(obj.getData());
+        } catch (AwsException e) {
+            // Measured (eu-west-1, 2026-10-20), alike for ValidateTemplate, CreateStack and GetTemplateSummary.
+            if ("NoSuchBucket".equals(e.getErrorCode())) {
+                throw new AwsException("ValidationError", "S3 error: The specified bucket does not exist\nFor more"
+                        + " information check http://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html", 400);
+            }
+            if ("NoSuchKey".equals(e.getErrorCode())) {
+                throw new AwsException("ValidationError", "S3 object does not exist. Bucket: " + ref.bucket()
+                        + ", Key: " + ref.key() + ". Error: NoSuchKey", 400);
+            }
+            LOG.errorv("Failed to fetch CloudFormation template from {0}: {1}", url, e.getMessage());
+            throw new RuntimeException("Failed to fetch CloudFormation template from " + url + ": " + e.getMessage(), e);
         } catch (Exception e) {
             LOG.errorv("Failed to fetch CloudFormation template from {0}: {1}", url, e.getMessage());
             throw new RuntimeException("Failed to fetch CloudFormation template from " + url + ": " + e.getMessage(), e);
@@ -4478,6 +4499,68 @@ public class CloudFormationService implements ResourceProvider {
                     + ", but this output was not found. The output may have been deleted.", 400);
         }
         return value;
+    }
+
+    /** ValidateTemplate's check of a template: one that is no template, and the null values AWS refuses there. */
+    public void validateTemplate(String templateBody, String templateUrl) {
+        String resolvedBody = resolveTemplateBody(templateBody, templateUrl);
+        if (resolvedBody != null) {
+            requireValidTemplate(resolvedBody);
+        }
+    }
+
+    /**
+     * The checks ValidateTemplate, CreateStack, UpdateStack, CreateChangeSet, CreateStackSet and
+     * UpdateStackSet make of a template before anything is created or kept: a body that is no
+     * template ({@link #readTemplate}), then its null values ({@link #requireNoNullValues}).
+     */
+    void requireValidTemplate(String templateBody) {
+        requireNoNullValues(readTemplate(templateBody));
+    }
+
+    /**
+     * Refuses a template that holds a null value anywhere, as AWS does when ValidateTemplate,
+     * CreateStack, UpdateStack or CreateChangeSet is requested, before anything is created
+     * (measured, eu-west-1, 2026-10-20): ValidationError "[path] 'null' values are not allowed in
+     * templates", naming the first null in document order. Below a resource's Properties the path
+     * says Type where Properties would be, as AWS's does; a null Properties is named as it is.
+     */
+    private static void requireNoNullValues(JsonNode parsed) {
+        if (parsed == null || parsed.isNull()) {
+            // Measured: a template that is null as a whole ("null", "~") lacks its resources first.
+            throw new AwsException("ValidationError",
+                    "Template format error: At least one Resources member must be defined.", 400);
+        }
+        String path = firstNullPath(parsed, "", false);
+        if (path != null) {
+            throw new AwsException("ValidationError",
+                    "[" + path + "] 'null' values are not allowed in templates", 400);
+        }
+    }
+
+    private static String firstNullPath(JsonNode node, String path, boolean isResource) {
+        if (node.isNull()) {
+            return path;
+        }
+        if (node.isObject()) {
+            boolean childIsResource = "/Resources".equals(path);
+            for (Map.Entry<String, JsonNode> member : node.properties()) {
+                String name = isResource && "Properties".equals(member.getKey()) && !member.getValue().isNull()
+                        ? "Type" : member.getKey();
+                String found = firstNullPath(member.getValue(), path + "/" + name, childIsResource);
+                if (found != null) {
+                    return found;
+                }
+            }
+        } else if (node.isArray()) {
+            for (int i = 0; i < node.size(); i++) {
+                String found = firstNullPath(node.get(i), path + "/" + i, false);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
     }
 
     /**

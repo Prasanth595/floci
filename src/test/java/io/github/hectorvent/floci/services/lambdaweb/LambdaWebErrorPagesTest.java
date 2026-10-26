@@ -18,6 +18,7 @@ class LambdaWebErrorPagesTest {
         assertEquals(230, length(LambdaWebErrorPages.FORBIDDEN));
         assertEquals(225, length(LambdaWebErrorPages.INVALID_ENDPOINT));
         assertEquals(264, length(LambdaWebErrorPages.UNSUPPORTED_HTTP_VERSION));
+        assertEquals(225, length(LambdaWebErrorPages.ENDPOINT_NOT_ACTIVE));
         assertEquals(274, length(LambdaWebErrorPages.ENDPOINT_DISABLED));
         assertEquals(249, length(LambdaWebErrorPages.REQUEST_TIMEOUT));
         assertEquals(236, length(LambdaWebErrorPages.ORIGIN_REQUEST_ERROR));
@@ -29,6 +30,7 @@ class LambdaWebErrorPagesTest {
         assertEquals(237, length(LambdaWebErrorPages.ENDPOINT_MAX_ENV_THROTTLE));
         assertEquals(237, length(LambdaWebErrorPages.ENDPOINT_REQUEST_THROTTLE));
         assertEquals(180, LambdaWebErrorPages.MALFORMED_REQUEST_HTML.getBytes(StandardCharsets.UTF_8).length);
+        assertEquals(196, LambdaWebErrorPages.HEADER_TOO_LARGE_HTML.getBytes(StandardCharsets.UTF_8).length);
     }
 
     @Test

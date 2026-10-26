@@ -137,6 +137,11 @@ public class CognitoService implements ResourceProvider {
      * starts with it, so a token whose username holds a pipe is never read as one with scopes.
      */
     private static final String REFRESH_TOKEN_SCOPE_FIELD = "scope=";
+    /**
+     * Starts the refresh token field that holds when the user signed in, in epoch seconds. A family id
+     * never starts with it either, so a token minted before the field existed is never read as one with it.
+     */
+    private static final String REFRESH_TOKEN_AUTH_TIME_FIELD = "auth_time=";
 
     private static final String IDENTITIES_ATTRIBUTE = "identities";
 
@@ -2027,7 +2032,7 @@ public class CognitoService implements ResourceProvider {
     private void validateLogConfigurations(List<Map<String, Object>> configs) {
         if (configs == null) {
             throw validationErrors(List.of(
-                    "Value null at 'logConfigurations' failed to satisfy constraint: Member must not be null"));
+                    SmithyValidationErrors.notNull("logConfigurations")));
         }
 
         List<String> errors = new ArrayList<>();
@@ -2671,45 +2676,95 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminUpdateUserAttributes(String userPoolId, String username, Map<String, String> attributes) {
+        adminUpdateUserAttributes(userPoolId, username, attributes, Map.of());
+    }
+
+    public void adminUpdateUserAttributes(String userPoolId, String username, Map<String, String> attributes,
+                                          Map<String, String> clientMetadata) {
         CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        List<AttributeCodeMessage> messages = new ArrayList<>();
+        AttributeCodeSending sending;
         synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
             adminUpdateUserAttributesUnderUserLock(
-                    userPoolId, resolvedUser.getUsername(), attributes);
+                    userPoolId, resolvedUser.getUsername(), attributes, clientMetadata, messages);
+            sending = attributeCodeSending(userPoolId, resolvedUser.getUsername(), null);
         }
+        sendAttributeCodeMessages(sending, "CustomMessage_UpdateUserAttribute", clientMetadata, messages);
     }
 
     private void adminUpdateUserAttributesUnderUserLock(
-            String userPoolId, String username, Map<String, String> attributes) {
-        CognitoUser user = adminGetUser(userPoolId, username);
+            String userPoolId, String username, Map<String, String> attributes,
+            Map<String, String> clientMetadata, List<AttributeCodeMessage> messages) {
+        CognitoUser currentUser = adminGetUser(userPoolId, username);
         UserPool pool = describeUserPool(userPoolId);
+        boolean stagesContactUpdate = attributes.entrySet().stream()
+                .anyMatch(attribute -> isVerifiableContactAttribute(attribute.getKey())
+                        && shouldVerifyAttribute(pool, attribute.getKey())
+                        && !isExplicitlyVerified(attributes, attribute.getKey())
+                        && blankToNull(attribute.getValue()) != null);
+        CognitoUser updatedUser = stagesContactUpdate
+                ? MAPPER.convertValue(currentUser, CognitoUser.class) : currentUser;
         validateEmailAttribute(attributes, true);
         if (usesAliasUsernames(pool)) {
             for (String aliasAttribute : pool.getUsernameAttributes()) {
                 String newValue = attributes.get(aliasAttribute);
-                if (blankToNull(newValue) == null || newValue.equals(user.getAttributes().get(aliasAttribute))) {
+                if (blankToNull(newValue) == null || newValue.equals(currentUser.getAttributes().get(aliasAttribute))) {
                     continue;
                 }
                 CognitoUser other = findUserByAlias(userPoolId, aliasAttribute, newValue);
-                if (other != null && !other.getUsername().equals(user.getUsername())) {
+                if (other != null && !other.getUsername().equals(currentUser.getUsername())) {
                     throw new AwsException("AliasExistsException",
                             "An account with the given " + aliasAttribute + " already exists.", 400);
                 }
             }
         }
-        attributes.keySet().forEach(attributeName ->
-                clearPendingAttributeVerification(userPoolId, user, attributeName));
+        Map<String, String> contacts = new LinkedHashMap<>();
         for (Map.Entry<String, String> attribute : attributes.entrySet()) {
             String attributeName = attribute.getKey();
             String value = attribute.getValue();
+            boolean contact = isVerifiableContactAttribute(attributeName);
             if (blankToNull(value) == null) {
-                user.getAttributes().remove(attributeName);
-                user.getAttributes().remove(attributeName + "_verified");
+                updatedUser.getAttributes().remove(attributeName);
+                updatedUser.getAttributes().remove(attributeName + "_verified");
+                clearPendingAttributeVerification(userPoolId, updatedUser, attributeName);
+            } else if (contact && shouldVerifyAttribute(pool, attributeName)
+                    && !isExplicitlyVerified(attributes, attributeName)) {
+                String pending = updatedUser.getPendingAttributes().get(attributeName);
+                boolean sameCurrent = value.equals(updatedUser.getAttributes().get(attributeName));
+                if (sameCurrent && "true".equalsIgnoreCase(
+                        updatedUser.getAttributes().get(attributeName + "_verified"))) {
+                    continue;
+                }
+                if (value.equals(pending) || sameCurrent) {
+                    ensureVerificationWiring();
+                    if (verificationCodeService.hasUsableCode(
+                            userPoolId, updatedUser.getUsername(), verificationPurpose(attributeName))) {
+                        continue;
+                    }
+                }
+                clearPendingAttributeVerification(userPoolId, updatedUser, attributeName);
+                stageContactAttributeUpdate(pool, updatedUser, attributeName, value);
+                contacts.put(attributeName, value);
             } else {
-                user.getAttributes().put(attributeName, value);
+                clearPendingAttributeVerification(userPoolId, updatedUser, attributeName);
+                updatedUser.getAttributes().put(attributeName, value);
+                if (contact && isExplicitlyVerified(attributes, attributeName)) {
+                    updatedUser.getAttributes().put(attributeName + "_verified", "true");
+                    updatedUser.getPendingAttributes().remove(attributeName);
+                }
             }
         }
-        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        userStore.put(userKey(userPoolId, user.getUsername()), user);
+        completeContactAttributeUpdate(pool, null, currentUser, updatedUser, contacts,
+                "CustomEmailSender_AdminUpdateUserAttribute", clientMetadata, messages);
+    }
+
+    private boolean isExplicitlyVerified(Map<String, String> attributes, String attributeName) {
+        return "true".equalsIgnoreCase(attributes.get(attributeName + "_verified"));
+    }
+
+    private boolean shouldVerifyAttribute(UserPool pool, String attributeName) {
+        return pool.getAutoVerifiedAttributes() != null
+                && pool.getAutoVerifiedAttributes().contains(attributeName);
     }
 
     public void adminDeleteUserAttributes(String userPoolId, String username, List<String> attributeNames) {
@@ -3556,7 +3611,7 @@ public class CognitoService implements ResourceProvider {
                     deliveryTarget.deliveryMedium(), "CustomEmailSender_ResendCode",
                     VerificationCode.Purpose.SIGNUP_CONFIRMATION, code, clientMetadata)) {
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                        pool, client, user, "CustomMessage_ResendCode", Map.of());
+                        pool, client, user, "CustomMessage_ResendCode", clientMetadata);
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
                         code, List.of(deliveryTarget.deliveryMedium()), customMessage);
             }
@@ -3674,7 +3729,12 @@ public class CognitoService implements ResourceProvider {
     }
 
     public Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode) {
-        return authFlowHandler.verifySoftwareToken(accessToken, session, userCode);
+        return verifySoftwareToken(accessToken, session, userCode, null);
+    }
+
+    public Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode,
+                                                   String friendlyDeviceName) {
+        return authFlowHandler.verifySoftwareToken(accessToken, session, userCode, friendlyDeviceName);
     }
 
     void beginSoftwareTokenMfa(String poolId, String username, String secret) {
@@ -3688,7 +3748,7 @@ public class CognitoService implements ResourceProvider {
     }
 
     boolean activateSoftwareTokenMfa(String poolId, String username, String expectedSecret,
-                                     String code, Instant now) {
+                                     String code, String friendlyDeviceName, Instant now) {
         synchronized (userLock(poolId, username)) {
             CognitoUser user = adminGetUser(poolId, username);
             String pending = user.getPendingSoftwareTokenMfaSecret();
@@ -3709,6 +3769,8 @@ public class CognitoService implements ResourceProvider {
                 return false;
             }
             user.setSoftwareTokenMfaSecret(pending);
+            user.setSoftwareTokenMfaDeviceName(friendlyDeviceName == null || friendlyDeviceName.isEmpty()
+                    ? null : friendlyDeviceName);
             user.setPendingSoftwareTokenMfaSecret(null);
             user.setPendingSoftwareTokenMfaAttemptsRemaining(null);
             user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -3967,7 +4029,7 @@ public class CognitoService implements ResourceProvider {
                     deliveryTarget.deliveryMedium(), "CustomEmailSender_ForgotPassword",
                     VerificationCode.Purpose.PASSWORD_RESET, code, clientMetadata)) {
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
-                        pool, client, user, "CustomMessage_ForgotPassword", Map.of());
+                        pool, client, user, "CustomMessage_ForgotPassword", clientMetadata);
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.PASSWORD_RESET, code,
                         List.of(deliveryTarget.deliveryMedium()), customMessage);
             }
@@ -4068,14 +4130,22 @@ public class CognitoService implements ResourceProvider {
         String username = token.username();
         String poolId = token.poolId();
 
+        List<AttributeCodeMessage> messages = new ArrayList<>();
+        Map<String, Object> response;
+        AttributeCodeSending sending;
         synchronized (userLock(poolId, username)) {
-            return getUserAttributeVerificationCodeUnderUserLock(poolId, username, token.clientId(), attributeName,
-                    clientMetadata);
+            UserPoolClient client = describeUserPoolClient(token.clientId());
+            response = getUserAttributeVerificationCodeUnderUserLock(poolId, username, token.clientId(), attributeName,
+                    clientMetadata, messages);
+            sending = attributeCodeSending(poolId, username, client);
         }
+        sendAttributeCodeMessages(sending, "CustomMessage_VerifyUserAttribute", clientMetadata, messages);
+        return response;
     }
 
     private Map<String, Object> getUserAttributeVerificationCodeUnderUserLock(
-            String poolId, String username, String clientId, String attributeName, Map<String, String> clientMetadata) {
+            String poolId, String username, String clientId, String attributeName, Map<String, String> clientMetadata,
+            List<AttributeCodeMessage> messages) {
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
                     "Invalid attribute name. Only phone_number and email can be verified.", 400);
@@ -4098,10 +4168,10 @@ public class CognitoService implements ResourceProvider {
                 : VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION;
         ensureVerificationWiring();
         try {
-            String code = verificationCodeService.issue(poolId, user.getUsername(),
+            VerificationCodeService.IssuedCode code = verificationCodeService.issueTracked(poolId, user.getUsername(),
                     purpose, Duration.ofHours(24));
             dispatchAttributeVerificationCode(pool, clientId, user, attributeName, destination, purpose, code,
-                    "CustomEmailSender_VerifyUserAttribute", clientMetadata);
+                    "CustomEmailSender_VerifyUserAttribute", clientMetadata, messages);
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
         }
@@ -4191,14 +4261,22 @@ public class CognitoService implements ResourceProvider {
                     400);
         }
 
+        List<AttributeCodeMessage> messages = new ArrayList<>();
+        List<Map<String, Object>> deliveryDetails;
+        AttributeCodeSending sending;
         synchronized (userLock(poolId, username)) {
-            return updateUserAttributesUnderUserLock(poolId, username, token.clientId(), attributes, clientMetadata);
+            UserPoolClient client = describeUserPoolClient(token.clientId());
+            deliveryDetails = updateUserAttributesUnderUserLock(poolId, username, token.clientId(), attributes,
+                    clientMetadata, messages);
+            sending = attributeCodeSending(poolId, username, client);
         }
+        sendAttributeCodeMessages(sending, "CustomMessage_UpdateUserAttribute", clientMetadata, messages);
+        return deliveryDetails;
     }
 
     private List<Map<String, Object>> updateUserAttributesUnderUserLock(
             String poolId, String username, String clientId, Map<String, String> attributes,
-            Map<String, String> clientMetadata) {
+            Map<String, String> clientMetadata, List<AttributeCodeMessage> messages) {
         UserPool pool = describeUserPool(poolId);
         CognitoUser currentUser = adminGetUser(poolId, username);
         validateEmailAttribute(attributes, true);
@@ -4216,41 +4294,52 @@ public class CognitoService implements ResourceProvider {
         }
 
         CognitoUser updatedUser = MAPPER.convertValue(currentUser, CognitoUser.class);
-        List<Map<String, Object>> deliveryDetails = new ArrayList<>();
+        Map<String, String> contacts = new LinkedHashMap<>();
+        for (Map.Entry<String, String> attribute : attributes.entrySet()) {
+            String attributeName = attribute.getKey();
+            String value = attribute.getValue();
+            if (blankToNull(value) == null) {
+                updatedUser.getAttributes().remove(attributeName);
+                updatedUser.getAttributes().remove(attributeName + "_verified");
+                updatedUser.getPendingAttributes().remove(attributeName);
+            } else if (!isVerifiableContactAttribute(attributeName)) {
+                updatedUser.getAttributes().put(attributeName, value);
+            } else {
+                stageContactAttributeUpdate(pool, updatedUser, attributeName, value);
+                contacts.put(attributeName, value);
+            }
+        }
+        return completeContactAttributeUpdate(pool, clientId, currentUser, updatedUser, contacts,
+                "CustomEmailSender_UpdateUserAttribute", clientMetadata, messages);
+    }
 
+    private void stageContactAttributeUpdate(UserPool pool, CognitoUser user, String attributeName, String value) {
+        if (requiresVerificationBeforeUpdate(pool, attributeName)) {
+            user.getPendingAttributes().put(attributeName, value);
+        } else {
+            user.getAttributes().put(attributeName, value);
+            user.getAttributes().put(attributeName + "_verified", "false");
+            user.getPendingAttributes().remove(attributeName);
+        }
+    }
+
+    private List<Map<String, Object>> completeContactAttributeUpdate(
+            UserPool pool, String clientId, CognitoUser currentUser, CognitoUser updatedUser,
+            Map<String, String> contacts, String customEmailSenderSource,
+            Map<String, String> clientMetadata, List<AttributeCodeMessage> messages) {
+        String poolId = pool.getId();
+        List<Map<String, Object>> deliveryDetails = new ArrayList<>();
+        boolean issued = false;
         try {
-            for (Map.Entry<String, String> attribute : attributes.entrySet()) {
+            for (Map.Entry<String, String> attribute : contacts.entrySet()) {
                 String attributeName = attribute.getKey();
                 String value = attribute.getValue();
-
-                if (blankToNull(value) == null) {
-                    // AWS: "To delete an attribute from the user, submit the attribute in
-                    // your API request with a blank value."
-                    updatedUser.getAttributes().remove(attributeName);
-                    updatedUser.getAttributes().remove(attributeName + "_verified");
-                    updatedUser.getPendingAttributes().remove(attributeName);
-                    continue;
-                }
-
-                if (!isVerifiableContactAttribute(attributeName)) {
-                    updatedUser.getAttributes().put(attributeName, value);
-                    continue;
-                }
-
                 VerificationCode.Purpose purpose = verificationPurpose(attributeName);
                 ensureVerificationWiring();
-                String verificationCode = verificationCodeService.issue(
+                VerificationCodeService.IssuedCode verificationCode = verificationCodeService.issueTracked(
                         poolId, currentUser.getUsername(), purpose, Duration.ofHours(24));
                 dispatchAttributeVerificationCode(pool, clientId, currentUser, attributeName, value,
-                        purpose, verificationCode, "CustomEmailSender_UpdateUserAttribute", clientMetadata);
-
-                if (requiresVerificationBeforeUpdate(pool, attributeName)) {
-                    updatedUser.getPendingAttributes().put(attributeName, value);
-                } else {
-                    updatedUser.getAttributes().put(attributeName, value);
-                    updatedUser.getAttributes().put(attributeName + "_verified", "false");
-                    updatedUser.getPendingAttributes().remove(attributeName);
-                }
+                        purpose, verificationCode, customEmailSenderSource, clientMetadata, messages);
 
                 Map<String, Object> detail = new LinkedHashMap<>();
                 detail.put("AttributeName", attributeName);
@@ -4258,13 +4347,30 @@ public class CognitoService implements ResourceProvider {
                 detail.put("Destination", maskAttributeDestination(attributeName, value));
                 deliveryDetails.add(detail);
             }
+            issued = true;
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
+        } catch (CustomEmailSenderException e) {
+            for (String attributeName : List.of("email", "phone_number")) {
+                if (!Objects.equals(attributeVerificationDestination(currentUser, attributeName),
+                        attributeVerificationDestination(updatedUser, attributeName))) {
+                    verificationCodeService.invalidatePrevious(
+                            poolId, currentUser.getUsername(), verificationPurpose(attributeName));
+                }
+            }
+            updatedUser.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, updatedUser.getUsername()), updatedUser);
+            throw e;
         } catch (AwsException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new AwsException("CodeDeliveryFailureException",
-                    "Failed to deliver verification code", 400);
+            throw codeDeliveryFailure();
+        } finally {
+            if (!issued) {
+                // A failed sender hand-over must not leave earlier queued codes live but unsent.
+                messages.forEach(message -> verificationCodeService.invalidateIfCurrent(
+                        poolId, currentUser.getUsername(), message.purpose(), message.issued()));
+            }
         }
 
         updatedUser.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -4433,7 +4539,7 @@ public class CognitoService implements ResourceProvider {
         // Use refresh token UUID as origin_jti for derived tokens
         Map<String, Object> result = new HashMap<>();
         result.put("AuthenticationResult", accessAndIdTokens(user, pool, client, override, refreshTokenUuid,
-                scopes, issuedAt / 1000L));
+                scopes, refreshTokenAuthTime(parts, issuedAt)));
         return result;
     }
 
@@ -4533,13 +4639,17 @@ public class CognitoService implements ResourceProvider {
      * allows, rather than the {@code aws.cognito.signin.user.admin} of an API sign-in, and the ID
      * token is minted only when they include {@code openid}, as on AWS. The trigger is told the same
      * scopes, and a V2 trigger's scope changes apply on top of them.
+     *
+     * <p>{@code authTime} is when the user signed in, which the code kept: the tokens carry it as
+     * {@code auth_time}, and so does every token refreshed from them.
      */
     Map<String, Object> generateAuthResultForHostedAuth(CognitoUser user, UserPool pool, UserPoolClient client,
-                                                        ClaimsOverride protocolClaims, List<String> grantedScopes) {
+                                                        ClaimsOverride protocolClaims, List<String> grantedScopes,
+                                                        Instant authTime) {
         List<String> scopes = scopesStillAllowed(client, grantedScopes);
         ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user, scopes);
         return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims),
-                UUID.randomUUID().toString(), scopes);
+                UUID.randomUUID().toString(), scopes, authTime.getEpochSecond());
     }
 
     /**
@@ -4612,22 +4722,25 @@ public class CognitoService implements ResourceProvider {
     }
 
     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override, String originJti) {
-        return generateAuthResult(user, pool, client, override, originJti, null);
+        return generateAuthResult(user, pool, client, override, originJti, null, null);
     }
 
     /**
      * @param grantedScopes the scopes of the OAuth grant the tokens are minted for, or null for a
      *                      sign-in through the API. The refresh token keeps them, so that a refresh
      *                      mints the same kind of tokens.
+     * @param authTime      when the user signed in, epoch seconds, which the refresh token keeps too;
+     *                      null for a sign-in through the API, which the user completes with this request
      */
     private Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client,
                                                    ClaimsOverride override, String originJti,
-                                                   List<String> grantedScopes) {
+                                                   List<String> grantedScopes, Long authTime) {
         long issuedAt = System.currentTimeMillis();
+        long signedInAt = authTime != null ? authTime : issuedAt / 1000L;
         Map<String, Object> auth = accessAndIdTokens(user, pool, client, override, originJti, grantedScopes,
-                issuedAt / 1000L);
+                signedInAt);
         auth.put("RefreshToken", buildRefreshToken(pool, user.getUsername(), client.getClientId(), issuedAt,
-                originJti, grantedScopes));
+                originJti, grantedScopes, signedInAt));
         return auth;
     }
 
@@ -4761,12 +4874,12 @@ public class CognitoService implements ResourceProvider {
         Map<String, Object> addOrOverride = isAccess ? override.accessClaimsToAddOrOverride() : override.idClaimsToAddOrOverride();
         if (suppress != null) {
             suppress.stream()
-                    .filter(claim -> !isTriggerProtectedIdentityClaim(claim, isAccess))
+                    .filter(claim -> !isTriggerProtectedClaim(claim, isAccess))
                     .forEach(claims::remove);
         }
         if (addOrOverride != null) {
             addOrOverride.forEach((claim, value) -> {
-                if (!isTriggerProtectedIdentityClaim(claim, isAccess)) {
+                if (!isTriggerProtectedClaim(claim, isAccess)) {
                     claims.put(claim, value);
                 }
             });
@@ -4802,10 +4915,12 @@ public class CognitoService implements ResourceProvider {
     /**
      * AWS lets no pre token generation trigger add, modify or suppress the claims that identify
      * the user: {@code sub} in either token, {@code username} in the access token and
-     * {@code cognito:username} in the ID token.
+     * {@code cognito:username} in the ID token. Nor {@code auth_time}, when the user signed in, in
+     * either token.
      */
-    private static boolean isTriggerProtectedIdentityClaim(String claim, boolean isAccess) {
-        return "sub".equals(claim) || (isAccess ? "username" : "cognito:username").equals(claim);
+    private static boolean isTriggerProtectedClaim(String claim, boolean isAccess) {
+        return "sub".equals(claim) || "auth_time".equals(claim)
+                || (isAccess ? "username" : "cognito:username").equals(claim);
     }
 
     private String encodeJwtHeader(UserPool pool) {
@@ -5492,17 +5607,20 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * A signed {@code poolId|username|clientId|issuedAt|familyId} token. An OAuth grant's token adds a
-     * field holding its scopes, base64url-encoded because a scope may contain the pipe that separates
-     * the fields; a sign-in through the API, {@code grantedScopes} null, has none.
+     * A signed {@code poolId|username|clientId|issuedAt|familyId|authTime} token, {@code authTime} being
+     * when the user signed in, which a managed login session can put well before the token is issued.
+     * An OAuth grant's token adds a field holding its scopes, base64url-encoded because a scope may
+     * contain the pipe that separates the fields; a sign-in through the API, {@code grantedScopes}
+     * null, has none.
      */
     String buildRefreshToken(UserPool pool, String username, String clientId, long issuedAt, String originJti,
-                             List<String> grantedScopes) {
+                             List<String> grantedScopes, long authTime) {
         if (ensureRefreshTokenSecret(pool)) {
             poolStore.put(pool.getId(), pool);
         }
         String familyId = originJti != null ? originJti : UUID.randomUUID().toString();
-        String raw = pool.getId() + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId;
+        String raw = pool.getId() + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId
+                + "|" + REFRESH_TOKEN_AUTH_TIME_FIELD + authTime;
         if (grantedScopes != null) {
             raw += "|" + REFRESH_TOKEN_SCOPE_FIELD + Base64Url.encode(String.join(" ", grantedScopes));
         }
@@ -5522,8 +5640,9 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * The fields of a refresh token whose signature verifies: {@code [poolId, username, clientId,
-     * issuedAt, familyId]}, and for an OAuth grant's token a sixth, its scopes separated by spaces.
-     * Only the username can hold a pipe, so the fields after it are read from the end of the token.
+     * issuedAt, familyId, authTime]}, {@code authTime} empty for a token minted before refresh tokens
+     * kept it, and for an OAuth grant's token a seventh, its scopes separated by spaces. Only the
+     * username can hold a pipe, so the fields after it are read from the end of the token.
      */
     String[] parseRefreshToken(String refreshToken) {
         try {
@@ -5532,9 +5651,16 @@ public class CognitoService implements ResourceProvider {
             int signatureAt = raw.lastIndexOf('|');
             String payload = raw.substring(0, signatureAt);
             String[] parts = payload.split("\\|", -1);
-            boolean hasScopes = parts[parts.length - 1].startsWith(REFRESH_TOKEN_SCOPE_FIELD);
-            int trailing = hasScopes ? 4 : 3;
-            if (parts.length < 2 + trailing) {
+            int end = parts.length;
+            boolean hasScopes = parts[end - 1].startsWith(REFRESH_TOKEN_SCOPE_FIELD);
+            if (hasScopes) {
+                end--;
+            }
+            boolean hasAuthTime = end > 0 && parts[end - 1].startsWith(REFRESH_TOKEN_AUTH_TIME_FIELD);
+            if (hasAuthTime) {
+                end--;
+            }
+            if (end < 5) {
                 return null;
             }
             UserPool pool = poolStore.get(parts[0]).orElse(null);
@@ -5546,14 +5672,14 @@ public class CognitoService implements ResourceProvider {
             if (!MessageDigest.isEqual(expectedSignature, actualSignature)) {
                 return null;
             }
-            int usernameEnd = parts.length - trailing;
-            String[] fields = new String[hasScopes ? 6 : 5];
+            int usernameEnd = end - 3;
+            String[] fields = new String[hasScopes ? 7 : 6];
             fields[0] = parts[0];
             fields[1] = String.join("|", Arrays.copyOfRange(parts, 1, usernameEnd));
             System.arraycopy(parts, usernameEnd, fields, 2, 3);
+            fields[5] = hasAuthTime ? parts[end].substring(REFRESH_TOKEN_AUTH_TIME_FIELD.length()) : "";
             if (hasScopes) {
-                fields[5] = new String(Base64.getUrlDecoder().decode(
-                        parts[parts.length - 1].substring(REFRESH_TOKEN_SCOPE_FIELD.length())), StandardCharsets.UTF_8);
+                fields[6] = Base64Url.decode(parts[parts.length - 1].substring(REFRESH_TOKEN_SCOPE_FIELD.length()));
             }
             return fields;
         } catch (Exception ignored) { }
@@ -5562,10 +5688,20 @@ public class CognitoService implements ResourceProvider {
 
     /** The scopes of the OAuth grant a parsed refresh token belongs to, or null for a sign-in through the API. */
     static List<String> refreshTokenScopes(String[] parts) {
-        if (parts.length < 6) {
+        if (parts.length < 7) {
             return null;
         }
-        return parts[5].isEmpty() ? List.of() : List.of(parts[5].split(" "));
+        return parts[6].isEmpty() ? List.of() : List.of(parts[6].split(" "));
+    }
+
+    /**
+     * When the user signed in to get a parsed refresh token, in epoch seconds: every token refreshed
+     * from it keeps that as its {@code auth_time}, since "Refreshing a token doesn't reset the
+     * {@code auth_time} claim" on AWS. A token minted before refresh tokens kept it falls back to when
+     * it was issued, {@code issuedAtMillis}.
+     */
+    static long refreshTokenAuthTime(String[] parts, long issuedAtMillis) {
+        return parts[5].isEmpty() ? issuedAtMillis / 1000L : Long.parseLong(parts[5]);
     }
 
     record VerifiedAccessToken(String username, String poolId, String subject, String clientId) {}
@@ -5973,18 +6109,80 @@ public class CognitoService implements ResourceProvider {
         return configured instanceof List<?> attributes && attributes.contains(attributeName);
     }
 
+    /**
+     * Hands {@code code} to the pool's CustomEmailSender when it takes the code, and otherwise adds
+     * the message that sends it to {@code messages}, for {@link #sendAttributeCodeMessages}.
+     */
     private void dispatchAttributeVerificationCode(UserPool pool, String clientId, CognitoUser user,
                                                     String attributeName, String destination,
-                                                    VerificationCode.Purpose purpose, String code,
+                                                    VerificationCode.Purpose purpose,
+                                                    VerificationCodeService.IssuedCode issued,
                                                     String customEmailSenderSource,
-                                                    Map<String, String> clientMetadata) {
+                                                    Map<String, String> clientMetadata,
+                                                    List<AttributeCodeMessage> messages) {
         CognitoUser deliveryUser = MAPPER.convertValue(user, CognitoUser.class);
         deliveryUser.getAttributes().put(attributeName, destination);
         if (!sendThroughCustomEmailSender(pool, clientId, deliveryUser, deliveryMedium(attributeName),
-                customEmailSenderSource, purpose, code, clientMetadata)) {
-            messageDispatcher.dispatch(pool, deliveryUser, purpose, code,
-                    List.of(deliveryMedium(attributeName)));
+                customEmailSenderSource, purpose, issued.code(), clientMetadata)) {
+            messages.add(new AttributeCodeMessage(deliveryUser, purpose, issued, deliveryMedium(attributeName)));
         }
+    }
+
+    /** An attribute's code, to send as Cognito's own message to the address on {@code deliveryUser}. */
+    private record AttributeCodeMessage(CognitoUser deliveryUser, VerificationCode.Purpose purpose,
+                                        VerificationCodeService.IssuedCode issued,
+                                        String deliveryMedium) {
+    }
+
+    /** What the messages of a request's attribute codes are sent with, read under the user lock. */
+    private record AttributeCodeSending(UserPool pool, UserPoolClient client, CognitoUser user) {
+    }
+
+    /**
+     * Reads, while the user lock is held, what the codes' messages go out with once it is released:
+     * the pool, the client, and a copy of the user as stored, which another request may change under
+     * its own lock in the meantime.
+     */
+    private AttributeCodeSending attributeCodeSending(String poolId, String username, UserPoolClient client) {
+        return new AttributeCodeSending(describeUserPool(poolId), client,
+                MAPPER.convertValue(adminGetUser(poolId, username), CognitoUser.class));
+    }
+
+    /**
+     * Sends each code as Cognito's message, which the CustomMessage trigger shapes. It runs once the
+     * user lock is released, since the trigger's function may call the pool back for this user, and
+     * hands the trigger the user as stored, which keeps an email that must be verified before it
+     * changes (measured, eu-west-1, 2026-10-21 and 2026-10-22). A code that cannot be sent is
+     * withdrawn, so a new one can be asked for at once, as Cognito hands one out (measured); the
+     * others are still sent, and the request then fails.
+     */
+    private void sendAttributeCodeMessages(AttributeCodeSending sending, String triggerSource,
+                                           Map<String, String> clientMetadata, List<AttributeCodeMessage> messages) {
+        RuntimeException failure = null;
+        for (AttributeCodeMessage message : messages) {
+            try {
+                Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
+                        sending.pool(), sending.client(), sending.user(), triggerSource, clientMetadata);
+                messageDispatcher.dispatch(sending.pool(), message.deliveryUser(), message.purpose(),
+                        message.issued().code(),
+                        List.of(message.deliveryMedium()), customMessage);
+            } catch (RuntimeException e) {
+                LOG.warnv("Cannot send a {0} code for pool {1}: {2}",
+                        message.purpose(), sending.pool().getId(), e.getMessage());
+                verificationCodeService.invalidateIfCurrent(
+                        sending.pool().getId(), sending.user().getUsername(), message.purpose(), message.issued());
+                if (failure == null) {
+                    failure = e;
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure instanceof AwsException aws ? aws : codeDeliveryFailure();
+        }
+    }
+
+    private static AwsException codeDeliveryFailure() {
+        return new AwsException("CodeDeliveryFailureException", "Failed to deliver verification code", 400);
     }
 
     /**

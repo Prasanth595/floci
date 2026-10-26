@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.autoscaling.model.ScalingPolicy;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;

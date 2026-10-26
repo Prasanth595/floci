@@ -257,6 +257,10 @@ class RedshiftServerlessIntegrationTest {
     @Test
     void snapshotLifecycleIsVisibleThroughSeparateReads() {
         doAnswer(invocation -> {
+            invocation.getArgument(6, Runnable.class).run();
+            return null;
+        }).when(runtime).restoreSnapshot(any(), any(), any(), any(), any(), any(), any());
+        doAnswer(invocation -> {
             Files.writeString(invocation.getArgument(5, Path.class), "-- dump");
             return null;
         }).when(runtime).takeSnapshot(any(), any(), any(), any(), any(), any());
@@ -312,6 +316,15 @@ class RedshiftServerlessIntegrationTest {
         call("ListSnapshots", "{\"startTime\":4102444800}")
                 .statusCode(200)
                 .body("snapshots", hasSize(0));
+        call("ListSnapshots", "{\"startTime\":4102444800.125}")
+                .statusCode(200)
+                .body("snapshots", hasSize(0));
+        call("ListSnapshots", "{\"startTime\":\"invalid\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        call("ListSnapshots", "{\"startTime\":123456789012345678901234567890}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
         call("RestoreFromSnapshot", "{\"namespaceName\":\"snap-life-ns\",\"workgroupName\":\"snap-life-wg\","
                 + "\"snapshotName\":\"snap-life\",\"snapshotArn\":\"" + snapshotArn + "\"}")
                 .statusCode(400)
@@ -321,10 +334,11 @@ class RedshiftServerlessIntegrationTest {
                 .body("snapshots", hasSize(0));
 
         call("RestoreFromSnapshot", "{\"namespaceName\":\"snap-life-ns\",\"workgroupName\":\"snap-life-wg\","
-                + "\"snapshotArn\":\"" + snapshotArn + "\"}")
+                + "\"snapshotArn\":\"" + snapshotArn + "\",\"manageAdminPassword\":true}")
                 .statusCode(200)
                 .body("snapshotName", equalTo("snap-life"))
                 .body("namespace.namespaceName", equalTo("snap-life-ns"))
+                .body("namespace.adminPasswordSecretArn", notNullValue())
                 .body("namespace.status", equalTo("AVAILABLE"))
                 .body("ownerAccount", matchesPattern("\\d{12}"));
         call("RestoreFromSnapshot", "{\"workgroupName\":\"snap-life-wg\",\"snapshotName\":\"snap-life\"}")

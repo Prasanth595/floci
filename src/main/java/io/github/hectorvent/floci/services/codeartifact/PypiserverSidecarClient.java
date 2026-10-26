@@ -14,6 +14,9 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -61,6 +64,7 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
     @Override
     public void release(String repositoryContainerId) {
         manager.release(repositoryContainerId);
+        SidecarConcurrency.release(repositoryContainerId);
     }
 
     /**
@@ -135,6 +139,110 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
             String namespace, String packageName, String version) {
         String baseUrl = ensureReady(repositoryContainerId, null);
         return packageFiles(baseUrl, packageName).stream().anyMatch(file -> file.version().equals(version));
+    }
+
+    /**
+     * pypiserver's own per-project JSON listing ({@link #packageFiles}'s source, read directly
+     * here by the {@code releases} map's own keys instead) has no timestamp field of its own
+     * (confirmed against a live container), so this follows each version's first listed file's
+     * download URL with a plain {@code HEAD} and reads the real {@code Last-Modified} response
+     * header it returns. Only one file per version needs checking: every file of the same release
+     * lands on disk within the same upload, close enough that picking "the first one" over "the
+     * most recently modified one" makes no practical difference, and the JSON listing gives no
+     * way to know which upload order they actually arrived in regardless.
+     *
+     * <p>The per-version {@code HEAD} requests run through {@link SidecarConcurrency#mapBounded},
+     * not a plain sequential loop: a package with many versions used to make every one of those
+     * requests one at a time before returning even a single-result page. Keyed by {@code
+     * repositoryContainerId} so the concurrency cap holds across simultaneous calls against the
+     * same pypiserver container, not just within one of them.
+     *
+     * <p>The whole method runs between {@link SidecarConcurrency#beginUse} and {@link
+     * SidecarConcurrency#endUse}, not only the {@code mapBounded} call: a repository delete racing
+     * this call's own HTTP fetch of the version listing, before {@code mapBounded} is even reached,
+     * must not be able to run {@link SidecarConcurrency#release} to completion in between, or {@code
+     * mapBounded} would cache a fresh permit for a container that is already gone.
+     */
+    @Override
+    public List<PackageVersionTimestamp> listPackageVersions(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName) {
+        SidecarConcurrency.beginUse(repositoryContainerId);
+        try {
+            String baseUrl = ensureReady(repositoryContainerId, null);
+            String normalized = normalizePackageName(packageName);
+            URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + SidecarUriUtils.encodeSegment(normalized)
+                    + "/json");
+            HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
+            HttpResponse<String> response;
+            try {
+                response = httpClient.send(request, BodyHandlers.ofString());
+            } catch (Exception e) {
+                throw new IllegalStateException("Could not reach the pypiserver sidecar to list versions of "
+                        + packageName, e);
+            }
+            if (response.statusCode() == 404) {
+                return List.of();
+            }
+            if (response.statusCode() != 200) {
+                throw new IllegalStateException("Could not list versions of " + packageName + " on the pypiserver "
+                        + "sidecar: upstream returned " + response.statusCode());
+            }
+            JsonNode releases;
+            try {
+                releases = mapper.readTree(response.body()).path("releases");
+            } catch (Exception e) {
+                throw new IllegalStateException("Could not parse pypiserver's version listing for " + packageName,
+                        e);
+            }
+            List<String> versions = new ArrayList<>();
+            releases.fieldNames().forEachRemaining(versions::add);
+            return SidecarConcurrency.mapBounded(repositoryContainerId, versions, version -> {
+                JsonNode files = releases.path(version);
+                String fileUrl = files.isEmpty() ? "" : files.get(0).path("url").asText("");
+                return new PackageVersionTimestamp(version, fileUrl.isEmpty() ? null : lastModified(fileUrl));
+            });
+        } finally {
+            SidecarConcurrency.endUse(repositoryContainerId);
+        }
+    }
+
+    /**
+     * Delegates to {@link SidecarConcurrency#beginUse}: {@code CodeArtifactService} calls this
+     * right after it resolves {@code repositoryContainerId}, closing the window between that
+     * resolution and this client's own {@link #listPackageVersions} call, which brackets the
+     * same key again internally. Nesting is safe: {@link SidecarConcurrency}'s bookkeeping is a
+     * reference count, not a flag.
+     */
+    @Override
+    public void beginUse(String repositoryContainerId) {
+        SidecarConcurrency.beginUse(repositoryContainerId);
+    }
+
+    /** Delegates to {@link SidecarConcurrency#endUse}, pairing {@link #beginUse} above. */
+    @Override
+    public void endUse(String repositoryContainerId) {
+        SidecarConcurrency.endUse(repositoryContainerId);
+    }
+
+    private Instant lastModified(String fileUrl) {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(fileUrl)).timeout(Duration.ofSeconds(10))
+                .method("HEAD", BodyPublishers.noBody()).build();
+        HttpResponse<Void> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.discarding());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the pypiserver sidecar to check " + fileUrl, e);
+        }
+        if (response.statusCode() != 200) {
+            return null;
+        }
+        return response.headers().firstValue("Last-Modified").flatMap(value -> {
+            try {
+                return Optional.of(Instant.from(DateTimeFormatter.RFC_1123_DATE_TIME.parse(value)));
+            } catch (DateTimeParseException e) {
+                return Optional.empty();
+            }
+        }).orElse(null);
     }
 
     /**
@@ -430,8 +538,19 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
      * at version {@code 2.0} produces {@code foo-1.0-bar-2.0.tar.gz}, and the text {@code -1.0-}
      * inside that name would otherwise look like a complete, valid version {@code 1.0} to a
      * caller who asked for the wrong one.
+     *
+     * <p>Not {@code private} for exactly one other reason (Greptile's review of this PR):
+     * {@code CodeArtifactPypiController#upload} calls this on the way in, the opposite direction
+     * from every other caller here. pypiserver itself files an upload under the identity this
+     * same boundary logic derives from its filename, never from the multipart form's own
+     * {@code name}/{@code version} fields; those fields are only ever used, until this check
+     * existed, to pick which coordinate the Archived/Disposed guard and the override-clearing
+     * call afterward run against. A form whose fields name an unrelated (unused, never
+     * Archived/Disposed) coordinate while the real filename matches a disposed one would let the
+     * guard see the harmless coordinate, the real upload land under the disposed one regardless,
+     * and the override-clearing call afterward operate on the wrong version too.
      */
-    private static boolean filenameEmbedsVersion(String assetName, String packageName, String version) {
+    static boolean filenameEmbedsVersion(String assetName, String packageName, String version) {
         String normalizedPackageName = normalizePackageName(packageName);
         String marker = "-" + version;
         for (int idx = assetName.indexOf(marker); idx >= 0; idx = assetName.indexOf(marker, idx + 1)) {

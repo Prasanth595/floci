@@ -37,17 +37,17 @@ public class KinesisJsonHandler {
 
     private final KinesisService service;
     private final ObjectMapper objectMapper;
-    private final long listShardsNextTokenTtlMillis;
+    private final long nextTokenTtlMillis;
 
     @Inject
     public KinesisJsonHandler(KinesisService service, ObjectMapper objectMapper, EmulatorConfig config) {
         this(service, objectMapper, config.services().kinesis().listShardsNextTokenTtlMillis());
     }
 
-    KinesisJsonHandler(KinesisService service, ObjectMapper objectMapper, long listShardsNextTokenTtlMillis) {
+    KinesisJsonHandler(KinesisService service, ObjectMapper objectMapper, long nextTokenTtlMillis) {
         this.service = service;
         this.objectMapper = objectMapper;
-        this.listShardsNextTokenTtlMillis = listShardsNextTokenTtlMillis;
+        this.nextTokenTtlMillis = nextTokenTtlMillis;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -225,12 +225,62 @@ public class KinesisJsonHandler {
     }
 
     private Response handleListStreams(JsonNode request, String region) {
-        List<String> streamNames = service.listStreams(region);
+        int limit = 100;
+        if (request.hasNonNull("Limit")) {
+            JsonNode value = request.get("Limit");
+            if (!value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 1 || value.intValue() > 10000) {
+                throw new AwsException("InvalidArgumentException", "Limit must be an integer between 1 and 10000", 400);
+            }
+            limit = Math.min(value.intValue(), 100);
+        }
+        JsonNode start = request.path("ExclusiveStartStreamName");
+        String startName = start.asText(null);
+        if (!start.isMissingNode() && !start.isNull()
+                && (!start.isTextual() || !startName.matches("[a-zA-Z0-9_.-]{1,128}"))) {
+            throw new AwsException("InvalidArgumentException", "ExclusiveStartStreamName must be a valid stream name", 400);
+        }
+        JsonNode token = request.path("NextToken");
+        if (!token.isMissingNode() && !token.isNull() && !token.isTextual()) {
+            throw invalidNextToken();
+        }
+        String after = token.isTextual() ? streamCursorFromToken(decodeNextToken(token.textValue()), region) : startName;
+        List<KinesisStream> streams = service.listStreamDetails(region).stream()
+                .filter(stream -> after == null || stream.getStreamName().compareTo(after) > 0)
+                .toList();
+        List<KinesisStream> page = streams.stream().limit(limit).toList();
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode names = response.putArray("StreamNames");
-        streamNames.forEach(names::add);
-        response.put("HasMoreStreams", false);
+        ArrayNode summaries = response.putArray("StreamSummaries");
+        for (KinesisStream stream : page) {
+            names.add(stream.getStreamName());
+            ObjectNode summary = summaries.addObject();
+            summary.put("StreamName", stream.getStreamName());
+            summary.put("StreamARN", stream.getStreamArn());
+            summary.put("StreamStatus", stream.getStreamStatus());
+            addStreamModeDetailsNode(summary, stream);
+            summary.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
+        }
+        response.put("HasMoreStreams", streams.size() > limit);
+        if (streams.size() > limit) {
+            response.put("NextToken", encodeNextToken("ListStreams|" + region,
+                    Base64Url.encode(page.getLast().getStreamName()), System.currentTimeMillis()));
+        }
         return Response.ok(response).build();
+    }
+
+    private String streamCursorFromToken(PaginationToken token, String region) {
+        if (!("ListStreams|" + region).equals(token.scope())) {
+            throw invalidNextToken();
+        }
+        try {
+            String cursor = Base64Url.decode(token.cursor());
+            if (!Base64Url.encode(cursor).equals(token.cursor())) {
+                throw invalidNextToken();
+            }
+            return cursor;
+        } catch (IllegalArgumentException e) {
+            throw invalidNextToken();
+        }
     }
 
     private Response handleDescribeStream(JsonNode request, String region) {
@@ -705,7 +755,7 @@ public class KinesisJsonHandler {
 
     private Response handleListShards(JsonNode request, String region) {
         String nextToken = request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null;
-        ShardToken token = nextToken == null ? null : decodeShardToken(nextToken);
+        PaginationToken token = nextToken == null ? null : decodeNextToken(nextToken);
         String resolvedStreamName = token == null
                 ? resolveStreamName(request)
                 : streamNameFromToken(request, token);
@@ -727,7 +777,7 @@ public class KinesisJsonHandler {
         int start = token == null ? 0 : resumeShardIndex(token, snapshot);
         List<KinesisShard> page = paginateShards(snapshot.subList(start, snapshot.size()), maxResults);
         String nextCursor = start + page.size() < snapshot.size() && !page.isEmpty()
-                ? encodeShardToken(resolvedStreamName, page.get(page.size() - 1).getShardId(),
+                ? encodeNextToken(resolvedStreamName, page.get(page.size() - 1).getShardId(),
                         System.currentTimeMillis())
                 : null;
 
@@ -760,36 +810,44 @@ public class KinesisJsonHandler {
     }
 
     /**
-     * Opaque, stream-bound cursor for ListShards. It carries the stream name, the last shard id of
-     * the emitted page, and the issue time, so a client can resume from the token alone without
-     * resending the stream name and without depending on a shard's position in the live list.
+     * Opaque cursor shared by ListStreams and ListShards, bound to a scope and issue time.
+     * ListStreams scopes include the operation and region; ListShards scopes name the stream.
      */
-    static String encodeShardToken(String streamName, String lastShardId, long issuedAtEpochMilli) {
-        String raw = streamName + "|" + lastShardId + "|" + issuedAtEpochMilli;
+    static String encodeNextToken(String scope, String cursor, long issuedAtEpochMilli) {
+        String raw = scope + "|" + cursor + "|" + issuedAtEpochMilli;
         return Base64Url.encode(raw);
     }
 
-    ShardToken decodeShardToken(String nextToken) {
+    private PaginationToken decodeNextToken(String nextToken) {
+        if (nextToken.isEmpty() || nextToken.length() > 1_048_576) {
+            throw invalidNextToken();
+        }
         String decoded;
         try {
-            decoded = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+            decoded = Base64Url.decode(nextToken);
         } catch (IllegalArgumentException e) {
             throw invalidNextToken();
         }
-        String[] parts = decoded.split("\\|", -1);
-        if (parts.length != 3 || parts[0].isEmpty() || parts[1].isEmpty()) {
+        int timestampSeparator = decoded.lastIndexOf('|');
+        int cursorSeparator = decoded.lastIndexOf('|', timestampSeparator - 1);
+        if (cursorSeparator < 1) {
             throw invalidNextToken();
         }
         long issuedAtEpochMilli;
         try {
-            issuedAtEpochMilli = Long.parseLong(parts[2]);
+            issuedAtEpochMilli = Long.parseLong(decoded.substring(timestampSeparator + 1));
         } catch (NumberFormatException e) {
             throw invalidNextToken();
         }
-        if (System.currentTimeMillis() - issuedAtEpochMilli >= listShardsNextTokenTtlMillis) {
+        long now = System.currentTimeMillis();
+        if (issuedAtEpochMilli > now) {
+            throw invalidNextToken();
+        }
+        if (issuedAtEpochMilli <= now - nextTokenTtlMillis) {
             throw new AwsException("ExpiredNextTokenException", "The NextToken has expired.", 400);
         }
-        return new ShardToken(parts[0], parts[1], issuedAtEpochMilli);
+        return new PaginationToken(decoded.substring(0, cursorSeparator),
+                decoded.substring(cursorSeparator + 1, timestampSeparator), issuedAtEpochMilli);
     }
 
     /**
@@ -798,24 +856,27 @@ public class KinesisJsonHandler {
      * {@code StreamARN} is tolerated when it names the same stream the token does, which keeps an
      * SDK that fills the ARN in for routing working, and rejected when it names a different one.
      */
-    private String streamNameFromToken(JsonNode request, ShardToken token) {
+    private String streamNameFromToken(JsonNode request, PaginationToken token) {
+        if (token.scope().contains("|") || token.cursor().isEmpty()) {
+            throw invalidNextToken();
+        }
         if (request.hasNonNull("StreamName")) {
             throw new AwsException("InvalidArgumentException",
                     "StreamName cannot be specified together with NextToken.", 400);
         }
         if (request.hasNonNull("StreamARN")) {
             String arnStreamName = parseStreamNameFromArn(request.path("StreamARN").asText());
-            if (!token.streamName().equals(arnStreamName)) {
+            if (!token.scope().equals(arnStreamName)) {
                 throw new AwsException("InvalidArgumentException",
                         "The NextToken does not belong to the stream named by StreamARN.", 400);
             }
         }
-        return token.streamName();
+        return token.scope();
     }
 
-    private static int resumeShardIndex(ShardToken token, List<KinesisShard> shards) {
+    private static int resumeShardIndex(PaginationToken token, List<KinesisShard> shards) {
         for (int i = 0; i < shards.size(); i++) {
-            if (shards.get(i).getShardId().equals(token.lastShardId())) {
+            if (shards.get(i).getShardId().equals(token.cursor())) {
                 return i + 1;
             }
         }
@@ -827,10 +888,9 @@ public class KinesisJsonHandler {
     }
 
     /**
-     * Decoded ListShards cursor: the stream it belongs to, the last shard id it covered, and when it
-     * was issued (epoch millis, for expiry).
+     * Decoded scoped cursor and its issue time (epoch millis).
      */
-    record ShardToken(String streamName, String lastShardId, long issuedAtEpochMilli) {
+    private record PaginationToken(String scope, String cursor, long issuedAtEpochMilli) {
     }
 
     /**

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.redshiftserverless.model.CustomDomainAssociation;
@@ -279,12 +280,12 @@ public class RedshiftServerlessAdminJsonHandler {
         action.setRoleArn(ServerlessSupport.text(request, "roleArn"));
         action.setDescription(ServerlessSupport.text(request, "scheduledActionDescription"));
         action.setEnabled(ServerlessSupport.bool(request, "enabled"));
-        action.setStartTime(ServerlessSupport.epochSeconds(request, "startTime"));
-        action.setEndTime(ServerlessSupport.epochSeconds(request, "endTime"));
+        action.setStartTime(AwsJsonTimestamp.epochSeconds(request, "startTime", "ValidationException"));
+        action.setEndTime(AwsJsonTimestamp.epochSeconds(request, "endTime", "ValidationException"));
         JsonNode schedule = ServerlessSupport.object(request, "schedule");
         if (schedule != null) {
             action.setScheduleSpecified(true);
-            action.setScheduleAt(ServerlessSupport.epochSeconds(schedule, "at"));
+            action.setScheduleAt(AwsJsonTimestamp.epochSeconds(schedule, "at", "ValidationException"));
             action.setScheduleCron(ServerlessSupport.text(schedule, "cron"));
         }
         JsonNode target = ServerlessSupport.object(request, "targetAction");

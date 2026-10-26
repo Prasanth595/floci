@@ -6,10 +6,10 @@ access identities, public keys, trusted key groups, CloudFront Functions, invali
 viewer delivery from S3 or custom origins for every CloudFront viewer method (GET, HEAD, OPTIONS, POST,
 PUT, PATCH and DELETE).
 
-**Protocol:** REST XML  
-**API version:** `2020-05-31`  
-**Endpoint prefix:** `cloudfront`  
-**Namespace:** `http://cloudfront.amazonaws.com/doc/2020-05-31/`  
+**Protocol:** REST XML
+**API version:** `2020-05-31`
+**Endpoint prefix:** `cloudfront`
+**Namespace:** `http://cloudfront.amazonaws.com/doc/2020-05-31/`
 **Global service** — ARNs contain no region segment.
 
 ## Supported Operations
@@ -246,6 +246,19 @@ PUT, PATCH and DELETE).
   whole. A custom error page is served whole, whatever the `Range` of the request it replaces.
 - Origin `Set-Cookie` headers always reach the viewer. With legacy `Forward=none`, AWS strips them
   from the response; Floci does not.
+- Custom-origin requests honor the origin's connection settings. `Origin.ConnectionAttempts` (1 to 3,
+  default 3) is how many times CloudFront tries to reach the origin, and `Origin.ConnectionTimeout`
+  (1 to 10 seconds, default 10) how long it waits for the connection. `CustomOriginConfig.OriginReadTimeout`
+  (1 to 120 seconds, default 30) bounds the wait for the origin's response, and a read timeout on a
+  GET or HEAD is retried up to the connection attempts, as CloudFront does, while a POST, PUT, PATCH
+  or DELETE is not retried. `Origin.ResponseCompletionTimeout` bounds the time the origin takes,
+  connecting, answering and streaming the body included, over every attempt, and ends the connection
+  when it expires; unset, or 0, leaves the origin as long as it wants to take, and a set value must
+  be at least the read timeout. The time a slow viewer takes to read what the origin already sent is
+  not part of it: the origin answered in time, so the response is not expired.
+  `CustomOriginConfig.OriginKeepaliveTimeout` (1 to 300 seconds, default 5) is how long CloudFront
+  keeps a connection to the origin after the last packet of a response. An origin that does not
+  answer in time is answered 504, "The origin didn't respond before the request expired", as on AWS.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
 - A custom origin whose domain is a [Lambda Web Function](lambda-web-functions.md) endpoint of this Floci is
   served by Floci itself, at the address the viewer reached. The origin names the endpoint's
@@ -410,6 +423,51 @@ To drop the `:4566`, publish the HTTPS port Floci also binds when TLS is on (`-p
 Set `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX=cloudfront.localhost.floci.io` to have
 `CreateDistribution` return that hostname as the `DomainName`, so test code can sign the API response
 as it is.
+
+### Behind a reverse proxy
+
+When a proxy terminates HTTPS and forwards HTTP to Floci, sign the browser-visible HTTPS URL,
+including its external hostname, port and path. Floci rebuilds the signed resource from the
+request scheme and host, so it must receive the external scheme through trusted proxy headers.
+A signature made for `https://` does not match a resource rebuilt as `http://`.
+
+For a proxy that preserves `Host` and sets `X-Forwarded-Proto` and `X-Forwarded-Port`,
+configure the Floci container with:
+
+```yaml
+environment:
+  QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING: "true"
+  QUARKUS_HTTP_PROXY_ALLOW_X_FORWARDED: "true"
+  QUARKUS_HTTP_PROXY_ALLOW_FORWARDED: "false"
+  QUARKUS_HTTP_PROXY_ENABLE_FORWARDED_HOST: "true"
+  QUARKUS_HTTP_PROXY_TRUSTED_PROXIES: "<proxy source IP or CIDR>"
+```
+
+Replace the placeholder with the proxy's source address **as seen by Floci**. In Docker this may
+be a bridge or gateway address rather than the host's loopback address. Quarkus ignores forwarded
+headers from peers outside `QUARKUS_HTTP_PROXY_TRUSTED_PROXIES`; a missing proxy address leaves
+Floci seeing HTTP and a valid HTTPS URL fails with `Signature does not match the policy`.
+
+For example, when signing `https://e1z2x3c4v5b6n7.cloudfront.localhost.floci.io:19443/hello.txt`,
+the proxy should forward these headers to Floci:
+
+```http
+Host: e1z2x3c4v5b6n7.cloudfront.localhost.floci.io:19443
+X-Forwarded-Proto: https
+X-Forwarded-Port: 19443
+```
+
+A non-default external port needs `X-Forwarded-Port`, even when the proxy preserves `Host`.
+Applying `X-Forwarded-Proto` resets Quarkus' port, so preserving `Host` alone rebuilds the URL
+without `:19443` and fails the signature check. Alternatively, send `X-Forwarded-Host` with
+the external hostname **and port**; the forwarded-host setting above enables its use.
+
+The proxy must replace client-supplied forwarded headers, and the trusted-proxy list should cover
+only its actual peers. See [Quarkus reverse-proxy configuration](https://quarkus.io/version/3.40/guides/http-reference/#running-behind-a-reverse-proxy)
+for other header layouts.
+
+With these settings a valid proxy HTTPS signed URL succeeds; missing, expired or invalid
+signatures must still return 403. Verify those cases through the proxy after configuring it.
 
 ## Not Supported (Phase 2)
 

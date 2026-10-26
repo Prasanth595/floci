@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
@@ -25,6 +26,7 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -523,6 +525,56 @@ class PostgresProtocolHandlerTest {
                 assertFalse(authThread.isAlive(), "authThread did not terminate");
             }
             assertNull(authFailure.get(), "TLS authentication thread failed");
+        }
+    }
+
+    @Test
+    void cancelRequestInsideTlsIsForwardedToTheBackend() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = clientServer.accept()) {
+
+            RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
+            tlsCertificates.ensureHost("localhost");
+            Path trustedCaFile = Files.copy(tempDir.resolve("tls/rds-ca.crt"), tempDir.resolve("trusted-ca.crt"));
+            Thread authThread = Thread.ofVirtual().start(() -> {
+                try {
+                    PostgresProtocolHandler.authenticate(
+                            proxyClient, () -> new Socket("localhost", backendServer.getLocalPort()),
+                            "dbadmin", "adminpass", "postgres",
+                            false, testSigV4Validator(), testBinding(), tlsCertificates,
+                            (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+
+            DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+            writeSslRequest(clientOut);
+            assertEquals('S', new DataInputStream(ourClient.getInputStream()).readUnsignedByte());
+            try (SSLSocket sslClient = verifyingClientSocket(ourClient, trustedCaFile, "localhost")) {
+                DataOutputStream tlsOut = new DataOutputStream(sslClient.getOutputStream());
+                tlsOut.writeInt(16);
+                tlsOut.writeInt(80877102);
+                tlsOut.writeInt(4242);
+                tlsOut.writeInt(0x5eed);
+                tlsOut.flush();
+
+                backendServer.setSoTimeout(5000);
+                try (Socket backend = backendServer.accept()) {
+                    backend.setSoTimeout(5000);
+                    DataInputStream backendIn = new DataInputStream(backend.getInputStream());
+                    assertEquals(16, backendIn.readInt());
+                    assertEquals(80877102, backendIn.readInt());
+                    assertEquals(4242, backendIn.readInt());
+                    assertEquals(0x5eed, backendIn.readInt());
+                    assertEquals(-1, backendIn.read(), "the proxy closes the cancel connection");
+                }
+            } finally {
+                authThread.join(5_000);
+                assertFalse(authThread.isAlive(), "authThread did not terminate");
+            }
         }
     }
 
@@ -1771,7 +1823,7 @@ class PostgresProtocolHandlerTest {
             int length = in.readInt();
             assertEquals(STARTUP_PROTOCOL_VERSION, in.readInt());
             byte[] payload = in.readNBytes(length - 8);
-            backendStartup.set(PostgresProtocolHandler.parseStartupParams(payload));
+            backendStartup.set(PostgresWire.startupParameters(payload));
 
             out.writeByte('R');
             out.writeInt(8);
@@ -2137,7 +2189,7 @@ class PostgresProtocolHandlerTest {
             int proto = in.readInt();
             assertEquals(STARTUP_PROTOCOL_VERSION, proto);
             byte[] payload = in.readNBytes(length - 8);
-            backendStartup.set(PostgresProtocolHandler.parseStartupParams(payload));
+            backendStartup.set(PostgresWire.startupParameters(payload));
             backendDatabase.set(backendStartup.get().get("database"));
 
             out.writeByte('R');
