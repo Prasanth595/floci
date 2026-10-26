@@ -94,7 +94,7 @@ final class DynamoDbPartiQLKeyPlan {
     }
 
     void requireNoOverlap() {
-        if (!keyed()) {
+        if (!keyed() || branches.stream().anyMatch(this::testsAKeyOutsideARange)) {
             return;
         }
         Map<Key, List<Range>> rangesByPartition = new TreeMap<>();
@@ -113,6 +113,30 @@ final class DynamoDbPartiQLKeyPlan {
                 }
             }
         }
+    }
+
+    // DynamoDB drops the overlap check once a branch tests a key in a way no key condition can
+    // hold, such as sk <> 'a', attribute_exists(sk) or NOT sk = 'a'. A NOT counts only when it
+    // sits right on the test, and a NOT over size() never counts.
+    private boolean testsAKeyOutsideARange(Branch branch) {
+        return branch.filters().stream().anyMatch(filter -> switch (filter) {
+            case Cond.Not not -> not.operand() instanceof Cond.Leaf leaf
+                    && !(leaf instanceof Cond.SizeCmp) && namesAKey(leaf);
+            default -> mentionsAKey(filter);
+        });
+    }
+
+    private boolean mentionsAKey(Cond cond) {
+        return switch (cond) {
+            case Cond.Leaf leaf -> namesAKey(leaf);
+            case Cond.And and   -> and.operands().stream().anyMatch(this::mentionsAKey);
+            case Cond.Or or     -> or.operands().stream().anyMatch(this::mentionsAKey);
+            case Cond.Not ignored -> false;
+        };
+    }
+
+    private boolean namesAKey(Cond.Leaf leaf) {
+        return leaf.bareAttribute().filter(name -> name.equals(partitionKey) || name.equals(sortKey)).isPresent();
     }
 
     List<String> unprojectedFilterAttributes(Set<String> projected) {
