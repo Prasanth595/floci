@@ -622,6 +622,8 @@ class CloudWatchMetricsServiceTest {
         assertEquals(400, error.getHttpStatus());
         assertEquals("Start date Mon Oct 26 16:23:10 UTC 2026 must be before end date Mon Oct 26 16:22:10 UTC 2026",
                 error.getMessage());
+        assertTrue(history(null, null, null, Instant.parse("2026-10-26T16:26:55.549900Z"),
+                Instant.parse("2026-10-26T16:26:55.549100Z"), null, null).isEmpty(), "AWS compares whole milliseconds");
     }
 
     @Test

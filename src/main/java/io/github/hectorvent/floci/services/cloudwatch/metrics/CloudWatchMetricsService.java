@@ -735,7 +735,7 @@ public class CloudWatchMetricsService {
             throw new AwsException("ValidationError",
                     "Alarm name must be provided to query history for alarm contributors.", 400);
         }
-        if (startDate != null && endDate != null && startDate.isAfter(endDate)) {
+        if (startDate != null && endDate != null && startDate.toEpochMilli() > endDate.toEpochMilli()) {
             throw CloudWatchMetricsException.invalidParameterValue("Start date " + HISTORY_DATE_FORMAT.format(startDate)
                     + " must be before end date " + HISTORY_DATE_FORMAT.format(endDate));
         }
