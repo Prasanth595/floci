@@ -29,9 +29,11 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -968,6 +970,47 @@ class LambdaWebServiceTest {
                 .thenReturn(object(LambdaWebZips.indexJs(""), LambdaWebCode.MAX_BYTES + 1));
         assertEquals("Zipped size must be smaller than 536870912 bytes",
                 message(() -> service.createFunction(REGION, createRequest("app"))));
+    }
+
+    @Test
+    void anActiveRevisionPastFiftyDeletesTheOldestUnusedOnes() {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        byte[] zip = LambdaWebZips.indexJs("");
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
+        String pinned = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
+        ObjectNode pin = endpointConfig("pin").put("autoDeploymentMode", "Disabled");
+        pin.putArray("revisionWeights").addObject().put("revisionId", pinned).put("weight", 100);
+        service.createEndpoint(REGION, "app", pin);
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(NOT_A_ZIP));
+        String failed = service.createRevision(REGION, "app", revisionConfig(30)).revisionId;
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
+        List<String> active = new ArrayList<>();
+        for (int i = 0; i < 48; i++) {
+            active.add(service.createRevision(REGION, "app", revisionConfig(30)).revisionId);
+        }
+        assertEquals(50, service.getFunction(REGION, "app").revisions.size());
+
+        service.createRevision(REGION, "app", revisionConfig(30));
+        Set<String> kept = service.getFunction(REGION, "app").revisions.keySet();
+        assertEquals(50, kept.size());
+        assertFalse(kept.contains(failed));
+        assertTrue(kept.contains(pinned));
+
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(NOT_A_ZIP));
+        service.createRevision(REGION, "app", revisionConfig(30));
+        assertEquals(51, service.getFunction(REGION, "app").revisions.size(), "a Failed revision cleans up nothing");
+
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
+        service.createRevision(REGION, "app", revisionConfig(30));
+        kept = service.getFunction(REGION, "app").revisions.keySet();
+        assertEquals(50, kept.size());
+        assertFalse(kept.contains(active.get(0)));
+        assertFalse(kept.contains(active.get(1)));
+        assertTrue(kept.contains(active.get(2)));
+        LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", active.get(0))));
+        assertTrue(Files.exists(code.file(ACCOUNT_ID, REGION, "app", active.get(2))));
     }
 
     private ObjectNode stateFilter(String state) {

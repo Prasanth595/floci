@@ -97,13 +97,24 @@ final class NpmPublishEnvelopeScanner {
 
     /**
      * {@link #LENIENT_FACTORY}'s own fallback parse, for a caller ({@link
-     * CodeArtifactNpmDataPlane#checkRepublish}) that still needs {@code versions()}' own key set
-     * once {@link #scan} itself has already thrown; see that factory's own javadoc for why a
-     * second, more tolerant pass is the only way to recover it at all. Its {@code readme} and
-     * {@code attachments} are not meant to be trusted the way {@link #scan}'s own result is (the
-     * whole reason this parse exists is that {@link #scan} itself refused to vouch for one of
-     * those same fields), so a caller must only ever read {@code versions().keySet()} from this,
-     * never anything else about the Envelope it returns.
+     * CodeArtifactNpmDataPlane#checkRepublish}) that still needs the full envelope once {@link
+     * #scan} itself has already thrown; see that factory's own javadoc for why a second, more
+     * tolerant pass is the only way to recover any of it at all. Both parses run the identical
+     * scanning logic over the identical bytes (see {@link #scan(InputStream, JsonFactory)}, which
+     * both this and {@link #scan} delegate to), only with a higher string-length ceiling, so every
+     * field this returns, {@code readme} and {@code attachments} included, is exactly as reliable
+     * as {@link #scan}'s own result (raised by Greptile's review, which this PR's own bookkeeping
+     * fix already relies on: {@link CodeArtifactNpmDataPlane#checkRepublish}'s own post-write
+     * byte accounting, readme capture, and redispose-protection call all key off this result's
+     * {@code readmeByVersion}, not just {@code versions().keySet()}).
+     *
+     * <p>What a caller must still never do with this result on its own: treat it as grounds for
+     * {@code CodeArtifactNpmDataPlane.RepublishCheck#confirmed} (a byte-identical idempotent
+     * retry safe to skip forwarding entirely). That determination compares the envelope against
+     * the sidecar's own stored packument content, which {@link #scan} itself threw before this
+     * fallback ever ran for, and {@code checkRepublish} always forwards on this path rather than
+     * attempting it; this parse's own tolerance has no bearing on that separate guarantee either
+     * way.
      */
     static Envelope scanLeniently(InputStream in) throws IOException {
         return scan(in, LENIENT_FACTORY);

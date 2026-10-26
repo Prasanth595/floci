@@ -2330,6 +2330,8 @@ class CognitoLambdaTriggersTest {
         VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         if (purpose != null) {
             when(verificationCodeService.issue(any(), any(), eq(purpose), any())).thenReturn(code);
+            when(verificationCodeService.issueTracked(any(), any(), eq(purpose), any()))
+                    .thenReturn(new VerificationCodeService.IssuedCode(code, "test-hash"));
         }
         return createServiceWithMessaging(ses, mock(SnsService.class), verificationCodeService);
     }
@@ -2364,8 +2366,12 @@ class CognitoLambdaTriggersTest {
         VerificationCodeService codes = inlineMock(VerificationCodeService.class);
         when(codes.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any()))
                 .thenReturn("777888");
+        when(codes.issueTracked(any(), any(), eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any()))
+                .thenReturn(new VerificationCodeService.IssuedCode("777888", "email-hash"));
         when(codes.issue(any(), any(), eq(VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION), any()))
                 .thenReturn("555666");
+        when(codes.issueTracked(any(), any(), eq(VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION), any()))
+                .thenReturn(new VerificationCodeService.IssuedCode("555666", "phone-hash"));
         return codes;
     }
 
@@ -2651,7 +2657,7 @@ class CognitoLambdaTriggersTest {
     void anUpdateThatCannotIssueALaterCodeWithdrawsTheCodesBeforeIt() {
         SesService ses = mock(SesService.class);
         VerificationCodeService codes = attributeCodes();
-        when(codes.issue(any(), any(), eq(VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION), any()))
+        when(codes.issueTracked(any(), any(), eq(VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION), any()))
                 .thenThrow(new VerificationCodeException(VerificationCodeException.Kind.RATE_LIMIT,
                         "Attempt limit exceeded, please try again later"));
         CognitoService svc = createServiceWithMessaging(ses, mock(SnsService.class), codes);
@@ -2664,7 +2670,8 @@ class CognitoLambdaTriggersTest {
                 () -> svc.updateUserAttributes(accessToken, newEmailAndPhoneNumber(), Map.of()));
 
         assertEquals("LimitExceededException", refused.getErrorCode());
-        verify(codes).invalidatePrevious(pool.getId(), "spike", VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
+        verify(codes).invalidateIfCurrent(eq(pool.getId()), eq("spike"),
+                eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any());
         verify(ses, never()).sendServiceEmail(any());
         assertEquals("spike@example.com", svc.adminGetUser(pool.getId(), "spike").getAttributes().get("email"));
     }
@@ -2687,9 +2694,10 @@ class CognitoLambdaTriggersTest {
 
         assertEquals("CodeDeliveryFailureException", failure.getErrorCode());
         verify(sns).publish(any(), any(), eq("+12025550123"), contains("555666"), any(), any(), any());
-        verify(codes).invalidatePrevious(pool.getId(), "spike", VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
-        verify(codes, never()).invalidatePrevious(pool.getId(), "spike",
-                VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION);
+        verify(codes).invalidateIfCurrent(eq(pool.getId()), eq("spike"),
+                eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any());
+        verify(codes, never()).invalidateIfCurrent(eq(pool.getId()), eq("spike"),
+                eq(VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION), any());
     }
 
     @Test
@@ -2707,7 +2715,8 @@ class CognitoLambdaTriggersTest {
                 () -> svc.getUserAttributeVerificationCode(accessToken, "email", Map.of()));
 
         assertEquals("CodeDeliveryFailureException", failure.getErrorCode());
-        verify(codes).invalidatePrevious(pool.getId(), "spike", VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
+        verify(codes).invalidateIfCurrent(eq(pool.getId()), eq("spike"),
+                eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any());
     }
 
     /** What the message goes out with is read before the update is stored: a client deleted after does not stop it. */

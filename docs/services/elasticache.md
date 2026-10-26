@@ -183,8 +183,9 @@ request may send them, and the describe will not report them back.
 `SecurityGroupIds` supplied to `CreateReplicationGroup` are stored with the group and returned
 on every member by `DescribeCacheClusters` as `SecurityGroups` memberships with `Status=active`.
 This includes shards and replicas in cluster mode. Groups without stored IDs return no memberships.
-The IDs are control-plane
-metadata, not network rules applied to the backing cache containers.
+`ModifyReplicationGroup` accepts `SecurityGroupIds` and replaces the whole stored list, on the
+group and every member; a modify that names none leaves the memberships untouched. The IDs are
+control-plane metadata, not network rules applied to the backing cache containers.
 
 `CreateReplicationGroup` provisions a real sharded Valkey cluster when the request asks for one:
 `NumNodeGroups` greater than 1, a `default.*.cluster.on` parameter group, a custom parameter group

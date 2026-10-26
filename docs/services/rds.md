@@ -783,6 +783,14 @@ A failed backend password rotation retains the managed secret and stored credent
 If Secrets Manager support is unavailable, opt-out fails before changing cluster state.
 This does not provide a transaction across database backends and persistent storage.
 
+## PostgreSQL restore connections
+
+Snapshot and point in time restores drop the target's non-template databases with
+`DROP DATABASE ... WITH (FORCE)` before replaying the dump. This terminates connections
+on the restore target, including preloaded workers such as pg_cron; the source is unchanged.
+Custom PostgreSQL images must support this syntax (PostgreSQL 13 or later). Prepared
+transactions and active logical replication slots or subscriptions can still prevent a drop.
+
 ## Point in time restore
 
 `RestoreDBInstanceToPointInTime` and `RestoreDBClusterToPointInTime` check the request as AWS does:

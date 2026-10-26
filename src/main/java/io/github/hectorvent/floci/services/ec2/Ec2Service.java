@@ -1409,12 +1409,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    public void ensureDefaultResources(String region) {
-        String ownerAccountId = callerAccountId();
-        String seedScope = ownerAccountId + "::" + region;
-        if (!seededAccountRegions.add(seedScope)) {
-            return;
-        }
+    private void ensureDefaultDhcpOptions(String region, String ownerAccountId) {
         String defaultOptionsId = "dopt-default";
         if (dhcpOptions.get(key(region, defaultOptionsId)).isEmpty()) {
             DhcpOptions defaultOptions = new DhcpOptions();
@@ -1427,11 +1422,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     new DhcpConfiguration("ipv6-address-preferred-lease-time", List.of("140"))));
             dhcpOptions.put(key(region, defaultOptionsId), defaultOptions);
         }
-        // Already provisioned in a previous run and reloaded from persistent storage: the default
-        // VPC (and everything else) is present, so don't re-seed and create duplicates (#1297).
-        if (!vpcs.scan(k -> k.startsWith(region + "::")).isEmpty()) {
+    }
+
+    public void ensureDefaultResources(String region) {
+        String ownerAccountId = callerAccountId();
+        String seedScope = ownerAccountId + "::" + region;
+        if (!seededAccountRegions.add(seedScope)) {
             return;
         }
+        List<Vpc> existingVpcs = vpcs.scan(k -> k.startsWith(region + "::"));
+        // Already provisioned in a previous run and reloaded from persistent storage: the default
+        // VPC (and everything else) is present, so don't re-seed and create duplicates (#1297).
+        if (!existingVpcs.isEmpty()) {
+            if (existingVpcs.stream().anyMatch(vpc -> "dopt-default".equals(vpc.getDhcpOptionsId()))) {
+                ensureDefaultDhcpOptions(region, ownerAccountId);
+            }
+            return;
+        }
+        ensureDefaultDhcpOptions(region, ownerAccountId);
         LOG.debugv("Seeding default EC2 resources for region {0}", region);
 
         // Default VPC
@@ -6094,6 +6102,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         rejectOutOfRangePrefix(cidrBlock, "InvalidVpc.Range");
         rejectReservedVpcRange(cidrBlock);
         ensureDefaultResources(region);
+        ensureDefaultDhcpOptions(region, callerAccountId());
         String vpcId = "vpc-" + randomHex(8);
         Vpc vpc = new Vpc();
         vpc.setVpcId(vpcId);

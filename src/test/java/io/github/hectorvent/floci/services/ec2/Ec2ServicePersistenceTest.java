@@ -83,6 +83,46 @@ class Ec2ServicePersistenceTest {
     }
 
     @Test
+    void startupRestoresDefaultDhcpOptionsReferencedByLegacyVpc(@TempDir Path dir) throws IOException {
+        Files.writeString(dir.resolve("ec2-vpcs.json"), """
+                {
+                  "us-east-1::vpc-legacy": {
+                    "vpcId": "vpc-legacy",
+                    "region": "us-east-1",
+                    "ownerId": "000000000000",
+                    "dhcpOptionsId": "dopt-default"
+                  }
+                }
+                """);
+
+        Ec2Service restarted = newService(dir);
+
+        DhcpOptions restored = restarted.describeDhcpOptions(REGION, List.of("dopt-default"), List.of(), 0, null)
+                .items().getFirst();
+        assertEquals("dopt-default", restored.getDhcpOptionsId());
+    }
+
+    @Test
+    void createVpcRestoresDeletedDefaultDhcpOptionsAfterRestart(@TempDir Path dir) {
+        Ec2Service original = newService(dir);
+        original.ensureDefaultResources(REGION);
+        String defaultVpcId = original.describeVpcs(REGION, List.of(), List.of()).stream()
+                .filter(Vpc::isDefault).findFirst().orElseThrow().getVpcId();
+        original.associateDhcpOptions(REGION, "default", defaultVpcId);
+        original.deleteDhcpOptions(REGION, "dopt-default");
+
+        Ec2Service restarted = newService(dir);
+        restarted.ensureDefaultResources(REGION);
+        assertTrue(restarted.describeDhcpOptions(REGION, List.of(), List.of(), 0, null)
+                .items().isEmpty());
+        assertEquals("dopt-default", restarted.createVpc(REGION, "10.78.0.0/16", false).getDhcpOptionsId());
+        DhcpOptions restored = restarted.describeDhcpOptions(REGION, List.of("dopt-default"), List.of(), 0, null)
+                .items().getFirst();
+        assertEquals("dopt-default", restored.getDhcpOptionsId());
+        assertEquals("default", restarted.requireVpc(REGION, defaultVpcId).getDhcpOptionsId());
+    }
+
+    @Test
     void elasticIpMetadataSurvivesRestart(@TempDir Path dir) {
         String region = "us-west-2";
         String pool = "ipv4pool-ec2-0123456789abcdef0";

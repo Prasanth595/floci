@@ -52,6 +52,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 /**
@@ -275,16 +276,23 @@ public class SesService {
         if (request.content() instanceof EmailContent.Raw raw) {
             return sendRawEmail(request, raw, requireVerifiedSender);
         }
+        Tenant tenant = requireSendingTenant(request.tenantName(), request.region(), request,
+                request::configurationSetName);
         if (request.content() instanceof EmailContent.InlineTemplate inline) {
             requireInlineTemplateContent(inline.subject(), inline.textPart(), inline.htmlPart());
         }
         // After a missing sender, AWS reports a malformed address ahead of the destination and
-        // configuration-set checks, then an over-long address, and only then a missing stored
-        // template (probe-confirmed), so the content is resolved after these checks.
+        // configuration-set checks, then an over-long address, then an unverified sender, and only
+        // then a missing stored template (probe-confirmed), so the content is resolved last.
         requireSource(request);
         SesAddressSyntax.requireEnvelope(request);
         String effectiveConfigSet = validateEnvelope(request);
         SesAddressLength.requireEnvelope(request);
+        if (requireVerifiedSender) {
+            requireVerifiedSenders(List.of(
+                    new SendingAddress(request.source(), request.sourceArn()),
+                    new SendingAddress(request.returnPath(), request.returnPathArn())), request.region());
+        }
         EmailContent.Simple content = switch (request.content()) {
             case EmailContent.Simple simple -> simple;
             case EmailContent.Template template ->
@@ -292,11 +300,10 @@ public class SesService {
             case EmailContent.InlineTemplate inline -> SesTemplateService.render(inline);
             case EmailContent.Raw raw -> throw new IllegalStateException("Raw content is sent above");
         };
-        if (requireVerifiedSender) {
-            requireVerifiedSenders(List.of(
-                    new SendingAddress(request.source(), request.sourceArn()),
-                    new SendingAddress(request.returnPath(), request.returnPathArn())), request.region());
-        }
+        String templateName = request.content() instanceof EmailContent.Template template
+                ? template.templateName()
+                : null;
+        requireTenantAssociations(tenant, request.source(), effectiveConfigSet, templateName, request.region());
         return sendSimpleEmail(request.toBuilder().content(content).build(), content, effectiveConfigSet);
     }
 
@@ -309,9 +316,10 @@ public class SesService {
 
     // "The message must be sent from a verified email address or domain" (API_SendEmail), and the
     // error "could apply to the "From", "Source", "Sender", or "Return-Path" address" (developer
-    // guide, Email sending errors). It runs after the request's own validation so that
-    // probe-confirmed order is unchanged; where AWS places this check among those errors has not
-    // been probed.
+    // guide, Email sending errors). It runs after the request's own validation: a missing
+    // configuration set is reported ahead of an unverified sender, and an unverified sender or
+    // return path ahead of a missing stored template and a tenant association 403 (probe-confirmed
+    // on v2). Where AWS places it among the other validation errors has not been probed.
     private void requireVerifiedSenders(List<SendingAddress> senders, String region) {
         String accountId = callerAccountId();
         // A blank address is not used, and neither is the null reverse-path "<>".
@@ -527,6 +535,11 @@ public class SesService {
     private String sendRawEmail(SendEmailRequest request, EmailContent.Raw raw, boolean requireVerifiedSender) {
         String source = request.source();
         String region = request.region();
+        // The configuration set checked before a DISABLED refusal may be named by the
+        // X-SES-CONFIGURATION-SET header alone, so the message is read for it only on that path.
+        Tenant tenant = requireSendingTenant(request.tenantName(), region, null,
+                () -> firstNonBlank(request.configurationSetName(),
+                        SmtpRelay.parseRawHeaders(raw.data()).configurationSet()));
         if (raw.data() == null || raw.data().isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
@@ -576,6 +589,7 @@ public class SesService {
         if (requireVerifiedSender) {
             requireVerifiedSenders(rawSendingAddresses(request, raw, headers), region);
         }
+        requireTenantAssociations(tenant, effectiveSource, effectiveConfigSet, null, region);
         // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
         // unknown contact list) fails the whole send without leaving an orphaned SentEmail record.
         Map<String, String> suppressedReasons = new LinkedHashMap<>(
@@ -1134,71 +1148,47 @@ public class SesService {
     }
 
     /**
-     * The tenant send gate (Phase 4): resolves the tenant with the send-flavored not-found wording,
-     * refuses a tenant whose sending is DISABLED, then requires every resource the send uses to be
-     * associated with it. Placement is probe-confirmed: request-shape validation (a missing Content,
-     * an empty inline template, a missing FromEmailAddress on Simple, the bulk template-content
-     * checks) runs before the tenant lookup, while the recipient checks, the raw MIME-From
-     * derivation, and identity verification all lose to the tenant 404. The DISABLED refusal also
-     * beats identity verification, the association check and a raw message's missing recipients,
-     * but an unknown configuration set named by the request is reported before it, and so are the
-     * address and recipient checks of a Simple or Template send, which goes through the overload
-     * that takes its envelope.
+     * The first half of the tenant send gate, run where each send starts: resolves the
+     * tenant with the send-flavored not-found wording and refuses a tenant whose sending is DISABLED,
+     * or returns null for a send with no tenant. Placement is probe-confirmed: request-shape
+     * validation (a missing Content, an empty inline template, a missing FromEmailAddress on Simple,
+     * the bulk template-content checks) runs before the tenant lookup, while the recipient checks,
+     * the raw MIME-From derivation, and identity verification all lose to the tenant 404. The
+     * DISABLED refusal also beats identity verification, the association check and a raw message's
+     * missing recipients, but the configuration set the request names is looked up before it, and
+     * a Simple or Template send's {@code envelope} has its address and recipient checks run first.
+     * The association half runs at the end of the send, see {@code requireTenantAssociations}.
      */
-    public void checkTenantSendAccess(String tenantName, String fromEmailAddress,
-                                      String configurationSetName, String templateName,
-                                      String accountId, String region) {
-        checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName, templateName, accountId,
-                region, null, configurationSetName);
-    }
-
-    /**
-     * The send gate for SendBulkEmail, which refuses a DISABLED tenant before it looks up the
-     * configuration set, unlike SendEmail. A request in which no entry names a recipient skips the
-     * gate altogether, even for an unknown tenant: each entry is answered on its own instead
-     * (probe-confirmed).
-     */
-    public void checkTenantBulkSendAccess(String tenantName, String fromEmailAddress,
-                                          String configurationSetName, String templateName,
-                                          List<BulkEmailEntry> entries, String accountId, String region) {
-        if (!anyBulkRecipient(entries)) {
-            return;
-        }
-        checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName, templateName, accountId,
-                region, null, null);
-    }
-
-    /**
-     * The send gate for a Simple or Template send, whose envelope SES validates before it refuses a
-     * DISABLED tenant: a malformed address and a request with no recipient are reported first
-     * (probe-confirmed), while a tenant that may send still meets the gate before them.
-     */
-    public void checkTenantSendAccess(SendEmailRequest envelope, String templateName, String accountId) {
-        checkTenantSendAccess(envelope.tenantName(), envelope.source(), envelope.configurationSetName(),
-                templateName, accountId, envelope.region(), envelope, envelope.configurationSetName());
-    }
-
-    private void checkTenantSendAccess(String tenantName, String fromEmailAddress,
-                                       String configurationSetName, String templateName,
-                                       String accountId, String region, SendEmailRequest envelope,
-                                       String configurationSetBeforeRefusal) {
+    private Tenant requireSendingTenant(String tenantName, String region, SendEmailRequest envelope,
+                                        Supplier<String> configurationSetBeforeRefusal) {
         if (tenantName == null) {
+            return null;
+        }
+        Tenant tenant = tenantService.tenantForSending(tenantName, region, callerAccountId());
+        requireSendingEnabled(tenant, configurationSetBeforeRefusal, region, envelope);
+        return tenant;
+    }
+
+    // The second half of the tenant send gate, and the last check of a send: AWS reports a missing
+    // configuration set or stored template and an unverified sender or return path ahead of the 403
+    // (probe-confirmed). Every resource the send uses must be associated with the tenant: the
+    // sender's identity, the effective configuration set (an omitted name resolves to the sender
+    // identity's default, which needs the association just as an explicit one does) and the stored
+    // template.
+    private void requireTenantAssociations(Tenant tenant, String source, String effectiveConfigSet,
+                                           String templateName, String region) {
+        if (tenant == null) {
             return;
         }
-        Tenant tenant = tenantService.tenantForSending(tenantName, region, accountId);
-        requireSendingEnabled(tenant, configurationSetBeforeRefusal, region, envelope);
-        String arnPrefix = "arn:" + AwsRegions.partitionFor(region) + ":ses:" + region + ":" + accountId + ":";
+        String arnPrefix = "arn:" + AwsRegions.partitionFor(region) + ":ses:" + region + ":" + callerAccountId()
+                + ":";
         List<SesTenantService.AssociationResource> used = new ArrayList<>();
-        if (fromEmailAddress != null && !fromEmailAddress.isBlank()) {
-            String identityName = sendIdentityName(fromEmailAddress, region);
+        if (source != null && !source.isBlank()) {
+            String identityName = sendIdentityName(source, region);
             used.add(new SesTenantService.AssociationResource(
                     SesTenantService.RESOURCE_TYPE_IDENTITY, identityName,
                     arnPrefix + "identity/" + identityName));
         }
-        // The gate covers the EFFECTIVE configuration set: an omitted name resolves to the sender
-        // identity's default, and that one needs the association just as an explicit one does.
-        String effectiveConfigSet =
-                resolveDefaultConfigurationSet(configurationSetName, fromEmailAddress, region);
         if (effectiveConfigSet != null && !effectiveConfigSet.isBlank()) {
             used.add(new SesTenantService.AssociationResource(
                     SesTenantService.RESOURCE_TYPE_CONFIGURATION_SET, effectiveConfigSet,
@@ -1212,41 +1202,7 @@ public class SesService {
         tenantService.requireResourcesAssociated(tenant, used, region);
     }
 
-    /**
-     * The raw-content variant of the tenant send gate: when {@code FromEmailAddress} is omitted,
-     * the effective sender comes from the MIME {@code From} header, the same derivation
-     * {@code sendRawEmail} applies, so the gate must resolve it the same way before checking.
-     * {@code hasDestination} says whether the request named any recipient; when it did not and the
-     * MIME To, Cc and Bcc headers are empty too, only the tenant's existence and sending status
-     * are checked.
-     */
-    public void checkTenantRawSendAccess(String tenantName, String fromEmailAddress,
-                                         String rawMessage, boolean hasDestination,
-                                         String configurationSetName, String accountId, String region) {
-        if (tenantName == null) {
-            return;
-        }
-        SmtpRelay.RawMessageHeaders headers = SmtpRelay.parseRawHeaders(rawMessage);
-        // AWS checks that the tenant exists and may send, then reports a message with no recipients
-        // anywhere ahead of the association gate (probe-confirmed), so that error is left to
-        // sendRawEmail.
-        if (!hasDestination && SendEmailRequest.recipients(headers.to(), headers.cc(), headers.bcc()).isEmpty()) {
-            requireSendingEnabled(tenantService.tenantForSending(tenantName, region, accountId),
-                    firstNonBlank(configurationSetName, headers.configurationSet()), region, null);
-            return;
-        }
-        String effectiveSource = fromEmailAddress;
-        if (effectiveSource == null || effectiveSource.isBlank()) {
-            effectiveSource = headers.from().isBlank() ? null : headers.from();
-        }
-        // The gate sees the same configuration set the send will use, so one named only by the
-        // X-SES-CONFIGURATION-SET header cannot slip past the tenant association check.
-        checkTenantSendAccess(tenantName, effectiveSource,
-                firstNonBlank(configurationSetName, headers.configurationSet()), null,
-                accountId, region);
-    }
-
-    private void requireSendingEnabled(Tenant tenant, String configurationSetName, String region,
+    private void requireSendingEnabled(Tenant tenant, Supplier<String> configurationSetName, String region,
                                        SendEmailRequest envelope) {
         if (!"DISABLED".equals(tenant.sendingStatus())) {
             return;
@@ -1255,8 +1211,9 @@ public class SesService {
             SesAddressSyntax.requireEnvelope(envelope);
             requireRecipients(envelope);
         }
-        if (configurationSetName != null && !configurationSetName.isBlank()) {
-            configSetService.get(configurationSetName, region);
+        String configurationSet = configurationSetName.get();
+        if (configurationSet != null && !configurationSet.isBlank()) {
+            configSetService.get(configurationSet, region);
         }
         throw new AwsException("MessageRejected", "Sending disabled for <" + tenant.tenantArn()
                 + ">. For more information, please check the resource configuration and status.", 400);
@@ -1728,12 +1685,19 @@ public class SesService {
     }
 
     public List<BulkEmailEntryResult> sendBulkEmail(SendBulkEmailRequest request) {
-        EmailContent.InlineTemplate template = request.defaultContent();
         if (request.source() == null || request.source().isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
-        requireInlineTemplateContent(template.subject(), template.textPart(), template.htmlPart());
+        if (request.defaultContent() instanceof EmailContent.InlineTemplate inline) {
+            requireInlineTemplateContent(inline.subject(), inline.textPart(), inline.htmlPart());
+        }
         requireBulkDestinationCount(sizeOf(request.entries()));
+        // SendBulkEmail refuses a DISABLED tenant before it looks up the configuration set, unlike
+        // SendEmail, and a request in which no entry names a recipient skips the gate altogether,
+        // even for an unknown tenant: each entry is answered on its own instead (probe-confirmed).
+        Tenant tenant = anyBulkRecipient(request.entries())
+                ? requireSendingTenant(request.tenantName(), request.region(), null, () -> null)
+                : null;
         configSetService.validateForSending(request.configurationSetName(), request.region());
         for (BulkEmailEntry entry : request.entries()) {
             int recipientCount = sizeOf(entry.toAddresses())
@@ -1754,10 +1718,27 @@ public class SesService {
                             "Destination cannot be empty"))
                     .toList();
         }
+        // The sender and return path are checked once for the whole call, then a stored template is
+        // looked up, then the tenant associations, as on a single send (probe-confirmed).
+        requireVerifiedSenders(List.of(
+                new SendingAddress(request.source(), request.sourceArn()),
+                new SendingAddress(request.returnPath(), request.returnPathArn())), request.region());
+        EmailContent.InlineTemplate template = switch (request.defaultContent()) {
+            case EmailContent.Template stored -> templateService.inline(stored, request.region());
+            case EmailContent.InlineTemplate inline -> inline;
+        };
+        requireTenantAssociations(tenant, request.source(),
+                resolveDefaultConfigurationSet(request.configurationSetName(), request.source(), request.region()),
+                request.templateName(), request.region());
         List<BulkEmailEntryResult> results = new ArrayList<>(request.entries().size());
         for (BulkEmailEntry entry : request.entries()) {
             try {
                 SesAddressSyntax.requireBulkDestination(entry, request.replyToAddresses());
+                // An entry with no recipient beside entries with one fails on its own (probe-confirmed
+                // on v1 and v2).
+                if (!anyBulkRecipient(List.of(entry))) {
+                    throw new AwsException("InvalidParameterValue", "Missing required header 'To'.", 400);
+                }
                 JsonNode merged = mergeTemplateData(template.templateData(), entry.replacementTemplateData());
                 List<MessageTag> mergedTags = mergeEmailTags(request.defaultEmailTags(), entry.replacementEmailTags());
                 List<MessageHeader> mergedHeaders = mergeHeaders(template.headers(), entry.replacementHeaders());
@@ -1780,8 +1761,8 @@ public class SesService {
                         .build();
                 // SesAddressLength is not applied to entries: an over-long bulk destination did not
                 // fail the length check ahead of sender verification (probe-confirmed; the
-                // verified-sender case is unprobed). The bulk sender and return path are checked
-                // by requireBulkAddress.
+                // verified-sender case is unprobed). The bulk sender and return path were checked
+                // above, their syntax by requireBulkAddress and their verification once for the call.
                 String messageId = sendSimpleEmail(entryRequest, rendered, validateEnvelope(entryRequest));
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {

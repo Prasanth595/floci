@@ -1480,6 +1480,8 @@ public class DynamoDbService {
                 }
             }
 
+            DynamoDbSetOrder.sortSetsIn(item);
+
             // Reject any attempt to modify a key attribute
             validateKeyNotModified(table, key, item);
             requireItemNestingWithinLimit(item);

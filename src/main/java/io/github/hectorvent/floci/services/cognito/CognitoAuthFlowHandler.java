@@ -1964,7 +1964,8 @@ final class CognitoAuthFlowHandler {
         byte[] payload;
         try {
             payload = MAPPER.writeValueAsBytes(
-                    triggerEvent(pool, clientId, user, "CustomEmailSender", triggerSource, req));
+                    triggerEvent(pool, clientId == null ? CLIENT_ID_NOT_APPLICABLE : clientId,
+                            user, "CustomEmailSender", triggerSource, req));
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Cannot serialize the CustomEmailSender event", e);
         }

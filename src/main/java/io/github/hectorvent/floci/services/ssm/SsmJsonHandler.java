@@ -234,13 +234,19 @@ public class SsmJsonHandler {
         String path = request.path("Path").asText();
         boolean recursive = request.path("Recursive").asBoolean(false);
 
-        List<Parameter> params = ssmService.getParametersByPath(path, recursive, parameterFilters(request), region);
+        List<ParameterStringFilter> filters = parameterFilters(request);
+        List<Parameter> params = ssmService.getParametersByPath(path, recursive, filters, region);
+        boolean labeledVersions = filters.stream().anyMatch(filter -> "Label".equals(filter.key()));
+        // A label query can return several versions of one name. The separator keeps name order,
+        // and the padded version lets the cursor resume inside that parameter's history.
+        Function<Parameter, String> cursor = labeledVersions
+                ? p -> p.getName() + "\0" + String.format("%019d", p.getVersion()) : Parameter::getName;
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        PaginatedResult<Parameter> page = page(pageRequest, params, Parameter::getName, ALL_ITEMS,
+        PaginatedResult<Parameter> page = page(pageRequest, params, cursor, ALL_ITEMS,
                 GET_PARAMETERS_BY_PATH_TOKEN + ssmService.accountId() + ":" + region + ":" + recursive + ":"
-                        + (path.endsWith("/") ? path : path + "/"));
+                        + (path.endsWith("/") ? path : path + "/") + (labeledVersions ? ":labels" : ""));
         for (Parameter p : page.items()) {
             parametersArray.add(parameterToNode(p));
         }

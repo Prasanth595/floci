@@ -2344,11 +2344,18 @@ public interface EmulatorConfig {
 
         /**
          * Publish {@code awsvpc} task ports on the Docker host so local host processes can
-         * reach them. This is an emulator-only escape hatch and can cause port collisions
-         * when more than one task exposes the same port.
+         * reach them. Uses stable host ports unless {@code dynamic-awsvpc-host-ports} is enabled.
          */
         @WithDefault("false")
         boolean publishAwsvpcPortsToHost();
+
+        /** Allocate a free host port per awsvpc task when host publishing is enabled. */
+        @WithDefault("false")
+        boolean dynamicAwsvpcHostPorts();
+
+        /** Host interface for published awsvpc task ports, including firewall namespaces. */
+        @WithDefault("127.0.0.1")
+        String hostPortBindAddress();
 
         Optional<String> dockerNetwork();
 
@@ -3051,6 +3058,17 @@ public interface EmulatorConfig {
 
         @WithDefault("300")
         int containerIdleTimeoutSeconds();
+
+        /**
+         * Seconds a newly started runtime has to finish its init and request its first invocation,
+         * matching the 10 second Init phase AWS allows. A function whose Timeout is longer waits
+         * that long instead, as AWS re-runs a slow init inside the invoke. The function's Timeout
+         * itself starts when the invocation is dispatched.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS
+         */
+        @WithDefault("10")
+        int initTimeoutSeconds();
 
         /**
          * One shutdown drain budget shared by provisioned and on-demand Lambda containers.
@@ -3868,6 +3886,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("300")
         int apiTimeoutSeconds();
+
+        /**
+         * How long each attempt at pulling an image may take before it is given up, in seconds. A pull
+         * still downloading when the limit passes is tried again, three attempts in all, so a launch that
+         * needs an image can wait up to about three times this before it fails. A large image, such as an EMR Serverless runtime of 3.5 to 4.3 GB, can need longer
+         * on a slow connection.
+         */
+        @WithDefault("300")
+        int imagePullTimeoutSeconds();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

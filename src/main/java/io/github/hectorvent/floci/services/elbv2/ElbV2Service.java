@@ -45,6 +45,8 @@ import java.util.stream.Collectors;
 public class ElbV2Service implements ResourceProvider, ServerCertificateReferenceProvider, VpcDependencyProvider {
 
     private static final Logger LOG = Logger.getLogger(ElbV2Service.class);
+    /** {@code LoadBalancerTypeEnum}, in the model's order. */
+    private static final List<String> LOAD_BALANCER_TYPES = List.of("application", "network", "gateway");
 
     @Inject
     ElbV2DataPlane dataPlane;
@@ -226,12 +228,16 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     /**
      * Resolving the subnets and publishing the balancer happen under EC2's subnet lock, so a
      * DeleteSubnet cannot pass its dependency check in between and leave the balancer on a subnet
-     * that is gone.
+     * that is gone. A {@code Type} outside the model's enum is refused, as AWS refuses it, rather
+     * than read as an application load balancer, which is not the one IAM checks the request for.
      */
     public LoadBalancer createLoadBalancer(String region, String name, String scheme,
                                            String type, String ipAddressType,
                                            List<String> subnets, List<String> securityGroups,
                                            Map<String, String> initialTags) {
+        if (type != null && !LOAD_BALANCER_TYPES.contains(type)) {
+            throw SmithyValidationErrors.validationError(SmithyValidationErrors.notInEnum(type, "type", LOAD_BALANCER_TYPES));
+        }
         return ec2Service.supplyWithSubnetReferencesHeld(region, () -> createLoadBalancerWithSubnetsHeld(
                 region, name, scheme, type, ipAddressType, subnets, securityGroups, initialTags));
     }

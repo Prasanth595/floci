@@ -502,12 +502,12 @@ class ElastiCacheServiceTest {
         service.createUserGroup("redis-users", "redis", List.of("default-user-id"), "us-east-1");
 
         AwsException refused = assertThrows(AwsException.class, () -> service.modifyReplicationGroup(
-                "grp", null, null, false, true, ReplicationGroupSettings.unchanged()));
+                "grp", null, null, false, true, ReplicationGroupSettings.unchanged(), null));
         assertEquals("InvalidParameterCombination", refused.getErrorCode());
         assertEquals("group-token", service.getReplicationGroup("grp").getAuthToken());
 
         service.modifyReplicationGroup("grp", List.of("redis-users"), null, false, true,
-                ReplicationGroupSettings.unchanged());
+                ReplicationGroupSettings.unchanged(), null);
         assertNull(service.getReplicationGroup("grp").getAuthToken());
 
         service.modifyReplicationGroup("grp", null, List.of("redis-users"));
@@ -528,13 +528,30 @@ class ElastiCacheServiceTest {
         service.createUserGroup("second-users", "redis", List.of("default-user-id"), "us-east-1");
         service.modifyReplicationGroup("grp", List.of("first-users", "second-users"), null);
 
-        service.modifyReplicationGroup("grp", null, null, true, false, ReplicationGroupSettings.unchanged());
+        service.modifyReplicationGroup("grp", null, null, true, false, ReplicationGroupSettings.unchanged(), null);
 
         ReplicationGroup group = service.getReplicationGroup("grp");
         assertTrue(group.getUserGroupIds().isEmpty());
         assertEquals(AuthMode.NO_AUTH, group.getAuthMode());
         assertTrue(group.isEncryptedInTransit());
         assertFalse(service.hasMembers("grp"));
+    }
+
+    @Test
+    void modifyReplicationGroupReplacesSecurityGroupsOnlyWhenNamed() {
+        service.createReplicationGroup("grp", "test", AuthMode.NO_AUTH, null, "us-east-1");
+
+        service.modifyReplicationGroup("grp", null, null, false, false,
+                ReplicationGroupSettings.unchanged(), List.of("sg-1", "sg-2"));
+        assertEquals(List.of("sg-1", "sg-2"), service.getReplicationGroup("grp").getSecurityGroupIds());
+
+        service.modifyReplicationGroup("grp", null, null, false, false,
+                ReplicationGroupSettings.unchanged(), null);
+        assertEquals(List.of("sg-1", "sg-2"), service.getReplicationGroup("grp").getSecurityGroupIds());
+
+        service.modifyReplicationGroup("grp", null, null, false, false,
+                ReplicationGroupSettings.unchanged(), List.of("sg-3"));
+        assertEquals(List.of("sg-3"), service.getReplicationGroup("grp").getSecurityGroupIds());
     }
 
     @Test
@@ -1353,7 +1370,7 @@ class ElastiCacheServiceTest {
                 "on ~* +@all", null);
         svc.createUserGroup("redis-users", "redis", List.of("default-user-id"), "us-east-1");
         svc.modifyReplicationGroup("grp", List.of("redis-users"), null, false, true,
-                ReplicationGroupSettings.unchanged());
+                ReplicationGroupSettings.unchanged(), null);
         svc.modifyReplicationGroup("grp", null, List.of("redis-users"));
         ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validator =
                 ArgumentCaptor.forClass(ElastiCacheAuthProxy.PasswordValidator.class);

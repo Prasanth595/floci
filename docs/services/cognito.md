@@ -599,6 +599,10 @@ verification code can be requested after the sender is working again.
 Codes issued for earlier destinations of changed contacts are also withdrawn,
 including when the replacement is pending. Codes for unchanged contacts that
 the failed delivery did not reach remain usable.
+`AdminUpdateUserAttributes` uses the same contact update and failed-sender handling.
+It skips verification delivery when the request sets the matching `*_verified`
+attribute to `true`. Otherwise, retrying an identical admin update sends a new
+code if the previous delivery failed and left no usable code.
 A verification code is still sent to the replacement value, but Cognito no
 longer retains or exposes the old value. For alias attributes, the old alias is
 removed immediately and the replacement becomes usable for sign-in only after

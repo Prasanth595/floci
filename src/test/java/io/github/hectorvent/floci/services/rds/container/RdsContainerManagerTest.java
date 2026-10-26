@@ -1439,6 +1439,8 @@ class RdsContainerManagerTest {
     void restoreScriptDropsNonSystemDatabasesAndRoles() {
         String script = RdsContainerManager.postgresRestoreScript();
 
+        assertTrue(script.contains("WITH (FORCE)"),
+                "Restore must terminate sessions such as pg_cron connected to the target database");
         assertTrue(script.contains("datistemplate = false"),
                 "Script must only drop non-template databases");
         assertTrue(script.contains("datname <> 'postgres'"),

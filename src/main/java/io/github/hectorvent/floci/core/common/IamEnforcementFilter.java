@@ -427,7 +427,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         List<String> resources = resolveResourceArns(credentialScope,
-                targetResources(credentialScope, action, ctx, region, accountId));
+                targetResources(credentialScope, action, resolvedAuthorization.operation(), ctx, region, accountId));
 
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
@@ -976,7 +976,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * A request that tags what it creates also needs the service's tagging action (see {@link TagOnCreate}),
      * checked as the caller for each set of tags, under any spelling a handler might read: on the resource a
-     * tag specification names, else on the
+     * tag specification names, else on the resource a create makes under a parent its action acts on, else on the
      * resources the operation is checked on, with the set's tags as {@code aws:RequestTag/<key>} and
      * {@code aws:TagKeys}, the operation as the namespace's {@code CreateAction} key where the tagging action
      * takes one, and the keys that say who is calling. Returns true when the request was aborted.
@@ -986,13 +986,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                              String operation, TagOnCreate.Tagging tagging,
                                              String credentialScope, List<String> resources,
                                              String region, String accountId, String akid) {
+        // A create of a resource under a parent its action acts on tags the new one (see RequestResources).
+        List<String> created = RequestResources.created(operation, ctx, AwsRegions.partitionFor(region), region,
+                accountId);
+        List<String> made = created.isEmpty() ? resources : created;
         for (TagOnCreate.TagSet set : tagging.checked()) {
             Map<String, List<String>> context = TagOnCreate.conditionContext(tagging, set, operation);
             if (callerArns != null) {
                 callerArns.putPrincipalKeys(context);
             }
-            List<String> tagged = TagOnCreate.resources(operation, set, requestPartition(), region, accountId,
-                    resources);
+            List<String> tagged = TagOnCreate.resources(operation, set, requestPartition(), region, accountId, made);
             if (abortIfDenied(ctx, caller, principal, tagging.action(), action, credentialScope, tagged,
                     List.of(context), region, accountId, akid)) {
                 return true;
@@ -1108,7 +1111,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                   List<String> resources, List<Map<String, List<String>>> targetContexts,
                                   String region, String accountId, String akid) {
         for (String resource : resources) {
-            List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies = resolveResourcePolicies(credentialScope, resource);
+            List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies =
+                    resolveResourcePolicies(credentialScope, operationAction, resource);
             String resourceOwnerAccountId = resourcePolicies.isEmpty() ? null : resourcePolicies.getFirst().ownerAccountId();
             List<String> policyDocs = resourcePolicies.stream()
                     .map(ResourcePolicyProvider.ResourcePolicy::policyDocument)
@@ -1401,7 +1405,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 // signing alias such as s3express, would otherwise see no bucket policy at all.
                 String resourcePolicyScope = catalog.canonicalCredentialScope(action.split(":", 2)[0]);
                 List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies = resolveResourcePolicies(
-                        resourcePolicyScope, resource);
+                        resourcePolicyScope, action, resource);
                 effectiveOwnerAccountId = resourcePolicies.isEmpty()
                         ? null : resourcePolicies.getFirst().ownerAccountId();
                 policyDocs = resourcePolicies.stream()
@@ -1583,10 +1587,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * Logs and Secrets Manager targets depend on the serving operation and the request's partition, STS
      * targets on the serving operation;
-     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in.
+     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in; and the
+     * targets of a namespace the table of request resources reads on {@code operation}, the one the request is
+     * dispatched as (see {@link RequestResources}).
      */
-    private List<String> targetResources(String credentialScope, String action, ContainerRequestContext ctx,
-                                         String region, String accountId) {
+    private List<String> targetResources(String credentialScope, String action, String operation,
+                                         ContainerRequestContext ctx, String region, String accountId) {
         if ("logs".equals(credentialScope)) {
             return arnBuilder.buildLogResources(action, ctx, region, accountId, requestPartition());
         }
@@ -1599,7 +1605,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope) || "dsql".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
-        return arnBuilder.buildResources(credentialScope, ctx, region, accountId);
+        return arnBuilder.buildResources(credentialScope, operation, ctx, region, accountId,
+                AwsRegions.partitionFor(region));
     }
 
     /**
@@ -1682,8 +1689,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return resolved;
     }
 
-    private List<ResourcePolicyProvider.ResourcePolicy> resolveResourcePolicies(String credentialScope, String resourceArn) {
-        return ResourcePolicyProviders.policiesFor(resourcePolicyProviders, credentialScope, resourceArn);
+    private List<ResourcePolicyProvider.ResourcePolicy> resolveResourcePolicies(
+            String credentialScope, String action, String resourceArn) {
+        return ResourcePolicyProviders.policiesFor(resourcePolicyProviders, credentialScope, action, resourceArn);
     }
 
     /**

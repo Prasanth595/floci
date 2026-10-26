@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.exception.NotModifiedException;
+import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.model.Container;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -28,7 +29,6 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.atLeastOnce;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -109,20 +109,29 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
-    void aCancelThatFindsTheDriverAlreadyExitedStillStopsTheRun() {
+    void aCancelEndsTheRunAndRemovesItsDriverEvenWhenDockerWouldRefuseAStop() {
         EmrServerlessSparkRunner runner = runner();
-        // Docker answers a stop of an exited container with HTTP 304.
+        SparkJobRunner.Job job = job(Duration.ofMillis(50));
         when(docker.stopContainerCmd("driver").withTimeout(0).exec())
-                .thenThrow(new NotModifiedException("Container already stopped"));
-        SparkJobRunner.Job job = job(Duration.ZERO);
-        doAnswer(started -> {
-            runner.stop(job.jobRunId());
-            return null;
-        }).when(progress).started();
+                .thenThrow(new InternalServerErrorException("daemon busy"));
+        // The driver never exits by itself, as a STREAMING run's; the cancel comes from another task,
+        // whose exceptions go nowhere, while the driver is being watched.
+        AtomicBoolean cancelled = new AtomicBoolean();
+        when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenAnswer(look -> {
+            if (cancelled.compareAndSet(false, true)) {
+                try {
+                    runner.stop(job.jobRunId());
+                } catch (RuntimeException ignored) {
+                    // Dropped, as the executor drops what its task throws; the assertions below catch a lost cancel.
+                }
+            }
+            return true;
+        });
 
         SparkJobRunner.Outcome outcome = runner.run(job, progress);
 
         assertTrue(outcome.stopped());
+        verify(progress, never()).timedOut();
         verify(lifecycle).stopAndRemove("driver", null, 0);
     }
 

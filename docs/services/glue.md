@@ -134,7 +134,7 @@ retroactively.
 |--------|-------------|
 | CreateSecurityConfiguration | Creates a named security configuration. |
 | GetSecurityConfiguration | Returns a named security configuration. |
-| GetSecurityConfigurations | Lists stored security configurations. `MaxResults` and `NextToken` are currently ignored, so the complete list is returned. |
+| GetSecurityConfigurations | Lists stored security configurations with `MaxResults` (1 to 200) and `NextToken` pagination, scoped to the account and region. |
 | DeleteSecurityConfiguration | Deletes a named security configuration. |
 
 #### Jobs

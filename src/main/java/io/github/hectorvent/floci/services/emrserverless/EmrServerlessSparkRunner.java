@@ -1,8 +1,6 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
 import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Container;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
@@ -121,17 +119,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     .build();
             String containerId = lifecycleManager.createAndStart(spec).containerId();
             launch.container.set(containerId);
-            // A stop, a reset or a shutdown while the image was pulled found no container to stop.
+            // A stop, a reset or a shutdown while the image was pulled is read now the driver has a container.
             if (launch.stopRequested || progress.cancelled()) {
                 return Outcome.halted();
             }
             logHandle = logStreamer.attachConsoleOnly(containerId, SERVICE + ":" + job.jobRunId());
             progress.started();
-            Integer exitCode = awaitExit(containerId, job, progress);
-            if (launch.stopRequested) {
-                return Outcome.halted();
-            }
-            return exitCode == null ? Outcome.outOfTime() : Outcome.exitedWith(exitCode);
+            return awaitEnd(containerId, job, launch, progress);
         } catch (InterruptedException e) {
             // Floci is shutting down: its teardown stops the driver.
             Thread.currentThread().interrupt();
@@ -159,21 +153,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     @Override
     public void stop(String jobRunId) {
         Launch launch = launches.get(jobRunId);
-        if (launch == null) {
-            return;
-        }
-        launch.stopRequested = true;
-        String containerId = launch.container.get();
-        if (containerId == null) {
-            // Still starting: run() reads the request once its container is up.
-            return;
-        }
-        // run() sees it stopped at its next look, and removes it.
-        try {
-            lifecycleManager.getDockerClient().stopContainerCmd(containerId).withTimeout(STOP_TIMEOUT_SECONDS).exec();
-        } catch (NotFoundException | NotModifiedException alreadyEnded) {
-            // Gone already (404), or exited and not yet removed (304).
-            LOG.debugv("EMR Serverless job run {0} had ended before it was stopped", jobRunId);
+        if (launch != null) {
+            // run() reads it once the driver's container is up and at each look at the driver after, and
+            // removes the driver itself: a stop makes no Docker call, so no Docker error can lose it.
+            launch.stopRequested = true;
         }
     }
 
@@ -318,27 +301,34 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     /**
-     * The driver's exit code, or null once the run's timeout has passed with the driver still running,
-     * which {@code progress} hears before the driver is stopped. Each look at the container is one short
-     * control-plane call, so a run holds no Docker connection while its driver runs.
+     * How the running driver ends: with its exit code, by a stop, or at the run's timeout, which
+     * {@code progress} hears before the driver is stopped. A stop is read at every look, so it ends the
+     * run whether or not the driver would ever exit by itself, as a STREAMING run's does not, and run()
+     * then removes the driver. Each look at the container is one short control-plane call, so a run
+     * holds no Docker connection while its driver runs.
      */
-    private Integer awaitExit(String containerId, Job job, Progress progress) throws InterruptedException {
+    private Outcome awaitEnd(String containerId, Job job, Launch launch, Progress progress)
+            throws InterruptedException {
         Instant deadline = job.timeout().isZero() ? null : clock.instant().plus(job.timeout());
-        while (true) {
+        while (!launch.stopRequested) {
             InspectContainerResponse.ContainerState state =
                     lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec().getState();
             if (!Boolean.TRUE.equals(state.getRunning())) {
+                if (launch.stopRequested) {
+                    return Outcome.halted();
+                }
                 Long exitCode = state.getExitCodeLong();
-                return exitCode != null ? exitCode.intValue() : -1;
+                return Outcome.exitedWith(exitCode != null ? exitCode.intValue() : -1);
             }
             if (deadline != null && !clock.instant().isBefore(deadline)) {
                 LOG.infov("EMR Serverless job run {0} passed its execution timeout of {1}", job.jobRunId(),
                         job.timeout());
                 progress.timedOut();
-                return null;
+                return Outcome.outOfTime();
             }
             Thread.sleep(pollInterval.toMillis());
         }
+        return Outcome.halted();
     }
 
     /**

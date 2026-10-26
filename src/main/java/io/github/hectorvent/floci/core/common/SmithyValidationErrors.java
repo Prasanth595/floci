@@ -31,6 +31,11 @@ public final class SmithyValidationErrors {
         return "Value null at '" + path + "' failed to satisfy constraint: Member must not be null";
     }
 
+    /** The same violation in the form some operations answer, without {@code null} after "Value". */
+    public static String notNullWithoutValue(String path) {
+        return "Value at '" + path + "' failed to satisfy constraint: Member must not be null";
+    }
+
     /** The 400 error carrying {@link #message} under the protocol's validation error code. */
     public static AwsException exception(String errorCode, List<String> violations) {
         return new AwsException(errorCode, message(violations), 400);

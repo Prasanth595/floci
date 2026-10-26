@@ -1167,12 +1167,12 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 set -e
                 USER="$1"
 
-                # Drop all non-template, non-postgres databases
+                # Terminate target connections (including pg_cron workers) when dropping databases
                 psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -tAc \\
                   "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres'" \\
                   | while read -r db; do
                       [ -z "$db" ] && continue
-                      psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \\"$db\\""
+                      psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \\"$db\\" WITH (FORCE)"
                     done
 
                 # Exclude the master user CREATE ROLE statement to avoid conflicts during restore

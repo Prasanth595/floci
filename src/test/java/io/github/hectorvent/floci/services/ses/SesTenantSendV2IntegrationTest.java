@@ -185,8 +185,8 @@ class SesTenantSendV2IntegrationTest {
     @Test
     @Order(8)
     void rawSend_gatesTheMimeDerivedSender() {
-        v2().body("{\"EmailIdentity\":\"floci-raw.example.com\"}")
-                .when().post("/v2/email/identities").then().statusCode(200);
+        // Verified, so the 403 is what stops the send: an unverified sender is reported first.
+        SesDomainIdentityTestHelper.createVerified("floci-raw.example.com", AUTH);
         String mime = "From: probe@floci-raw.example.com\r\nTo: success@simulator.amazonses.com\r\n"
                 + "Subject: s\r\n\r\nbody";
         String data = java.util.Base64.getEncoder().encodeToString(mime.getBytes(java.nio.charset.StandardCharsets.UTF_8));

@@ -455,7 +455,7 @@ class ElastiCacheQueryHandlerTest {
 
     @Test
     void modifyReplicationGroup_passesSnapshotSettingsOnly() {
-        when(service.modifyReplicationGroup(eq("g1"), isNull(), isNull(), eq(false), eq(false), any()))
+        when(service.modifyReplicationGroup(eq("g1"), isNull(), isNull(), eq(false), eq(false), any(), isNull()))
                 .thenReturn(group("g1"));
         MultivaluedMap<String, String> p = params();
         p.add("ReplicationGroupId", "g1");
@@ -466,12 +466,12 @@ class ElastiCacheQueryHandlerTest {
 
         assertEquals(200, handler.handle("ModifyReplicationGroup", p, "us-east-1").getStatus());
         verify(service).modifyReplicationGroup("g1", null, null, false, false,
-                new ReplicationGroupSettings(null, null, 3, "01:00-02:00"));
+                new ReplicationGroupSettings(null, null, 3, "01:00-02:00"), null);
     }
 
     @Test
     void modifyReplicationGroup_passesRemoveUserGroupsAndAuthTokenDelete() {
-        when(service.modifyReplicationGroup(eq("g1"), any(), isNull(), eq(true), eq(true), any()))
+        when(service.modifyReplicationGroup(eq("g1"), any(), isNull(), eq(true), eq(true), any(), isNull()))
                 .thenReturn(group("g1"));
         MultivaluedMap<String, String> p = params();
         p.add("ReplicationGroupId", "g1");
@@ -481,7 +481,21 @@ class ElastiCacheQueryHandlerTest {
 
         assertEquals(200, handler.handle("ModifyReplicationGroup", p, "us-east-1").getStatus());
         verify(service).modifyReplicationGroup("g1", List.of("new-users"), null, true, true,
-                new ReplicationGroupSettings(null, null, null, null));
+                new ReplicationGroupSettings(null, null, null, null), null);
+    }
+
+    @Test
+    void modifyReplicationGroup_passesNamedSecurityGroupIdsAndUnchangedOtherwise() {
+        when(service.modifyReplicationGroup(eq("g1"), isNull(), isNull(), eq(false), eq(false), any(), any()))
+                .thenReturn(group("g1"));
+        MultivaluedMap<String, String> p = params();
+        p.add("ReplicationGroupId", "g1");
+        p.add("SecurityGroupIds.SecurityGroupId.1", "sg-1");
+        p.add("SecurityGroupIds.SecurityGroupId.2", "sg-2");
+
+        assertEquals(200, handler.handle("ModifyReplicationGroup", p, "us-east-1").getStatus());
+        verify(service).modifyReplicationGroup("g1", null, null, false, false,
+                new ReplicationGroupSettings(null, null, null, null), List.of("sg-1", "sg-2"));
     }
 
     @Test

@@ -60,6 +60,8 @@ public class KinesisEventSourcePoller implements Resettable {
     /** Keyed by {@link StreamBatchFailures#batchStateKey}. */
     private final ConcurrentHashMap<String, Integer> retryCounts = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> retryNotBefore = new ConcurrentHashMap<>();
+    /** The batch size a split batch is refetched at, keyed like {@link #retryCounts}. */
+    private final ConcurrentHashMap<String, Integer> bisectLimits = new ConcurrentHashMap<>();
     /** Set during a reset and after shutdown: a failed invoke then counts for nothing. */
     private volatile boolean quiesced;
     /** Mappings stopped since their last start; a delete stops the mapping before the store forgets it. */
@@ -136,6 +138,7 @@ public class KinesisEventSourcePoller implements Resettable {
         activePolls.clear();
         retryCounts.clear();
         retryNotBefore.clear();
+        bisectLimits.clear();
         stopped.clear();
     }
 
@@ -161,6 +164,7 @@ public class KinesisEventSourcePoller implements Resettable {
         }
         retryCounts.keySet().removeIf(k -> k.startsWith(uuid + ":"));
         retryNotBefore.keySet().removeIf(k -> k.startsWith(uuid + ":"));
+        bisectLimits.keySet().removeIf(k -> k.startsWith(uuid + ":"));
     }
 
     /** Drops the stop tombstone once the store has forgotten the mapping, which stillActive then sees. */
@@ -208,7 +212,8 @@ public class KinesisEventSourcePoller implements Resettable {
         }
 
         Map<String, Object> result = kinesisService.getRecordsForAccount(
-                esm.getAccountId(), iterator, esm.getBatchSize(), esm.getRegion());
+                esm.getAccountId(), iterator, Math.min(esm.getBatchSize(), StreamBatchFailures.bisectLimit(esm, bisectLimits, batchKey)),
+                esm.getRegion());
         List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
 
         if (records.isEmpty()) {
@@ -290,6 +295,11 @@ public class KinesisEventSourcePoller implements Resettable {
         // function is not retried at once.
         long now = clock.getAsLong();
         List<KinesisRecord> failed = failedRecords(records, matched, outcome.lowestFailedIndex());
+        if (StreamBatchFailures.splitsOnFunctionError(esm, invokeResult, failed.size())
+                && !StreamBatchFailures.maximumRecordAgeExceeded(esm, failed.get(0).getApproximateArrivalTimestamp(), now)) {
+            bisect(esm, shardId, retryKey, records.size());
+            return;
+        }
         int invokeCount = retryCounts.getOrDefault(retryKey, 0) + 1;
         Optional<String> discardCondition = discardCondition(esm, failed, invokeCount, now);
         if (discardCondition.isPresent()) {
@@ -332,6 +342,21 @@ public class KinesisEventSourcePoller implements Resettable {
                 esm.getUuid(), invokeCount,
                 invokeResult.getFunctionError() != null ? invokeResult.getFunctionError() : "batchItemFailures",
                 records, shardId, backoffMs);
+    }
+
+    /**
+     * Refetches the failed batch at half its size, unless stopPolling, a reset or shutdown came first. The
+     * limit is keyed by checkpoint, so once the first half succeeds the rest is fetched at the full batch
+     * size and split again if it fails.
+     */
+    private synchronized void bisect(EventSourceMapping esm, String shardId, String retryKey, int fetched) {
+        if (!stillActive(esm)) {
+            return;
+        }
+        int limit = StreamBatchFailures.splitBatchSize(fetched);
+        bisectLimits.put(retryKey, limit);
+        LOG.infov("Kinesis ESM {0}: function error on {1} record(s) of shard {2}, bisecting to {3}",
+                esm.getUuid(), fetched, shardId, limit);
     }
 
     private record CheckpointOutcome(String checkpoint, int lowestFailedIndex) {}
@@ -384,6 +409,7 @@ public class KinesisEventSourcePoller implements Resettable {
     private void clearBatchState(String key) {
         retryCounts.remove(key);
         retryNotBefore.remove(key);
+        bisectLimits.remove(key);
     }
 
     private String buildKinesisEvent(List<KinesisRecord> records, EventSourceMapping esm, String shardId) {

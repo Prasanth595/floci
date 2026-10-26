@@ -9,10 +9,12 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.AcmService;
+import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
 import io.github.hectorvent.floci.services.cognito.verification.CustomSenderCodeEncryptor;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -86,6 +88,7 @@ class CognitoCustomEmailSenderTest {
     private SesService ses;
     private SnsService sns;
     private CognitoService service;
+    private VerificationCodeService codes;
 
     @BeforeEach
     void setUp() {
@@ -96,14 +99,66 @@ class CognitoCustomEmailSenderTest {
         lambda = mock(LambdaService.class);
         ses = mock(SesService.class);
         sns = mock(SnsService.class);
+        codes = new VerificationCodeService(storageFactory, Clock.systemUTC());
         service = new CognitoService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 "http://localhost:4566", "cloudfront.net", regionResolver, lambda, mock(AcmService.class),
-                new VerificationCodeService(storageFactory, Clock.systemUTC()),
+                codes,
                 new CognitoMessageDispatcher(ses, sns, REGION), mock(TlsCertificateManager.class),
                 Clock.systemUTC(), true, new CustomSenderCodeEncryptor(kms));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false, false, false", "true, false, false", "false, true, false", "true, true, false",
+            "false, false, true", "true, false, true", "false, true, true", "true, true, true"})
+    void failedAdminSenderKeepsTheWholeUpdate(boolean emailFirst, boolean pending, boolean invocationFailure) {
+        UserPool pool = pool(Map.of("KMSKeyID", keyArn, "CustomEmailSender", sender()),
+                List.of("email", "phone_number"));
+        service.adminCreateUser(pool.getId(), "alice", Map.of(
+                "email", "old@example.com", "email_verified", "true",
+                "phone_number", "+12025550100", "phone_number_verified", "true", "name", "Original"), null);
+        service.adminSetUserPassword(pool.getId(), "alice", "Passw0rd!", true);
+        if (pending) {
+            service.updateUserPool(Map.of("UserPoolId", pool.getId(), "UserAttributeUpdateSettings",
+                    Map.of("AttributesRequireVerificationBeforeUpdate", List.of("email", "phone_number"))), REGION);
+        }
+        if (invocationFailure) {
+            when(lambda.invoke(eq(REGION), eq(SENDER), any(byte[].class), any()))
+                    .thenThrow(new AwsException("AccessDeniedException", "Sender unavailable", 400));
+        } else {
+            kms.disableKey(keyArn, REGION);
+        }
+        Map<String, String> attributes = new LinkedHashMap<>();
+        if (emailFirst) {
+            attributes.put("email", "new@example.com");
+        }
+        attributes.put("phone_number", "+12025550101");
+        attributes.put("name", "Renamed");
+        if (!emailFirst) {
+            attributes.put("email", "new@example.com");
+        }
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> service.adminUpdateUserAttributes(pool.getId(), "alice", attributes));
+
+        assertEquals(invocationFailure ? "UnexpectedLambdaException" : "CodeDeliveryFailureException",
+                failure.getErrorCode());
+        CognitoUser stored = service.adminGetUser(pool.getId(), "alice");
+        assertEquals("Renamed", stored.getAttributes().get("name"));
+        assertEquals(pending ? "old@example.com" : "new@example.com", stored.getAttributes().get("email"));
+        assertEquals(pending ? "+12025550100" : "+12025550101", stored.getAttributes().get("phone_number"));
+        assertEquals(pending ? "true" : "false", stored.getAttributes().get("email_verified"));
+        assertEquals(pending ? "true" : "false", stored.getAttributes().get("phone_number_verified"));
+        if (pending) {
+            assertEquals(Map.of("email", "new@example.com", "phone_number", "+12025550101"),
+                    stored.getPendingAttributes());
+        } else {
+            assertTrue(stored.getPendingAttributes().isEmpty());
+        }
+        assertFalse(codes.hasUsableCode(pool.getId(), "alice", VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION));
+        assertFalse(codes.hasUsableCode(pool.getId(), "alice", VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION));
     }
 
     @Test
@@ -373,8 +428,9 @@ class CognitoCustomEmailSenderTest {
                 () -> assertEquals("Renamed", stored.get("name")));
     }
 
-    @Test
-    void anUndeliveredAttributeUpdateCodeCanBeRequestedAgain() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void anUndeliveredAttributeUpdateCodeCanBeRequestedAgain(boolean admin) throws Exception {
         UserPool pool = pool(Map.of("KMSKeyID", keyArn, "CustomEmailSender", sender()), List.of("email"));
         UserPoolClient client = client(pool);
         service.adminCreateUser(pool.getId(), "alice",
@@ -383,13 +439,20 @@ class CognitoCustomEmailSenderTest {
         String token = signIn(client, "alice", "Passw0rd!");
         kms.disableKey(keyArn, REGION);
         assertThrows(AwsException.class,
-                () -> service.updateUserAttributes(token, Map.of("email", "alice@example.org")));
+                () -> updateAttributes(admin, pool, token, Map.of("email", "alice@example.org")));
         kms.enableKey(keyArn, REGION);
 
-        service.getUserAttributeVerificationCode(token, "email");
+        if (admin) {
+            service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("email", "alice@example.org"));
+        } else {
+            service.getUserAttributeVerificationCode(token, "email");
+        }
 
         Map<String, Object> verification = senderEvent();
-        assertEquals("CustomEmailSender_VerifyUserAttribute", verification.get("triggerSource"));
+        assertEquals(admin ? "CustomEmailSender_AdminUpdateUserAttribute" : "CustomEmailSender_VerifyUserAttribute",
+                verification.get("triggerSource"));
+        assertEquals(admin ? "CLIENT_ID_NOT_APPLICABLE" : client.getClientId(),
+                ((Map<?, ?>) verification.get("callerContext")).get("clientId"));
         assertEquals("alice@example.org",
                 ((Map<?, ?>) request(verification).get("userAttributes")).get("email"));
         service.verifyUserAttribute(token, "email", decrypt(request(verification)).plaintext());
@@ -397,8 +460,10 @@ class CognitoCustomEmailSenderTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"OMIT, false", "SAME, false", "REPLACE, false", "REPLACE, true"})
-    void anEmailSenderFailureOnlyWithdrawsCodesForChangedDestinations(String phoneUpdate, boolean requiresVerification) {
+    @CsvSource({"OMIT, false, false", "SAME, false, false", "REPLACE, false, false", "REPLACE, true, false",
+            "OMIT, false, true", "SAME, false, true", "REPLACE, false, true", "REPLACE, true, true"})
+    void anEmailSenderFailureOnlyWithdrawsCodesForChangedDestinations(
+            String phoneUpdate, boolean requiresVerification, boolean admin) {
         UserPool pool = pool(Map.of("KMSKeyID", keyArn, "CustomEmailSender", sender()),
                 List.of("email", "phone_number"));
         if (requiresVerification) {
@@ -429,7 +494,7 @@ class CognitoCustomEmailSenderTest {
         }
 
         AwsException delivery = assertThrows(AwsException.class,
-                () -> service.updateUserAttributes(token, attributes));
+                () -> updateAttributes(admin, pool, token, attributes));
 
         assertEquals("CodeDeliveryFailureException", delivery.getErrorCode());
         if (!replacePhone) {
@@ -458,6 +523,14 @@ class CognitoCustomEmailSenderTest {
         assertEquals("+15555550200", service.adminGetUser(pool.getId(), "alice").getAttributes().get("phone_number"));
         assertEquals("true", service.adminGetUser(pool.getId(), "alice").getAttributes().get("phone_number_verified"));
         assertFalse(service.adminGetUser(pool.getId(), "alice").getPendingAttributes().containsKey("phone_number"));
+    }
+
+    private void updateAttributes(boolean admin, UserPool pool, String token, Map<String, String> attributes) {
+        if (admin) {
+            service.adminUpdateUserAttributes(pool.getId(), "alice", attributes);
+        } else {
+            service.updateUserAttributes(token, attributes);
+        }
     }
 
     /**

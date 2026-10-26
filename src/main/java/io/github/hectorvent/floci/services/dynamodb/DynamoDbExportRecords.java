@@ -7,12 +7,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPointInTimeRecovery.ItemChange;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -81,18 +79,11 @@ final class DynamoDbExportRecords {
                 content.forEach(member -> members.add(sortedValue(member)));
                 yield NODES.objectNode().set("L", members);
             }
-            case "SS" -> sortedSet("SS", content, Comparator.comparing(JsonNode::asText, CODE_POINT_ORDER));
-            case "NS" -> sortedSet("NS", content, Comparator.comparing(member -> new BigDecimal(member.asText())));
-            case "BS" -> sortedSet("BS", content, (a, b) -> Arrays.compareUnsigned(
-                    Base64.getDecoder().decode(a.asText()), Base64.getDecoder().decode(b.asText())));
+            case "SS", "NS", "BS" -> {
+                String setType = typed.getKey();
+                yield NODES.objectNode().set(setType, DynamoDbSetOrder.sorted(setType, content));
+            }
             default -> value;
         };
-    }
-
-    private static JsonNode sortedSet(String type, JsonNode members, Comparator<JsonNode> order) {
-        List<JsonNode> sorted = new ArrayList<>();
-        members.forEach(sorted::add);
-        sorted.sort(order);
-        return NODES.objectNode().set(type, NODES.arrayNode().addAll(sorted));
     }
 }
