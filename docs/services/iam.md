@@ -2189,6 +2189,23 @@ floci populates:
   `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
   `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
   `logs:DeleteRetentionPolicy` use the owning log group's tags.
+  `sqs:SendMessage`, `sqs:SendMessageBatch`, `sqs:ReceiveMessage`, `sqs:DeleteMessage`,
+  `sqs:DeleteMessageBatch`, `sqs:ChangeMessageVisibility`, `sqs:ChangeMessageVisibilityBatch`
+  and `sqs:PurgeQueue` use the target queue's tags, read from the queue the request names and
+  through its URL, which carries the owning account. `sns:Publish` and `sns:PublishBatch` use the
+  target topic's tags, read from the topic ARN the request names.
+  Every DynamoDB request is evaluated once per table it names, with only that table's tags, and
+  the table is read from the resource ARN's own account and Region. That covers the single-item
+  actions, `Query`, `Scan`, the batch actions, the transaction items and PartiQL, as well as an
+  ARN naming a table index (indexes are not tagged separately).
+- `aws:PrincipalTag/<key>`: the session tags an `sts:AssumeRole` set, from the request's `Tags`
+  member. A tag the caller's own session marked transitive in `TransitiveTagKeys` passes to the
+  new session, and a tag of the new request replaces an inherited tag of the same key. The key is
+  absent when the session carries no such tag, so a positive condition on it does not match.
+  Tags attached to the IAM user or role itself are not part of this key.
+- `aws:SourceIdentity`: the `SourceIdentity` an `sts:AssumeRole` set, inherited by a chained
+  session when the new request omits it. A chained request that names a different source identity
+  is refused with `AccessDenied`.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their

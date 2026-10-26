@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbTableNames;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -16,6 +17,8 @@ import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.github.hectorvent.floci.services.s3.S3ObjectKeys;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -83,9 +86,22 @@ public class IamConditionContextResolver {
     public static final String OBJECT_LOCK_REMAINING_RETENTION_DAYS = "s3:object-lock-remaining-retention-days";
     public static final String OBJECT_LOCK_LEGAL_HOLD = "s3:object-lock-legal-hold";
 
+    /**
+     * The SQS and SNS actions AWS checks against the target's {@code aws:ResourceTag} keys. Both
+     * services store tags on the queue or topic, and these are the actions whose request names that
+     * queue or topic.
+     */
+    private static final Set<String> SQS_RESOURCE_TAG_ACTIONS = Set.of(
+            "sqs:SendMessage", "sqs:SendMessageBatch", "sqs:ReceiveMessage",
+            "sqs:DeleteMessage", "sqs:DeleteMessageBatch",
+            "sqs:ChangeMessageVisibility", "sqs:ChangeMessageVisibilityBatch", "sqs:PurgeQueue");
+    private static final Set<String> SNS_RESOURCE_TAG_ACTIONS = Set.of("sns:Publish", "sns:PublishBatch");
+
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
+    private final Instance<SqsService> sqsService;
+    private final Instance<SnsService> snsService;
     private final Instance<CloudWatchLogsService> logsService;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
@@ -101,18 +117,22 @@ public class IamConditionContextResolver {
     public IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
+                                       Instance<SqsService> sqsService,
+                                       Instance<SnsService> snsService,
                                        Instance<CloudWatchLogsService> logsService,
                                        RequestContext requestContext,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, requestContext, config, currentVertxRequest,
-                serviceCatalog, Clock.systemUTC());
+        this(dynamoDbFacade, ec2Service, s3Service, sqsService, snsService, logsService, requestContext, config,
+                currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
     IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                 Instance<Ec2Service> ec2Service,
                                 Instance<S3Service> s3Service,
+                                Instance<SqsService> sqsService,
+                                Instance<SnsService> snsService,
                                 Instance<CloudWatchLogsService> logsService,
                                 RequestContext requestContext,
                                 EmulatorConfig config,
@@ -121,6 +141,8 @@ public class IamConditionContextResolver {
         this.dynamoDbFacade = dynamoDbFacade;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
+        this.sqsService = sqsService;
+        this.snsService = snsService;
         this.logsService = logsService;
         this.requestContext = requestContext;
         this.config = config;
@@ -137,6 +159,8 @@ public class IamConditionContextResolver {
             case "dynamodb" -> dynamoDbConditionContext(action, ctx);
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
+            case "sqs" -> sqsConditionContext(action, ctx);
+            case "sns" -> snsConditionContext(action, ctx);
             default -> null;
         };
     }
@@ -655,6 +679,95 @@ public class IamConditionContextResolver {
         }
     }
 
+    // ── SQS ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * {@code aws:ResourceTag/<key>} from the queue named by the request. The queue URL is read from
+     * the same place the handler reads it: a form POST's body, a Query GET's parameters, or a JSON
+     * body. Reading only the body for a form POST keeps the tag off a decoy URL parameter that the
+     * handler never acts on. The URL carries the owning account, so a queue in another account is
+     * read as that account's queue. A queue that does not exist offers no keys and is left for the
+     * handler to report.
+     */
+    private Map<String, List<String>> sqsConditionContext(String action, ContainerRequestContext ctx) {
+        if (!SQS_RESOURCE_TAG_ACTIONS.contains(action) || !sqsService.isResolvable()) {
+            return null;
+        }
+        String queueUrl = formParameters(ctx).get("QueueUrl");
+        if (queueUrl == null) {
+            queueUrl = jsonField(ctx, "QueueUrl");
+        }
+        if (queueUrl == null || queueUrl.isBlank()) {
+            return null;
+        }
+        Map<String, String> tags;
+        try {
+            tags = sqsService.get().listQueueTags(queueUrl, requestRegion());
+        } catch (AwsException e) {
+            if (!"AWS.SimpleQueueService.NonExistentQueue".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return null;
+        }
+        return resourceTagConditions(tags);
+    }
+
+    // ── SNS ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * {@code aws:ResourceTag/<key>} from the topic named by the request. {@code Publish} also
+     * accepts {@code TargetArn} for an endpoint and {@code PhoneNumber} for SMS, neither of which
+     * is a tagged topic, so only {@code TopicArn} yields keys. The ARN is read from the same place
+     * the handler reads it, so a decoy URL parameter on a form POST never supplies the tags. The ARN
+     * carries the owning account, so a topic in another account is read as that account's topic.
+     */
+    private Map<String, List<String>> snsConditionContext(String action, ContainerRequestContext ctx) {
+        if (!SNS_RESOURCE_TAG_ACTIONS.contains(action) || !snsService.isResolvable()) {
+            return null;
+        }
+        String topicArn = formParameters(ctx).get("TopicArn");
+        if (topicArn == null) {
+            topicArn = jsonField(ctx, "TopicArn");
+        }
+        if (topicArn == null || topicArn.isBlank()) {
+            return null;
+        }
+        Map<String, String> tags;
+        try {
+            tags = snsService.get().listTagsForResource(topicArn,
+                    AwsArnUtils.regionOrDefault(topicArn, requestRegion()));
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return null;
+        }
+        return resourceTagConditions(tags);
+    }
+
+    private static Map<String, List<String>> resourceTagConditions(Map<String, String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        tags.forEach((key, value) -> conditions.put(RESOURCE_TAG_PREFIX + key,
+                List.of(value == null ? "" : value)));
+        return conditions;
+    }
+
+    private String requestRegion() {
+        return requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+    }
+
+    private String jsonField(ContainerRequestContext ctx, String name) {
+        JsonNode body = bufferedJsonBody(ctx);
+        if (body == null || !body.isObject() || !body.hasNonNull(name)) {
+            return null;
+        }
+        String value = body.get(name).asText().trim();
+        return value.isEmpty() ? null : value;
+    }
+
     // ── Request body access ─────────────────────────────────────────────────────
 
     /**
@@ -923,6 +1036,44 @@ public class IamConditionContextResolver {
                 ? config.defaultRegion() : requestContext.getRegion();
         DynamoDbFacade dynamoDb = dynamoDbFacade.get();
         return dynamoDb.tables().findTable(dynamoDb.scope(region), tableName).orElse(null);
+    }
+
+    /**
+     * {@code aws:ResourceTag/<key>} from the table a resolved resource ARN names, so a request
+     * that names several tables is evaluated once per table with only that table's tags. The ARN
+     * carries the table's account and Region, which is the table that is read even when the caller
+     * reached it through a session in another account.
+     *
+     * <p>An index ARN names the table's index, which is not tagged separately, so it reads the
+     * table's tags as well. Any other shape, such as a stream or export ARN, is not a taggable
+     * table and offers no keys.
+     */
+    Map<String, List<String>> dynamoDbResourceTagContext(String resourceArn) {
+        if (resourceArn == null || !dynamoDbFacade.isResolvable()
+                || !AwsArnUtils.isArnFor(resourceArn, "dynamodb")) {
+            return null;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        String resource = arn.resource();
+        if (!resource.startsWith("table/")) {
+            return null;
+        }
+        String tableName = resource.substring("table/".length());
+        int index = tableName.indexOf('/');
+        if (index >= 0) {
+            if (!tableName.substring(index).startsWith("/index/")) {
+                return null;
+            }
+            tableName = tableName.substring(0, index);
+        }
+        if (tableName.isEmpty()) {
+            return null;
+        }
+        String region = arn.region().isBlank() ? requestRegion() : arn.region();
+        DynamoDbFacade dynamoDb = dynamoDbFacade.get();
+        Scope scope = arn.accountId().isBlank() ? dynamoDb.scope(region) : new Scope(arn.accountId(), region);
+        TableDefinition table = dynamoDb.tables().findTable(scope, tableName).orElse(null);
+        return table == null ? null : resourceTagConditions(table.getTags());
     }
 
     /** The table targeted by a non-batch request. */

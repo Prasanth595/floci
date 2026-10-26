@@ -204,16 +204,34 @@ names its session ARN or its role's ARN, path included.
 `Condition` blocks are evaluated with the same operators as identity and resource policies. The
 request context holds `sts:RoleSessionName`, `sts:ExternalId` when the caller passes `ExternalId`,
 `aws:PrincipalArn` (for a caller using assumed-role credentials, the role's ARN with its path, as on AWS),
-`aws:PrincipalAccount`, `aws:ResourceAccount`, `aws:RequestedRegion` and
-`aws:PrincipalIsAWSService`. A trust policy that requires `sts:ExternalId`, the confused-deputy
+`aws:PrincipalAccount`, `aws:ResourceAccount`, `aws:RequestedRegion`,
+`aws:PrincipalIsAWSService`, and, when the caller's session carries them,
+`aws:PrincipalTag/<key>` and `aws:SourceIdentity`. A trust policy that requires `sts:ExternalId`, the confused-deputy
 guard, refuses a call that omits it or passes another value, and a conditional `Deny` applies only
 when its condition matches.
 
+### Session tags and source identity
+
+`AssumeRole` accepts `Tags`, `TransitiveTagKeys` and `SourceIdentity`. The session's `Tags` are
+exposed to its later requests as `aws:PrincipalTag/<key>`, so a policy can scope access by a tag
+the caller set when assuming the role. `SourceIdentity` is exposed as `aws:SourceIdentity`.
+
+A session that assumes another role passes on the tags its own request marked transitive. Tags
+of the new `AssumeRole` request apply to the new session and replace an inherited tag of the same
+key. A source identity set on the first session is inherited when the chained request omits it,
+and a chained request that tries to change it is refused with `AccessDenied`.
+
+The `Tags.member.N` spelling of the Query protocol is read, as is the unqualified `Tags.N` form.
+An empty key, a duplicate key and more than 50 tags are rejected with `ValidationError`.
+
 ### Known limitations
 
-- **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,
-  `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not in the request context, so a condition
-  on them does not match, and `sts:TagSession` and `sts:SetSourceIdentity` are not checked.
+- **Session tag authorization is not checked.** `AssumeRole` records the `Tags`,
+  `TransitiveTagKeys` and `SourceIdentity` members, but it does not evaluate `sts:TagSession` or
+  `sts:SetSourceIdentity`, so a caller without those permissions can still pass tags and a source
+  identity. The trust-policy request context carries no `aws:RequestTag/*`, `aws:TagKeys` or
+  `sts:TransitiveTagKeys`, and `aws:PrincipalTag` names only the session's tags, not tags attached
+  to the IAM user or role.
 
 ## Web Identity Validation (IRSA)
 

@@ -39,9 +39,11 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -87,6 +89,8 @@ public class StsQueryHandler {
     private static final int DEFAULT_TOKEN_SECONDS = 300;
     private static final int MIN_TOKEN_SECONDS = 60;
     private static final int MAX_TOKEN_SECONDS = 3600;
+    /** The most session tags one AssumeRole may set, as the STS reference states it. */
+    private static final int MAX_SESSION_TAGS = 50;
     private static final String STS_AUDIENCE = "sts.amazonaws.com"; // partition-literal: web-identity audience; no source outside the commercial partition (P9)
 
     private final IamService iamService;
@@ -189,6 +193,38 @@ public class StsQueryHandler {
         String sessionName = getParam(params, "RoleSessionName");
         int durationSeconds = getIntParam(params, "DurationSeconds", 3600);
 
+        Map<String, String> requestedTags = new LinkedHashMap<>();
+        Set<String> requestedTransitiveTagKeys = new LinkedHashSet<>();
+        Response tagValidation = readSessionTags(params, requestedTags, requestedTransitiveTagKeys);
+        if (tagValidation != null) {
+            return tagValidation;
+        }
+        String callerKey = callerAccessKeyId();
+        Map<String, String> inheritedTags = iamService.transitiveSessionTags(callerKey);
+        if (inheritedTags == null) {
+            inheritedTags = Map.of();
+        }
+        Map<String, String> sessionTags = new LinkedHashMap<>(inheritedTags);
+        sessionTags.putAll(requestedTags);
+        for (String key : requestedTransitiveTagKeys) {
+            if (!sessionTags.containsKey(key)) {
+                return AwsQueryResponse.error("ValidationError",
+                        "TransitiveTagKeys must name a tag key that the request passes in Tags.",
+                        AwsNamespaces.STS, 400);
+            }
+        }
+        Set<String> transitiveTagKeys = new LinkedHashSet<>(inheritedTags.keySet());
+        transitiveTagKeys.addAll(requestedTransitiveTagKeys);
+        String sourceIdentity = getParam(params, "SourceIdentity");
+        String inheritedSourceIdentity = iamService.sessionSourceIdentity(callerKey);
+        if (sourceIdentity == null || sourceIdentity.isBlank()) {
+            sourceIdentity = inheritedSourceIdentity;
+        } else if (inheritedSourceIdentity != null && !inheritedSourceIdentity.equals(sourceIdentity)) {
+            return AwsQueryResponse.error("AccessDenied",
+                    "The source identity in the request does not match the source identity of the calling session.",
+                    AwsNamespaces.STS, 403);
+        }
+
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
@@ -220,6 +256,7 @@ public class StsQueryHandler {
         iamService.registerSession(
                 accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
+        iamService.setSessionTags(accessKeyId, sessionTags, transitiveTagKeys, sourceIdentity);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -1240,6 +1277,53 @@ public class StsQueryHandler {
 
     private String getParam(MultivaluedMap<String, String> params, String name) {
         return params.getFirst(name);
+    }
+
+    /**
+     * Reads the {@code Tags} and {@code TransitiveTagKeys} members of an AssumeRole request into
+     * {@code tags} and {@code transitiveTagKeys}. The Query protocol spells a list of structures
+     * {@code Tags.member.N.Key}; the unqualified {@code Tags.N.Key} form is accepted too. A
+     * duplicate key, an empty key and more than {@value #MAX_SESSION_TAGS} tags are rejected, as
+     * AWS rejects them.
+     */
+    private Response readSessionTags(MultivaluedMap<String, String> params,
+                                     Map<String, String> tags, Set<String> transitiveTagKeys) {
+        for (int index = 1; ; index++) {
+            String key = params.getFirst("Tags.member." + index + ".Key");
+            String value = params.getFirst("Tags.member." + index + ".Value");
+            if (key == null) {
+                key = params.getFirst("Tags." + index + ".Key");
+                value = params.getFirst("Tags." + index + ".Value");
+            }
+            if (key == null) {
+                break;
+            }
+            if (key.isBlank()) {
+                return AwsQueryResponse.error("ValidationError", "Tag keys must not be empty.",
+                        AwsNamespaces.STS, 400);
+            }
+            if (tags.containsKey(key)) {
+                return AwsQueryResponse.error("ValidationError", "Duplicate tag key: " + key + ".",
+                        AwsNamespaces.STS, 400);
+            }
+            tags.put(key, value == null ? "" : value);
+            if (tags.size() > MAX_SESSION_TAGS) {
+                return AwsQueryResponse.error("ValidationError",
+                        "The request carries more than " + MAX_SESSION_TAGS + " session tags.",
+                        AwsNamespaces.STS, 400);
+            }
+        }
+        for (int index = 1; ; index++) {
+            String key = params.getFirst("TransitiveTagKeys.member." + index);
+            if (key == null) {
+                key = params.getFirst("TransitiveTagKeys." + index);
+            }
+            if (key == null) {
+                break;
+            }
+            transitiveTagKeys.add(key);
+        }
+        return null;
     }
 
     private int getIntParam(MultivaluedMap<String, String> params, String name, int defaultValue) {
