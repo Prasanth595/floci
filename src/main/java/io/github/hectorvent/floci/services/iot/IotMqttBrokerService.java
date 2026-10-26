@@ -152,11 +152,6 @@ public class IotMqttBrokerService implements Resettable {
     private final AtomicInteger pendingRuleEvaluations = new AtomicInteger();
     private final AtomicBoolean ruleEvaluationsThrottled = new AtomicBoolean();
     /**
-     * The packet identifier of every publish the broker sends. Vert.x draws its own from an unsynchronized
-     * per-endpoint counter, so two threads fanning out to one client could send two QoS 1 copies under one.
-     */
-    private final AtomicInteger packetIds = new AtomicInteger();
-    /**
      * Rule admission in one value: the {@link #RULES_RESETTING} and {@link #RULES_STOPPED} bits suspend rules, and
      * every change also adds {@link #RULE_STATE_STEP}, so an evaluation runs its rules only while the state is still
      * the one it was admitted under.
@@ -554,7 +549,8 @@ public class IotMqttBrokerService implements Resettable {
                     device == null ? config.defaultAccountId() : device.accountId(),
                     device == null ? config.defaultRegion() : device.region(),
                     System.currentTimeMillis(),
-                    endpoint.keepAliveTimeSeconds());
+                    endpoint.keepAliveTimeSeconds(),
+                    new AtomicInteger());
             ClientSession previous = sessionsByClient.put(clientId, session);
             if (previous != null && previous.endpoint() != endpoint) {
                 endSession(previous, DUPLICATE_CLIENTID);
@@ -809,9 +805,9 @@ public class IotMqttBrokerService implements Resettable {
             if (!session.endpoint().isConnected() || granted < 0) {
                 continue;
             }
+            MqttQoS delivered = MqttQoS.valueOf(Math.min(qos, granted));
             try {
-                session.endpoint().publish(topic, Buffer.buffer(safePayload), MqttQoS.valueOf(Math.min(qos, granted)), false, false,
-                        nextPacketId());
+                session.endpoint().publish(topic, Buffer.buffer(safePayload), delivered, false, false, session.packetId(delivered));
             } catch (IllegalStateException e) {
                 LOG.debugv("IoT MQTT client {0} closed before the publish on {1} reached it", session.clientId(), topic);
             }
@@ -825,11 +821,6 @@ public class IotMqttBrokerService implements Resettable {
                 .mapToInt(Subscription::qos)
                 .max()
                 .orElse(-1);
-    }
-
-    // ponytail: one counter for every client, so an identifier repeats after 65535 publishes broker-wide; per-session counters if a client ever holds that many unacknowledged.
-    private int nextPacketId() {
-        return packetIds.updateAndGet(id -> id % 65535 + 1);
     }
 
     private void deliverRetained(ClientSession session, List<Subscription> subscriptions) {
@@ -847,8 +838,8 @@ public class IotMqttBrokerService implements Resettable {
             }
             byte[] payload = Base64.getDecoder().decode(retained.getPayload());
             // Publish kept a qos outside 0 and 1 as sent before it refused one, so a stored message may carry one.
-            session.endpoint().publish(retained.getTopic(), Buffer.buffer(payload),
-                    MqttQoS.valueOf(Math.clamp(retained.getQos(), 0, granted)), false, true, nextPacketId());
+            MqttQoS delivered = MqttQoS.valueOf(Math.clamp(retained.getQos(), 0, granted));
+            session.endpoint().publish(retained.getTopic(), Buffer.buffer(payload), delivered, false, true, session.packetId(delivered));
         }
     }
 
@@ -982,7 +973,18 @@ public class IotMqttBrokerService implements Resettable {
             String accountId,
             String region,
             long connectedAt,
-            int keepAliveDuration) {
+            int keepAliveDuration,
+            AtomicInteger packetIds) {
+
+        /**
+         * The packet identifier of a copy sent at {@code qos}: none at QoS 0, otherwise the session's
+         * next, from 1 to 65535. Vert.x draws its own from an unsynchronized counter, which two threads
+         * fanning out to the same client race on.
+         */
+        int packetId(MqttQoS qos) {
+            // ponytail: no in-flight tracking, so an identifier repeats after 65535 QoS 1 copies to one client; track until PUBACK if Floci ever redelivers.
+            return qos == MqttQoS.AT_MOST_ONCE ? 0 : packetIds.updateAndGet(id -> id % 65535 + 1);
+        }
 
         HistoryKey historyKey() {
             return new HistoryKey(accountId, region, clientId);

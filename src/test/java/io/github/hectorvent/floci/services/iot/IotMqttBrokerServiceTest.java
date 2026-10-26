@@ -923,14 +923,7 @@ class IotMqttBrokerServiceTest {
         int perThread = 2000;
         ExecutorService publishers = Executors.newFixedThreadPool(threads);
         try (Socket socket = rawConnect("packet-ids")) {
-            ByteArrayOutputStream subscribe = new ByteArrayOutputStream();
-            subscribe.write(0x00);
-            subscribe.write(0x01);
-            writeUtf8(subscribe, "ids/#");
-            subscribe.write(0x01);
-            socket.getOutputStream().write(packet(0x82, subscribe.toByteArray()));
-            DataInputStream in = new DataInputStream(socket.getInputStream());
-            assertArrayEquals(new byte[] {(byte) 0x90, 0x03, 0x00, 0x01, 0x01}, in.readNBytes(5), "SUBACK granting QoS 1");
+            DataInputStream in = rawSubscribeQos1(socket, "ids/#");
 
             for (int thread = 0; thread < threads; thread++) {
                 publishers.execute(() -> {
@@ -947,6 +940,27 @@ class IotMqttBrokerServiceTest {
             assertEquals(threads * perThread, packetIds.size(), "no two unacknowledged copies share a packet identifier");
         } finally {
             publishers.shutdownNow();
+        }
+    }
+
+    /** Copies sent to other clients do not use up the packet identifiers of a client whose QoS 1 copy is unacknowledged. */
+    @Test
+    void anotherClientsTrafficDoesNotRecycleAPacketIdentifierStillInFlight() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttClient busy = subscribedPlain("busy", "busy/#", new LinkedBlockingQueue<>());
+        try (Socket socket = rawConnect("slow")) {
+            DataInputStream in = rawSubscribeQos1(socket, "slow/#");
+            broker.publish("slow/first", new byte[] {1}, 1);
+            int first = readQos1PublishPacketId(in);
+
+            for (int i = 0; i < 65_534; i++) {
+                broker.publish("busy/x", new byte[] {1}, 0);
+            }
+            broker.publish("slow/second", new byte[] {2}, 1);
+
+            assertNotEquals(first, readQos1PublishPacketId(in), "the first copy was never acknowledged");
+        } finally {
+            disconnect(busy);
         }
     }
 
@@ -1949,6 +1963,19 @@ class IotMqttBrokerServiceTest {
         }
         body.writeBytes(payload);
         socket.getOutputStream().write(packet(0x30 | (qos << 1), body.toByteArray()));
+    }
+
+    /** Subscribes a raw client to one filter at QoS 1 and returns its stream once the broker granted it. */
+    private static DataInputStream rawSubscribeQos1(Socket socket, String topicFilter) throws IOException {
+        ByteArrayOutputStream subscribe = new ByteArrayOutputStream();
+        subscribe.write(0x00);
+        subscribe.write(0x01);
+        writeUtf8(subscribe, topicFilter);
+        subscribe.write(0x01);
+        socket.getOutputStream().write(packet(0x82, subscribe.toByteArray()));
+        DataInputStream in = new DataInputStream(socket.getInputStream());
+        assertArrayEquals(new byte[] {(byte) 0x90, 0x03, 0x00, 0x01, 0x01}, in.readNBytes(5), "SUBACK granting QoS 1");
+        return in;
     }
 
     /** Reads one QoS 1 PUBLISH and returns its packet identifier. */
