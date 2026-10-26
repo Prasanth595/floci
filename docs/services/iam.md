@@ -1490,7 +1490,10 @@ its request's `EventBusName` names, by name or by ARN, and on the default bus wh
 or gives a null, whose rules are `rule/<name>`, with no bus; a bus ARN of another account, the
 default bus's included, names that account's rule, checked as given and as the caller's own, which
 Floci acts on, and one leaving its account and Region empty names the caller's. `DescribeEventBus`
-naming no bus is checked on `event-bus/default`. A connection or an API destination, whose ARN
+naming no bus is checked on `event-bus/default`. `PutEvents` is checked on the bus of every entry,
+the one its `EventBusName` names, by name or by ARN, or the default bus for an entry naming none,
+so one entry for a bus the caller may not publish to refuses the whole request, as the EventBridge
+User Guide gives it for every entry. A connection or an API destination, whose ARN
 EventBridge follows with an id it mints after the name, `connection/<name>/<id>`, is checked on
 the ARN it is stored under when the request names it, and on `connection/<name>/*` when there is
 none yet, as for its create. EventBridge V2's API, which Floci does not serve, is not read. A

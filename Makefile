@@ -397,17 +397,55 @@ iam-action-resources-verify: ## CI gate (online): every vendored IAM action reso
 		exit 1; \
 	fi
 
-iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS
-	@# Both halves run even when the first fails, so one file's drift cannot hide the other's
+# The paths each upstream check covers: its vendored file, its tests, its generator and every
+# module that generator imports. Given CHANGED, the paths a pull request changes, iam-data-verify
+# runs only the checks covering one of them, so a pull request is not failed by drift in a file it
+# leaves alone; without it, as on the weekly run, it runs every check.
+IAM_PASSED_ROLES_GENERATOR := tools/aws/regen_iam_passed_roles.py tools/aws/regen_iam_authorized_actions.py \
+	tools/aws/regen_partitions.py tools/aws/regen_query_services.py
+IAM_NAMESPACES_PATHS := src/main/resources/aws/iam-service-namespaces.json \
+	tools/aws/regen_service_namespaces.py tools/aws/test_regen_service_namespaces.py
+IAM_ACTION_RESOURCES_PATHS := src/main/resources/aws/iam-action-resources.json \
+	tools/aws/regen_iam_action_resources.py tools/aws/test_regen_iam_action_resources.py
+IAM_AUTHORIZED_ACTIONS_PATHS := src/main/resources/aws/iam-authorized-actions.json \
+	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py
+IAM_PASSED_ROLES_PATHS := src/main/resources/aws/iam-passed-roles.json $(IAM_PASSED_ROLES_GENERATOR) \
+	tools/aws/test_regen_iam_passed_roles.py
+IAM_TAG_ON_CREATE_PATHS := src/main/resources/aws/iam-tag-on-create.json tools/aws/regen_iam_tag_on_create.py \
+	$(IAM_PASSED_ROLES_GENERATOR) tools/aws/test_regen_iam_tag_on_create.py
+IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
+	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
+	tools/aws/test_regen_iam_request_resources.py
+
+iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS; CHANGED="<paths>" checks only the ones they cover
+	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
 	@namespaces=0; actions=0; authorized=0; passed=0; tagged=0; requested=0; \
-	$(MAKE) --no-print-directory iam-namespaces-verify || namespaces=$$?; \
-	$(MAKE) --no-print-directory iam-action-resources-verify || actions=$$?; \
-	$(MAKE) --no-print-directory iam-authorized-actions-verify || authorized=$$?; \
-	$(MAKE) --no-print-directory iam-passed-roles-verify || passed=$$?; \
-	$(MAKE) --no-print-directory iam-tag-on-create-verify || tagged=$$?; \
-	$(MAKE) --no-print-directory iam-request-resources-verify || requested=$$?; \
+	covers() { \
+		[ -z "$(strip $(CHANGED))" ] && return 0; \
+		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
+		echo "not checked, as the change touches none of its files: $$2"; \
+		return 1; \
+	}; \
+	if covers "$(IAM_NAMESPACES_PATHS)" "the service namespace list"; then \
+		$(MAKE) --no-print-directory iam-namespaces-verify || namespaces=$$?; \
+	fi; \
+	if covers "$(IAM_ACTION_RESOURCES_PATHS)" "the action resource map"; then \
+		$(MAKE) --no-print-directory iam-action-resources-verify || actions=$$?; \
+	fi; \
+	if covers "$(IAM_AUTHORIZED_ACTIONS_PATHS)" "the map of operations to their IAM actions"; then \
+		$(MAKE) --no-print-directory iam-authorized-actions-verify || authorized=$$?; \
+	fi; \
+	if covers "$(IAM_PASSED_ROLES_PATHS)" "the table of the roles operations pass"; then \
+		$(MAKE) --no-print-directory iam-passed-roles-verify || passed=$$?; \
+	fi; \
+	if covers "$(IAM_TAG_ON_CREATE_PATHS)" "the table of the tagging actions creates need"; then \
+		$(MAKE) --no-print-directory iam-tag-on-create-verify || tagged=$$?; \
+	fi; \
+	if covers "$(IAM_REQUEST_RESOURCES_PATHS)" "the table of the resources requests name"; then \
+		$(MAKE) --no-print-directory iam-request-resources-verify || requested=$$?; \
+	fi; \
 	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
 			|| [ $$tagged -ne 0 ] || [ $$requested -ne 0 ]; then \
 		echo ""; \
