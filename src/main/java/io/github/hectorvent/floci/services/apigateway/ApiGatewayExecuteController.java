@@ -1022,10 +1022,6 @@ public class ApiGatewayExecuteController {
                 return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401,
                         "Unauthorized"), null, null);
             }
-            if (result.failure() == CognitoUserPoolAuthorizer.Failure.ACCESS_DENIED) {
-                return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.ACCESS_DENIED, 403,
-                        "User is not authorized to access this resource"), null, null);
-            }
             return new AuthorizerResult(null, result.principalId(), result.context());
         }
         if ("CUSTOM".equals(authorizationType)) {

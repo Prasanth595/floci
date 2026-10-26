@@ -350,6 +350,7 @@ This is what lets a browser read a `401`/`403`/`400` as such instead of as a COR
 | `AWS_IAM` access key the emulator never issued | `ACCESS_DENIED` |
 | Lambda authorizer returns `Deny` | `ACCESS_DENIED` |
 | Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` |
+| Cognito authorizer gets no token, an invalid one, one from another pool, or one claiming none of the method's authorization scopes (`401 Unauthorized`) | `UNAUTHORIZED` |
 | Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` |
 | Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` |
 | `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` |
