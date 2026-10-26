@@ -33,9 +33,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -128,7 +130,8 @@ public class CloudTrailService {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         String key = regionKey(trail.homeRegion(), trail.name());
         withTrailLock(key, () -> store.delete(key));
-        pendingRecordsByTrail.keySet().removeIf(k -> k.trailName().equals(trail.name()));
+        pendingRecordsByTrail.keySet().removeIf(k -> k.trailName().equals(trail.name())
+                && k.region().equals(trail.homeRegion()) && k.accountId().equals(regionResolver.getAccountId()));
     }
 
     public Trail updateTrail(String region, String trailNameOrArn,
@@ -352,6 +355,43 @@ public class CloudTrailService {
 
     // --- Data plane: called by S3 (and other services) when an op happens ---
 
+    public record ManagementEventInput(String eventSource, String eventName, String region, String accessKeyId,
+                                       ObjectNode requestParameters, ObjectNode responseElements) {}
+
+    /** Records one management write and returns the event only when a logging trail selects it. */
+    public Optional<ObjectNode> emitManagementEvent(ManagementEventInput in) {
+        try {
+            String region = in.region() != null ? in.region() : regionResolver.getDefaultRegion();
+            ObjectNode record = mapper.createObjectNode();
+            record.put("eventVersion", EVENT_VERSION);
+            record.put("eventTime", Instant.now().toString());
+            record.put("eventSource", in.eventSource());
+            record.put("eventName", in.eventName());
+            record.put("awsRegion", region);
+            record.put("recipientAccountId", regionResolver.getAccountId());
+            record.put("eventType", "AwsApiCall");
+            record.put("eventCategory", "Management");
+            record.put("managementEvent", true);
+            record.put("readOnly", false);
+            record.put("eventID", UUID.randomUUID().toString());
+            record.put("requestID", UUID.randomUUID().toString());
+            record.set("userIdentity", buildUserIdentity(in.accessKeyId()));
+            record.set("requestParameters", in.requestParameters().deepCopy());
+            record.set("responseElements", in.responseElements().deepCopy());
+            List<MatchedTrail> matched = trailsMatching(region, entry -> matchesManagementEvent(entry, record));
+            if (matched.isEmpty()) {
+                return Optional.empty();
+            }
+            for (MatchedTrail trail : matched) {
+                append(new TrailKey(trail.region(), trail.trail().name(), region), record.deepCopy());
+            }
+            return Optional.of(record);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Failed to record CloudTrail management event {0}", in.eventName());
+            return Optional.empty();
+        }
+    }
+
     public void emitS3DataEvent(S3EventInput in) {
         try {
             String region = in.region() != null ? in.region() : regionResolver.getDefaultRegion();
@@ -428,7 +468,7 @@ public class CloudTrailService {
         List<TrailKey> result = new ArrayList<>();
         for (Map.Entry<PendingTrailKey, PendingRecordBuffer> e : pendingRecordsByTrail.entrySet()) {
             for (String eventRegion : e.getValue().eventRegions()) {
-                result.add(new TrailKey(e.getKey().region(), e.getKey().trailName(), eventRegion));
+                result.add(new TrailKey(e.getKey().region(), e.getKey().trailName(), eventRegion, e.getKey().accountId()));
             }
         }
         return result;
@@ -483,9 +523,13 @@ public class CloudTrailService {
      * {@code eventRegion} is the region where the event occurred (used for the S3 delivery path).
      * For single-region trails these are the same; for multi-region trails they differ.
      */
-    public record TrailKey(String region, String trailName, String eventRegion) {}
+    public record TrailKey(String region, String trailName, String eventRegion, String accountId) {
+        public TrailKey(String region, String trailName, String eventRegion) {
+            this(region, trailName, eventRegion, null);
+        }
+    }
 
-    private record PendingTrailKey(String region, String trailName) {}
+    private record PendingTrailKey(String region, String trailName, String accountId) {}
 
     private record PendingRecord(ObjectNode record, long byteCount) {}
 
@@ -612,13 +656,23 @@ public class CloudTrailService {
         }
     }
 
-    private static PendingTrailKey pendingTrailKey(TrailKey key) {
-        return new PendingTrailKey(key.region(), key.trailName());
+    private PendingTrailKey pendingTrailKey(TrailKey key) {
+        return new PendingTrailKey(key.region(), key.trailName(),
+                key.accountId() != null ? key.accountId() : regionResolver.getAccountId());
     }
 
     // --- Helpers ---
 
     private List<MatchedTrail> trailsMatching(String region, S3EventInput in) {
+        return trailsMatching(region, entry -> {
+            List<AdvancedEventSelector> advanced = entry.advancedSelectors();
+            return advanced != null && !advanced.isEmpty()
+                    ? matchesAnyAdvancedSelector(advanced, in)
+                    : matchesAnySelector(entry.selectors() != null ? entry.selectors() : List.of(), in);
+        });
+    }
+
+    private List<MatchedTrail> trailsMatching(String region, Predicate<CloudTrailEntry> matches) {
         List<MatchedTrail> result = new ArrayList<>();
         for (String k : store.keys()) {
             String trailRegion = regionFromKey(k);
@@ -631,23 +685,45 @@ public class CloudTrailService {
             if (!sameRegion && !trail.isMultiRegionTrail()) {
                 continue;
             }
+            if (!AwsRegions.partitionFor(region).equals(AwsRegions.partitionFor(trail.homeRegion()))) {
+                continue;
+            }
             if (!entry.logging()) {
                 continue;
             }
-            List<AdvancedEventSelector> advancedSelectors =
-                    entry.advancedSelectors() != null ? entry.advancedSelectors() : List.of();
-            boolean matched;
-            if (!advancedSelectors.isEmpty()) {
-                matched = matchesAnyAdvancedSelector(advancedSelectors, in);
-            } else {
-                List<EventSelector> selectors = entry.selectors() != null ? entry.selectors() : List.of();
-                matched = matchesAnySelector(selectors, in);
-            }
-            if (matched) {
+            if (matches.test(entry)) {
                 result.add(new MatchedTrail(trail, trailRegion));
             }
         }
         return result;
+    }
+
+    private boolean matchesManagementEvent(CloudTrailEntry entry, ObjectNode record) {
+        List<AdvancedEventSelector> advanced = entry.advancedSelectors();
+        if (advanced != null && !advanced.isEmpty()) {
+            return advanced.stream().anyMatch(selector -> selector.fieldSelectors() != null
+                    && !selector.fieldSelectors().isEmpty()
+                    && selector.fieldSelectors().stream().allMatch(field -> matchesManagementField(field, record)));
+        }
+        List<EventSelector> selectors = entry.selectors();
+        if (selectors == null || selectors.isEmpty()) {
+            return !entry.trail().hasCustomEventSelectors();
+        }
+        return selectors.stream().anyMatch(selector -> !Boolean.FALSE.equals(selector.includeManagementEvents())
+                && (selector.readWriteType() == null || "All".equalsIgnoreCase(selector.readWriteType())
+                    || "WriteOnly".equalsIgnoreCase(selector.readWriteType()))
+                && (selector.excludeManagementEventSources() == null
+                    || !selector.excludeManagementEventSources().contains(record.path("eventSource").asText())));
+    }
+
+    private static boolean matchesManagementField(AdvancedFieldSelector field, ObjectNode record) {
+        String value = switch (field.field()) {
+            case "eventCategory", "eventSource", "eventName", "readOnly", "eventType" ->
+                    record.path(field.field()).asText();
+            case "userIdentity.arn" -> record.path("userIdentity").path("arn").asText();
+            default -> null;
+        };
+        return matchesFieldValue(field, value);
     }
 
     private boolean matchesAnySelector(List<EventSelector> selectors, S3EventInput in) {
@@ -713,6 +789,10 @@ public class CloudTrailService {
             case "resources.ARN" -> s3ObjectArn;
             default -> null;
         };
+        return matchesFieldValue(fs, value);
+    }
+
+    private static boolean matchesFieldValue(AdvancedFieldSelector fs, String value) {
         if (value == null) {
             return false;
         }
