@@ -26,6 +26,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -809,7 +810,9 @@ public class CloudWatchMetricsJsonHandler {
     private Instant parseInstantNode(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) return null;
         if (node.isNumber()) {
-            return Instant.ofEpochSecond(0, node.decimalValue().movePointRight(9).longValue());
+            BigDecimal seconds = node.decimalValue();
+            return Instant.ofEpochSecond(seconds.longValue(),
+                    seconds.remainder(BigDecimal.ONE).movePointRight(9).longValue());
         }
         return parseInstant(node.asText(null));
     }

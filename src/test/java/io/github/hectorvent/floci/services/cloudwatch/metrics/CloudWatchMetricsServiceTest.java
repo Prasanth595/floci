@@ -657,6 +657,13 @@ class CloudWatchMetricsServiceTest {
         putAlarm("pruner");
         assertFalse(store.keys().contains(expiredKey), "a write prunes expired history");
         assertEquals(4, store.keys().size());
+
+        store.put(expiredKey, new AlarmHistoryItem(0, "dated", "MetricAlarm",
+                now.minus(Duration.ofDays(40)).toEpochMilli(), "StateUpdate", "40 days ago", "{}"));
+        putAlarm("within-the-hour");
+        assertTrue(store.keys().contains(expiredKey), "pruning runs at most once an hour");
+        assertEquals(List.of("1 days ago", "2 days ago", "3 days ago"),
+                summaries(history("dated", null, null, null, null, null, null)));
     }
 
     private MetricAlarm putAlarm(String name) {

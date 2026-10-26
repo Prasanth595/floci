@@ -76,6 +76,7 @@ public class CloudWatchMetricsService {
     private final RegionResolver regionResolver;
     private final AlarmSnsNotifier alarmSnsNotifier;
     private long lastHistorySequence;
+    private Instant nextHistoryPrune = Instant.MIN;
 
     public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver) {
         this(storageFactory, regionResolver, null);
@@ -693,14 +694,17 @@ public class CloudWatchMetricsService {
         return node;
     }
 
-    /** Called only under this service's monitor, which also guards the sequence. */
+    /** Called only under this service's monitor, which also guards the sequence and the prune deadline. */
     private void recordHistory(Alarm alarm, String region, String type, String summary, ObjectNode data) {
         Instant now = Instant.now();
-        long expired = epochMicros(now.minus(HISTORY_RETENTION));
-        for (String key : List.copyOf(historyStore.keys())) {
-            if (Long.parseLong(key.substring(key.lastIndexOf("::") + 2)) < expired) {
-                historyStore.delete(key);
+        if (!now.isBefore(nextHistoryPrune)) {
+            long expired = epochMicros(now.minus(HISTORY_RETENTION));
+            for (String key : List.copyOf(historyStore.keys())) {
+                if (Long.parseLong(key.substring(key.lastIndexOf("::") + 2)) < expired) {
+                    historyStore.delete(key);
+                }
             }
+            nextHistoryPrune = now.plus(Duration.ofHours(1));
         }
         lastHistorySequence = Math.max(epochMicros(now), lastHistorySequence + 1);
         historyStore.put(region + "::" + String.format("%020d", lastHistorySequence),

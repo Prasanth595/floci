@@ -497,6 +497,11 @@ class CloudWatchMetricsJsonHandlerTest {
                 .put("StartDate", sdkTimestamp(Instant.now().plusSeconds(3600)));
         assertEquals(0, ((ObjectNode) handler.handle("DescribeAlarmHistory", future, REGION).getEntity())
                 .get("AlarmHistoryItems").size());
+
+        ObjectNode distant = MAPPER.createObjectNode().put("AlarmName", "json-history")
+                .put("HistoryItemType", "StateUpdate").put("EndDate", 253402300799L);
+        assertEquals(3, ((ObjectNode) handler.handle("DescribeAlarmHistory", distant, REGION).getEntity())
+                .get("AlarmHistoryItems").size(), "9999-12-31 is after every item");
     }
 
     @Test
