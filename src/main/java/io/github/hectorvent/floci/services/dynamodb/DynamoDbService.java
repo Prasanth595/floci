@@ -1570,7 +1570,8 @@ public class DynamoDbService {
         List<JsonNode> results = new ArrayList<>();
 
         if (keyConditions != null) {
-            for (JsonNode item : items.values()) {
+            String partitionKeyValue = extractComparisonValue(keyConditions.get(pkName));
+            for (JsonNode item : queryCandidates(items, accessPath, partitionKeyValue)) {
                 boolean partitionKeyMatches = pkNames.stream().allMatch(name -> item.has(name)
                         && matchesAttributeValue(item.get(name), extractComparisonValue(keyConditions.get(name))));
                 if (!partitionKeyMatches) continue;
@@ -1584,7 +1585,7 @@ public class DynamoDbService {
                 }
             }
         } else if (keyConditionExpression != null) {
-            results = queryWithExpression(items, pkName, partitionKeyValuePlaceholder,
+            results = queryWithExpression(items, accessPath, partitionKeyValuePlaceholder,
                     keyConditionExpression, expressionAttrValues, exprAttrNames);
         }
 
@@ -4852,17 +4853,31 @@ public class DynamoDbService {
         }
     }
 
+    private Collection<JsonNode> queryCandidates(ConcurrentSkipListMap<String, JsonNode> items,
+                                                DynamoDbAccessPath accessPath, String partitionKeyValue) {
+        if (accessPath.isIndex() || partitionKeyValue == null) {
+            return items.values();
+        }
+        String encodedPk = encodeKeySegment(partitionKeyValue);
+        if (accessPath.sortKeyName() == null) {
+            return items.subMap(encodedPk, true, encodedPk, true).values();
+        }
+        // Increment the separator for an exclusive upper bound covering every sort-key suffix.
+        return items.subMap(encodedPk + "#", true, encodedPk + "$", false).values();
+    }
+
     private List<JsonNode> queryWithExpression(ConcurrentSkipListMap<String, JsonNode> items,
-                                                String partitionKeyName,
+                                                DynamoDbAccessPath accessPath,
                                                 String partitionKeyValuePlaceholder,
                                                 String expression,
                                                 JsonNode expressionAttrValues,
                                                 JsonNode exprAttrNames) {
         List<JsonNode> results = new ArrayList<>();
+        String partitionKeyName = accessPath.partitionKeyName();
         String partitionKeyValue = expressionAttrValues != null && partitionKeyValuePlaceholder != null
                 ? extractScalarValue(expressionAttrValues.get(partitionKeyValuePlaceholder))
                 : null;
-        for (JsonNode item : items.values()) {
+        for (JsonNode item : queryCandidates(items, accessPath, partitionKeyValue)) {
             if (partitionKeyValue != null
                     && !matchesAttributeValue(item.get(partitionKeyName), partitionKeyValue)) {
                 continue;
