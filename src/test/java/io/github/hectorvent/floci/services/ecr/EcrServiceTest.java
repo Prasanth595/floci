@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -30,11 +31,17 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1376,6 +1383,7 @@ class EcrServiceTest {
         assertInvalid(() -> service.putRegistryPolicy("not json", REGION));
         assertInvalid(() -> service.putRegistryPolicy("[]", REGION));
         assertInvalid(() -> service.putRegistryPolicy("", REGION));
+        assertInvalid(() -> service.putRegistryPolicy("{} x", REGION));
     }
 
     @Test
@@ -1479,7 +1487,7 @@ class EcrServiceTest {
         return t;
     }
 
-    private static void assertInvalidTemplate(org.junit.jupiter.api.function.Executable call) {
+    private static void assertInvalidTemplate(Executable call) {
         assertEquals("InvalidParameterException", assertThrows(AwsException.class, call).getErrorCode());
     }
 
@@ -1512,6 +1520,13 @@ class EcrServiceTest {
         RepositoryCreationTemplate badLifecycle = template("prod", "REPLICATION");
         badLifecycle.setLifecyclePolicy("not json");
         assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(badLifecycle, REGION));
+        // A JSON object followed by more text is still not a JSON object.
+        RepositoryCreationTemplate trailingPolicy = template("prod", "REPLICATION");
+        trailingPolicy.setRepositoryPolicy("{}{}");
+        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(trailingPolicy, REGION));
+        RepositoryCreationTemplate trailingLifecycle = template("prod", "REPLICATION");
+        trailingLifecycle.setLifecyclePolicy("{\"rules\":[]} []");
+        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(trailingLifecycle, REGION));
 
         RepositoryCreationTemplate full = template("ROOT", "CREATE_ON_PUSH");
         full.setEncryptionConfiguration(new RepositoryCreationTemplate.EncryptionConfiguration("KMS_DSSE",
@@ -1607,5 +1622,104 @@ class EcrServiceTest {
         other.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION);
         assertEquals("TemplateNotFoundException", assertThrows(AwsException.class,
                 () -> home.deleteRepositoryCreationTemplate("prod", "eu-west-1")).getErrorCode());
+    }
+
+    /** ECR assumes a {@code /} after every prefix, so a trailing one names the same template. */
+    @Test
+    void creationTemplate_aTrailingSlashNamesTheSameTemplate() {
+        service.createRepositoryCreationTemplate(template("prod/", "REPLICATION"), REGION);
+
+        assertEquals("TemplateAlreadyExistsException", assertThrows(AwsException.class,
+                () -> service.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION)).getErrorCode());
+        assertEquals(1, service.describeRepositoryCreationTemplates(List.of("prod"), null, null, REGION)
+                .items().size());
+        RepositoryCreationTemplate change = template("prod");
+        change.setDescription("changed");
+        assertEquals("changed", service.updateRepositoryCreationTemplate(change, REGION).getDescription());
+        service.deleteRepositoryCreationTemplate("prod", REGION);
+        assertTrue(service.describeRepositoryCreationTemplates(null, null, null, REGION).items().isEmpty());
+    }
+
+    @Test
+    void creationTemplate_aSecondCreateOfThePrefixWaitsAndIsRefused() throws Exception {
+        PausingTemplateStore store = new PausingTemplateStore();
+        EcrService templates = templateService(store);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            store.pauseNextRead();
+            Future<?> first = pool.submit(() -> templates.createRepositoryCreationTemplate(
+                    template("prod", "REPLICATION"), REGION));
+            assertTrue(store.read.await(5, TimeUnit.SECONDS));
+            Future<?> second = pool.submit(() -> templates.createRepositoryCreationTemplate(
+                    template("prod", "REPLICATION"), REGION));
+            assertThrows(TimeoutException.class, () -> second.get(200, TimeUnit.MILLISECONDS),
+                    "the second create must wait for the first");
+
+            store.release.countDown();
+            first.get(5, TimeUnit.SECONDS);
+            ExecutionException refused = assertThrows(ExecutionException.class, () -> second.get(5, TimeUnit.SECONDS));
+            assertEquals("TemplateAlreadyExistsException", ((AwsException) refused.getCause()).getErrorCode());
+        } finally {
+            store.release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void creationTemplate_aDeleteDuringAnUpdateStaysDeleted() throws Exception {
+        PausingTemplateStore store = new PausingTemplateStore();
+        EcrService templates = templateService(store);
+        templates.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION);
+        RepositoryCreationTemplate change = template("prod");
+        change.setDescription("changed");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            store.pauseNextRead();
+            Future<?> update = pool.submit(() -> templates.updateRepositoryCreationTemplate(change, REGION));
+            assertTrue(store.read.await(5, TimeUnit.SECONDS));
+            Future<?> delete = pool.submit(() -> templates.deleteRepositoryCreationTemplate("prod", REGION));
+            assertThrows(TimeoutException.class, () -> delete.get(200, TimeUnit.MILLISECONDS),
+                    "the delete must wait for the update");
+
+            store.release.countDown();
+            update.get(5, TimeUnit.SECONDS);
+            delete.get(5, TimeUnit.SECONDS);
+        } finally {
+            store.release.countDown();
+            pool.shutdownNow();
+        }
+
+        assertTrue(templates.describeRepositoryCreationTemplates(null, null, null, REGION).items().isEmpty());
+    }
+
+    private EcrService templateService(InMemoryStorage<String, RepositoryCreationTemplate> store) {
+        return new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), store, registryManager, Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, ACCOUNT));
+    }
+
+    /** Holds the next reader of a template once it has read it, until {@code release} opens. */
+    private static final class PausingTemplateStore extends InMemoryStorage<String, RepositoryCreationTemplate> {
+        final CountDownLatch read = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        private final AtomicBoolean pauseNext = new AtomicBoolean();
+
+        void pauseNextRead() {
+            pauseNext.set(true);
+        }
+
+        @Override
+        public Optional<RepositoryCreationTemplate> get(String key) {
+            Optional<RepositoryCreationTemplate> template = super.get(key);
+            if (pauseNext.compareAndSet(true, false)) {
+                read.countDown();
+                try {
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return template;
+        }
     }
 }

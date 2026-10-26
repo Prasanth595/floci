@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.ecr;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -79,7 +81,8 @@ public class EcrService implements ResourceProvider {
             "ecr", "ecr-public", "quay", "k8s", "docker-hub",
             "github-container-registry", "azure-container-registry",
             "gitlab-container-registry", "chainguard");
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectReader SINGLE_JSON_VALUE =
+            MAPPER.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final int MAX_REPO_NAME_LENGTH = 256;
     private static final int MAX_PULL_THROUGH_CACHE_PREFIX_LENGTH = 30;
 
@@ -87,7 +90,7 @@ public class EcrService implements ResourceProvider {
     private final StorageBackend<String, ImageMetadata> imageMetaStore;
     private final StorageBackend<String, PullThroughCacheRule> pullThroughCacheRuleStore;
     private final StorageBackend<String, RegistrySettings> registrySettingsStore;
-    private final Map<String, Object> registrySettingsLocks = new ConcurrentHashMap<>();
+    private final Map<String, Object> registryLocks = new ConcurrentHashMap<>();
     private final StorageBackend<String, RepositoryCreationTemplate> templateStore;
     private final EcrRegistryManager registryManager;
     private final EmulatorConfig config;
@@ -346,21 +349,23 @@ public class EcrService implements ResourceProvider {
         validateTemplateFields(requested);
         String account = regionResolver.getAccountId();
         String key = templateKey(region, account, requested.getPrefix());
-        if (templateStore.get(key).isPresent()) {
-            throw new AwsException("TemplateAlreadyExistsException",
-                    "The repository creation template with prefix '" + requested.getPrefix()
-                            + "' already exists in the registry with id '" + account + "'", 400);
+        synchronized (registryLock(region)) {
+            if (templateStore.get(key).isPresent()) {
+                throw new AwsException("TemplateAlreadyExistsException",
+                        "The repository creation template with prefix '" + requested.getPrefix()
+                                + "' already exists in the registry with id '" + account + "'", 400);
+            }
+            RepositoryCreationTemplate template = new RepositoryCreationTemplate();
+            template.setPrefix(requested.getPrefix());
+            template.setEncryptionConfiguration(new RepositoryCreationTemplate.EncryptionConfiguration("AES256", null));
+            template.setImageTagMutability("MUTABLE");
+            applyTemplateFields(template, requested);
+            Instant now = Instant.now();
+            template.setCreatedAt(now);
+            template.setUpdatedAt(now);
+            templateStore.put(key, template);
+            return template;
         }
-        RepositoryCreationTemplate template = new RepositoryCreationTemplate();
-        template.setPrefix(requested.getPrefix());
-        template.setEncryptionConfiguration(new RepositoryCreationTemplate.EncryptionConfiguration("AES256", null));
-        template.setImageTagMutability("MUTABLE");
-        applyTemplateFields(template, requested);
-        Instant now = Instant.now();
-        template.setCreatedAt(now);
-        template.setUpdatedAt(now);
-        templateStore.put(key, template);
-        return template;
     }
 
     /**
@@ -389,24 +394,28 @@ public class EcrService implements ResourceProvider {
                                                                        String region) {
         validateTemplateFields(requested);
         String key = templateKey(region, regionResolver.getAccountId(), requested.getPrefix());
-        RepositoryCreationTemplate template = templateStore.get(key)
-                .orElseThrow(() -> templateNotFound(requested.getPrefix()));
-        applyTemplateFields(template, requested);
-        // Exclusion filters mean nothing outside a *_WITH_EXCLUSION mode. Terraform leaves the
-        // member out when the filters are removed, so they go when the mode no longer takes them.
-        if (!template.getImageTagMutability().endsWith("_WITH_EXCLUSION")) {
-            template.setImageTagMutabilityExclusionFilters(null);
+        synchronized (registryLock(region)) {
+            RepositoryCreationTemplate template = templateStore.get(key)
+                    .orElseThrow(() -> templateNotFound(requested.getPrefix()));
+            applyTemplateFields(template, requested);
+            // Exclusion filters mean nothing outside a *_WITH_EXCLUSION mode. Terraform leaves the
+            // member out when the filters are removed, so they go when the mode no longer takes them.
+            if (!template.getImageTagMutability().endsWith("_WITH_EXCLUSION")) {
+                template.setImageTagMutabilityExclusionFilters(null);
+            }
+            template.setUpdatedAt(Instant.now());
+            templateStore.put(key, template);
+            return template;
         }
-        template.setUpdatedAt(Instant.now());
-        templateStore.put(key, template);
-        return template;
     }
 
     public RepositoryCreationTemplate deleteRepositoryCreationTemplate(String prefix, String region) {
         String key = templateKey(region, regionResolver.getAccountId(), prefix);
-        RepositoryCreationTemplate template = templateStore.get(key).orElseThrow(() -> templateNotFound(prefix));
-        templateStore.delete(key);
-        return template;
+        synchronized (registryLock(region)) {
+            RepositoryCreationTemplate template = templateStore.get(key).orElseThrow(() -> templateNotFound(prefix));
+            templateStore.delete(key);
+            return template;
+        }
     }
 
     /** The registry the templates belong to: the caller's account. */
@@ -431,12 +440,17 @@ public class EcrService implements ResourceProvider {
         if (text == null || text.isEmpty()) {
             return;
         }
-        try {
-            if (!JSON.readTree(text).isObject()) {
-                throw invalidTemplate(field + " must be a JSON object");
-            }
-        } catch (JsonProcessingException e) {
+        if (!isJsonObject(text)) {
             throw invalidTemplate(field + " must be a JSON object");
+        }
+    }
+
+    /** Whether {@code text} is one JSON object with nothing after it, so {@code {} x} is not. */
+    private static boolean isJsonObject(String text) {
+        try {
+            return SINGLE_JSON_VALUE.readTree(text).isObject();
+        } catch (JsonProcessingException e) {
+            return false;
         }
     }
 
@@ -477,8 +491,10 @@ public class EcrService implements ResourceProvider {
         return value == null || value.isEmpty() ? null : value;
     }
 
+    /** ECR assumes a {@code /} after every prefix, so {@code prod} and {@code prod/} are one template. */
     private static String templateKey(String region, String account, String prefix) {
-        return region + "::" + account + "::" + prefix;
+        String namespace = prefix.endsWith("/") ? prefix.substring(0, prefix.length() - 1) : prefix;
+        return region + "::" + account + "::" + namespace;
     }
 
     private static AwsException invalidTemplate(String message) {
@@ -1207,13 +1223,7 @@ public class EcrService implements ResourceProvider {
      * text that is not a JSON object is refused here, as the model cannot say so.
      */
     public String putRegistryPolicy(String policyText, String region) {
-        JsonNode parsed;
-        try {
-            parsed = policyText == null ? null : MAPPER.readTree(policyText);
-        } catch (Exception e) {
-            parsed = null;
-        }
-        if (parsed == null || !parsed.isObject()) {
+        if (policyText == null || !isJsonObject(policyText)) {
             throw new AwsException("InvalidParameterException", "Invalid parameter at 'PolicyText' failed to satisfy "
                     + "constraint: 'Invalid registry policy provided'", 400);
         }
@@ -1312,12 +1322,21 @@ public class EcrService implements ResourceProvider {
      */
     private <T> T updateRegistrySettings(String region, Function<RegistrySettings, T> change) {
         String key = registrySettingsKey(region);
-        synchronized (registrySettingsLocks.computeIfAbsent(key, k -> new Object())) {
+        synchronized (registryLock(region)) {
             RegistrySettings settings = registrySettings(region);
             T result = change.apply(settings);
             registrySettingsStore.put(key, settings);
             return result;
         }
+    }
+
+    /**
+     * One lock per registry for every read and write back of its settings and creation templates:
+     * unlocked, two creates of one template prefix could both succeed, and an update could write
+     * back a template a delete had just removed.
+     */
+    private Object registryLock(String region) {
+        return registryLocks.computeIfAbsent(registrySettingsKey(region), k -> new Object());
     }
 
     private String registrySettingsKey(String region) {
