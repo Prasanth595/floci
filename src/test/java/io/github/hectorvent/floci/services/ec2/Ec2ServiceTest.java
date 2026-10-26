@@ -127,6 +127,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -135,6 +136,7 @@ import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -223,6 +225,51 @@ class Ec2ServiceTest {
         assertEquals(List.of(userTag), service.resourceTags("us-east-1", ids.getFirst()));
     }
 
+
+    @Test
+    void aLaunchRefusedWhenItTakesCapacityLeavesNoVolumeBehind() {
+        Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+        // Another launch took the capacity between this launch's check and its claim on it.
+        doThrow(new AwsException("InsufficientInstanceCapacity", "taken in the meantime", 400))
+                .when(service).acquireCapacity(anyString(), anyList());
+
+        assertThrows(AwsException.class, () -> launchKeepingADataVolume(service));
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+    }
+
+    @Test
+    void aRollbackWhoseTerminationFailsKeepsEachVolumesDeleteOnTermination() {
+        Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+        String instanceId = launchKeepingADataVolume(service).getInstances().getFirst().getInstanceId();
+        doThrow(new AwsException("InternalError", "termination failed", 500))
+                .when(service).terminateInstances(anyString(), anyList());
+
+        assertThrows(AwsException.class, () -> service.rollBackLaunch("us-east-1", List.of(instanceId)));
+
+        // The instance is still there, so a later TerminateInstances must keep what the launch asked to keep.
+        assertEquals(Set.of("/dev/xvda=true", "/dev/sdf=false"),
+                service.describeVolumes("us-east-1", List.of(), Map.of()).stream()
+                        .map(volume -> volume.getAttachments().getFirst())
+                        .map(a -> a.getDevice() + "=" + a.isDeleteOnTermination())
+                        .collect(Collectors.toSet()));
+    }
+
+    private static Reservation launchKeepingADataVolume(Ec2Service service) {
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeSize(5);
+        ebs.setDeleteOnTermination(false);
+        LaunchTemplateData.BlockDeviceMapping data = new LaunchTemplateData.BlockDeviceMapping();
+        data.setDeviceName("/dev/sdf");
+        data.setEbs(ebs);
+        return service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1, null, List.of(), null, null,
+                List.of(), null, null, null, null, 0, null, null, null, null, false, null, null,
+                List.of(data), false, null, null);
+    }
 
     @Test
     void subnetAvailableAddressesTrackAllocationsAndRelease() {

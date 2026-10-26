@@ -5568,10 +5568,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * ModifyInstanceAttribute with {@code BlockDeviceMapping}: sets DeleteOnTermination on the
      * volumes attached at the devices it names, true where an entry leaves it unset, as AWS
      * documents. An entry that is NoDevice or names an instance store volume, without an Ebs
-     * block, describes no EBS setting and leaves its device as it is. A device the instance has no volume at is refused before anything changes. The
-     * volumes are read again under all their locks before any is changed, so a device whose
-     * volume a TerminateInstances or DetachVolume took in the meantime is refused and no device
-     * is changed.
+     * block, describes no EBS setting and leaves its device as it is. A device the instance has
+     * no volume at is refused before anything changes. The volumes are read again under all their
+     * locks before any is changed, so a device whose volume a TerminateInstances or DetachVolume
+     * took in the meantime is refused and no device is changed.
      *
      * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ModifyInstanceAttribute.html">ModifyInstanceAttribute</a>
      */
@@ -14448,25 +14448,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * volume the launch created, those it would keep on termination included, so nothing of the
      * refused launch is left. A launch attaches the volumes it creates at the instance's launch
      * time; one attached since then goes as its DeleteOnTermination says, as on any termination.
+     * Only a volume termination left unattached is deleted, so an instance whose termination
+     * fails keeps its volumes as they were.
      */
     public List<Map<String, String>> rollBackLaunch(String region, List<String> instanceIds) {
-        for (String id : instanceIds) {
-            Instance inst = getRequiredInstance(region, id);
-            for (String k : volumes.keys()) {
-                Volume vol = volumes.get(k).orElse(null);
-                if (vol == null || !region.equals(vol.getRegion())
-                        || vol.getAttachments().stream().noneMatch(a -> createdByLaunch(a, inst))) {
-                    continue;
-                }
-                withVolumeLock(vol.getVolumeId(), () -> volumes.get(k).ifPresent(current -> {
-                    current.getAttachments().stream()
-                            .filter(a -> createdByLaunch(a, inst))
-                            .forEach(a -> a.setDeleteOnTermination(true));
-                    volumes.put(k, current);
-                }));
+        Set<String> launchVolumeKeys = new LinkedHashSet<>();
+        List<Instance> launched = instanceIds.stream().map(id -> getRequiredInstance(region, id)).toList();
+        for (String k : volumes.keys()) {
+            volumes.get(k).filter(vol -> region.equals(vol.getRegion())
+                            && vol.getAttachments().stream().anyMatch(a -> launched.stream()
+                                    .anyMatch(inst -> createdByLaunch(a, inst))))
+                    .ifPresent(vol -> launchVolumeKeys.add(k));
+        }
+        try {
+            return terminateInstances(region, instanceIds);
+        } finally {
+            for (String k : launchVolumeKeys) {
+                volumes.get(k).ifPresent(vol -> withVolumeLock(vol.getVolumeId(), () -> volumes.get(k)
+                        .filter(current -> current.getAttachments().isEmpty())
+                        .ifPresent(current -> deleteVolumeRecord(region, k, current))));
             }
         }
-        return terminateInstances(region, instanceIds);
     }
 
     private static boolean createdByLaunch(VolumeAttachment attachment, Instance inst) {
@@ -14513,11 +14515,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 boolean attachedElsewhere = vol.getAttachments().stream()
                         .anyMatch(other -> !inst.getInstanceId().equals(other.getInstanceId()));
                 if (att.isDeleteOnTermination() && !attachedElsewhere) {
-                    if (volumeBlockDeviceManager != null) {
-                        volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
-                    }
-                    volumes.delete(storeKey);
-                    removeTags(region, vol.getVolumeId());
+                    deleteVolumeRecord(region, storeKey, vol);
                     return;
                 }
                 vol.getAttachments().remove(att);
@@ -14528,6 +14526,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             vol.setState(vol.getAttachments().isEmpty() ? "available" : "in-use");
             volumes.put(storeKey, vol);
         }
+    }
+
+    /** Deletes a volume, its block device and its tags. Called under the volume's lock. */
+    private void deleteVolumeRecord(String region, String storeKey, Volume vol) {
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
+        }
+        volumes.delete(storeKey);
+        removeTags(region, vol.getVolumeId());
     }
 
     /**
