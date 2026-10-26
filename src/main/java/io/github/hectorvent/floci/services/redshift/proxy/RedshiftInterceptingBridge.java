@@ -806,11 +806,9 @@ public class RedshiftInterceptingBridge {
                 throw new IOException("interrupted while acquiring the backend lock", e);
             }
             if (!locked) {
-                if (System.nanoTime() >= deadlineNanos) {
-                    LOG.warn("could not take the backend stream in time; forwarding the COPY unintercepted");
-                    return false;
-                }
-                continue;
+                // A timed tryLock returns false only once the whole remaining budget has elapsed.
+                LOG.warn("could not take the backend stream in time; forwarding the COPY unintercepted");
+                return false;
             }
             boolean backendBusy;
             try {
