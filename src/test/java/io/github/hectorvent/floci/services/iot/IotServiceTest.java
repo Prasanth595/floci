@@ -75,7 +75,8 @@ import static org.mockito.Mockito.when;
  * Also the five-version cap on a policy, including under racing creates, the device shadow
  * events that reach MQTT subscribers and topic rules on the AWS response topics, and one stored
  * registration when identical RegisterCertificateWithoutCA calls race. Last, how UpdateThing and
- * DeleteThing treat the attributes, the thing type and the expected version, including racing merges.
+ * DeleteThing treat the attributes, the thing type and the expected version, including racing merges
+ * and racing versioned updates and deletes.
  */
 class IotServiceTest {
 
@@ -1784,6 +1785,66 @@ class IotServiceTest {
         Thing raced = service.describeThing("raced", REGION);
         assertEquals(expected, raced.getAttributes());
         assertEquals(writers * updatesPerWriter + 1L, raced.getVersion());
+    }
+
+    @Test
+    void racingVersionedUpdatesAndDeletesConsumeAnExpectedVersionOnce() throws Exception {
+        Set<String> losers = Set.of("VersionConflictException", "ResourceNotFoundException");
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        try {
+            for (int round = 0; round < 200; round++) {
+                String name = "cas-" + round;
+                service.createThing(name, Map.of("a", "1"), REGION);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<String>> outcomes = new ArrayList<>();
+                for (int i = 0; i < 2; i++) {
+                    outcomes.add(pool.submit(() -> {
+                        start.await();
+                        try {
+                            service.updateThing(name, Map.of("b", "2"), true, null, false, 1L, REGION);
+                            return "update";
+                        } catch (AwsException e) {
+                            return e.getErrorCode();
+                        }
+                    }));
+                    outcomes.add(pool.submit(() -> {
+                        start.await();
+                        try {
+                            service.deleteThing(name, 1L, REGION);
+                            return "delete";
+                        } catch (AwsException e) {
+                            return e.getErrorCode();
+                        }
+                    }));
+                }
+                start.countDown();
+                List<String> results = new ArrayList<>();
+                for (Future<String> outcome : outcomes) {
+                    results.add(outcome.get(60, TimeUnit.SECONDS));
+                }
+
+                String context = "round " + round + ": " + results;
+                List<String> winners = new ArrayList<>();
+                for (String result : results) {
+                    if (result.equals("update") || result.equals("delete")) {
+                        winners.add(result);
+                    } else {
+                        assertTrue(losers.contains(result), context);
+                    }
+                }
+                assertEquals(1, winners.size(), context);
+                if (winners.getFirst().equals("update")) {
+                    Thing updated = service.describeThing(name, REGION);
+                    assertEquals(2L, updated.getVersion(), context);
+                    assertEquals(Map.of("a", "1", "b", "2"), updated.getAttributes(), context);
+                } else {
+                    AwsException gone = assertThrows(AwsException.class, () -> service.describeThing(name, REGION), context);
+                    assertEquals("ResourceNotFoundException", gone.getErrorCode(), context);
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
