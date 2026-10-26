@@ -132,6 +132,27 @@ class RedshiftAutomatedSnapshotServiceTest {
 
         assertEquals(List.of("manual-backup"), fixture.snapshots().scanForAccount(ACCOUNT, key -> true).stream()
                 .map(Snapshot::getSnapshotIdentifier).toList());
+        assertTrue(fixture.states().getForAccount(ACCOUNT, "warehouse").isEmpty());
+    }
+
+    @Test
+    void retentionStillRunsWhenTheNextDumpFails() throws Exception {
+        Fixture fixture = fixture();
+        seed(fixture, ACCOUNT, "warehouse", "us-east-1", "rate(1 hour)");
+        fixture.service().runSnapshotSchedules(ANCHOR.plusSeconds(3600));
+        Snapshot first = fixture.snapshots().scanForAccount(ACCOUNT, key -> true).getFirst();
+        fixture.service().runSnapshotSchedules(ANCHOR.plusSeconds(7200));
+        Snapshot latest = fixture.snapshots().scanForAccount(ACCOUNT, key -> true).stream()
+                .filter(snapshot -> !snapshot.getSnapshotIdentifier().equals(first.getSnapshotIdentifier()))
+                .findFirst().orElseThrow();
+        doThrow(new IllegalStateException("dump failed")).when(fixture.manager())
+                .takeSnapshot(anyString(), anyString(), anyString(), any(Path.class));
+
+        fixture.service().runSnapshotSchedules(ANCHOR.plus(Duration.ofDays(3)));
+
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, first.getSnapshotIdentifier()).isEmpty());
+        assertFalse(Files.exists(Path.of(first.getSqlDump())));
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, latest.getSnapshotIdentifier()).isPresent());
     }
 
     @Test

@@ -1933,8 +1933,12 @@ public class RedshiftService {
                 withResourceLock(entry.accountId(), "cluster", entry.key(), () -> {
                     Cluster cluster = clusters.getForAccount(entry.accountId(), entry.key()).orElse(null);
                     if (cluster != null) {
-                        runSnapshotSchedule(entry.accountId(), cluster, now);
-                        expireAutomatedSnapshots(entry.accountId(), cluster.getClusterIdentifier(), cluster, now);
+                        try {
+                            runSnapshotSchedule(entry.accountId(), cluster, now);
+                        } finally {
+                            // Retention must not depend on the next dump succeeding.
+                            expireAutomatedSnapshots(entry.accountId(), cluster.getClusterIdentifier(), cluster, now);
+                        }
                     }
                     return null;
                 });
@@ -1957,6 +1961,20 @@ public class RedshiftService {
                 });
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Could not clean up automated snapshot {0} in account {1}", entry.key(), entry.accountId());
+            }
+        }
+        for (AccountAwareStorageBackend.AccountEntry<AutomatedSnapshotState> entry
+                : automatedSnapshotStates.scanAllAccountEntries(key -> true)) {
+            try {
+                withResourceLock(entry.accountId(), "cluster", entry.key(), () -> {
+                    if (clusters.getForAccount(entry.accountId(), entry.key()).isEmpty()) {
+                        automatedSnapshotStates.deleteForAccount(entry.accountId(), entry.key());
+                    }
+                    return null;
+                });
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not remove the automated snapshot checkpoint of cluster {0} in account {1}",
+                        entry.key(), entry.accountId());
             }
         }
     }
@@ -2044,6 +2062,8 @@ public class RedshiftService {
                 return null;
             }
             snapshots.deleteAllAtomicallyForAccounts(Map.of(accountId, Set.of(snapshotId)));
+            // Hybrid storage flushes lazily; a crash after the dump is gone would resurrect a dump-less snapshot.
+            snapshots.flush();
             if (current.getSqlDump() != null) {
                 Path file = Paths.get(current.getSqlDump()).toAbsolutePath().normalize();
                 if (file.startsWith(accountDumpDir(accountId))) {

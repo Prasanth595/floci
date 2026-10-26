@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -12,14 +13,17 @@ import java.time.Instant;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /** Drives automated snapshots outside AWS request threads. */
 @ApplicationScoped
-public class RedshiftSnapshotScheduler {
+public class RedshiftSnapshotScheduler implements Resettable {
     private static final Logger LOG = Logger.getLogger(RedshiftSnapshotScheduler.class);
     private final RedshiftService service;
     private final ScheduledExecutorService executor;
     private final long intervalSeconds;
+    private final ReentrantLock sweepLock = new ReentrantLock();
+    private volatile boolean paused;
 
     @Inject
     public RedshiftSnapshotScheduler(RedshiftService service, EmulatorConfig config) {
@@ -54,7 +58,32 @@ public class RedshiftSnapshotScheduler {
     }
 
     public void tick(Instant now) {
-        service.runSnapshotSchedules(now);
+        sweepLock.lock();
+        try {
+            if (!paused) {
+                service.runSnapshotSchedules(now);
+            }
+        } finally {
+            sweepLock.unlock();
+        }
+    }
+
+    /** Drains a running sweep so it cannot write old snapshots back into storage that reset is about to clear. */
+    @Override
+    public void beforeReset() {
+        paused = true;
+        sweepLock.lock();
+        sweepLock.unlock();
+    }
+
+    @Override
+    public void clear() {
+        // Snapshot state lives in RedshiftService storage, which reset wipes.
+    }
+
+    @Override
+    public void afterReset() {
+        paused = false;
     }
 
     private void tickSafely() {
