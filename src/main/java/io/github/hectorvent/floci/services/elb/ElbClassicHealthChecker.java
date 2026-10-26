@@ -17,6 +17,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -62,8 +63,11 @@ public class ElbClassicHealthChecker implements Resettable {
 
     // "account|region|lbName" → instanceId → state
     private final Map<String, Map<String, InstanceState>> states = new ConcurrentHashMap<>();
-    // "account|region|lbName" → Vert.x timer id
-    private final Map<String, Long> timers = new ConcurrentHashMap<>();
+    // "account|region|lbName" → the periodic check armed for it
+    private final Map<String, ArmedCheck> timers = new ConcurrentHashMap<>();
+
+    /** A periodic check: its Vert.x timer and the load balancer each tick probes. */
+    private record ArmedCheck(long id, ClassicLoadBalancer lb) {}
 
     @Inject
     public ElbClassicHealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service) {
@@ -89,7 +93,15 @@ public class ElbClassicHealthChecker implements Resettable {
         stopTimer(k);
         int interval = lb.getHealthCheck() != null && lb.getHealthCheck().getInterval() != null
                 ? lb.getHealthCheck().getInterval() : 30;
-        timers.put(k, vertx.setPeriodic(interval * 1000L, id -> probeAll(lb)));
+        timers.put(k, new ArmedCheck(vertx.setPeriodic(interval * 1000L, id -> probeAll(lb)), lb));
+    }
+
+    /**
+     * Runs one tick of every armed periodic check now, probing what each timer would probe, so
+     * tests need not wait out a check interval. The timers themselves keep their schedule.
+     */
+    void runArmedChecks() {
+        List.copyOf(timers.values()).forEach(timer -> probeAll(timer.lb()));
     }
 
     public void stopMonitoring(ClassicLoadBalancer lb) {
@@ -144,7 +156,7 @@ public class ElbClassicHealthChecker implements Resettable {
     @Override
     public void clear() {
         if (vertx != null) {
-            timers.values().forEach(vertx::cancelTimer);
+            timers.values().forEach(timer -> vertx.cancelTimer(timer.id()));
         }
         timers.clear();
         states.clear();
@@ -155,9 +167,9 @@ public class ElbClassicHealthChecker implements Resettable {
     }
 
     private void stopTimer(String k) {
-        Long timerId = timers.remove(k);
-        if (timerId != null && vertx != null) {
-            vertx.cancelTimer(timerId);
+        ArmedCheck timer = timers.remove(k);
+        if (timer != null && vertx != null) {
+            vertx.cancelTimer(timer.id());
         }
     }
 

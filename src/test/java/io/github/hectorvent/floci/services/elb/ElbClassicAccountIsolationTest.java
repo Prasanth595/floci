@@ -111,9 +111,10 @@ class ElbClassicAccountIsolationTest {
         createWeb();
         backendStatus.set(503);
 
-        // The instance now fails its checks, which only the first account's own checks can notice.
+        // The instance now fails, which only the first account's own periodic check can notice.
+        healthChecker.runArmedChecks();
         context.setAccountId(FIRST);
-        await().pollInSameThread().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+        await().pollInSameThread().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
             ElbClassicHealthChecker.InstanceHealth health = health();
             assertEquals("OutOfService", health.state());
             assertEquals("Instance", health.reasonCode());
@@ -131,23 +132,24 @@ class ElbClassicAccountIsolationTest {
     }
 
     /**
-     * Gives the stored balancer a check every second and re-arms the checker, as
-     * ConfigureHealthCheck does but below the 5-second minimum that action enforces, so each test
-     * takes seconds. The first check runs at registration, so the healthy threshold of two is met
-     * one interval later.
+     * Gives the stored balancer a check that one probe settles and re-arms the checker, as
+     * ConfigureHealthCheck does but past the thresholds that action enforces. The interval is
+     * the longest the API allows, so no timer fires during a test: the test runs each round of
+     * checks itself through {@link ElbClassicHealthChecker#runArmedChecks()}.
      */
     private void registerHealthyInstance() {
         ClassicHealthCheck check = new ClassicHealthCheck();
         check.setTarget("HTTP:" + backend.actualPort() + "/");
-        check.setInterval(1);
+        check.setInterval(300);
         check.setTimeout(1);
-        check.setHealthyThreshold(2);
-        check.setUnhealthyThreshold(2);
+        check.setHealthyThreshold(1);
+        check.setUnhealthyThreshold(1);
         ClassicLoadBalancer lb = service.requireLoadBalancer(REGION, "web");
         lb.setHealthCheck(check);
         healthChecker.healthCheckChanged(lb);
         service.registerInstances(REGION, "web", List.of(INSTANCE));
-        await().pollInSameThread().atMost(Duration.ofSeconds(10))
+        healthChecker.runArmedChecks();
+        await().pollInSameThread().atMost(Duration.ofSeconds(5))
                 .until(() -> "InService".equals(health().state()));
     }
 
