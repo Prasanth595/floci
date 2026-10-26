@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.storage;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.github.hectorvent.floci.testing.FileSystemAssumptions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,7 +15,6 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
@@ -23,7 +23,6 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class WalStorageTest {
 
@@ -394,8 +393,7 @@ class WalStorageTest {
         Path walDirectory = Files.createDirectories(tempDir.resolve("stuck-wal"));
         Path walPath = walDirectory.resolve("data.wal");
         // The test makes the directory read-only through POSIX permissions, which Windows lacks.
-        assumeTrue(Files.getFileStore(walDirectory).supportsFileAttributeView(PosixFileAttributeView.class),
-                "POSIX file permissions are not supported here");
+        FileSystemAssumptions.assumePosixPermissions(walDirectory);
         Set<PosixFilePermission> original = Files.getPosixFilePermissions(walDirectory);
 
         WalStorage<String, String> store1 = new WalStorage<>(snapshotPath, walPath,
