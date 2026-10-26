@@ -7,9 +7,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.model.Dashboard;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Alarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmHistoryItem;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmMetricDataQuery;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.CompositeAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
@@ -80,6 +82,7 @@ public class CloudWatchMetricsJsonHandler {
             case "DescribeAlarms" -> handleDescribeAlarms(request, region);
             case "DeleteAlarms" -> handleDeleteAlarms(request, region);
             case "SetAlarmState" -> handleSetAlarmState(request, region);
+            case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
@@ -404,6 +407,31 @@ public class CloudWatchMetricsJsonHandler {
         String reasonData = request.path("StateReasonData").asText(null);
         metricsService.setAlarmState(name, state, reason, reasonData, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeAlarmHistory(JsonNode request, String region) {
+        List<String> types = new ArrayList<>();
+        request.path("AlarmTypes").forEach(value -> types.add(value.asText()));
+        PaginatedResult<AlarmHistoryItem> page = metricsService.describeAlarmHistory(
+                request.path("AlarmName").asText(null), types, request.path("HistoryItemType").asText(null),
+                parseInstantNode(request.path("StartDate")), parseInstantNode(request.path("EndDate")),
+                Pagination.parseMaxResults(request, "MaxRecords", "ValidationError"),
+                request.path("NextToken").asText(null), request.path("ScanBy").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("AlarmHistoryItems");
+        for (AlarmHistoryItem item : page.items()) {
+            items.addObject()
+                    .put("AlarmName", item.alarmName())
+                    .put("AlarmType", item.alarmType())
+                    .put("HistoryData", item.historyData())
+                    .put("HistoryItemType", item.historyItemType())
+                    .put("HistorySummary", item.historySummary())
+                    .put("Timestamp", item.timestamp() / 1000.0);
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {

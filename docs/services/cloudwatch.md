@@ -403,6 +403,7 @@ returns HTTP 404.
 | `DescribeAlarms` | List alarms |
 | `DeleteAlarms` | Delete alarms |
 | `SetAlarmState` | Manually set alarm state |
+| `DescribeAlarmHistory` | List alarm state transitions and configuration changes (see [Alarm history](#alarm-history)) |
 | `PutMetricStream` | Create or update a metric stream definition |
 | `GetMetricStream` | Read a metric stream definition |
 | `ListMetricStreams` | List metric streams |
@@ -458,6 +459,27 @@ metric does not retain the previous definition.
 
 This is management-plane support: the alarm evaluator currently evaluates only single-metric
 alarms, not metric-math expressions. `SetAlarmState` remains available for manual transitions.
+
+### Alarm history {#alarm-history}
+
+`DescribeAlarmHistory` lists two kinds of items, newest first unless `ScanBy` is
+`TimestampAscending`:
+
+- `StateUpdate` for every real state transition, whether it comes from `SetAlarmState`, the alarm
+  evaluator or a composite alarm's rule. Setting an alarm to the state it already has records
+  nothing. `HistoryData` carries the old and new state with their reasons and reason data.
+- `ConfigurationUpdate` when `PutMetricAlarm` or `PutCompositeAlarm` creates or updates an alarm,
+  and when `DeleteAlarms` deletes one. An update lists the previous value of each changed field
+  under `originalUpdatedFields`.
+
+History survives the deletion of its alarm and is kept for 30 days. Without `AlarmTypes` only
+metric alarm history is listed; request `CompositeAlarm` to include composite alarms. `Action`,
+`AlarmContributorStateUpdate` and `AlarmContributorAction` are accepted filters, but Floci never
+records those items, so they match nothing. `MaxRecords` defaults to 50, and a `NextToken` issued
+for the other `ScanBy` direction returns an empty page, as on AWS.
+
+The alarm snapshots in `ConfigurationUpdate` items use Floci's field names, such as `okActions`
+and `statistic`, where AWS uses its internal ones, such as `okactions` and `extendedStatistic`.
 
 ### Examples
 
