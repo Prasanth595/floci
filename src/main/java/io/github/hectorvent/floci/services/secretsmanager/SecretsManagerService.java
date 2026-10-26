@@ -82,6 +82,9 @@ public class SecretsManagerService implements ResourceProvider {
     // stripe only contend; no lock is held while a rotation Lambda runs.
     private static final int ROTATION_LOCK_STRIPE_COUNT = 32;
     private final Object[] rotationLockStripes = newLockStripes(ROTATION_LOCK_STRIPE_COUNT);
+    // Names outlive ARNs across deletion and recreation. Hold these after any ARN lock, never before it.
+    private static final int NAME_LOCK_STRIPE_COUNT = 32;
+    private final Object[] nameLockStripes = newLockStripes(NAME_LOCK_STRIPE_COUNT);
     // Entries exist only while a service owner changes backend credentials outside the stripe.
     private final Set<String> managedReleases = ConcurrentHashMap.newKeySet();
 
@@ -96,6 +99,11 @@ public class SecretsManagerService implements ResourceProvider {
     private Object lockFor(String secretArn) {
         int index = Math.floorMod(secretArn.hashCode(), rotationLockStripes.length);
         return rotationLockStripes[index];
+    }
+
+    private Object nameLockFor(String accountId, String region, String name) {
+        int index = Math.floorMod(Objects.hash(accountId, region, name), nameLockStripes.length);
+        return nameLockStripes[index];
     }
 
     /** Names rotation threads for diagnostics. */
@@ -184,6 +192,17 @@ public class SecretsManagerService implements ResourceProvider {
         throwIfBothSecretValues(secretString, secretBinary);
         validateKmsKey(kmsKeyId, region);
 
+        String accountId = store instanceof AccountAwareStorageBackend<Secret> aware
+                ? aware.accountId() : regionResolver.getAccountId();
+        synchronized (nameLockFor(accountId, region, name)) {
+            return createSecretLocked(name, secretString, secretBinary, description, kmsKeyId, tags,
+                    owningService, clientRequestToken, region);
+        }
+    }
+
+    private Secret createSecretLocked(String name, String secretString, String secretBinary,
+                                      String description, String kmsKeyId, List<Secret.Tag> tags,
+                                      String owningService, String clientRequestToken, String region) {
         String storageKey = regionKey(region, name);
         Secret existing = store.get(storageKey).orElse(null);
 
@@ -1193,16 +1212,18 @@ public class SecretsManagerService implements ResourceProvider {
         if (snapshot.getOwningService() == null) {
             throw new IllegalArgumentException("A managed secret snapshot must have an owning service");
         }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(snapshot.getArn());
         synchronized (lockFor(snapshot.getArn())) {
-            throwIfManagedRelease(snapshot.getArn());
-            AwsArnUtils.Arn arn = AwsArnUtils.parse(snapshot.getArn());
-            String currentArn = findArnByName(arn.accountId(), snapshot.getName(), region).orElse(null);
-            if (currentArn != null && !snapshot.getArn().equals(currentArn)) {
-                throw new AwsException("ResourceExistsException",
-                        "Cannot restore managed secret " + snapshot.getArn()
-                                + " because another secret already uses the name " + snapshot.getName() + ".", 400);
+            synchronized (nameLockFor(arn.accountId(), region, snapshot.getName())) {
+                throwIfManagedRelease(snapshot.getArn());
+                String currentArn = findArnByName(arn.accountId(), snapshot.getName(), region).orElse(null);
+                if (currentArn != null && !snapshot.getArn().equals(currentArn)) {
+                    throw new AwsException("ResourceExistsException",
+                            "Cannot restore managed secret " + snapshot.getArn()
+                                    + " because another secret already uses the name " + snapshot.getName() + ".", 400);
+                }
+                persist(snapshot, region);
             }
-            persist(snapshot, region);
         }
     }
 
