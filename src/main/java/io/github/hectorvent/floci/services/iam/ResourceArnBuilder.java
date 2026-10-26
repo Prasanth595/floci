@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
+import io.github.hectorvent.floci.services.s3.S3ControlController;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -801,6 +802,27 @@ public class ResourceArnBuilder {
             stripped = stripped.substring(0, firstSlash);
         }
         return AwsArnUtils.Arn.global(partition, "s3", "", stripped).toString();
+    }
+
+    // ── S3 Control ──────────────────────────────────────────────────────────────
+
+    /**
+     * The resource an S3 Control request is authorized against. The tagging operations act on the
+     * resource their ARN names, here always a bucket, which a policy names by the bucket's own ARN
+     * whichever form the request gives it in. The other operations are account-level, and their
+     * actions have no resource type, so they are authorized against {@code *}, as is a resource ARN
+     * naming no bucket, which the operation rejects.
+     */
+    public List<String> buildS3ControlResources(ContainerRequestContext ctx, String region) {
+        String resourceArn = ctx.getUriInfo().getPathParameters()
+                .getFirst(S3ControlController.RESOURCE_ARN_PARAMETER);
+        if (resourceArn == null) {
+            return List.of("*");
+        }
+        return S3ControlController.bucketNameOf(resourceArn)
+                .map(bucket -> List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "s3", "", bucket)
+                        .toString()))
+                .orElseGet(() -> List.of("*"));
     }
 
     // ── Lambda ──────────────────────────────────────────────────────────────────
