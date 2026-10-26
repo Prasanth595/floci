@@ -194,6 +194,8 @@ public class LambdaMicrovmsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", connector.arn);
         r.getAttributes().put("Id", connector.id);
         r.getAttributes().put("Name", connector.name);
+        r.getAttributes().put("LatestVersion", Long.toString(connector.latestVersion));
+        r.getAttributes().put("LatestVersionArn", connector.arn + ":" + connector.latestVersion);
     }
 
     /** Records the connector's settings before an in-place update, for {@link #rollbackUpdate}. */

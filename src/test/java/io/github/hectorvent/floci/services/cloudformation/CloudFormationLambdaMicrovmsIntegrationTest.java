@@ -136,10 +136,14 @@ class CloudFormationLambdaMicrovmsIntegrationTest {
         assertTrue(connectorArn.contains(":network-connector:nc-"), connectorArn);
         assertEquals(connectorArn, created.get("ConnectorRef"), "Ref is the connector ARN, its primaryIdentifier");
         assertEquals(created.get("ImageArn"), created.get("ImageRef"), "Ref is the image ARN, its primaryIdentifier");
+        assertEquals("1", created.get("ConnectorLatestVersion"));
+        assertEquals(connectorArn + ":1", created.get("ConnectorLatestVersionArn"));
 
         cloudFormation(stackName, "UpdateStack", refTemplate(connectorName, "subnet-0cfn000000000002"));
         Map<String, String> updated = outputs(describeStacks(stackName, "UPDATE_COMPLETE"));
         assertEquals(connectorArn, updated.get("ConnectorRef"), "a subnet change updates the connector in place");
+        assertEquals("2", updated.get("ConnectorLatestVersion"));
+        assertEquals(connectorArn + ":2", updated.get("ConnectorLatestVersionArn"));
         given()
             .when()
             .get("/2026-04-04/network-connectors/" + connectorArn)
@@ -190,7 +194,9 @@ class CloudFormationLambdaMicrovmsIntegrationTest {
                     "ImageRef": {"Value": {"Ref": "Image"}},
                     "ImageArn": {"Value": {"Fn::GetAtt": ["Image", "ImageArn"]}},
                     "ConnectorRef": {"Value": {"Ref": "Connector"}},
-                    "ConnectorArn": {"Value": {"Fn::GetAtt": ["Connector", "Arn"]}}
+                    "ConnectorArn": {"Value": {"Fn::GetAtt": ["Connector", "Arn"]}},
+                    "ConnectorLatestVersion": {"Value": {"Fn::GetAtt": ["Connector", "LatestVersion"]}},
+                    "ConnectorLatestVersionArn": {"Value": {"Fn::GetAtt": ["Connector", "LatestVersionArn"]}}
                   }
                 }
                 """.formatted(connectorName, subnetId);
