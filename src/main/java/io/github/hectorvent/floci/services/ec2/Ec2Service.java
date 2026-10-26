@@ -9816,10 +9816,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Every tag constraint that does not need the resource: reserved keys, key and value lengths
-     * and the per-resource limit, the same rules CreateTags enforces on the list it writes. A
-     * create handler runs this on the TagSpecification it parsed before creating the resource,
-     * so a rejected specification leaves nothing behind; CreateTags checks the same rules again
-     * when it applies the list.
+     * and the per-resource limit, the same rules CreateTags enforces on the list it writes.
+     * {@code Ec2QueryHandler.parseTagsForResource} runs this on the TagSpecification it parsed,
+     * before the handler creates anything, so a rejected specification leaves nothing behind;
+     * CreateTags checks the same rules again when it applies the list.
      */
     public static void validateNewResourceTags(List<Tag> tagList) {
         validateUserTagKeys(tagList);

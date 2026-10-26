@@ -147,6 +147,33 @@ class Ec2QueryHandlerTest {
     }
 
     @ParameterizedTest
+    @CsvSource({
+            "RegisterImage,instance,The valid resource type is 'image'.",
+            "CreateImage,instance,The valid resource types are 'image' and 'snapshot'.",
+            "CopyImage,instance,The valid resource types are 'image' and 'snapshot'."
+    })
+    void rejectsTagSpecificationsForResourcesTheImageActionsDoNotCreate(String action, String resourceType,
+                                                                        String validResourceTypes) {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Name", "wrong-resource-type");
+        params.putSingle("TagSpecification.1.ResourceType", resourceType);
+        params.putSingle("TagSpecification.1.Tag.1.Key", "Team");
+        params.putSingle("TagSpecification.1.Tag.1.Value", "images");
+
+        Response response = handler(service).handle(action, params, "us-east-1");
+
+        assertEquals(400, response.getStatus());
+        String body = response.getEntity().toString();
+        String message = ("Tag specification resource type '" + resourceType
+                + "' is not valid for this operation. " + validResourceTypes)
+                .replace("'", "&apos;");
+        assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
+        assertTrue(body.contains(message), body);
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"CreateLaunchTemplate", "CreateLaunchTemplateVersion"})
     void rejectsReservedNestedTemplateTagsBeforeCreatingATemplateOrVersion(String action) {
         Ec2Service service = mock(Ec2Service.class);

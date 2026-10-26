@@ -24,7 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * ImportKeyPair also return them in the create response's tagSet, and CreateImage and CopyImage
  * tag the AMI's new snapshots as well as the AMI. A specification CreateTags would reject is
  * answered before anything is created, so a rejected create leaves no key pair, network ACL,
- * AMI or snapshot behind.
+ * AMI or snapshot behind. The image actions also accept only the resource types their reference
+ * allows: image for RegisterImage, image and snapshot for CreateImage and CopyImage.
  */
 @QuarkusTest
 class Ec2CreateTagSpecificationIntegrationTest {
@@ -281,6 +282,26 @@ class Ec2CreateTagSpecificationIntegrationTest {
     }
 
     @Test
+    void registerImageRejectsATagSpecificationForAResourceItDoesNotCreate() {
+        String name = "wrong-type-registered-" + UUID.randomUUID();
+        XmlPath rejected = ec2Rejects("RegisterImage",
+                "Name", name,
+                "Architecture", "x86_64",
+                "RootDeviceName", "/dev/xvda",
+                "TagSpecification.1.ResourceType", "instance",
+                "TagSpecification.1.Tag.1.Key", "Team",
+                "TagSpecification.1.Tag.1.Value", "instances");
+        assertEquals("InvalidParameterValue", rejected.getString("Response.Errors.Error.Code"));
+        assertEquals("Tag specification resource type 'instance' is not valid for this operation. "
+                        + "The valid resource type is 'image'.",
+                rejected.getString("Response.Errors.Error.Message"));
+
+        assertTrue(describeImageByName(name).getList(
+                "DescribeImagesResponse.imagesSet.item.imageId", String.class).isEmpty(),
+                "the rejected registration created no AMI");
+    }
+
+    @Test
     void createImageRejectsInvalidSnapshotTagsWithoutCreatingTheAmiOrItsSnapshots() {
         String instance = ec2("RunInstances",
                 "ImageId", "ami-0abcdef1234567890",
@@ -311,6 +332,72 @@ class Ec2CreateTagSpecificationIntegrationTest {
             assertEquals(snapshotsBefore, selfOwnedSnapshotCount(), "the rejected create left no snapshots");
         } finally {
             ec2("TerminateInstances", "InstanceId.1", instance);
+        }
+    }
+
+    @Test
+    void createImageRejectsATagSpecificationForAResourceItDoesNotCreate() {
+        String instance = ec2("RunInstances",
+                "ImageId", "ami-0abcdef1234567890",
+                "InstanceType", "t3.micro",
+                "MinCount", "1",
+                "MaxCount", "1")
+                .getString("RunInstancesResponse.instancesSet.item.instanceId");
+        try {
+            int snapshotsBefore = selfOwnedSnapshotCount();
+            String name = "wrong-type-captured-" + UUID.randomUUID();
+            XmlPath rejected = ec2Rejects("CreateImage",
+                    "InstanceId", instance,
+                    "Name", name,
+                    "NoReboot", "true",
+                    "TagSpecification.1.ResourceType", "instance",
+                    "TagSpecification.1.Tag.1.Key", "Team",
+                    "TagSpecification.1.Tag.1.Value", "instances");
+            assertEquals("InvalidParameterValue", rejected.getString("Response.Errors.Error.Code"));
+            assertEquals("Tag specification resource type 'instance' is not valid for this operation. "
+                            + "The valid resource types are 'image' and 'snapshot'.",
+                    rejected.getString("Response.Errors.Error.Message"));
+
+            assertTrue(describeImageByName(name).getList(
+                    "DescribeImagesResponse.imagesSet.item.imageId", String.class).isEmpty(),
+                    "the rejected create left no AMI");
+            assertEquals(snapshotsBefore, selfOwnedSnapshotCount(), "the rejected create left no snapshots");
+        } finally {
+            ec2("TerminateInstances", "InstanceId.1", instance);
+        }
+    }
+
+    @Test
+    void copyImageRejectsATagSpecificationForAResourceItDoesNotCreate() {
+        String source = ec2("RegisterImage",
+                "Name", "wrong-type-copy-source-" + UUID.randomUUID(),
+                "Architecture", "x86_64",
+                "RootDeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.SnapshotId", "snap-0123456789abcdef0",
+                "BlockDeviceMapping.1.Ebs.VolumeSize", "8")
+                .getString("RegisterImageResponse.imageId");
+        try {
+            int snapshotsBefore = selfOwnedSnapshotCount();
+            String name = "wrong-type-copy-destination-" + UUID.randomUUID();
+            XmlPath rejected = ec2Rejects("CopyImage",
+                    "SourceRegion", "us-east-1",
+                    "SourceImageId", source,
+                    "Name", name,
+                    "TagSpecification.1.ResourceType", "instance",
+                    "TagSpecification.1.Tag.1.Key", "Team",
+                    "TagSpecification.1.Tag.1.Value", "instances");
+            assertEquals("InvalidParameterValue", rejected.getString("Response.Errors.Error.Code"));
+            assertEquals("Tag specification resource type 'instance' is not valid for this operation. "
+                            + "The valid resource types are 'image' and 'snapshot'.",
+                    rejected.getString("Response.Errors.Error.Message"));
+
+            assertTrue(describeImageByName(name).getList(
+                    "DescribeImagesResponse.imagesSet.item.imageId", String.class).isEmpty(),
+                    "the rejected copy left no AMI");
+            assertEquals(snapshotsBefore, selfOwnedSnapshotCount(), "the rejected copy left no snapshots");
+        } finally {
+            ec2("DeregisterImage", "ImageId", source);
         }
     }
 
