@@ -126,8 +126,8 @@ public class CodePipelineService {
     // An execution's status turns Failed as soon as one action fails, while its runner is still waiting
     // on sibling actions. Retries check this set so they never overlap a runner that has not finished.
     final Set<String> activeRuns = ConcurrentHashMap.newKeySet();
-    private final long sourcePollIntervalMs;
-    // Package-private so tests can assert the resolved interval instead of timing worker sleeps.
+    // Package-private so tests can assert the resolved intervals instead of timing schedules and sleeps.
+    final long sourcePollIntervalMs;
     final long workerPollIntervalMs;
     // Test hooks, set only through the package-private constructor: a shortened wait, and a probe
     // for the gap before the override timeout cleanup.
@@ -187,22 +187,13 @@ public class CodePipelineService {
      * observer and stop the whole emulator becoming ready. A misconfigured value is not worth
      * failing every other service for, so it falls back with a warning.
      */
-    private static long resolveSourcePollInterval(long configured) {
+    static long resolvePollInterval(String kind, long configured, long fallback) {
         if (configured > 0) {
             return configured;
         }
-        LOG.warnv("Ignoring CodePipeline source poll interval {0}ms: must be a positive number of "
-                + "milliseconds, falling back to {1}ms", configured, DEFAULT_SOURCE_POLL_INTERVAL_MS);
-        return DEFAULT_SOURCE_POLL_INTERVAL_MS;
-    }
-
-    private static long resolveWorkerPollInterval(long configured) {
-        if (configured > 0) {
-            return configured;
-        }
-        LOG.warnv("Ignoring CodePipeline worker poll interval {0}ms: must be a positive number of "
-                + "milliseconds, falling back to {1}ms", configured, DEFAULT_WORKER_POLL_INTERVAL_MS);
-        return DEFAULT_WORKER_POLL_INTERVAL_MS;
+        LOG.warnv("Ignoring CodePipeline {0} poll interval {1}ms: must be a positive number of "
+                + "milliseconds, falling back to {2}ms", kind, configured, fallback);
+        return fallback;
     }
 
     @SuppressWarnings("unchecked")
@@ -223,8 +214,10 @@ public class CodePipelineService {
         this.lambdaService = lambdaService;
         this.s3Service = s3Service;
         this.eventPublisher = eventPublisher;
-        this.sourcePollIntervalMs = resolveSourcePollInterval(sourcePollIntervalMs);
-        this.workerPollIntervalMs = resolveWorkerPollInterval(workerPollIntervalMs);
+        this.sourcePollIntervalMs = resolvePollInterval("source", sourcePollIntervalMs,
+                DEFAULT_SOURCE_POLL_INTERVAL_MS);
+        this.workerPollIntervalMs = resolvePollInterval("worker", workerPollIntervalMs,
+                DEFAULT_WORKER_POLL_INTERVAL_MS);
         this.runFinishWaitNanos = runFinishWaitNanos;
         this.beforeOverrideTimeoutCleanup = beforeOverrideTimeoutCleanup;
     }

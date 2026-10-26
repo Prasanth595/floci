@@ -211,6 +211,35 @@ class CodePipelineServiceTest {
     }
 
     @Test
+    void nonPositiveSourceIntervalsFallBackToTheDefault() {
+        for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
+            CodePipelineService pipelineService = new CodePipelineService(new InMemoryStorageFactory(), mapper,
+                    mock(CodeBuildService.class), mock(CodeDeployService.class), mock(LambdaService.class),
+                    mock(S3Service.class), configWithPollIntervals(interval, 739L));
+            try {
+                assertEquals(500L, pipelineService.sourcePollIntervalMs,
+                        "source interval " + interval + " must fall back to 500ms");
+                assertEquals(739L, pipelineService.workerPollIntervalMs,
+                        "a valid worker interval must not follow the source fallback");
+            } finally {
+                pipelineService.shutdown();
+            }
+        }
+    }
+
+    @Test
+    void resolvePollIntervalUsesTheFallbackOfEachKind() {
+        for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
+            assertEquals(500L, CodePipelineService.resolvePollInterval("source", interval, 500L));
+            assertEquals(100L, CodePipelineService.resolvePollInterval("worker", interval, 100L));
+        }
+        for (long interval : new long[] {1L, 739L, Long.MAX_VALUE}) {
+            assertEquals(interval, CodePipelineService.resolvePollInterval("source", interval, 500L));
+            assertEquals(interval, CodePipelineService.resolvePollInterval("worker", interval, 100L));
+        }
+    }
+
+    @Test
     void positiveWorkerIntervalsArePreserved() {
         for (boolean direct : new boolean[] {false, true}) {
             for (long interval : new long[] {1L, 739L, Long.MAX_VALUE}) {
