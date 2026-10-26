@@ -104,8 +104,10 @@ class ManagedSecretRotationServiceTest {
                 assertDoesNotThrow(() -> service.rotateSecret(original.getArn(), token, null, rules(), true, REGION));
                 assertThrows(AwsException.class, () -> service.rotateSecret(original.getArn(),
                         UUID.randomUUID().toString(), null, rules(), true, REGION));
-                assertThrows(AwsException.class, () -> service.putSecretValue(
-                        original.getArn(), "other", null, null, REGION, null));
+                assertDoesNotThrow(() -> service.putSecretValue(
+                        original.getArn(), "updated-password", null, null, REGION, null));
+                assertEquals("updated-password",
+                        service.getSecretValue(original.getArn(), null, null, REGION).getSecretString());
             } finally {
                 finishReservation.countDown();
             }
@@ -115,6 +117,57 @@ class ManagedSecretRotationServiceTest {
             assertEquals(1, reservations.get());
             assertEquals(1, changes.get());
             assertEquals(token, service.describeSecret(original.getArn(), REGION).getCurrentVersionId());
+        } finally {
+            finishReservation.countDown();
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void ownerCanDeleteSecretWhileRotationWaitsForReservation() throws Exception {
+        CountDownLatch reserving = new CountDownLatch(1);
+        CountDownLatch finishReservation = new CountDownLatch(1);
+        AtomicInteger releases = new AtomicInteger();
+        SecretsManagerService service = service(new ManagedSecretRotator() {
+            public boolean supports(String arn, String region) {
+                return true;
+            }
+
+            public void reserve(String arn, String region) {
+                reserving.countDown();
+                try {
+                    assertTrue(finishReservation.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+                throw new AwsException("ResourceNotFoundException", "Owner deleted", 400);
+            }
+
+            public void rotate(String arn, String region, Rotation rotation) {
+                fail("deleted owner's secret must not rotate");
+            }
+
+            public void release(String arn, String region) {
+                releases.incrementAndGet();
+            }
+        });
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Secret original = create(service);
+            Future<AwsException> rotation = executor.submit(() -> assertThrows(AwsException.class,
+                    () -> service.rotateSecret(original.getArn(), UUID.randomUUID().toString(),
+                            null, rules(), true, REGION)));
+            try {
+                assertTrue(reserving.await(5, TimeUnit.SECONDS));
+                assertTrue(service.deleteManagedSecretAfter(original.getArn(), REGION, () -> { }));
+                AwsException missing = assertThrows(AwsException.class,
+                        () -> service.describeSecret(original.getArn(), REGION));
+                assertEquals("ResourceNotFoundException", missing.getErrorCode());
+            } finally {
+                finishReservation.countDown();
+            }
+            assertEquals("ResourceNotFoundException", rotation.get(5, TimeUnit.SECONDS).getErrorCode());
+            assertEquals(0, releases.get());
         } finally {
             finishReservation.countDown();
             service.shutdown();

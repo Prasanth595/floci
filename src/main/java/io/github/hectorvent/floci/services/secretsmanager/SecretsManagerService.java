@@ -1336,7 +1336,6 @@ public class SecretsManagerService implements ResourceProvider {
                 }
                 throwIfManagedRelease(secret.getArn());
                 managedRotationTokens.put(secret.getArn(), managedToken);
-                managedReleases.add(secret.getArn());
             }
         }
 
@@ -1349,6 +1348,7 @@ public class SecretsManagerService implements ResourceProvider {
             synchronized (lockFor(secret.getArn())) {
                 if (managedToken != null && managedRotator != null) {
                     secret = resolveSecret(secret.getArn(), region);
+                    managedReleases.add(secret.getArn());
                 }
                 SecretVersion pendingVersion = findVersionByStage(secret, "AWSPENDING");
                 if (pendingVersion != null) {
@@ -1375,11 +1375,7 @@ public class SecretsManagerService implements ResourceProvider {
             }
         } catch (RuntimeException e) {
             if (managedToken != null && managedRotator != null) {
-                synchronized (lockFor(secret.getArn())) {
-                    if (managedRotationTokens.remove(secret.getArn(), managedToken)) {
-                        managedReleases.remove(secret.getArn());
-                    }
-                }
+                clearManagedRotation(secret.getArn(), managedToken);
             }
             if (managedReservationAcquired) {
                 managedRotator.release(secret.getArn(), region);
@@ -1399,10 +1395,7 @@ public class SecretsManagerService implements ResourceProvider {
             try {
                 rotationExecutor.submit(() -> executeManagedRotation(arn, managedToken, region, managedRotator));
             } catch (RuntimeException e) {
-                synchronized (lockFor(arn)) {
-                    managedRotationTokens.remove(arn, managedToken);
-                    managedReleases.remove(arn);
-                }
+                clearManagedRotation(arn, managedToken);
                 managedRotator.release(arn, region);
                 throw e;
             }
@@ -1465,13 +1458,16 @@ public class SecretsManagerService implements ResourceProvider {
                 persist(current, region);
             }
         } finally {
-            synchronized (lockFor(secretArn)) {
-                if (token.equals(managedRotationTokens.get(secretArn))) {
-                    managedRotationTokens.remove(secretArn);
-                    managedReleases.remove(secretArn);
-                }
-            }
+            clearManagedRotation(secretArn, token);
             rotator.release(secretArn, region);
+        }
+    }
+
+    private void clearManagedRotation(String secretArn, String token) {
+        synchronized (lockFor(secretArn)) {
+            if (managedRotationTokens.remove(secretArn, token)) {
+                managedReleases.remove(secretArn);
+            }
         }
     }
 
