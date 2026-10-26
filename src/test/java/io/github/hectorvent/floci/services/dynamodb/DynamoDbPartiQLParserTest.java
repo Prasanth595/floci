@@ -213,8 +213,9 @@ class DynamoDbPartiQLParserTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"FROM \"t\"", "FROM \"t\" WHERE pk = 'p'", "FROM \"t\" WHERE pk = 'p' RETURNING ALL OLD *"})
-    void refusesAFromFirstUpdateWithNothingToChange(String statement) {
+    @ValueSource(strings = {"FROM \"t\"", "FROM \"t\" WHERE pk = 'p'", "FROM \"t\" WHERE pk = 'p' RETURNING ALL OLD *",
+            "UPDATE \"t\" WHERE pk = 'p'", "UPDATE \"t\" WHERE pk = 'p' SET c = 1"})
+    void refusesAnUpdateWhoseSetOrRemoveDoesNotFollowTheTable(String statement) {
         AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
 
         assertEquals("ValidationException", e.getErrorCode());

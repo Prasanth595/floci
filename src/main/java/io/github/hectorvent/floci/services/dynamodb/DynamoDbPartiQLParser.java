@@ -554,17 +554,13 @@ public class DynamoDbPartiQLParser {
         return new Stmt.Update(table, index, edits.sets(), edits.removes(), where, parseReturning());
     }
 
-    // FROM "Table" [WHERE …] SET attr=val [, …] [REMOVE attr [, …]]: the same update with the
-    // clauses in PartiQL's order. Without a WHERE the key check reports the missing key.
+    // FROM "Table" [WHERE …] SET attr=val [, …] [REMOVE attr [, …]], an UPDATE with the clauses in PartiQL's order
     private Stmt.Update parseFromFirstUpdate() {
         consume(TType.FROM);
         String table = expectTableName();
         String index = parseIndexQualifier();
         List<Cond> where = List.of();
         if (peek().type() == TType.WHERE) { advance(); where = parseConditions(); }
-        if (peek().type() != TType.SET && peek().type() != TType.REMOVE) {
-            throw validationEx(NOT_WELL_FORMED + "Expected data manipulation");
-        }
         Edits edits = parseEdits();
         return new Stmt.Update(table, index, edits.sets(), edits.removes(), where, parseReturning());
     }
@@ -572,6 +568,9 @@ public class DynamoDbPartiQLParser {
     private record Edits(List<SetClause> sets, List<Path> removes) {}
 
     private Edits parseEdits() {
+        if (peek().type() != TType.SET && peek().type() != TType.REMOVE) {
+            throw validationEx(NOT_WELL_FORMED + "Expected data manipulation");
+        }
         List<SetClause> sets = new ArrayList<>();
         List<Path> removes = new ArrayList<>();
         while (peek().type() == TType.SET || peek().type() == TType.REMOVE) {
