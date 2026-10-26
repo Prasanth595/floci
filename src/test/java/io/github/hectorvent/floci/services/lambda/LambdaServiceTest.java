@@ -2550,22 +2550,14 @@ class LambdaServiceTest {
         WarmPool warmPool = mock(WarmPool.class);
         LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
                 reactiveS3SyncConfig(true, false));
-        String name = "reactive-failed-" + UUID.randomUUID();
-        when(s3.openObject("code-bucket", "function.zip", null))
-                .thenReturn(heldObject(zipWithBody("v1")))
-                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
-        Map<String, Object> request = baseRequest(name);
-        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
-        LambdaFunction latest = syncingService.createFunction(REGION, request);
-
-        syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "function.zip"));
+        LambdaFunction latest = functionWhoseLastSyncFailed(syncingService, s3);
 
         assertEquals("Failed", syncingService.lastUpdateStatus(latest));
         assertEquals("Reactive S3 sync from s3://code-bucket/function.zip failed: The specified key does not exist.",
                 syncingService.lastUpdateStatusReason(latest));
         verify(warmPool, never()).pushCodeUpdate(any());
 
-        syncingService.updateFunctionCode(REGION, name, Map.of("ZipFile", zipWithBody("v2")));
+        syncingService.updateFunctionCode(REGION, latest.getFunctionName(), Map.of("ZipFile", zipWithBody("v2")));
 
         assertEquals("Successful", syncingService.lastUpdateStatus(latest));
         assertNull(syncingService.lastUpdateStatusReason(latest));
@@ -2574,24 +2566,31 @@ class LambdaServiceTest {
     @Test
     void failedReactiveSync_isClearedByAConfigurationUpdate() throws Exception {
         S3Service s3 = mock(S3Service.class);
-        WarmPool warmPool = mock(WarmPool.class);
-        LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
+        LambdaService syncingService = s3BackedService(s3, mock(WarmPool.class), new ZipExtractor(),
                 reactiveS3SyncConfig(true, false));
-        String name = "reactive-failed-config-" + UUID.randomUUID();
-        when(s3.openObject("code-bucket", "function.zip", null))
-                .thenReturn(heldObject(zipWithBody("v1")))
-                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
-        Map<String, Object> request = baseRequest(name);
-        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
-        LambdaFunction latest = syncingService.createFunction(REGION, request);
-        syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "function.zip"));
-        assertEquals("Failed", syncingService.lastUpdateStatus(latest));
+        LambdaFunction latest = functionWhoseLastSyncFailed(syncingService, s3);
 
-        syncingService.updateFunctionConfiguration(REGION, name,
+        syncingService.updateFunctionConfiguration(REGION, latest.getFunctionName(),
                 Map.of("Environment", Map.of("Variables", Map.of("STAGE", "ci"))));
 
         assertEquals("Successful", syncingService.lastUpdateStatus(latest));
         assertNull(syncingService.lastUpdateStatusReason(latest));
+    }
+
+    /**
+     * A function deployed from {@code s3://code-bucket/function.zip} whose sync after the object was
+     * overwritten failed because the object had gone. {@code s3} is the mock {@code service} reads.
+     */
+    private LambdaFunction functionWhoseLastSyncFailed(LambdaService service, S3Service s3)
+            throws Exception {
+        when(s3.openObject("code-bucket", "function.zip", null))
+                .thenReturn(heldObject(zipWithBody("v1")))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+        Map<String, Object> request = baseRequest("reactive-failed-" + UUID.randomUUID());
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
+        LambdaFunction latest = service.createFunction(REGION, request);
+        service.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "function.zip"));
+        return latest;
     }
 
     private static EmulatorConfig reactiveS3SyncConfig(boolean enabled, boolean async) {
