@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.cloudmap.model.Instance;
 import io.github.hectorvent.floci.services.cloudmap.model.Namespace;
 import io.github.hectorvent.floci.services.cloudmap.model.Operation;
@@ -53,7 +54,7 @@ public class CloudMapHandler {
                         text(request, "Name"), text(request, "Vpc"), text(request, "CreatorRequestId"),
                         text(request, "Description"), parseTags(request), region));
                 case "GetNamespace" -> handleGetNamespace(request);
-                case "ListNamespaces" -> handleListNamespaces(region);
+                case "ListNamespaces" -> handleListNamespaces(request, region);
                 case "DeleteNamespace" -> opResponse(service.deleteNamespace(text(request, "Id"), region));
                 case "GetOperation" -> handleGetOperation(request);
                 case "ListOperations" -> handleListOperations(request, region);
@@ -100,11 +101,15 @@ public class CloudMapHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleListNamespaces(String region) {
+    private Response handleListNamespaces(JsonNode request, String region) {
+        PaginatedResult<Namespace> page = service.listNamespaces(region, maxResults(request), nextToken(request));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Namespaces");
-        for (Namespace ns : service.listNamespaces(region)) {
+        for (Namespace ns : page.items()) {
             arr.add(buildNamespaceNode(ns));
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
@@ -120,13 +125,18 @@ public class CloudMapHandler {
 
     private Response handleListOperations(JsonNode request, String region) {
         Map<String, List<String>> filters = parseFilters(request);
+        PaginatedResult<Operation> page = service.listOperations(
+                region, filters, maxResults(request), nextToken(request));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Operations");
-        for (Operation op : service.listOperations(region, filters)) {
+        for (Operation op : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Id", op.getId());
             node.put("Status", op.getStatus());
             arr.add(node);
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
@@ -155,10 +165,15 @@ public class CloudMapHandler {
         Map<String, List<String>> filters = parseFilters(request);
         String namespaceId = filters.containsKey("NAMESPACE_ID") && !filters.get("NAMESPACE_ID").isEmpty()
                 ? filters.get("NAMESPACE_ID").get(0) : null;
+        PaginatedResult<Service> page = service.listServices(
+                region, namespaceId, maxResults(request), nextToken(request));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Services");
-        for (Service s : service.listServices(region, namespaceId)) {
+        for (Service s : page.items()) {
             arr.add(buildServiceSummaryNode(s));
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
@@ -367,6 +382,28 @@ public class CloudMapHandler {
     }
 
     // ──────────────────────────── Parsing ────────────────────────────
+
+    private Integer maxResults(JsonNode request) {
+        JsonNode value = request.get("MaxResults");
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new AwsException("InvalidInput", "MaxResults must be an integer.", 400);
+        }
+        return value.intValue();
+    }
+
+    private String nextToken(JsonNode request) {
+        JsonNode value = request.get("NextToken");
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("InvalidInput", "NextToken must be a string.", 400);
+        }
+        return value.textValue();
+    }
 
     private Map<String, List<String>> parseFilters(JsonNode request) {
         Map<String, List<String>> filters = new LinkedHashMap<>();

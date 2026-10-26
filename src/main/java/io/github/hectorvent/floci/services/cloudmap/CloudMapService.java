@@ -9,6 +9,9 @@ import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsRecord;
@@ -35,11 +38,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Cloud Map (AWS service discovery) business logic. Mirrors the EventBridge service
@@ -166,6 +171,11 @@ public class CloudMapService {
         return result;
     }
 
+    public PaginatedResult<Namespace> listNamespaces(String region, Integer maxResults, String nextToken) {
+        return paginate(listNamespaces(region), Namespace::getId, maxResults, nextToken,
+                "ListNamespaces", region, null);
+    }
+
     public void updateNamespace(String id, String description) {
         Namespace ns = requireNamespace(id);
         ns.setDescription(description);
@@ -254,6 +264,16 @@ public class CloudMapService {
             result.add(s);
         }
         return result;
+    }
+
+    public PaginatedResult<Service> listServices(String region, String namespaceIdFilter,
+                                                  Integer maxResults, String nextToken) {
+        PaginatedResult<Service> page = paginate(listServices(region, null), Service::getId,
+                maxResults, nextToken, "ListServices", region, namespaceIdFilter);
+        // AWS applies filters after selecting the page, so an empty page can still have a token.
+        List<Service> items = page.items().stream()
+                .filter(s -> namespaceIdFilter == null || namespaceIdFilter.equals(s.getNamespaceId())).toList();
+        return new PaginatedResult<>(items, page.nextToken());
     }
 
     /**
@@ -726,6 +746,34 @@ public class CloudMapService {
             }
         }
         return result;
+    }
+
+    public PaginatedResult<Operation> listOperations(String region, Map<String, List<String>> filters,
+                                                     Integer maxResults, String nextToken) {
+        Map<String, List<String>> normalized = new TreeMap<>();
+        if (filters != null) {
+            filters.forEach((name, values) -> normalized.put(name, values.stream().distinct().sorted().toList()));
+        }
+        PaginatedResult<Operation> page = paginate(listOperations(region, null), Operation::getId,
+                maxResults, nextToken, "ListOperations", region, normalized);
+        List<Operation> items = page.items().stream().filter(op -> matchesOperationFilters(op, filters)).toList();
+        return new PaginatedResult<>(items, page.nextToken());
+    }
+
+    private <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf,
+                                           Integer maxResults, String nextToken,
+                                           String action, String region, Object query) {
+        int limit = maxResults == null ? 100 : maxResults;
+        if (limit < 1 || limit > 100) {
+            throw new AwsException("InvalidInput", "MaxResults must be between 1 and 100.", 400);
+        }
+        if (nextToken != null && nextToken.length() > 4096) {
+            throw new AwsException("InvalidInput", "NextToken must not exceed 4096 characters.", 400);
+        }
+        String namespace = action + ":" + regionResolver.getAccountId() + ":" + region + ":"
+                + Digests.sha256Hex(objectMapper.valueToTree(query).toString());
+        return Pagination.paginate(items, cursorOf, limit, nextToken, namespace,
+                token -> new AwsException("InvalidInput", "Invalid NextToken.", 400));
     }
 
     private boolean matchesOperationFilters(Operation op, Map<String, List<String>> filters) {
