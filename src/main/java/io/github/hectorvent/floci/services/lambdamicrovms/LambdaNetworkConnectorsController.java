@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.ConnectorVersion;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.NetworkConnector;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.NetworkConnectorVersion;
@@ -106,7 +107,7 @@ public class LambdaNetworkConnectorsController {
         for (NetworkConnectorVersion version : versions) {
             ObjectNode item = items.addObject();
             item.put("Arn", connector.arn);
-            item.put("VersionArn", connector.arn + ":" + version.version);
+            item.put("VersionArn", LambdaArnUtils.networkConnectorVersionArn(connector.arn, version.version));
             item.put("Name", connector.name);
             item.put("Id", connector.id);
             item.put("Version", version.version);
@@ -162,10 +163,11 @@ public class LambdaNetworkConnectorsController {
         node.put("Name", connector.name);
         node.put("Arn", connector.arn);
         if (shape == ConnectorShape.GET) {
-            node.put("LatestVersionArn", connector.arn + ":" + connector.latestVersion);
+            node.put("LatestVersionArn",
+                    LambdaArnUtils.networkConnectorVersionArn(connector.arn, connector.latestVersion));
             node.put("LatestVersion", connector.latestVersion);
         } else if (shape != ConnectorShape.DELETE) {
-            node.put("VersionArn", connector.arn + ":" + connector.latestVersion);
+            node.put("VersionArn", LambdaArnUtils.networkConnectorVersionArn(connector.arn, connector.latestVersion));
             node.put("Version", connector.latestVersion);
         }
         node.put("State", shape == ConnectorShape.CREATE ? "PENDING" : connector.state);
@@ -244,7 +246,7 @@ public class LambdaNetworkConnectorsController {
         node.put("Type", "VPC_EGRESS");
         node.put("State", connector.state);
         node.put("LastModified", iso(connector.lastModified));
-        node.put("LatestVersionArn", connector.arn + ":" + connector.latestVersion);
+        node.put("LatestVersionArn", LambdaArnUtils.networkConnectorVersionArn(connector.arn, connector.latestVersion));
         node.put("LatestVersion", connector.latestVersion);
         return node;
     }

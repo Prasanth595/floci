@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.LongNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
@@ -88,11 +87,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
-    public JsonNode attributeValue(String resourceType, String attributeName, String value) {
-        if (PREFIX_LIST.equals(resourceType) && "Version".equals(attributeName)) {
-            return LongNode.valueOf(Long.parseLong(value));
-        }
-        return CfnResourceProvisioner.super.attributeValue(resourceType, attributeName, value);
+    public Map<String, Set<String>> integerAttributes() {
+        return Map.of(PREFIX_LIST, Set.of("Version"));
     }
 
     @Override

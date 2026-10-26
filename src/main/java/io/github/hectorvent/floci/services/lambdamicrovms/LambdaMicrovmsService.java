@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -437,7 +438,7 @@ public class LambdaMicrovmsService {
     public record ConnectorVersion(NetworkConnector connector, NetworkConnectorVersion version, boolean qualified) {
 
         public String versionArn() {
-            return connector.arn + ":" + version.version;
+            return LambdaArnUtils.networkConnectorVersionArn(connector.arn, version.version);
         }
     }
 
@@ -547,12 +548,11 @@ public class LambdaMicrovmsService {
     public synchronized ConnectorVersion getConnectorVersion(String region, String identifier) {
         ConnectorRef ref = ConnectorRef.parse(identifier);
         NetworkConnector connector = find(region, ref);
-        String suffix = ref.version() == null ? "" : ":" + ref.version();
         long wanted = ref.version() == null ? connector.latestVersion : ref.version();
         NetworkConnectorVersion found = connector.versions.stream()
                 .filter(v -> v.version == wanted)
                 .findFirst()
-                .orElseThrow(() -> connectorNotFound(connector.arn + suffix));
+                .orElseThrow(() -> connectorNotFound(LambdaArnUtils.networkConnectorVersionArn(connector.arn, wanted)));
         return new ConnectorVersion(connector, found, ref.version() != null);
     }
 
@@ -595,7 +595,8 @@ public class LambdaMicrovmsService {
                         String arn = ref.arn() ? ref.unqualified()
                                 : AwsArnUtils.Arn.of("lambda", region, regionResolver.getAccountId(),
                                 "network-connector:" + ref.idOrName()).toString();
-                        return connectorNotFound(ref.version() == null ? arn : arn + ":" + ref.version());
+                        return connectorNotFound(ref.version() == null ? arn
+                                : LambdaArnUtils.networkConnectorVersionArn(arn, ref.version()));
                     });
         }
         // One stored before versions has only its latest version.

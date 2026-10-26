@@ -3,9 +3,9 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.LongNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -58,11 +58,8 @@ public class LambdaMicrovmsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
-    public JsonNode attributeValue(String resourceType, String attributeName, String value) {
-        if (NETWORK_CONNECTOR.equals(resourceType) && "LatestVersion".equals(attributeName)) {
-            return LongNode.valueOf(Long.parseLong(value));
-        }
-        return CfnResourceProvisioner.super.attributeValue(resourceType, attributeName, value);
+    public Map<String, Set<String>> integerAttributes() {
+        return Map.of(NETWORK_CONNECTOR, Set.of("LatestVersion"));
     }
 
     @Override
@@ -211,7 +208,8 @@ public class LambdaMicrovmsCfnProvisioner implements CfnResourceProvisioner {
 
     private static void putLatestVersion(StackResource r, LambdaMicrovmsService.NetworkConnector connector) {
         r.getAttributes().put("LatestVersion", Long.toString(connector.latestVersion));
-        r.getAttributes().put("LatestVersionArn", connector.arn + ":" + connector.latestVersion);
+        r.getAttributes().put("LatestVersionArn",
+                LambdaArnUtils.networkConnectorVersionArn(connector.arn, connector.latestVersion));
     }
 
     /** Records the connector's settings before an in-place update, for {@link #rollbackUpdate}. */
