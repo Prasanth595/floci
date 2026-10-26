@@ -136,6 +136,21 @@ class RedshiftAutomatedSnapshotServiceTest {
     }
 
     @Test
+    void occurrenceIsRetakenWhenItsSnapshotMetadataWasLostButTheCheckpointSurvived() {
+        Fixture fixture = fixture();
+        seed(fixture, ACCOUNT, "warehouse", "us-east-1", "rate(1 hour)");
+        fixture.service().runSnapshotSchedules(ANCHOR.plusSeconds(3600));
+        Snapshot lost = fixture.snapshots().scanForAccount(ACCOUNT, key -> true).getFirst();
+        fixture.snapshots().deleteForAccount(ACCOUNT, lost.getSnapshotIdentifier());
+
+        fixture.service().runSnapshotSchedules(ANCHOR.plusSeconds(3600));
+
+        assertEquals(List.of(lost.getSnapshotIdentifier()), fixture.snapshots().scanForAccount(ACCOUNT, key -> true)
+                .stream().map(Snapshot::getSnapshotIdentifier).toList());
+        verify(fixture.manager(), times(2)).takeSnapshot(eq(ACCOUNT), eq("warehouse"), eq("admin"), any(Path.class));
+    }
+
+    @Test
     void retentionStillRunsWhenTheNextDumpFails() throws Exception {
         Fixture fixture = fixture();
         seed(fixture, ACCOUNT, "warehouse", "us-east-1", "rate(1 hour)");

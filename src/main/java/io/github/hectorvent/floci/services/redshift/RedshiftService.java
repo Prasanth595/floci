@@ -2002,7 +2002,16 @@ public class RedshiftService {
             automatedSnapshotStates.putAllAtomicallyForAccount(accountId, Map.of(clusterId, state));
         }
         Optional<Instant> due = RedshiftSnapshotSchedule.latestDue(definitions, state.anchor(), now);
-        if (due.isEmpty() || state.lastScheduledTime() != null && !due.get().isAfter(state.lastScheduledTime())) {
+        if (due.isEmpty()) {
+            return;
+        }
+        Instant scheduled = due.get();
+        String identity = clusterId + "|" + state.anchor() + "|" + scheduled;
+        String snapshotId = "rs-auto-" + UUID.nameUUIDFromBytes(identity.getBytes(StandardCharsets.UTF_8));
+        Instant last = state.lastScheduledTime();
+        // The checkpoint lives in a separate store, so it can outlive a snapshot whose metadata never reached disk.
+        if (last != null && (scheduled.isBefore(last)
+                || scheduled.equals(last) && snapshots.getForAccount(accountId, snapshotId).isPresent())) {
             return;
         }
         boolean tooSoon = snapshots.scanForAccount(accountId, key -> true).stream()
@@ -2010,9 +2019,6 @@ public class RedshiftService {
                 .filter(snapshot -> clusterId.equals(snapshot.getClusterIdentifier()))
                 .map(Snapshot::getSnapshotCreateTime).filter(time -> time != null)
                 .anyMatch(time -> time.plus(Duration.ofHours(1)).isAfter(now));
-        Instant scheduled = due.get();
-        String identity = clusterId + "|" + state.anchor() + "|" + scheduled;
-        String snapshotId = "rs-auto-" + UUID.nameUUIDFromBytes(identity.getBytes(StandardCharsets.UTF_8));
         boolean completed = withResourceLock(accountId, "snapshot", snapshotId, () -> {
             Snapshot existing = snapshots.getForAccount(accountId, snapshotId).orElse(null);
             if (existing == null) {
