@@ -50,6 +50,7 @@ import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -374,7 +375,11 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     void publish(String topic, byte[] payload) {
-        fanOut(topic, payload, false);
+        publish(topic, payload, 0);
+    }
+
+    void publish(String topic, byte[] payload, int qos) {
+        fanOut(topic, payload, qos);
     }
 
     boolean disconnectClient(String clientId, boolean cleanSession) {
@@ -729,7 +734,7 @@ public class IotMqttBrokerService implements Resettable {
 
         iotService.get().publish(topic, payload, message.isRetain(), message.qosLevel().value(), null,
                 session.clientId(), rules -> evaluateRulesOnWorker(topic, rules));
-        fanOut(topic, payload, false);
+        fanOut(topic, payload, message.qosLevel().value());
     }
 
     /**
@@ -787,26 +792,33 @@ public class IotMqttBrokerService implements Resettable {
         }
     }
 
-    private void fanOut(String topic, byte[] payload, boolean retained) {
+    /**
+     * Delivers a live copy, RETAIN 0 as on AWS, to each subscriber with a matching subscription, at the
+     * lower of {@code qos} and the highest QoS among its matching subscriptions.
+     */
+    private void fanOut(String topic, byte[] payload, int qos) {
         byte[] safePayload = payload == null ? new byte[0] : payload.clone();
         for (ClientSession session : sessionsByClient.values()) {
-            if (!session.endpoint().isConnected() || !hasMatchingSubscription(session.clientId(), topic)) {
+            Map<String, Subscription> subscriptions = subscriptionsByClient.get(session.clientId());
+            int granted = subscriptions == null ? -1 : grantedQos(subscriptions.values(), topic);
+            if (!session.endpoint().isConnected() || granted < 0) {
                 continue;
             }
             try {
-                session.endpoint().publish(topic, Buffer.buffer(safePayload), MqttQoS.AT_MOST_ONCE, false, retained);
+                session.endpoint().publish(topic, Buffer.buffer(safePayload), MqttQoS.valueOf(Math.min(qos, granted)), false, false);
             } catch (IllegalStateException e) {
                 LOG.debugv("IoT MQTT client {0} closed before the publish on {1} reached it", session.clientId(), topic);
             }
         }
     }
 
-    private boolean hasMatchingSubscription(String clientId, String topic) {
-        Map<String, Subscription> subscriptions = subscriptionsByClient.get(clientId);
-        if (subscriptions == null) {
-            return false;
-        }
-        return subscriptions.values().stream().anyMatch(subscription -> topicMatches(subscription.topicFilter(), topic));
+    /** The highest QoS among the subscriptions matching {@code topic}, or -1 when none does. */
+    private int grantedQos(Collection<Subscription> subscriptions, String topic) {
+        return subscriptions.stream()
+                .filter(subscription -> topicMatches(subscription.topicFilter(), topic))
+                .mapToInt(Subscription::qos)
+                .max()
+                .orElse(-1);
     }
 
     private void deliverRetained(ClientSession session, List<Subscription> subscriptions) {
@@ -818,13 +830,13 @@ public class IotMqttBrokerService implements Resettable {
             if (!deliveredTopics.add(retained.getTopic())) {
                 continue;
             }
-            boolean matches = subscriptions.stream()
-                    .anyMatch(subscription -> topicMatches(subscription.topicFilter(), retained.getTopic()));
-            if (!matches) {
+            int granted = grantedQos(subscriptions, retained.getTopic());
+            if (granted < 0) {
                 continue;
             }
             byte[] payload = Base64.getDecoder().decode(retained.getPayload());
-            session.endpoint().publish(retained.getTopic(), Buffer.buffer(payload), MqttQoS.AT_MOST_ONCE, false, true);
+            session.endpoint().publish(retained.getTopic(), Buffer.buffer(payload),
+                    MqttQoS.valueOf(Math.min(retained.getQos(), granted)), false, true);
         }
     }
 
@@ -886,7 +898,7 @@ public class IotMqttBrokerService implements Resettable {
         vertx.runOnContext(ignored -> {
             iotService.get().publish(topic, payload, false, 0, null, session.clientId(),
                     rules -> evaluateRulesOnWorker(topic, rules, admitted));
-            fanOut(topic, payload, false);
+            fanOut(topic, payload, 0);
         });
     }
 

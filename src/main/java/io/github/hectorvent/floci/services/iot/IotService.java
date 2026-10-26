@@ -1135,9 +1135,20 @@ public class IotService {
         publish(topic, payload, false, 0, null, null);
     }
 
-    /** {@code clientId} is the MQTT client that published, or null for a message that did not come over MQTT. */
+    /**
+     * A publish from outside the broker, such as the data plane Publish API: retained, recorded and
+     * run through the topic rules before it returns, then delivered to the broker's matching
+     * subscribers. {@code clientId} is what a rule's clientid() reports, null for the data plane.
+     */
     public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId) {
+        if (qos == 2) {
+            throw new AwsException("InvalidRequestException", "QoS 2 is currently not supported", 400);
+        }
+        if (qos != 0 && qos != 1) {
+            throw new AwsException("InvalidRequestException", "Invalid QoS value: " + qos, 400);
+        }
         publish(topic, payload, retain, qos, region, clientId, Runnable::run);
+        mqttBrokerService.publish(topic, payload, qos);
     }
 
     /**

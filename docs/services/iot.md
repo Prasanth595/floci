@@ -41,7 +41,8 @@ Supported MVP 2 behavior:
 Current MVP 2 limitations:
 
 - `DeleteConnection.preventWillMessage` is accepted for SDK request compatibility, but the embedded broker does not expose selective Last Will suppression.
-- HTTP IoT Data `Publish` still treats QoS and MQTT5 metadata as compatibility inputs only; those properties are not fully forwarded or persisted yet.
+- HTTP IoT Data `Publish` reaches MQTT subscribers as an MQTT publish does, and refuses a `qos` other than 0 or 1 with AWS's `InvalidRequestException`. Its MQTT 5 metadata (`contentType`, `correlationData`, `messageExpiry`, `payloadFormatIndicator`, `responseTopic`, `userProperties`) is accepted but not forwarded.
+- A retained message is also sent on a subscription to a wildcard filter that matches its topic. AWS sends it only to a subscription naming its exact topic.
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.
 - `GetConnection` and `ListSubscriptions` report live in-memory broker state only; offline persistent session subscription reporting is not modeled yet.
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
@@ -180,7 +181,7 @@ Broker scope:
 
 - Target real AWS IoT/device SDK style MQTT clients, not only handcrafted packet tests.
 - Support MQTT v3 and MQTT 5 CONNECT handling used by local compatibility tests.
-- Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice.
+- Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice. A publish, over MQTT or through IoT Data `Publish`, reaches each matching subscriber at the lower of its own and the subscription's QoS, with RETAIN 0, as on AWS. A retained message sent on subscribe carries RETAIN 1 at the lower of its stored and the subscription's QoS.
 - Accept PUBLISH payloads up to 128 KB on 1883, 8883 and `/mqtt`, the AWS IoT Core quota (packets up to 146 KB including the variable header). A larger publish disconnects the client without acknowledgement, delivery or rule evaluation, as on AWS.
 - Serve MQTT over TLS on 8883 next to plaintext 1883 when TLS is enabled, and verify the device certificate and its `iot:Connect` permission there.
 - Keep the plaintext listener permissive except for a `CONNECT` that names a [custom authorizer](#authorizers); topic-level authorization (`Publish`, `Subscribe`, `Receive`) is follow-up scope.
