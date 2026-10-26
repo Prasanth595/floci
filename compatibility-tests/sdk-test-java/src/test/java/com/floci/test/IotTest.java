@@ -1021,6 +1021,72 @@ class IotTest {
     }
 
     @Test
+    void thingUpdateHonoursMergeThingTypeAndExpectedVersion() {
+        String thingType = "java-iot-update-type";
+        String thingName = "java-iot-update-thing";
+        try {
+            iot.deleteThing(DeleteThingRequest.builder().thingName(thingName).build());
+        } catch (Exception ignored) {
+            // Nothing is left over from an earlier run.
+        }
+        deleteThingTypeQuietly(thingType);
+
+        iot.createThingType(CreateThingTypeRequest.builder().thingTypeName(thingType).build());
+        iot.createThing(CreateThingRequest.builder()
+                .thingName(thingName)
+                .attributePayload(AttributePayload.builder().attributes(Map.of("env", "java", "owner", "iot")).build())
+                .build());
+
+        iot.updateThing(UpdateThingRequest.builder()
+                .thingName(thingName)
+                .attributePayload(AttributePayload.builder()
+                        .attributes(Map.of("fw", "1.2", "owner", ""))
+                        .merge(true)
+                        .build())
+                .build());
+        DescribeThingResponse merged = iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build());
+        assertThat(merged.attributes()).isEqualTo(Map.of("env", "java", "fw", "1.2"));
+
+        iot.updateThing(UpdateThingRequest.builder().thingName(thingName).thingTypeName(thingType).build());
+        DescribeThingResponse typed = iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build());
+        assertThat(typed.thingTypeName()).isEqualTo(thingType);
+        assertThat(typed.attributes()).isEqualTo(Map.of("env", "java", "fw", "1.2"));
+
+        iot.updateThing(UpdateThingRequest.builder().thingName(thingName).removeThingType(true).build());
+        DescribeThingResponse untyped = iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build());
+        assertThat(untyped.thingTypeName()).isNull();
+
+        assertThatThrownBy(() -> iot.updateThing(UpdateThingRequest.builder()
+                .thingName(thingName)
+                .thingTypeName(thingType)
+                .removeThingType(true)
+                .build()))
+                .isInstanceOf(InvalidRequestException.class);
+
+        long version = untyped.version();
+        assertThatThrownBy(() -> iot.deleteThing(DeleteThingRequest.builder()
+                .thingName(thingName)
+                .expectedVersion(version - 1)
+                .build()))
+                .isInstanceOf(VersionConflictException.class);
+        assertThat(iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build()).version()).isEqualTo(version);
+
+        iot.deleteThing(DeleteThingRequest.builder().thingName(thingName).expectedVersion(version).build());
+        assertThatThrownBy(() -> iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build()))
+                .isInstanceOf(ResourceNotFoundException.class);
+        deleteThingTypeQuietly(thingType);
+    }
+
+    private void deleteThingTypeQuietly(String thingType) {
+        try {
+            iot.deprecateThingType(DeprecateThingTypeRequest.builder().thingTypeName(thingType).build());
+            iot.deleteThingType(DeleteThingTypeRequest.builder().thingTypeName(thingType).build());
+        } catch (Exception ignored) {
+            // Absent, or on AWS deprecated less than five minutes ago and left for the next run.
+        }
+    }
+
+    @Test
     void mqttConnectPublishSubscribe() throws Exception {
         String topic = "devices/java-iot-mqtt/events";
         byte[] payload = "java-mqtt".getBytes(StandardCharsets.UTF_8);

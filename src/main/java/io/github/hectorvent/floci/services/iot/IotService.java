@@ -60,6 +60,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -287,11 +288,31 @@ public class IotService {
     }
 
     public Thing updateThing(String thingName, Map<String, String> attributes, Long expectedVersion, String region) {
-        Thing thing = describeThing(thingName, region);
-        if (expectedVersion != null && thing.getVersion() != expectedVersion) {
-            throw new AwsException("VersionConflictException", "Thing version does not match expectedVersion", 409);
+        return updateThing(thingName, attributes, false, null, false, expectedVersion, region);
+    }
+
+    /** {@code attributes} is null when the request carries none, which leaves the stored ones as they are. */
+    public Thing updateThing(String thingName, Map<String, String> attributes, boolean merge, String thingTypeName,
+                             boolean removeThingType, Long expectedVersion, String region) {
+        String typeName = blankToNull(thingTypeName);
+        if (removeThingType && typeName != null) {
+            throw new AwsException("InvalidRequestException", "Cannot remove thing type when thing type is not null", 400);
         }
-        thing.setAttributes(attributes);
+        Thing thing = describeThing(thingName, region);
+        if (typeName != null && describeThingType(typeName, region).isDeprecated()) {
+            throw new AwsException("InvalidRequestException",
+                    "Can not update a thing to use deprecated thing type: " + typeName, 400);
+        }
+        requireThingVersion(thing, expectedVersion);
+        if (attributes != null) {
+            Map<String, String> updated = merge ? new HashMap<>(thing.getAttributes()) : new HashMap<>();
+            updated.putAll(attributes);
+            updated.values().removeIf(String::isEmpty);
+            thing.setAttributes(updated);
+        }
+        if (typeName != null || removeThingType) {
+            thing.setThingTypeName(typeName);
+        }
         thing.setVersion(thing.getVersion() + 1);
         thing.setLastModifiedDate(Instant.now());
         thingStore.put(thingKey(region, thingName), thing);
@@ -299,7 +320,11 @@ public class IotService {
     }
 
     public void deleteThing(String thingName, String region) {
-        describeThing(thingName, region);
+        deleteThing(thingName, null, region);
+    }
+
+    public void deleteThing(String thingName, Long expectedVersion, String region) {
+        requireThingVersion(describeThing(thingName, region), expectedVersion);
         thingStore.delete(thingKey(region, thingName));
         for (String key : thingGroupMembershipStore.keys()) {
             if (key.startsWith("thing-group-membership:" + region + ":")) {
@@ -1653,6 +1678,13 @@ public class IotService {
     private void validateThingName(String thingName) {
         if (thingName == null || !THING_NAME_PATTERN.matcher(thingName).matches()) {
             throw new AwsException("InvalidRequestException", "Invalid thing name: " + thingName, 400);
+        }
+    }
+
+    private static void requireThingVersion(Thing thing, Long expectedVersion) {
+        if (expectedVersion != null && thing.getVersion() != expectedVersion) {
+            throw new AwsException("VersionConflictException",
+                    "The version for thing " + thing.getThingName() + " does not match the expected version.", 409);
         }
     }
 
