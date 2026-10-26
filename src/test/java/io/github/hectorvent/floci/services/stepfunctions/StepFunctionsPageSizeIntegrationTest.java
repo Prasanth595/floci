@@ -14,7 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.StepFunctionsRequests.sfn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -26,7 +26,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 @QuarkusTest
 class StepFunctionsPageSizeIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
     // Validation comes before the execution is looked up, so no execution needs to exist.
     private static final String EXECUTION_ARN =
             "arn:aws:states:us-east-1:000000000000:execution:page-size:" + UUID.randomUUID();
@@ -60,7 +59,7 @@ class StepFunctionsPageSizeIntegrationTest {
             assertEquals("InvalidToken", errorType(action, Map.of("nextToken", nextToken)));
         }
         if ("ListActivities".equals(action)) {
-            call(action, Map.of("maxResults", 1000)).then().statusCode(200);
+            sfn(action, Map.of("maxResults", 1000)).then().statusCode(200);
         }
     }
 
@@ -75,11 +74,11 @@ class StepFunctionsPageSizeIntegrationTest {
         List<String> arns = new ArrayList<>();
         try {
             for (int index = 0; index < 101; index++) {
-                arns.add(call("CreateActivity", Map.of("name", "page-size-" + UUID.randomUUID()))
+                arns.add(sfn("CreateActivity", Map.of("name", "page-size-" + UUID.randomUUID()))
                         .then().statusCode(200).extract().path("activityArn"));
             }
             for (Map<String, Object> request : List.of(Map.<String, Object>of(), Map.<String, Object>of("maxResults", 0))) {
-                Response page = call("ListActivities", request).then().statusCode(200).extract().response();
+                Response page = sfn("ListActivities", request).then().statusCode(200).extract().response();
                 assertEquals(100, page.jsonPath().getList("activities").size());
                 assertNotNull(page.path("nextToken"));
             }
@@ -87,7 +86,7 @@ class StepFunctionsPageSizeIntegrationTest {
             // Best effort, unasserted, so a failed delete can neither hide the test's own failure
             // nor stop the remaining deletes.
             for (String arn : arns) {
-                call("DeleteActivity", Map.of("activityArn", arn));
+                sfn("DeleteActivity", Map.of("activityArn", arn));
             }
         }
     }
@@ -107,14 +106,6 @@ class StepFunctionsPageSizeIntegrationTest {
         if ("GetExecutionHistory".equals(action)) {
             body.put("executionArn", EXECUTION_ARN);
         }
-        return call(action, body).then().statusCode(400).extract().response();
-    }
-
-    private static Response call(String action, Map<String, ?> body) {
-        return given()
-                .header("X-Amz-Target", "AWSStepFunctions." + action)
-                .contentType(CONTENT_TYPE)
-                .body(body)
-                .post("/");
+        return sfn(action, body).then().statusCode(400).extract().response();
     }
 }

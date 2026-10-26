@@ -17,7 +17,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.LongStream;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.StepFunctionsRequests.sfn;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -27,7 +27,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 @QuarkusTest
 class StepFunctionsExecutionHistoryPaginationIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/test-role";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     // Sixty Pass states: ExecutionStarted, an Entered and an Exited event per state, and
@@ -60,7 +59,7 @@ class StepFunctionsExecutionHistoryPaginationIntegrationTest {
                 state.put("End", true);
             }
         }
-        String stateMachineArn = call("CreateStateMachine", Map.of(
+        String stateMachineArn = sfn("CreateStateMachine", Map.of(
                 "name", "history-pages-" + UUID.randomUUID(),
                 "definition", definition.toString(),
                 "roleArn", ROLE_ARN))
@@ -135,7 +134,7 @@ class StepFunctionsExecutionHistoryPaginationIntegrationTest {
         assertNotNull(nextToken, "a page shorter than the history carries a token");
 
         assertEquals("InvalidToken", error(Map.of("nextToken", nextToken, "reverseOrder", true)));
-        assertEquals("InvalidToken", call("GetExecutionHistory",
+        assertEquals("InvalidToken", sfn("GetExecutionHistory",
                 Map.of("executionArn", otherExecutionArn, "nextToken", nextToken))
                 .then().statusCode(400).extract().path("__type"));
     }
@@ -154,11 +153,11 @@ class StepFunctionsExecutionHistoryPaginationIntegrationTest {
     }
 
     private static String runToCompletion(String stateMachineArn) {
-        String arn = call("StartExecution", Map.of(
+        String arn = sfn("StartExecution", Map.of(
                 "stateMachineArn", stateMachineArn, "input", "{\"payload\":\"visible\"}"))
                 .then().statusCode(200).extract().path("executionArn");
         await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100)).until(() ->
-                "SUCCEEDED".equals(call("DescribeExecution", Map.of("executionArn", arn))
+                "SUCCEEDED".equals(sfn("DescribeExecution", Map.of("executionArn", arn))
                         .then().statusCode(200).extract().path("status")));
         return arn;
     }
@@ -170,24 +169,16 @@ class StepFunctionsExecutionHistoryPaginationIntegrationTest {
     private static Response history(Map<String, Object> parameters) {
         Map<String, Object> request = new HashMap<>(parameters);
         request.put("executionArn", executionArn);
-        return call("GetExecutionHistory", request).then().statusCode(200).extract().response();
+        return sfn("GetExecutionHistory", request).then().statusCode(200).extract().response();
     }
 
     private static String error(Map<String, Object> parameters) {
         Map<String, Object> request = new HashMap<>(parameters);
         request.put("executionArn", executionArn);
-        return call("GetExecutionHistory", request).then().statusCode(400).extract().path("__type");
+        return sfn("GetExecutionHistory", request).then().statusCode(400).extract().path("__type");
     }
 
     private static List<Long> ids(Response page) {
         return page.jsonPath().getList("events.id", Long.class);
-    }
-
-    private static Response call(String action, Map<String, ?> body) {
-        return given()
-                .header("X-Amz-Target", "AWSStepFunctions." + action)
-                .contentType(CONTENT_TYPE)
-                .body(body)
-                .post("/");
     }
 }
