@@ -147,29 +147,14 @@ public class ServiceCatalogJsonHandler {
     }
 
     private Response listPortfolios(JsonNode request, String region, String accountId) {
-        int pageSize = 100;
-        JsonNode size = request.get("PageSize");
-        if (size != null && !size.isNull()) {
-            if (!size.isIntegralNumber() || !size.canConvertToInt()) {
-                throw new AwsException("InvalidParametersException", "PageSize must be an integer.", 400);
-            }
-            pageSize = size.intValue();
-            if (pageSize < 0 || pageSize > 100) {
-                throw new AwsException("InvalidParametersException", "PageSize must be between 0 and 100.", 400);
-            }
+        Integer pageSize = Pagination.parseMaxResults(request, "PageSize", "InvalidParametersException");
+        if (pageSize != null && pageSize == 0) {
+            pageSize = null;
         }
-        JsonNode token = request.get("PageToken");
-        String pageToken = null;
-        if (token != null && !token.isNull()) {
-            if (!token.isTextual() || token.textValue().length() > 2024) {
-                throw new AwsException("InvalidParametersException", "PageToken must be a string of at most 2024 characters.", 400);
-            }
-            pageToken = token.textValue();
-        }
+        String pageToken = Pagination.parseNextToken(request, "PageToken", "InvalidParametersException");
         PaginatedResult<ObjectNode> page = Pagination.paginate(service.listPortfolios(region, accountId),
-                item -> text(item, "Id"), pageSize == 0 ? 100 : pageSize, pageToken,
-                "ListPortfolios:" + accountId + ":" + region,
-                invalid -> new AwsException("InvalidParametersException", "Invalid PageToken.", 400));
+                item -> text(item, "Id"), pageSize, pageToken, 100, 100, 2024, "InvalidParametersException",
+                "ListPortfolios:" + accountId + ":" + region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode details = response.putArray("PortfolioDetails");
         page.items().forEach(details::add);
