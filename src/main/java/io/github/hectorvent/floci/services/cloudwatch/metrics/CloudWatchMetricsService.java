@@ -386,7 +386,10 @@ public class CloudWatchMetricsService {
             alarm.setStateReason(previous.getStateReason());
             alarm.setStateReasonData(previous.getStateReasonData());
             alarm.setStateUpdatedTimestamp(previous.getStateUpdatedTimestamp());
+            alarm.setStateTransitionedTimestamp(previous.getStateTransitionedTimestamp());
             alarm.setTags(new HashMap<>(previous.getTags()));
+        } else {
+            alarm.setStateTransitionedTimestamp(alarm.getStateUpdatedTimestamp());
         }
         if (alarm.getAlarmArn() == null) {
             alarm.setAlarmArn(regionResolver.buildArn("cloudwatch", region, "alarm:" + name));
@@ -497,6 +500,7 @@ public class CloudWatchMetricsService {
                     alarm.setStateReason("AlarmRule evaluated to " + state);
                     alarm.setStateReasonData(null);
                     alarm.setStateUpdatedTimestamp(Instant.now().getEpochSecond());
+                    alarm.setStateTransitionedTimestamp(alarm.getStateUpdatedTimestamp());
                     alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
                     changed.add(alarm.getAlarmName());
                     changed.add(alarm.getAlarmArn());
@@ -554,7 +558,7 @@ public class CloudWatchMetricsService {
     }
 
     public void setAlarmState(String alarmName, String stateValue, String stateReason, String stateReasonData, String region) {
-        List<String> states = List.of("OK", "ALARM", "INSUFFICIENT_DATA");
+        List<String> states = List.of("INSUFFICIENT_DATA", "ALARM", "OK");
         if (stateValue == null || !states.contains(stateValue)) {
             throw SmithyValidationErrors.validationError(stateValue == null ? SmithyValidationErrors.notNull("stateValue")
                     : SmithyValidationErrors.notInEnum(stateValue, "stateValue", states));
@@ -582,7 +586,14 @@ public class CloudWatchMetricsService {
             alarm.setStateValue(stateValue);
             alarm.setStateReason(stateReason);
             alarm.setStateReasonData(stateReasonData);
+            if (alarm.getStateTransitionedTimestamp() == 0) {
+                // Stored before transitions were recorded: its last state update is the best known transition.
+                alarm.setStateTransitionedTimestamp(alarm.getStateUpdatedTimestamp());
+            }
             alarm.setStateUpdatedTimestamp(Instant.now().getEpochSecond());
+            if (!stateValue.equals(oldState)) {
+                alarm.setStateTransitionedTimestamp(alarm.getStateUpdatedTimestamp());
+            }
 
             alarmStore.put(key, alarm);
             evaluateComposites(region, Set.of(alarmName), null);
