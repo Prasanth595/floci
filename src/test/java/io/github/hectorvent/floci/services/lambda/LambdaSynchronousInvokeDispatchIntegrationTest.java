@@ -5,8 +5,10 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.FourWorkerThreadsProfile;
+import io.github.hectorvent.floci.testing.HeldWorkerProbes;
+import io.github.hectorvent.floci.testing.HeldWorkerProbes.Probe;
+import io.github.hectorvent.floci.testing.HeldWorkerProbes.Scope;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -28,7 +30,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static io.github.hectorvent.floci.testing.HeldWorkerProbes.SCOPES;
+import static io.github.hectorvent.floci.testing.HeldWorkerProbes.signed;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -47,13 +50,6 @@ import static org.mockito.Mockito.when;
 @QuarkusTest
 @TestProfile(FourWorkerThreadsProfile.class)
 class LambdaSynchronousInvokeDispatchIntegrationTest {
-
-    /** One held invocation per worker, each in its own account and Region. */
-    private static final List<Scope> SCOPES = List.of(
-            new Scope("111122223333", "us-east-1"),
-            new Scope("111122223333", "us-west-2"),
-            new Scope("444455556666", "us-east-1"),
-            new Scope("444455556666", "us-west-2"));
 
     @TestHTTPResource("/")
     URI endpoint;
@@ -74,9 +70,8 @@ class LambdaSynchronousInvokeDispatchIntegrationTest {
         CountDownLatch invoking = new CountDownLatch(SCOPES.size());
         Map<String, Held> held = new ConcurrentHashMap<>();
         Map<String, CompletableFuture<InvokeResult>> releases = new ConcurrentHashMap<>();
-        assertEquals(FourWorkerThreadsProfile.WORKER_THREADS, SCOPES.size());
         for (Scope scope : SCOPES) {
-            releases.put(scope.target(invoke), new CompletableFuture<>());
+            releases.put(target(scope, invoke), new CompletableFuture<>());
         }
         // An unknown URL id gets null, which the controller answers with a 404 the await below reports.
         when(lambdaService.getTargetByUrlId(anyString())).thenAnswer(call -> SCOPES.stream()
@@ -96,7 +91,7 @@ class LambdaSynchronousInvokeDispatchIntegrationTest {
             try {
                 for (Scope scope : SCOPES) {
                     String path = invoke
-                            ? "2015-03-31/functions/" + scope.functionName() + "/invocations"
+                            ? "2015-03-31/functions/" + functionName(scope) + "/invocations"
                             : "lambda-url/" + scope.identity() + "/check";
                     invocations.add(client.sendAsync(signed(endpoint.resolve(path), scope, "lambda")
                             .header("Content-Type", "application/json")
@@ -107,37 +102,23 @@ class LambdaSynchronousInvokeDispatchIntegrationTest {
                         () -> "every invocation reaches LambdaService; answered without it: " + answered(invocations));
                 assertEquals(releases.keySet(), held.keySet(), "each function is invoked once, by its own target");
                 for (Scope scope : SCOPES) {
-                    Held invocation = held.get(scope.target(invoke));
+                    Held invocation = held.get(target(scope, invoke));
                     assertEquals(InvocationType.RequestResponse, invocation.type());
                     assertEquals(scope, invocation.scope(), "an invocation runs in the account and Region of its function");
                 }
 
                 // The health check and SSM need a worker; DynamoDB and EC2 run on virtual threads.
-                HttpResponse<String> health = served(client.sendAsync(
-                        HttpRequest.newBuilder(endpoint.resolve("health")).GET().build(),
-                        HttpResponse.BodyHandlers.ofString()));
-                assertEquals(200, health.statusCode());
-                assertEquals("community", mapper.readTree(health.body()).path("edition").asText());
-                HttpResponse<String> parameters = served(client.sendAsync(signed(endpoint, SCOPES.getFirst(), "ssm")
-                        .header("Content-Type", "application/x-amz-json-1.1")
-                        .header("X-Amz-Target", "AmazonSSM.DescribeParameters")
-                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
-                        .build(), HttpResponse.BodyHandlers.ofString()));
-                assertEquals(200, parameters.statusCode());
-                assertTrue(mapper.readTree(parameters.body()).path("Parameters").isArray());
-                HttpResponse<String> tables = served(client.sendAsync(signed(endpoint, SCOPES.getFirst(), "dynamodb")
-                        .header("Content-Type", "application/x-amz-json-1.0")
-                        .header("X-Amz-Target", "DynamoDB_20120810.ListTables")
-                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
-                        .build(), HttpResponse.BodyHandlers.ofString()));
-                assertEquals(200, tables.statusCode());
-                assertTrue(mapper.readTree(tables.body()).path("TableNames").isArray());
-                HttpResponse<String> regions = served(client.sendAsync(signed(endpoint, SCOPES.getFirst(), "ec2")
-                        .header("Content-Type", "application/x-www-form-urlencoded")
-                        .POST(HttpRequest.BodyPublishers.ofString("Action=DescribeRegions&Version=2016-11-15"))
-                        .build(), HttpResponse.BodyHandlers.ofString()));
-                assertEquals(200, regions.statusCode());
-                assertTrue(regions.body().contains("<DescribeRegionsResponse"));
+                List<Probe> probes = new ArrayList<>(HeldWorkerProbes.sharedProbes(client, endpoint));
+                probes.add(HeldWorkerProbes.probe("DynamoDB ListTables", client,
+                        signed(endpoint, SCOPES.getFirst(), "dynamodb")
+                                .header("Content-Type", "application/x-amz-json-1.0")
+                                .header("X-Amz-Target", "DynamoDB_20120810.ListTables")
+                                .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                                .build(), tables -> {
+                                    assertEquals(200, tables.statusCode());
+                                    assertTrue(mapper.readTree(tables.body()).path("TableNames").isArray());
+                                }));
+                HeldWorkerProbes.assertServed(probes);
                 for (CompletableFuture<HttpResponse<String>> invocation : invocations) {
                     assertFalse(invocation.isDone(), "the invocations are still waiting for their functions");
                 }
@@ -147,7 +128,7 @@ class LambdaSynchronousInvokeDispatchIntegrationTest {
                     InvokeResult result = new InvokeResult(200, null, ("{\"statusCode\":201,\"body\":\""
                             + scope.identity() + "\"}").getBytes(StandardCharsets.UTF_8), null, "req-" + i);
                     result.setExecutedVersion("1");
-                    releases.get(scope.target(invoke)).complete(result);
+                    releases.get(target(scope, invoke)).complete(result);
                     HttpResponse<String> response = invocations.get(i).get(10, TimeUnit.SECONDS);
                     if (invoke) {
                         assertEquals(200, response.statusCode());
@@ -178,8 +159,8 @@ class LambdaSynchronousInvokeDispatchIntegrationTest {
 
     private static LambdaFunction function(Scope scope) {
         LambdaFunction function = new LambdaFunction();
-        function.setFunctionName(scope.functionName());
-        function.setFunctionArn(scope.functionArn());
+        function.setFunctionName(functionName(scope));
+        function.setFunctionArn(functionArn(scope));
         function.setAccountId(scope.account());
         return function;
     }
@@ -196,37 +177,20 @@ class LambdaSynchronousInvokeDispatchIntegrationTest {
         return answers;
     }
 
-    private static HttpRequest.Builder signed(URI uri, Scope scope, String service) {
-        return HttpRequest.newBuilder(uri)
-                .header("Authorization", EnforcementFixtures.auth(scope.account(), scope.region(), service));
-    }
-
-    /** Fails when a request is not answered in five seconds, which is what a held worker pool causes. */
-    private static <T> HttpResponse<T> served(CompletableFuture<HttpResponse<T>> request) {
-        return assertDoesNotThrow(() -> request.get(5, TimeUnit.SECONDS),
-                "a request is answered while the invocations wait");
-    }
-
     /** What a held invocation saw: how it was invoked and the account and Region it ran in. */
     private record Held(InvocationType type, Scope scope) {
     }
 
-    private record Scope(String account, String region) {
-        String identity() {
-            return account + "-" + region;
-        }
+    private static String functionName(Scope scope) {
+        return "held-" + scope.identity();
+    }
 
-        String functionName() {
-            return "held-" + identity();
-        }
+    private static String functionArn(Scope scope) {
+        return "arn:aws:lambda:" + scope.region() + ":" + scope.account() + ":function:" + functionName(scope);
+    }
 
-        String functionArn() {
-            return "arn:aws:lambda:" + region + ":" + account + ":function:" + functionName();
-        }
-
-        /** What LambdaService receives: the name from Invoke, the ARN from a function URL. */
-        String target(boolean invoke) {
-            return invoke ? functionName() : functionArn();
-        }
+    /** What LambdaService receives: the name from Invoke, the ARN from a function URL. */
+    private static String target(Scope scope, boolean invoke) {
+        return invoke ? functionName(scope) : functionArn(scope);
     }
 }

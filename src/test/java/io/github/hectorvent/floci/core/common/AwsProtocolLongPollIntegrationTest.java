@@ -4,8 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.github.hectorvent.floci.services.sqs.SqsService;
-import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.FourWorkerThreadsProfile;
+import io.github.hectorvent.floci.testing.HeldWorkerProbes;
+import io.github.hectorvent.floci.testing.HeldWorkerProbes.Probe;
+import io.github.hectorvent.floci.testing.HeldWorkerProbes.Scope;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -31,7 +33,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static io.github.hectorvent.floci.testing.HeldWorkerProbes.SCOPES;
+import static io.github.hectorvent.floci.testing.HeldWorkerProbes.served;
+import static io.github.hectorvent.floci.testing.HeldWorkerProbes.signed;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -54,12 +58,6 @@ class AwsProtocolLongPollIntegrationTest {
     private static final String JSON_1_0 = "application/x-amz-json-1.0";
     private static final String CBOR_1_1 = "application/x-amz-cbor-1.1";
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
-    /** One waiting receive per worker, each in its own account and Region. */
-    private static final List<Scope> SCOPES = List.of(
-            new Scope("111122223333", "us-east-1"),
-            new Scope("111122223333", "us-west-2"),
-            new Scope("444455556666", "us-east-1"),
-            new Scope("444455556666", "us-west-2"));
 
     @TestHTTPResource("/")
     URI endpoint;
@@ -80,7 +78,6 @@ class AwsProtocolLongPollIntegrationTest {
         Map<Scope, String> queues = new LinkedHashMap<>();
         Map<String, Scope> receiveScopes = new ConcurrentHashMap<>();
         CountDownLatch receiving = new CountDownLatch(SCOPES.size());
-        assertEquals(FourWorkerThreadsProfile.WORKER_THREADS, SCOPES.size());
         try (HttpClient client = HttpClient.newHttpClient()) {
             try {
                 for (Scope scope : SCOPES) {
@@ -109,35 +106,22 @@ class AwsProtocolLongPollIntegrationTest {
                             "a receive runs in the account and Region it was signed for");
                 }
 
+                List<Probe> probes = new ArrayList<>(HeldWorkerProbes.sharedProbes(client, endpoint));
                 for (Scope scope : SCOPES) {
-                    HttpResponse<byte[]> listed = served(sqs(client, scope, protocol, "ListQueues",
-                            Map.of("QueueNamePrefix", prefix)));
-                    assertEquals(200, listed.statusCode());
-                    assertEquals(List.of(queues.get(scope)), queueUrls(listed, protocol));
-                    assertProtocolHeaders(listed, protocol);
+                    probes.add(new Probe("ListQueues as " + scope.identity(), sqs(client, scope, protocol,
+                            "ListQueues", Map.of("QueueNamePrefix", prefix)), listed -> {
+                                assertEquals(200, listed.statusCode());
+                                assertEquals(List.of(queues.get(scope)), queueUrls(listed, protocol));
+                                assertProtocolHeaders(listed, protocol);
+                            }));
                 }
-                HttpResponse<byte[]> invalid = served(sqs(client, SCOPES.getFirst(), protocol, "ReceiveMessage",
-                        Map.of("QueueUrl", queues.get(SCOPES.getFirst()), "WaitTimeSeconds", 21)));
-                assertEquals(400, invalid.statusCode());
-                assertEquals("InvalidParameterValue", errorCode(invalid, protocol));
-                HttpResponse<byte[]> regions = served(client.sendAsync(signed(endpoint, SCOPES.getFirst(), "ec2")
-                        .header("Content-Type", "application/x-www-form-urlencoded")
-                        .POST(HttpRequest.BodyPublishers.ofString("Action=DescribeRegions&Version=2016-11-15"))
-                        .build(), HttpResponse.BodyHandlers.ofByteArray()));
-                assertEquals(200, regions.statusCode());
-                assertTrue(new String(regions.body(), StandardCharsets.UTF_8).contains("<DescribeRegionsResponse"));
-                HttpResponse<byte[]> health = served(client.sendAsync(
-                        HttpRequest.newBuilder(endpoint.resolve("health")).GET().build(),
-                        HttpResponse.BodyHandlers.ofByteArray()));
-                assertEquals(200, health.statusCode());
-                assertEquals("community", mapper.readTree(health.body()).path("edition").asText());
-                HttpResponse<byte[]> parameters = served(client.sendAsync(signed(endpoint, SCOPES.getFirst(), "ssm")
-                        .header("Content-Type", "application/x-amz-json-1.1")
-                        .header("X-Amz-Target", "AmazonSSM.DescribeParameters")
-                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
-                        .build(), HttpResponse.BodyHandlers.ofByteArray()));
-                assertEquals(200, parameters.statusCode());
-                assertTrue(mapper.readTree(parameters.body()).path("Parameters").isArray());
+                probes.add(new Probe("ReceiveMessage with WaitTimeSeconds 21", sqs(client, SCOPES.getFirst(), protocol,
+                        "ReceiveMessage", Map.of("QueueUrl", queues.get(SCOPES.getFirst()), "WaitTimeSeconds", 21)),
+                        invalid -> {
+                            assertEquals(400, invalid.statusCode());
+                            assertEquals("InvalidParameterValue", errorCode(invalid, protocol));
+                        }));
+                HeldWorkerProbes.assertServed(probes);
                 for (CompletableFuture<HttpResponse<byte[]>> receive : receives) {
                     assertFalse(receive.isDone(), "the receives are still waiting for a message");
                 }
@@ -196,11 +180,6 @@ class AwsProtocolLongPollIntegrationTest {
                 .build(), HttpResponse.BodyHandlers.ofByteArray());
     }
 
-    private static HttpRequest.Builder signed(URI uri, Scope scope, String service) {
-        return HttpRequest.newBuilder(uri)
-                .header("Authorization", EnforcementFixtures.auth(scope.account(), scope.region(), service));
-    }
-
     private List<String> queueUrls(HttpResponse<byte[]> response, String protocol) throws Exception {
         if (protocol.startsWith("query")) {
             return xml(response).getList("ListQueuesResponse.ListQueuesResult.QueueUrl", String.class);
@@ -242,17 +221,5 @@ class AwsProtocolLongPollIntegrationTest {
 
     private static XmlPath xml(HttpResponse<byte[]> response) {
         return new XmlPath(new String(response.body(), StandardCharsets.UTF_8));
-    }
-
-    /** Fails when a request is not answered in five seconds, which is what a held worker pool causes. */
-    private static <T> HttpResponse<T> served(CompletableFuture<HttpResponse<T>> request) {
-        return assertDoesNotThrow(() -> request.get(5, TimeUnit.SECONDS),
-                "a request is answered while the receives wait");
-    }
-
-    private record Scope(String account, String region) {
-        String identity() {
-            return account + "-" + region;
-        }
     }
 }
