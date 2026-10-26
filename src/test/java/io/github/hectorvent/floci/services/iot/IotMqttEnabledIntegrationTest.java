@@ -3,11 +3,11 @@ package io.github.hectorvent.floci.services.iot;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.testing.IotDataRequests;
 import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.RestAssured;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
@@ -20,18 +20,13 @@ import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.SdkBytes;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iotdataplane.IotDataPlaneClient;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -215,7 +210,8 @@ class IotMqttEnabledIntegrationTest {
         String queueUrl = createQueue("dataplane-rule-" + System.nanoTime());
         String rule = "dataPlaneRule" + System.nanoTime();
         createSqsRule(rule, "SELECT * FROM '" + prefix + "/b'", queueUrl);
-        try (MqttTestClient subscriber = connectMqtt("dataplane-sub"); IotDataPlaneClient iotData = iotData()) {
+        try (MqttTestClient subscriber = connectMqtt("dataplane-sub");
+             IotDataPlaneClient iotData = IotDataRequests.iotDataClient("test")) {
             subscriber.subscribe(prefix + "/#", 1);
 
             iotData.publish(request -> request.topic(prefix + "/b").qos(1).payload(SdkBytes.fromUtf8String("{\"cmd\":\"on\"}")));
@@ -241,7 +237,8 @@ class IotMqttEnabledIntegrationTest {
     void retainedDataPlanePublishReachesACurrentAndALaterSubscriber() throws Exception {
         String prefix = "dataplane/" + System.nanoTime();
         String topic = prefix + "/config";
-        try (MqttTestClient current = connectMqtt("dataplane-current"); IotDataPlaneClient iotData = iotData()) {
+        try (MqttTestClient current = connectMqtt("dataplane-current");
+             IotDataPlaneClient iotData = IotDataRequests.iotDataClient("test")) {
             current.subscribe(prefix + "/#", 0);
 
             iotData.publish(request -> request.topic(topic).qos(1).retain(true).payload(SdkBytes.fromUtf8String("config-v1")));
@@ -896,15 +893,6 @@ class IotMqttEnabledIntegrationTest {
 
     private Mqtt5TestClient connectMqtt5(String clientId) throws org.eclipse.paho.mqttv5.common.MqttException {
         return Mqtt5TestClient.connect(uniqueClientId(clientId));
-    }
-
-    private static IotDataPlaneClient iotData() {
-        return IotDataPlaneClient.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
     }
 
     private void removeShadowAfterTheTest(String thingName) {
