@@ -349,6 +349,23 @@ class StsQueryHandlerTest {
     }
 
     @Test
+    void assumeRoleRejectsCaseOnlyDuplicateSessionTagKeys() {
+        StsQueryHandler handler = newHandler();
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("Tags.member.1.Key", "team");
+        params.putSingle("Tags.member.1.Value", "blue");
+        params.putSingle("Tags.member.2.Key", "TEAM");
+        params.putSingle("Tags.member.2.Value", "red");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ValidationError</Code>"));
+    }
+
+    @Test
     void assumeRoleRejectsATransitiveKeyTheRequestDoesNotPass() {
         StsQueryHandler handler = newHandler();
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();

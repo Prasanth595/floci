@@ -41,6 +41,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -1302,7 +1303,11 @@ public class StsQueryHandler {
                 return AwsQueryResponse.error("ValidationError", "Tag keys must not be empty.",
                         AwsNamespaces.STS, 400);
             }
-            if (tags.containsKey(key)) {
+            // The condition context lowercases tag keys, so two keys that differ only in case
+            // would collapse into one and silently drop a value.
+            String normalizedKey = key.toLowerCase(Locale.ROOT);
+            if (tags.keySet().stream()
+                    .anyMatch(existing -> existing.toLowerCase(Locale.ROOT).equals(normalizedKey))) {
                 return AwsQueryResponse.error("ValidationError", "Duplicate tag key: " + key + ".",
                         AwsNamespaces.STS, 400);
             }

@@ -46,6 +46,18 @@ class SqsSnsResourceTagEnforcementIntegrationTest {
     }
 
     @Test
+    void aQueueTagIsReadFromTheQueuesAccountNotTheCallers() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String taggedQueue = createQueue("tags-cross-tagged-" + suffix);
+        String untaggedQueue = createQueue("tags-cross-untagged-" + suffix);
+        tagQueue(taggedQueue, "team", "blue");
+        String accessKey = createUserWithSqsTagPolicy("CrossAccountSqsUser" + suffix);
+
+        sendMessage(accessKey, taggedQueue, "allowed", 200);
+        sendMessage(accessKey, untaggedQueue, "denied", 403);
+    }
+
+    @Test
     void aTaggedTopicAllowsPublishAndAnUntaggedTopicDeniesIt() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String taggedTopic = createTopic("tags-tagged-" + suffix);
@@ -193,6 +205,42 @@ class SqsSnsResourceTagEnforcementIntegrationTest {
                 .post("/")
         .then()
                 .statusCode(200);
+    }
+
+    private static String createUserWithSqsTagPolicy(String userName) {
+        given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserName", userName)
+                .header("Authorization", auth(CALLER_ACCOUNT_ID, "iam"))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+        String accessKey = given()
+                .formParam("Action", "CreateAccessKey")
+                .formParam("UserName", userName)
+                .header("Authorization", auth(CALLER_ACCOUNT_ID, "iam"))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
+        given()
+                .formParam("Action", "PutUserPolicy")
+                .formParam("UserName", userName)
+                .formParam("PolicyName", "ResourceTagPolicy")
+                .formParam("PolicyDocument", """
+                    {"Version":"2012-10-17","Statement":[
+                      {"Effect":"Allow","Action":"sqs:SendMessage","Resource":"*",
+                       "Condition":{"StringEquals":{"aws:ResourceTag/team":"blue"}}}]}
+                    """)
+                .header("Authorization", auth(CALLER_ACCOUNT_ID, "iam"))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+        return accessKey;
     }
 
     private static String assumeRole(String roleName) {

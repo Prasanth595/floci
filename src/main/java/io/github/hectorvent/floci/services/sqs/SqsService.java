@@ -2169,9 +2169,14 @@ public class SqsService implements Resettable, ResourceProvider {
         return arr;
     }
 
+    /**
+     * The queue's tags, resolved from the account its URL names, as the queue's message
+     * operations resolve the queue. A caller in another account therefore reads the owning
+     * account's tags, not its own.
+     */
     public Map<String, String> listQueueTags(String queueUrl, String region) {
         String storageKey = regionKey(region, queueUrl);
-        Queue queue = queueStore.get(storageKey)
+        Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
         return new LinkedHashMap<>(queue.getTags());
