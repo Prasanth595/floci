@@ -58,16 +58,16 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
 
     private final Ec2Service ec2Service;
     private final ElbClassicHealthChecker healthChecker;
-    private final StorageFactory storageFactory;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final IamService iamService;
     private final CertificateReferenceResolver certificates;
 
     // region → load balancer name → record, in the calling account
-    private Map<String, Map<String, ClassicLoadBalancer>> loadBalancers = new ConcurrentHashMap<>();
-    // The store behind loadBalancers, for the startup passes that must reach every account
-    private AccountAwareStorageBackend<Map<String, ClassicLoadBalancer>> loadBalancerStore;
+    private final Map<String, Map<String, ClassicLoadBalancer>> loadBalancers;
+    // The store behind loadBalancers, for the startup passes that must reach every account; null
+    // without a StorageFactory, when loadBalancers is a plain in-memory map
+    private final AccountAwareStorageBackend<Map<String, ClassicLoadBalancer>> loadBalancerStore;
 
     /** Serializes listener writes against each other; see {@link #createLoadBalancerListeners}. */
     private final Object listenerLock = new Object();
@@ -97,21 +97,24 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
                              AcmService acmService) {
         this.ec2Service = ec2Service;
         this.healthChecker = healthChecker;
-        this.storageFactory = storageFactory;
         this.config = config;
         this.regionResolver = regionResolver;
         this.iamService = iamService;
         this.certificates = new CertificateReferenceResolver(iamService, acmService);
+        this.loadBalancerStore = storageFactory != null
+                ? storageFactory.create("elb", "elb-load-balancers.json",
+                        new TypeReference<Map<String, Map<String, ClassicLoadBalancer>>>() {})
+                : null;
+        this.loadBalancers = loadBalancerStore != null
+                ? new StorageBackedMap<>(loadBalancerStore)
+                : new ConcurrentHashMap<>();
     }
 
     @PostConstruct
     void initializeStorage() {
-        if (storageFactory == null) {
+        if (loadBalancerStore == null) {
             return;
         }
-        this.loadBalancerStore = storageFactory.create("elb", "elb-load-balancers.json",
-                new TypeReference<Map<String, Map<String, ClassicLoadBalancer>>>() {});
-        this.loadBalancers = new StorageBackedMap<>(loadBalancerStore);
         // Region maps read back from disk are plain maps; the name check in createLoadBalancer and
         // the certificate scan rely on concurrent ones, in every account.
         for (StoredRegion stored : storedRegions()) {
