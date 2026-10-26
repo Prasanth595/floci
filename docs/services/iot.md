@@ -41,7 +41,7 @@ Supported MVP 2 behavior:
 Current MVP 2 limitations:
 
 - `DeleteConnection.preventWillMessage` is accepted for SDK request compatibility, but the embedded broker does not expose selective Last Will suppression.
-- HTTP IoT Data `Publish` reaches MQTT subscribers as an MQTT publish does, and refuses a `qos` other than 0 or 1 with AWS's `InvalidRequestException`. Its MQTT 5 metadata (`contentType`, `correlationData`, `messageExpiry`, `payloadFormatIndicator`, `responseTopic`, `userProperties`) is accepted but not forwarded.
+- HTTP IoT Data `Publish` reaches MQTT subscribers as an MQTT publish does, whatever account and region they connected in: the broker has neither, where AWS runs one per account and region. It refuses a `qos` other than 0 or 1 with AWS's `InvalidRequestException`. Its MQTT 5 metadata (`contentType`, `correlationData`, `messageExpiry`, `payloadFormatIndicator`, `responseTopic`, `userProperties`) is accepted but not forwarded.
 - A retained message is also sent on a subscription to a wildcard filter that matches its topic. AWS sends it only to a subscription naming its exact topic.
 - A QoS 1 copy sent to a subscriber is never retried, and no limit applies to how many stay unacknowledged. AWS holds further copies once a client has 100 unacknowledged and retries them for up to an hour (16 minutes for MQTT 5).
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.

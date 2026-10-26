@@ -943,24 +943,22 @@ class IotMqttBrokerServiceTest {
         }
     }
 
-    /** Copies sent to other clients do not use up the packet identifiers of a client whose QoS 1 copy is unacknowledged. */
+    /** QoS 1 copies sent to other clients do not use up the packet identifiers of a client whose QoS 1 copy is unacknowledged. */
     @Test
     void anotherClientsTrafficDoesNotRecycleAPacketIdentifierStillInFlight() throws Exception {
         startBrokerRecordingPublishes();
-        MqttClient busy = subscribedPlain("busy", "busy/#", new LinkedBlockingQueue<>());
-        try (Socket socket = rawConnect("slow")) {
+        try (Socket busy = rawConnect("busy"); Socket socket = rawConnect("slow")) {
+            rawSubscribeQos1(busy, "busy/#");
             DataInputStream in = rawSubscribeQos1(socket, "slow/#");
             broker.publish("slow/first", new byte[] {1}, 1);
             int first = readQos1PublishPacketId(in);
 
             for (int i = 0; i < 65_534; i++) {
-                broker.publish("busy/x", new byte[] {1}, 0);
+                broker.publish("busy/x", new byte[] {1}, 1);
             }
             broker.publish("slow/second", new byte[] {2}, 1);
 
             assertNotEquals(first, readQos1PublishPacketId(in), "the first copy was never acknowledged");
-        } finally {
-            disconnect(busy);
         }
     }
 
