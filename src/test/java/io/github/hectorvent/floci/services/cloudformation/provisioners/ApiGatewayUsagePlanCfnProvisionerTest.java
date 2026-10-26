@@ -724,6 +724,23 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
                 String.valueOf(reason));
     }
 
+    @Test
+    void aRestoreRethrowingTheUpdateFailureIsNotSuppressedInItself() {
+        storeHolds(originalPlan());
+        RuntimeException failure = new IllegalStateException("store write failed");
+        // The update and its restore both fail to save the plan with the same exception object.
+        doThrow(failure).when(apiGateway).replaceUsagePlanTags(eq(REGION), eq("plan-1"), anyMap());
+        doThrow(failure).when(apiGateway).restoreUsagePlan(eq(REGION), eq("plan-1"), any(), any(), any(), anyMap());
+        StackResource r = resource(PLAN, "Plan", "plan-1");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> provisioner.provision(r, changedPlanProps(), ctx("plan-1")));
+
+        assertSame(failure, thrown);
+        assertEquals(0, thrown.getSuppressed().length);
+        assertTrue(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
     // The snapshot is the plan read under the service's patch lock before the first write, not the
     // provisioner's earlier lookup: here a patch renamed the plan between the two, and the rollback
     // puts back the revision the locked read saw.
