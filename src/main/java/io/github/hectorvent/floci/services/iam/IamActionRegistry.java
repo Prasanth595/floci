@@ -15,6 +15,7 @@ import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -48,6 +49,28 @@ public class IamActionRegistry {
     }
 
     private static final List<ActionRule> RULES = List.of(
+        // ── S3 Control ────────────────────────────────────────────────────────
+        // S3 Control clients sign with the s3 scope (botocore's s3control model
+        // declares signingName "s3") and its operations are s3: actions, per the
+        // Service Authorization Reference's Amazon S3 operations table and the
+        // S3 User Guide's account operations. These rules come before the data-plane
+        // object rules, which would otherwise read /v20180820/... as a bucket
+        // named v20180820: ListTagsForResource, TagResource and UntagResource name
+        // the bucket or access point they act on; ListAccessPoints and the
+        // account-level Block Public Access configure the account, where the User
+        // Guide requires PutAccountPublicAccessBlock or GetAccountPublicAccessBlock
+        // (a delete needs the same action as the write it undoes).
+        rule("s3", "GET",    "^/v20180820/tags/.+",               "s3:ListTagsForResource"),
+        rule("s3", "POST",   "^/v20180820/tags/.+",               "s3:TagResource"),
+        rule("s3", "DELETE", "^/v20180820/tags/.+",               "s3:UntagResource"),
+        rule("s3", "GET",    "^/v20180820/accesspoint/?$",        "s3:ListAccessPoints"),
+        rule("s3", "PUT",    "^/v20180820/configuration/publicAccessBlock/?$",
+                "s3:PutAccountPublicAccessBlock"),
+        rule("s3", "GET",    "^/v20180820/configuration/publicAccessBlock/?$",
+                "s3:GetAccountPublicAccessBlock"),
+        rule("s3", "DELETE", "^/v20180820/configuration/publicAccessBlock/?$",
+                "s3:PutAccountPublicAccessBlock"),
+
         // ── S3 ─────────────────────────────────────────────────────────────────
         rule("s3", "GET",    "^/?$",                              "s3:ListAllMyBuckets"),
         rule("s3", "PUT",    "^/[^/]+/?$",                       "s3:CreateBucket"),
@@ -516,6 +539,26 @@ public class IamActionRegistry {
                                    String queryValue, String action) {
         return new ActionRule(service, method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), queryParameter,
                 queryValue, action);
+    }
+
+    /**
+     * The actions the S3 Control routes under {@code /v20180820} resolve to, as the rules above
+     * map them. They are {@code s3:} actions, because S3 Control clients sign with the s3 scope
+     * and the Service Authorization Reference lists the operations under Amazon S3, but a
+     * request one of them names is S3 Control's, and answers it differently from the data plane:
+     * S3 Control errors wrap in an {@code <ErrorResponse>} envelope, where S3's are bare.
+     */
+    static final Set<String> S3_CONTROL_ACTIONS = Set.of(
+            "s3:ListTagsForResource",
+            "s3:TagResource",
+            "s3:UntagResource",
+            "s3:ListAccessPoints",
+            "s3:PutAccountPublicAccessBlock",
+            "s3:GetAccountPublicAccessBlock");
+
+    /** Whether {@code action} is one of the actions an S3 Control route resolves to. */
+    public static boolean isS3ControlAction(String action) {
+        return action != null && S3_CONTROL_ACTIONS.contains(action);
     }
 
     /**

@@ -569,6 +569,38 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void s3ControlRoutesResolveToTheActionsAwsChecks() {
+        String bucketArn = "arn:aws:s3:::repro-bucket";
+        assertEquals("s3:ListTagsForResource", s3Action("GET", "/v20180820/tags/" + bucketArn));
+        assertEquals("s3:TagResource", s3Action("POST", "/v20180820/tags/" + bucketArn));
+        assertEquals("s3:UntagResource", s3Action("DELETE", "/v20180820/tags/" + bucketArn, "tagKeys=Env"));
+        // The Go SDK v2, and so Terraform's provider, percent-encodes the ARN's colons and slashes.
+        String encoded = "arn%3Aaws%3As3%3Aus-east-1%3A000000000000%3Abucket%2Frepro-bucket";
+        assertEquals("s3:ListTagsForResource", s3Action("GET", "/v20180820/tags/" + encoded));
+        assertEquals("s3:TagResource", s3Action("POST", "/v20180820/tags/" + encoded));
+        assertEquals("s3:UntagResource", s3Action("DELETE", "/v20180820/tags/" + encoded, "tagKeys=Env"));
+        assertEquals("s3:ListAccessPoints", s3Action("GET", "/v20180820/accesspoint", "bucket=b"));
+        // The account-level Block Public Access: the User Guide requires PutAccountPublicAccessBlock
+        // or GetAccountPublicAccessBlock, and a delete the same action as the write it undoes.
+        assertEquals("s3:PutAccountPublicAccessBlock",
+                s3Action("PUT", "/v20180820/configuration/publicAccessBlock"));
+        assertEquals("s3:GetAccountPublicAccessBlock",
+                s3Action("GET", "/v20180820/configuration/publicAccessBlock"));
+        assertEquals("s3:PutAccountPublicAccessBlock",
+                s3Action("DELETE", "/v20180820/configuration/publicAccessBlock"));
+    }
+
+    @Test
+    void s3ControlRulesClaimOnlyTheRoutesTheControllerServes() {
+        // PUT is no S3 Control tagging route, so a bucket actually named v20180820
+        // keeps its data-plane actions: the resource stays its own bucket and key.
+        assertEquals("s3:PutObject", s3Action("PUT", "/v20180820/tags/key.txt"));
+        assertEquals("s3:GetObject", s3Action("GET", "/v20180820/other/key.txt"));
+        assertEquals("s3:ListBucket", s3Action("GET", "/v20180820"));
+        assertEquals("s3:CreateBucket", s3Action("PUT", "/v20180820"));
+    }
+
+    @Test
     void s3AccelerateYieldsToSubresourcesDispatchedFirst() {
         MultivaluedMap<String, String> withRequestPayment = new MultivaluedHashMap<>();
         withRequestPayment.add("requestPayment", "");

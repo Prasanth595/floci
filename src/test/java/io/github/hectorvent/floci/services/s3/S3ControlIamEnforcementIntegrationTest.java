@@ -1,0 +1,324 @@
+package io.github.hectorvent.floci.services.s3;
+
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.quarkus.test.common.http.TestHTTPResource;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.net.URI;
+import java.util.UUID;
+
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+
+/**
+ * With {@code iam.enforcement-enabled=true}, S3 Control's routes are authorized as the {@code s3:}
+ * actions the Service Authorization Reference gives them (S3 Control clients sign with the s3
+ * scope), against the resources those routes name, not as the data-plane object operations their
+ * {@code /v20180820} paths resemble. Issue #6537: a ListTagsForResource was checked as
+ * s3:GetObject on a "bucket" named v20180820, so Terraform's AWS provider, which reads every
+ * bucket's tags through S3 Control, saw 403 under enforcement and never fell back, leaving the
+ * bucket unrefreshable.
+ *
+ * <p>The deny answer is also S3 Control's own REST-XML envelope, not S3's bare {@code <Error>}: the
+ * s3control SDK deserializers read only the {@code <ErrorResponse>} wrapper (issue #557), and the
+ * provider falls back when the message names {@code s3:ListTagsForResource}.
+ */
+@QuarkusTest
+@TestProfile(IamEnforcementProfile.class)
+class S3ControlIamEnforcementIntegrationTest {
+
+    @TestHTTPResource
+    static URI baseUri;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
+    private static final String ACCOUNT = "000000000000";
+    private static final String S3_CONTROL_ERROR_ENVELOPE =
+            "<ErrorResponse xmlns=\"http://awss3control.amazonaws.com/doc/2018-08-20/\">";
+
+    @Test
+    void listTagsForResourceIsAllowedByItsOwnActionOnTheBucket() {
+        String bucket = bucketWithTags("control-allow");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListTagsForResource","Resource":"arn:aws:s3:::%1$s"}]}"""
+                .formatted(bucket));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(200)
+                .body(containsString("<ListTagsForResourceResult"))
+                .body(containsString("<Key>Env</Key>"))
+                .body(containsString("<Value>dev</Value>"));
+    }
+
+    @Test
+    void listTagsForResourceAcceptsTheGoSdkWireFormOfTheSameArn() {
+        String bucket = bucketWithTags("control-encoded");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListTagsForResource","Resource":"arn:aws:s3:::%1$s"}]}"""
+                .formatted(bucket));
+
+        String encodedArn = "arn%3Aaws%3As3%3A%3A%3A" + bucket;
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/" + encodedArn)
+        .then()
+                .statusCode(200)
+                .body(containsString("<Key>Env</Key>"));
+    }
+
+    @Test
+    void aWildcardS3PolicyOnTheBucketAllowsListTagsForResource() {
+        String bucket = bucketWithTags("control-wildcard");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:*","Resource":["arn:aws:s3:::%1$s","arn:aws:s3:::%1$s/*"]}]}"""
+                .formatted(bucket));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(200);
+    }
+
+    /**
+     * The leak issue #6537 reports in the other direction: with the request checked as
+     * s3:GetObject, an object-read policy authorized reading a bucket's tags through the control
+     * plane. The tagging action is its own, so nothing below s3:ListTagsForResource grants it.
+     */
+    @Test
+    void anObjectReadPolicyDoesNotAuthorizeListTagsForResource() {
+        String bucket = bucketWithTags("control-no-objects");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}""");
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(403)
+                .body(containsString(S3_CONTROL_ERROR_ENVELOPE))
+                .body(containsString("<Code>AccessDenied</Code>"))
+                .body(containsString("is not authorized to perform: s3:ListTagsForResource"));
+    }
+
+    /** The data-plane tagging read is a different action from the control-plane one, as on AWS. */
+    @Test
+    void getBucketTaggingDoesNotAuthorizeListTagsForResource() {
+        String bucket = bucketWithTags("control-dataplane");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetBucketTagging","Resource":"arn:aws:s3:::%1$s"}]}"""
+                .formatted(bucket));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(403)
+                .body(containsString("is not authorized to perform: s3:ListTagsForResource"));
+    }
+
+    @Test
+    void tagResourceAndUntagResourceAreCheckedAsTheirOwnActions() {
+        String bucket = bucketWithTags("control-write");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:TagResource","s3:UntagResource","s3:ListTagsForResource"],
+                   "Resource":"arn:aws:s3:::%1$s"}]}"""
+                .formatted(bucket));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+                .contentType("application/xml")
+                .body("<Tagging><Tags><Tag><Key>Owner</Key><Value>team</Value></Tag></Tags></Tagging>")
+        .when()
+                .post("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(204);
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(200)
+                .body(containsString("<Key>Owner</Key>"));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+                .queryParam("tagKeys", "Owner")
+        .when()
+                .delete("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(204);
+    }
+
+    @Test
+    void anObjectWritePolicyDoesNotAuthorizeTagResource() {
+        String bucket = bucketWithTags("control-no-write");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}""");
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+                .contentType("application/xml")
+                .body("<Tagging><Tags><Tag><Key>Owner</Key><Value>team</Value></Tag></Tags></Tagging>")
+        .when()
+                .post("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(403)
+                .body(containsString("is not authorized to perform: s3:TagResource"));
+    }
+
+    /**
+     * The account-level Block Public Access is a security control, so the account's own actions
+     * gate it: the S3 User Guide requires s3:PutAccountPublicAccessBlock and
+     * s3:GetAccountPublicAccessBlock, and a delete the same action as the write it undoes. The
+     * bucket-level s3:PutBucketPublicAccessBlock must not reach it.
+     */
+    @Test
+    void accountPublicAccessBlockIsAuthorizedAsTheAccountActions() {
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:PutAccountPublicAccessBlock","s3:GetAccountPublicAccessBlock"],
+                   "Resource":"*"}]}""");
+        try {
+            given()
+                    .header("Authorization", auth(user, "s3"))
+                    .header("x-amz-account-id", ACCOUNT)
+                    .body("<PublicAccessBlockConfiguration><BlockPublicAcls>true</BlockPublicAcls>"
+                            + "</PublicAccessBlockConfiguration>")
+            .when()
+                    .put("/v20180820/configuration/publicAccessBlock")
+            .then()
+                    .statusCode(200);
+
+            given()
+                    .header("Authorization", auth(user, "s3"))
+                    .header("x-amz-account-id", ACCOUNT)
+            .when()
+                    .get("/v20180820/configuration/publicAccessBlock")
+            .then()
+                    .statusCode(200)
+                    .body(containsString("<BlockPublicAcls>true</BlockPublicAcls>"));
+        } finally {
+            given()
+                    .header("Authorization", auth("test", "s3"))
+                    .header("x-amz-account-id", ACCOUNT)
+            .when()
+                    .delete("/v20180820/configuration/publicAccessBlock")
+            .then()
+                    .statusCode(204);
+        }
+    }
+
+    @Test
+    void aBucketLevelPublicAccessBlockPolicyDoesNotAuthorizeTheAccountControl() {
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutBucketPublicAccessBlock","Resource":"*"}]}""");
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+                .body("<PublicAccessBlockConfiguration><BlockPublicAcls>true</BlockPublicAcls>"
+                        + "</PublicAccessBlockConfiguration>")
+        .when()
+                .put("/v20180820/configuration/publicAccessBlock")
+        .then()
+                .statusCode(403)
+                .body(containsString("is not authorized to perform: s3:PutAccountPublicAccessBlock"));
+    }
+
+    @Test
+    void listAccessPointsIsAuthorizedAsItsOwnAction() {
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListAccessPoints","Resource":"*"}]}""");
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/accesspoint")
+        .then()
+                .statusCode(200)
+                .body(containsString("<AccessPointList"));
+    }
+
+    @Test
+    void aListBucketPolicyDoesNotAuthorizeListAccessPoints() {
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:ListAllMyBuckets"],"Resource":"*"}]}""");
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/accesspoint")
+        .then()
+                .statusCode(403)
+                .body(containsString("is not authorized to perform: s3:ListAccessPoints"));
+    }
+
+    /** A bucket created by the root stand-in, tagged through the data plane, as Terraform reads it. */
+    private String bucketWithTags(String prefix) {
+        String bucket = prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
+        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
+                auth("test", "s3"), bucket));
+        given()
+                .header("Authorization", auth("test", "s3"))
+        .when()
+                .put("/" + bucket)
+        .then()
+                .statusCode(200);
+        given()
+                .header("Authorization", auth("test", "s3"))
+                .contentType("application/xml")
+                .body("<Tagging><TagSet><Tag><Key>Env</Key><Value>dev</Value></Tag></TagSet></Tagging>")
+        .when()
+                .put("/" + bucket + "?tagging")
+        .then()
+                .statusCode(204);
+        return bucket;
+    }
+
+    /** The access key of a new IAM user holding {@code policy} inline. */
+    private String userWith(String policy) {
+        String userName = "s3-control-" + UUID.randomUUID().toString().substring(0, 8);
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(cleanup,
+                baseUri.getPort(), auth("test", "iam"), userName);
+        EnforcementFixtures.putUserPolicy(baseUri.getPort(), auth("test", "iam"), userName, "p", policy);
+        return credentials.accessKeyId();
+    }
+}
