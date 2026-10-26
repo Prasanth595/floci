@@ -98,9 +98,10 @@ class AwsProtocolLongPollIntegrationTest {
                 List<CompletableFuture<HttpResponse<byte[]>>> receives = new ArrayList<>();
                 for (Scope scope : SCOPES) {
                     receives.add(sqs(client, scope, protocol, "ReceiveMessage",
-                            Map.of("QueueUrl", queues.get(scope), "WaitTimeSeconds", 20)));
+                            Map.of("QueueUrl", queues.get(scope), "WaitTimeSeconds", HeldWorkerProbes.HOLD_SECONDS)));
                 }
-                assertTrue(receiving.await(10, TimeUnit.SECONDS), "every receive reaches SqsService");
+                assertTrue(receiving.await(HeldWorkerProbes.ARRIVAL_SECONDS, TimeUnit.SECONDS),
+                        "every receive reaches SqsService");
                 for (Scope scope : SCOPES) {
                     assertEquals(scope, receiveScopes.get(queues.get(scope)),
                             "a receive runs in the account and Region it was signed for");

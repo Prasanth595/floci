@@ -25,8 +25,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * the probes sent while the requests are held.
  *
  * <p>Probes are sent together and share one deadline, {@link #PROBE_DEADLINE_SECONDS}. A held
- * request waits 20 seconds and the tests allow 10 seconds for all of them to arrive, so the probes
- * always finish while every request is still held, however slow the runner.
+ * request waits {@link #HOLD_SECONDS} and the tests allow {@link #ARRIVAL_SECONDS} for all of them to
+ * reach the service, so {@link #assertServed} fails before any held request is released.
  */
 public final class HeldWorkerProbes {
 
@@ -37,6 +37,12 @@ public final class HeldWorkerProbes {
             new Scope("444455556666", "us-east-1"),
             new Scope("444455556666", "us-west-2"));
 
+    /** How long a held request waits before it is answered on its own. */
+    public static final int HOLD_SECONDS = 20;
+
+    /** How long the tests wait for every held request to reach the service. */
+    public static final long ARRIVAL_SECONDS = 10;
+
     /** How long all probes together may take, which is what a held worker pool would exceed. */
     public static final long PROBE_DEADLINE_SECONDS = 5;
 
@@ -44,7 +50,11 @@ public final class HeldWorkerProbes {
 
     static {
         if (SCOPES.size() != FourWorkerThreadsProfile.WORKER_THREADS) {
-            throw new IllegalStateException("one scope per worker thread");
+            throw new IllegalStateException("one scope per worker thread: " + SCOPES.size() + " scopes, "
+                    + FourWorkerThreadsProfile.WORKER_THREADS + " workers");
+        }
+        if (ARRIVAL_SECONDS + PROBE_DEADLINE_SECONDS >= HOLD_SECONDS) {
+            throw new IllegalStateException("the probes must finish before a held request is released");
         }
     }
 
@@ -133,6 +143,8 @@ public final class HeldWorkerProbes {
                 probe.check().check(probe.response().join());
             } catch (AssertionError e) {
                 throw new AssertionError(probe.name() + ": " + e.getMessage(), e);
+            } catch (Exception e) {
+                fail(probe.name() + ": " + e, e);
             }
         }
     }

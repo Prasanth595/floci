@@ -98,7 +98,7 @@ class LambdaSynchronousInvokeDispatchIntegrationTest {
                             .method(invoke ? "POST" : route, HttpRequest.BodyPublishers.ofString("{}"))
                             .build(), HttpResponse.BodyHandlers.ofString()));
                 }
-                assertTrue(invoking.await(10, TimeUnit.SECONDS),
+                assertTrue(invoking.await(HeldWorkerProbes.ARRIVAL_SECONDS, TimeUnit.SECONDS),
                         () -> "every invocation reaches LambdaService; answered without it: " + answered(invocations));
                 assertEquals(releases.keySet(), held.keySet(), "each function is invoked once, by its own target");
                 for (Scope scope : SCOPES) {
@@ -154,7 +154,7 @@ class LambdaSynchronousInvokeDispatchIntegrationTest {
         invoking.countDown();
         CompletableFuture<InvokeResult> release = releases.get(target);
         return release == null ? new InvokeResult(200, null, null, null, "unexpected")
-                : release.get(20, TimeUnit.SECONDS);
+                : release.get(HeldWorkerProbes.HOLD_SECONDS, TimeUnit.SECONDS);
     }
 
     private static LambdaFunction function(Scope scope) {
