@@ -123,6 +123,104 @@ class S3ControlIamEnforcementIntegrationTest {
                 .body(containsString("is not authorized to perform: s3:ListTagsForResource"));
     }
 
+    /**
+     * A query parameter the control plane ignores must not re-point the authorization at the
+     * data-plane action it names: S3ControlController reads the bucket's tags whatever
+     * {@code ?tagging} says, so a caller holding only s3:GetObjectTagging on everything is
+     * denied, and a caller holding only the control action is allowed.
+     */
+    @Test
+    void aTaggingQueryOnTheControlRouteDoesNotRepointTheAuthorization() {
+        String bucket = bucketWithTags("control-query");
+        String objectTagger = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObjectTagging","Resource":"*"}]}""");
+
+        given()
+                .header("Authorization", auth(objectTagger, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:::" + bucket + "?tagging")
+        .then()
+                .statusCode(403)
+                .body(containsString("is not authorized to perform: s3:ListTagsForResource"));
+
+        String controlReader = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListTagsForResource","Resource":"arn:aws:s3:::%1$s"}]}"""
+                .formatted(bucket));
+
+        given()
+                .header("Authorization", auth(controlReader, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:::" + bucket + "?tagging")
+        .then()
+                .statusCode(200)
+                .body(containsString("<Key>Env</Key>"));
+    }
+
+    /**
+     * The regional ARN form, the one the tagging operation's own request pattern and the AWS
+     * CLI examples use, is the request's resource as written: a policy naming it authorizes the
+     * read, because the ARN is not rewritten into the global form a data-plane path mints.
+     */
+    @Test
+    void listTagsForResourceIsAuthorizedByAPolicyOnTheRegionalArnForm() {
+        String bucket = bucketWithTags("control-regional");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListTagsForResource",
+                   "Resource":"arn:aws:s3:us-east-1:000000000000:bucket/%1$s"}]}"""
+                .formatted(bucket));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:us-east-1:000000000000:bucket/" + bucket)
+        .then()
+                .statusCode(200)
+                .body(containsString("<ListTagsForResourceResult"))
+                .body(containsString("<Key>Env</Key>"));
+    }
+
+    /**
+     * A bucket policy is resolved from the bucket the tagged ARN names, not from the bucket the
+     * data-plane reading of the ARN's resource part would find: the regional form's resource is
+     * {@code bucket/<name>}, and the real bucket's policy denying the control action must deny a
+     * caller whose identity policy allows it.
+     */
+    @Test
+    void aBucketPolicyOnTheTaggedBucketDeniesTheControlRead() {
+        String bucket = bucketWithTags("control-bucket-policy");
+        given()
+                .header("Authorization", auth("test", "s3"))
+                .contentType("application/json")
+                .body("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Deny","Principal":"*","Action":"s3:ListTagsForResource",
+                           "Resource":"arn:aws:s3:us-east-1:000000000000:bucket/%1$s"}]}"""
+                        .formatted(bucket))
+        .when()
+                .put("/" + bucket + "?policy")
+        .then()
+                .statusCode(200);
+
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListTagsForResource","Resource":"*"}]}""");
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:us-east-1:000000000000:bucket/" + bucket)
+        .then()
+                .statusCode(403)
+                .body(containsString("is not authorized to perform: s3:ListTagsForResource"));
+    }
+
     /** The data-plane tagging read is a different action from the control-plane one, as on AWS. */
     @Test
     void getBucketTaggingDoesNotAuthorizeListTagsForResource() {

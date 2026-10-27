@@ -808,20 +808,24 @@ public class ResourceArnBuilder {
      * are {@code s3:} actions (the Service Authorization Reference lists them under Amazon S3),
      * so the operation, not the path, tells the two apart: a tagging route carries the ARN of the
      * bucket or access point it acts on in its path, and the request is checked against that ARN
-     * as written, the way every ARN-carrying request is; the account-wide routes AWS gives no
-     * resource, ListAccessPoints and the account-level Block Public Access, are checked against
-     * every bucket, as an empty S3 path is. Any other operation is the data plane, checked
-     * against the bucket or object its path names.
+     * as written, the way every ARN-carrying request is; the Service Authorization Reference
+     * gives ListAccessPoints and the account-level Block Public Access no resource type, so
+     * those are checked against the wildcard alone, as the no-resource actions of other
+     * namespaces are (the KMS list operations), and a bucket-scoped statement grants them
+     * nothing. Any other operation is the data plane, checked against the bucket or object its
+     * path names.
      */
     private List<String> buildS3Resources(String operation, String path, String region) {
-        String resource = operation == null ? null : switch (operation) {
-            case "s3:ListTagsForResource", "s3:TagResource", "s3:UntagResource" -> taggedS3ControlArn(path);
+        if (operation == null) {
+            return List.of(buildS3Arn(path, region));
+        }
+        return switch (operation) {
+            case "s3:ListTagsForResource", "s3:TagResource", "s3:UntagResource" ->
+                    List.of(taggedS3ControlArn(path));
             case "s3:ListAccessPoints", "s3:PutAccountPublicAccessBlock",
-                    "s3:GetAccountPublicAccessBlock" ->
-                    AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "s3", "", "*").toString();
-            default -> null;
+                    "s3:GetAccountPublicAccessBlock" -> List.of("*");
+            default -> List.of(buildS3Arn(path, region));
         };
-        return resource == null ? List.of(buildS3Arn(path, region)) : List.of(resource);
     }
 
     /**

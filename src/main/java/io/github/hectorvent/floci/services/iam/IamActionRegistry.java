@@ -48,18 +48,22 @@ public class IamActionRegistry {
         }
     }
 
-    private static final List<ActionRule> RULES = List.of(
-        // ── S3 Control ────────────────────────────────────────────────────────
-        // S3 Control clients sign with the s3 scope (botocore's s3control model
-        // declares signingName "s3") and its operations are s3: actions, per the
-        // Service Authorization Reference's Amazon S3 operations table and the
-        // S3 User Guide's account operations. These rules come before the data-plane
-        // object rules, which would otherwise read /v20180820/... as a bucket
-        // named v20180820: ListTagsForResource, TagResource and UntagResource name
-        // the bucket or access point they act on; ListAccessPoints and the
-        // account-level Block Public Access configure the account, where the User
-        // Guide requires PutAccountPublicAccessBlock or GetAccountPublicAccessBlock
-        // (a delete needs the same action as the write it undoes).
+    /**
+     * The S3 Control routes, matched before the data-plane query overrides and before the rule
+     * table: the control plane answers a tagging route whatever its query string carries, so a
+     * parameter such as {@code ?tagging} must not re-point the authorization at the data-plane
+     * object tagging it suggests, and the rules below would otherwise read {@code /v20180820/...}
+     * as a bucket named v20180820.
+     *
+     * <p>S3 Control clients sign with the s3 scope (botocore's s3control model declares
+     * signingName "s3") and its operations are s3: actions, per the Service Authorization
+     * Reference's Amazon S3 operations table and the S3 User Guide's account operations.
+     * ListTagsForResource, TagResource and UntagResource name the bucket or access point they
+     * act on; ListAccessPoints and the account-level Block Public Access configure the account,
+     * where the User Guide requires PutAccountPublicAccessBlock or GetAccountPublicAccessBlock
+     * (a delete needs the same action as the write it undoes).
+     */
+    private static final List<ActionRule> S3_CONTROL_RULES = List.of(
         rule("s3", "GET",    "^/v20180820/tags/.+",               "s3:ListTagsForResource"),
         rule("s3", "POST",   "^/v20180820/tags/.+",               "s3:TagResource"),
         rule("s3", "DELETE", "^/v20180820/tags/.+",               "s3:UntagResource"),
@@ -69,8 +73,10 @@ public class IamActionRegistry {
         rule("s3", "GET",    "^/v20180820/configuration/publicAccessBlock/?$",
                 "s3:GetAccountPublicAccessBlock"),
         rule("s3", "DELETE", "^/v20180820/configuration/publicAccessBlock/?$",
-                "s3:PutAccountPublicAccessBlock"),
+                "s3:PutAccountPublicAccessBlock")
+    );
 
+    private static final List<ActionRule> RULES = List.of(
         // ── S3 ─────────────────────────────────────────────────────────────────
         rule("s3", "GET",    "^/?$",                              "s3:ListAllMyBuckets"),
         rule("s3", "PUT",    "^/[^/]+/?$",                       "s3:CreateBucket"),
@@ -628,12 +634,20 @@ public class IamActionRegistry {
         // bucket's one trailing slash, so an S3 path is matched as sent.
         String path = "s3".equals(credentialScope) ? rawPath(ctx.getUriInfo()) : routedPath(ctx.getUriInfo());
 
-        // S3 sub-resource override: the URL path alone doesn't distinguish
-        // s3:GetObjectAcl / s3:PutObjectAcl from s3:GetObject / s3:PutObject
-        // — only the {@code ?acl} query parameter does. Without this hook,
-        // an actor with s3:GetObject permission could read ACLs that their
-        // policy intends to forbid.
         if ("s3".equals(credentialScope)) {
+            // An S3 Control route is matched before the query overrides below, which would read the
+            // query string of a route the control plane answers whatever it carries: ?tagging on a
+            // tagging route is caller-supplied noise, not the object sub-resource it names.
+            for (ActionRule rule : S3_CONTROL_RULES) {
+                if (rule.matches(credentialScope, method, path, ctx)) {
+                    return rule.action();
+                }
+            }
+            // S3 sub-resource override: the URL path alone doesn't distinguish
+            // s3:GetObjectAcl / s3:PutObjectAcl from s3:GetObject / s3:PutObject:
+            // only the {@code ?acl} query parameter does. Without this hook,
+            // an actor with s3:GetObject permission could read ACLs that their
+            // policy intends to forbid.
             String s3SubAction = resolveS3SubResourceAction(method, ctx);
             if (s3SubAction != null) {
                 return s3SubAction;

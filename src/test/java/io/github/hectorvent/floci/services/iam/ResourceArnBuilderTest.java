@@ -1559,19 +1559,22 @@ class ResourceArnBuilderTest {
 
     /**
      * AWS gives s3:ListAccessPoints and the account-level Block Public Access actions no
-     * resource, so every bucket matches, as an empty S3 path does, in the request's partition.
+     * resource type, so the request is checked against the wildcard alone, as the no-resource
+     * actions of other namespaces are (the KMS list operations): a bucket-scoped statement,
+     * {@code arn:<partition>:s3:::*} or any other ARN, grants them nothing, and a NotResource
+     * naming any bucket denies the call.
      */
     @Test
-    void s3ControlAccountRoutesAreCheckedAgainstEveryBucketInTheRequestsPartition() {
+    void s3ControlAccountRoutesAreCheckedAgainstTheWildcardAlone() {
         when(uriInfo.getPath()).thenReturn("/v20180820/accesspoint");
-        assertEquals(List.of("arn:aws:s3:::*"),
+        assertEquals(List.of("*"),
                 builder.buildResources("s3", "s3:ListAccessPoints", ctx, "us-east-1", ACCOUNT, "aws"));
         when(uriInfo.getPath()).thenReturn("/v20180820/configuration/publicAccessBlock");
-        assertEquals(List.of("arn:aws:s3:::*"),
+        assertEquals(List.of("*"),
                 builder.buildResources("s3", "s3:PutAccountPublicAccessBlock", ctx, "us-east-1", ACCOUNT, "aws"));
-        assertEquals(List.of("arn:aws:s3:::*"),
+        assertEquals(List.of("*"),
                 builder.buildResources("s3", "s3:GetAccountPublicAccessBlock", ctx, "us-east-1", ACCOUNT, "aws"));
-        assertEquals(List.of("arn:aws-us-gov:s3:::*"),
+        assertEquals(List.of("*"),
                 builder.buildResources("s3", "s3:PutAccountPublicAccessBlock", ctx, "us-gov-west-1", ACCOUNT,
                         "aws-us-gov"));
     }

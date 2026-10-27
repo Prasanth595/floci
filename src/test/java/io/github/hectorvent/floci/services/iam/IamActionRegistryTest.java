@@ -600,6 +600,30 @@ class IamActionRegistryTest {
         assertEquals("s3:CreateBucket", s3Action("PUT", "/v20180820"));
     }
 
+    /**
+     * A tagging route is matched before the data-plane query overrides: S3ControlController
+     * answers it whatever the query string carries, so {@code ?tagging} on the control route
+     * must not have the call checked as the object tagging of a bucket named v20180820, which a
+     * caller holding only that object action would pass while reading the bucket's tags, and a
+     * caller holding only the control action would fail.
+     */
+    @Test
+    void s3ControlRoutesWinOverTheDataPlaneQueryOverrides() {
+        String bucketArn = "arn:aws:s3:::repro-bucket";
+        assertEquals("s3:ListTagsForResource", s3Action("GET", "/v20180820/tags/" + bucketArn, "tagging"));
+        assertEquals("s3:ListTagsForResource",
+                s3Action("GET", "/v20180820/tags/" + bucketArn, "tagging", "versionId=1"));
+        assertEquals("s3:TagResource", s3Action("POST", "/v20180820/tags/" + bucketArn, "tagging"));
+        assertEquals("s3:UntagResource",
+                s3Action("DELETE", "/v20180820/tags/" + bucketArn, "tagging", "tagKeys=Env"));
+        // The Go SDK v2, and so Terraform's provider, percent-encodes the ARN's colons and slashes.
+        String encoded = "arn%3Aaws%3As3%3Aus-east-1%3A000000000000%3Abucket%2Frepro-bucket";
+        assertEquals("s3:ListTagsForResource", s3Action("GET", "/v20180820/tags/" + encoded, "tagging"));
+        // The data-plane object tagging the query names keeps its own action on its own path.
+        assertEquals("s3:GetObjectTagging", s3Action("GET", "/bucket/key.txt", "tagging"));
+        assertEquals("s3:GetObjectVersionTagging", s3Action("GET", "/bucket/key.txt", "tagging", "versionId=1"));
+    }
+
     @Test
     void s3AccelerateYieldsToSubresourcesDispatchedFirst() {
         MultivaluedMap<String, String> withRequestPayment = new MultivaluedHashMap<>();

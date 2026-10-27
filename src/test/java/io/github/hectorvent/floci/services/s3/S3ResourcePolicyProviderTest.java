@@ -54,4 +54,25 @@ class S3ResourcePolicyProviderTest {
         assertEquals("arn:aws-cn:sqs:cn-north-1:000000000000:q",
                 provider.resolveResourceArn("sqs", "arn:aws-cn:sqs:cn-north-1:000000000000:q"));
     }
+
+    /**
+     * The regional form an S3 Control tagging route names is the caller's own naming of the
+     * resource, which the tagging operations' own request pattern and the AWS CLI examples use,
+     * so it is kept as written: rewriting it into the global form would deny a policy written
+     * against the regional form, and would read its resource part as a bucket named bucket
+     * with the real name as its key.
+     */
+    @Test
+    void controlTaggingArnsKeepTheBucketTheyName() {
+        assertEquals("audit-source", S3ResourcePolicyProvider.extractBucketName(
+                "arn:aws:s3:us-east-1:000000000000:bucket/audit-source"));
+        assertEquals("audit-source", S3ResourcePolicyProvider.extractBucketName(
+                "arn:aws-cn:s3:cn-north-1:000000000000:bucket/audit-source"));
+
+        S3ResourcePolicyProvider provider = new S3ResourcePolicyProvider(mock(S3Service.class));
+        assertEquals("arn:aws:s3:us-east-1:000000000000:bucket/audit-source",
+                provider.resolveResourceArn("s3", "arn:aws:s3:us-east-1:000000000000:bucket/audit-source"));
+        assertEquals("arn:aws-cn:s3:cn-north-1:000000000000:bucket/audit-source",
+                provider.resolveResourceArn("s3", "arn:aws-cn:s3:cn-north-1:000000000000:bucket/audit-source"));
+    }
 }
