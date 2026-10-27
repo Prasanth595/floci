@@ -65,16 +65,14 @@ public class S3ResourcePolicyProvider implements ResourcePolicyProvider {
     }
 
     /**
-     * The request's resource as the one parse every reader of an S3 Control tagging ARN shares.
-     * Null when it is not an s3 ARN or its percent-encoding is malformed, which leaves the
+     * The request's resource, parsed without decoding: every ARN reaching here is already in its
+     * decoded form, the data plane's from the request path and a control tagging one re-minted
+     * by the rule that read it off the wire, so decoding again would rewrite an object key like
+     * {@code a+b.txt} before IAM checks it. Null when it is not an s3 ARN, which leaves the
      * request its identity policy alone: no bucket policy applies, as when the bucket has none.
      */
     private static AwsArnUtils.Arn s3Arn(String resourceArn) {
-        try {
-            return S3ControlArnUtils.parse(resourceArn).orElse(null);
-        } catch (IllegalArgumentException malformedEncoding) {
-            return null;
-        }
+        return AwsArnUtils.isArnFor(resourceArn, "s3") ? AwsArnUtils.parse(resourceArn) : null;
     }
 
     /**

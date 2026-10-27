@@ -83,6 +83,23 @@ class S3ResourcePolicyProviderTest {
     }
 
     /**
+     * The provider reads ARNs that are already decoded, so it never decodes: an object key
+     * carrying a plus sign or a literal percent sequence keeps its bytes before IAM checks it.
+     */
+    @Test
+    void anObjectKeyIsNotDecodedAgainBeforeThePolicyCheck() {
+        assertEquals("example", S3ResourcePolicyProvider.extractBucketName(
+                "arn:aws:s3:::example/a+b.txt"));
+        S3Service s3Service = mock(S3Service.class);
+        when(s3Service.bucketPartition("example")).thenReturn("aws");
+        S3ResourcePolicyProvider provider = new S3ResourcePolicyProvider(s3Service);
+        assertEquals("arn:aws:s3:::example/a+b.txt",
+                provider.resolveResourceArn("s3", "arn:aws:s3:::example/a+b.txt"));
+        assertEquals("arn:aws:s3:::example/report%20file.txt",
+                provider.resolveResourceArn("s3", "arn:aws:s3:::example/report%20file.txt"));
+    }
+
+    /**
      * A regional tagging ARN's policy is looked up in the account the ARN names, the same
      * account whose bucket the handler reads and writes, so a caller in one account cannot be
      * governed by the bucket policy of its own same-named bucket when the ARN names another
