@@ -58,6 +58,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -413,12 +414,19 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
      */
     public PaginatedResult<Rule> listRules(String busName, String namePrefix, Integer limit,
                                            String nextToken, String region) {
+        return paginate(listRules(busName, namePrefix, region), Rule::getName, limit, nextToken, "rule");
+    }
+
+    private static <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf, Integer limit,
+                                                  String nextToken, String scope) {
         if (limit != null && (limit < 1 || limit > MAX_LIST_LIMIT)) {
             throw limitOutOfRange(limit.toString(), limit < 1);
         }
-        return Pagination.paginate(listRules(busName, namePrefix, region), Rule::getName,
-                limit != null ? limit : MAX_LIST_LIMIT, nextToken, "rule",
-                token -> new AwsException("InvalidToken", "Invalid NextToken: " + token, 400));
+        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 2048)) {
+            throw new AwsException("ValidationException", "NextToken must contain 1 to 2048 characters.", 400);
+        }
+        return Pagination.paginate(items, cursorOf, limit == null ? MAX_LIST_LIMIT : limit, nextToken, scope,
+                token -> new AwsException("InvalidToken", "Invalid NextToken.", 400));
     }
 
     static AwsException limitOutOfRange(String value, boolean belowMinimum) {
@@ -1671,18 +1679,10 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public PaginatedResult<Connection> listConnections(String namePrefix, ConnectionState state, Integer limit,
                                                        String nextToken, String region) {
-        if (limit != null && (limit < 1 || limit > MAX_LIST_LIMIT)) {
-            throw limitOutOfRange(limit.toString(), limit < 1);
-        }
-        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 2048)) {
-            throw new AwsException("ValidationException", "NextToken must contain 1 to 2048 characters.", 400);
-        }
         String effectivePrefix = namePrefix == null || namePrefix.isBlank() ? "" : namePrefix;
         String scope = "events:ListConnections:" + regionResolver.getAccountId() + ":" + region
                 + ":" + effectivePrefix + ":" + (state == null ? "" : state.name());
-        return Pagination.paginate(listConnections(namePrefix, state, region), Connection::getName,
-                limit == null ? MAX_LIST_LIMIT : limit, nextToken, scope,
-                token -> new AwsException("InvalidToken", "Invalid NextToken.", 400));
+        return paginate(listConnections(namePrefix, state, region), Connection::getName, limit, nextToken, scope);
     }
 
     private static void validateConnectionName(String name) {

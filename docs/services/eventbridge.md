@@ -50,6 +50,10 @@
 | `ListReplays` | - |
 <!-- floci:actions:end -->
 
+`ListRules` and `ListConnections` accept `NextToken` values of 1 to 2048
+characters. Empty or overlong tokens return `ValidationException`; unrecognized
+cursors within those bounds return `InvalidToken`.
+
 ## Configuration
 
 | Variable | Default | Description |
