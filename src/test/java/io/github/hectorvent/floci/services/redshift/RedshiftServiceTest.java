@@ -575,6 +575,7 @@ class RedshiftServiceTest {
     private DockerHostResolver dockerHostResolver;
     private RedshiftCredentialBroker credentialBroker;
     private SecretsManagerService secretsManagerService;
+    private RedshiftEventService events;
     private final Set<String> existingStreams = new HashSet<>();
     private RedshiftService service;
 
@@ -627,6 +628,7 @@ class RedshiftServiceTest {
 
         credentialBroker = new RedshiftCredentialBroker();
         secretsManagerService = mock(SecretsManagerService.class);
+        events = mock(RedshiftEventService.class);
         ObjectMapper mapper = new ObjectMapper();
         // Answers DescribeStream the way the native handler does: it throws for an unknown stream.
         DynamoDbOperations streams = call -> {
@@ -640,7 +642,103 @@ class RedshiftServiceTest {
 
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, mapper,
-                new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS));
+                new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS), null, events);
+    }
+
+    @Test
+    void successfulClusterOperationsRecordTheirLifecycleEvents() {
+        when(cm.start(any(), any(), any(), any()))
+                .thenReturn(new RedshiftContainerHandle("container", "event-cluster", "localhost", 5432));
+        Cluster cluster = service.createCluster("event-cluster", "dc2.large", "admin", "password123");
+        when(clusterBackend.get("event-cluster")).thenReturn(Optional.of(cluster));
+
+        service.modifyCluster("event-cluster", null, null, "changedPassword123", "custom-pg", List.of("sg-new"));
+        service.rebootCluster("event-cluster");
+        service.deleteCluster("event-cluster");
+
+        InOrder recorded = inOrder(events);
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_CREATED), eq("event-cluster"), anyString());
+        recorded.verify(events).record(eq(RedshiftEventCatalog.ADMIN_CREDENTIALS_UPDATED), eq("event-cluster"), anyString());
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_PARAMETER_GROUP_CHANGED), eq("event-cluster"), anyString());
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_SECURITY_GROUPS_UPDATED), eq("event-cluster"), anyString());
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_REBOOTED), eq("event-cluster"), anyString());
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_DELETED), eq("event-cluster"), anyString());
+        recorded.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void failedClusterOperationsNeverRecordSuccessEvents() {
+        when(cm.start(any(), any(), any(), any())).thenThrow(new RuntimeException("startup failed"));
+        assertThrows(AwsException.class,
+                () -> service.createCluster("event-cluster", "dc2.large", "admin", "password123"));
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("event-cluster");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("password123");
+        cluster.setClusterStatus("available");
+        when(clusterBackend.get("event-cluster")).thenReturn(Optional.of(cluster));
+        doThrow(new AwsException("InternalFailure", "password change failed", 500))
+                .when(cm).alterUserPassword(anyString(), anyString(), anyString(), anyString());
+        assertThrows(AwsException.class,
+                () -> service.modifyCluster("event-cluster", null, null, "changedPassword123", null, null));
+        doThrow(new RuntimeException("dump failed")).when(cm).takeSnapshot(anyString(), anyString(), anyString(), any(Path.class));
+        assertThrows(AwsException.class, () -> service.rebootCluster("event-cluster"));
+        doThrow(new RuntimeException("proxy stop failed")).when(proxyManager).stopProxy("111111111111:event-cluster");
+        assertThrows(AwsException.class, () -> service.deleteCluster("event-cluster"));
+
+        verifyNoInteractions(events);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void snapshotEventsReportStartAndTheActualOutcome(boolean fails) {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("event-cluster");
+        cluster.setMasterUsername("admin");
+        when(clusterBackend.get("event-cluster")).thenReturn(Optional.of(cluster));
+        if (fails) {
+            doThrow(new RuntimeException("snapshot failed"))
+                    .when(cm).takeSnapshot(anyString(), anyString(), anyString(), any(Path.class));
+            assertThrows(AwsException.class, () -> service.createSnapshot("event-snapshot", "event-cluster"));
+        } else {
+            service.createSnapshot("event-snapshot", "event-cluster");
+        }
+
+        InOrder recorded = inOrder(events);
+        recorded.verify(events).recordForAccount(eq("111111111111"), eq("us-east-1"),
+                eq(RedshiftEventCatalog.SNAPSHOT_STARTED), eq("event-snapshot"), anyString());
+        recorded.verify(events).recordForAccount(eq("111111111111"), eq("us-east-1"),
+                eq(fails ? RedshiftEventCatalog.SNAPSHOT_FAILED : RedshiftEventCatalog.SNAPSHOT_COMPLETED),
+                eq("event-snapshot"), anyString());
+        recorded.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void parameterGroupModifyAndResetRecordUpdatesAfterPersistence() {
+        ClusterParameterGroup group = new ClusterParameterGroup("event-pg", "redshift-1.0", "events");
+        when(parameterGroupBackend.get("event-pg")).thenReturn(Optional.of(group));
+
+        service.modifyClusterParameterGroup("event-pg", List.of(new Parameter("max_cursor_result_set_size", "1000")));
+        service.resetClusterParameterGroup("event-pg", true, List.of());
+
+        InOrder recorded = inOrder(parameterGroupBackend, events);
+        recorded.verify(parameterGroupBackend).flush();
+        recorded.verify(events).record(eq(RedshiftEventCatalog.PARAMETER_GROUP_UPDATED), eq("event-pg"), anyString());
+        recorded.verify(parameterGroupBackend).flush();
+        recorded.verify(events).record(eq(RedshiftEventCatalog.PARAMETER_GROUP_UPDATED), eq("event-pg"), anyString());
+        verify(events, times(2)).record(any(), anyString(), anyString());
+    }
+
+    @Test
+    void invalidParameterGroupResetDoesNotRecordAnUpdate() {
+        ClusterParameterGroup group = new ClusterParameterGroup("event-pg", "redshift-1.0", "events");
+        when(parameterGroupBackend.get("event-pg")).thenReturn(Optional.of(group));
+
+        assertThrows(AwsException.class,
+                () -> service.resetClusterParameterGroup("event-pg", false, List.of("unknown-parameter")));
+
+        verifyNoInteractions(events);
+        verify(parameterGroupBackend, never()).flush();
     }
 
     @Test
@@ -1081,6 +1179,10 @@ class RedshiftServiceTest {
         verify(clusterBackend, never()).delete("c1");
         verify(clusterBackend, atLeast(1)).put(eq("c1"), argThat(c -> "failed".equals(c.getClusterStatus())));
         verify(clusterBackend, atLeastOnce()).flush();
+        InOrder recorded = inOrder(events);
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_RESTORE_STARTED), eq("c1"), anyString());
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_RESTORE_FAILED), eq("c1"), anyString());
+        recorded.verifyNoMoreInteractions();
     }
 
     @Test

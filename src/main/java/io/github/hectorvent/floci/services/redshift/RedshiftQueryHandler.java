@@ -9,11 +9,13 @@ import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.redshift.RedshiftEventCatalog.EventInfo;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
+import io.github.hectorvent.floci.services.redshift.model.RedshiftEvent;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotSchedule;
@@ -24,7 +26,12 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -40,6 +47,9 @@ public class RedshiftQueryHandler {
 
     private static final Pattern FILTER_NAME =
             Pattern.compile("Filters\\.DescribeIntegrationsFilter\\.(\\d+)\\.Name");
+
+    private static final DateTimeFormatter EVENT_TIMESTAMP =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     // GetClusterCredentials DurationSeconds bounds, inclusive (AWS: 900 to 3600).
     private static final int MIN_CREDENTIAL_DURATION_SECONDS = 900;
@@ -618,6 +628,63 @@ public class RedshiftQueryHandler {
                         .elem("RequestId", "test-req-id")
                       .end("ResponseMetadata")
                     .end("DeleteSnapshotCopyGrantResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DescribeEvents" -> {
+            PaginatedResult<RedshiftEvent> page = service.describeEvents(params.getFirst("SourceIdentifier"),
+                    params.getFirst("SourceType"), timestampParam(params, "StartTime"),
+                    timestampParam(params, "EndTime"), intParam(params, "Duration"),
+                    intParam(params, "MaxRecords"), params.getFirst("Marker"));
+            XmlBuilder xmlBuilder = new XmlBuilder()
+                    .start("DescribeEventsResponse", AwsNamespaces.REDSHIFT)
+                      .start("DescribeEventsResult");
+            if (page.nextToken() != null) {
+                xmlBuilder.elem("Marker", page.nextToken());
+            }
+            xmlBuilder.start("Events");
+            for (RedshiftEvent event : page.items()) {
+                xmlBuilder.raw(buildEventXml(event));
+            }
+            String xml = xmlBuilder
+                        .end("Events")
+                      .end("DescribeEventsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeEventsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DescribeEventCategories" -> {
+            Map<String, List<EventInfo>> bySourceType = service.describeEventCategories(params.getFirst("SourceType"));
+            XmlBuilder xmlBuilder = new XmlBuilder()
+                    .start("DescribeEventCategoriesResponse", AwsNamespaces.REDSHIFT)
+                      .start("DescribeEventCategoriesResult")
+                        .start("EventCategoriesMapList");
+            for (Map.Entry<String, List<EventInfo>> entry : bySourceType.entrySet()) {
+                xmlBuilder.start("EventCategoriesMap")
+                            .elem("SourceType", entry.getKey())
+                            .start("Events");
+                for (EventInfo info : entry.getValue()) {
+                    xmlBuilder.start("EventInfoMap")
+                                .elem("Severity", info.severity())
+                                .elem("EventDescription", info.description())
+                                .elem("EventId", info.id())
+                                .start("EventCategories")
+                                  .elem("EventCategory", info.category())
+                                .end("EventCategories")
+                              .end("EventInfoMap");
+                }
+                xmlBuilder.end("Events").end("EventCategoriesMap");
+            }
+            String xml = xmlBuilder
+                        .end("EventCategoriesMapList")
+                      .end("DescribeEventCategoriesResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeEventCategoriesResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
@@ -1233,6 +1300,41 @@ public class RedshiftQueryHandler {
             builder.start("Subnet").elem("SubnetIdentifier", subnetId).end("Subnet");
         }
         return builder.end("Subnets").end("ClusterSubnetGroup").build();
+    }
+
+    private String buildEventXml(RedshiftEvent event) {
+        XmlBuilder builder = new XmlBuilder()
+                .start("Event")
+                .elem("Date", EVENT_TIMESTAMP.format(event.getDate()))
+                .elem("Severity", event.getSeverity())
+                .elem("EventId", event.getEventId())
+                .elem("SourceIdentifier", event.getSourceIdentifier())
+                .elem("SourceType", event.getSourceType())
+                .start("EventCategories");
+        for (String category : event.getEventCategories()) {
+            builder.elem("EventCategory", category);
+        }
+        return builder.end("EventCategories")
+                .elem("Message", event.getMessage())
+                .end("Event").build();
+    }
+
+    /** ISO 8601 as the SDKs send it, with or without seconds, or epoch seconds. */
+    private static Instant timestampParam(MultivaluedMap<String, String> params, String name) {
+        String raw = params.getFirst(name);
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return OffsetDateTime.parse(raw).toInstant();
+        } catch (DateTimeParseException e) {
+            try {
+                return Instant.ofEpochMilli(new BigDecimal(raw).movePointRight(3).longValueExact());
+            } catch (NumberFormatException | ArithmeticException ignored) {
+                // Neither form: the ISO 8601 failure below names the parameter.
+                throw new AwsException("InvalidParameterValue", name + " must be an ISO 8601 timestamp.", 400);
+            }
+        }
     }
 
     private String buildSnapshotCopyGrantXml(SnapshotCopyGrant grant) {

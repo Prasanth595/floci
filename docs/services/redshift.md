@@ -14,6 +14,35 @@ Snapshot-dump and catalog-seed uploads retry transient Docker I/O failures for u
 
 For running SQL without a PostgreSQL wire connection (the way Lambda and Step Functions do), see the [Redshift Data API](redshift-data.md).
 
+## Events
+
+`DescribeEvents` returns the last hour by default, accepts `StartTime`, `EndTime`,
+`Duration`, and a paired `SourceType`/`SourceIdentifier` filter, and retains the last
+14 days. `MaxRecords` accepts 20 through 100; continue with the returned `Marker`.
+These bounds follow the [AWS DescribeEvents API](https://docs.aws.amazon.com/redshift/latest/APIReference/API_DescribeEvents.html).
+History is isolated by account and region and uses the configured Redshift storage
+mode, including persistent, hybrid and WAL storage.
+
+Floci records cluster creation, deletion, reboot, restore, password changes,
+parameter-group association and security-group changes. Snapshot operations record
+start, completion and failure, including final snapshots. Parameter-group creation,
+update, reset and deletion also produce events. The IDs, categories and severities
+come from the [AWS event catalog](https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-event-notifications.html).
+`DescribeEventCategories` lists the event IDs implemented by Floci, grouped by source
+type. It does not advertise hardware failures, maintenance or other conditions Floci
+does not simulate. Security-group and scheduled-action source types are accepted as
+filters, but Floci does not model resources or generate events for those source types.
+
+For example, parameter-group events work without a database container:
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift create-cluster-parameter-group \
+  --parameter-group-name event-demo --parameter-group-family redshift-1.0 \
+  --description 'Event example'
+aws --endpoint-url http://localhost:4566 redshift describe-events \
+  --source-type cluster-parameter-group --source-identifier event-demo
+```
+
 ## Supported Actions
 
 <!-- floci:actions:start -->
@@ -45,6 +74,8 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `CreateSnapshotCopyGrant` | Register a snapshot copy grant, defaulting `KmsKeyId` to the AWS-managed Redshift key. `SnapshotCopyGrantName` must be 1-63 characters, start with a lowercase letter, and contain only lowercase letters, digits and non-consecutive hyphens |
 | `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name, paged with `MaxRecords` and `Marker` |
 | `DeleteSnapshotCopyGrant` | Remove a snapshot copy grant |
+| `DescribeEvents` | - |
+| `DescribeEventCategories` | - |
 | `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. No snapshot is copied |
 | `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
 | `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
