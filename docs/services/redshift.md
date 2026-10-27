@@ -256,6 +256,28 @@ are coalesced to one current backup, which contains the data at dump time, rathe
 as historical backups. Older persisted clusters acquire their initial scheduling anchor on the
 first sweep. Cleanup after deleting a cluster runs on the next sweep.
 
+## CloudWatch metrics
+
+Floci publishes metrics for every `available` cluster to the `AWS/Redshift` CloudWatch namespace once a minute, each stamped with the minute that ended. The only dimension is `ClusterIdentifier`.
+
+| Metric | Unit | Value |
+| --- | --- | --- |
+| `HealthStatus` | `Count` | `1` while the cluster is `available` |
+| `MaintenanceMode` | `Count` | `0`; Floci models no maintenance windows |
+| `DatabaseConnections` | `Count` | Clients currently connected through the cluster's auth proxy |
+
+A cluster that is not `available` (for example `creating`, `deleting` or `failed`) publishes nothing, and `DatabaseConnections` is omitted for a cluster whose proxy is not running. A reboot keeps the status `available`, so `HealthStatus` stays `1` during it and `DatabaseConnections` is omitted until the proxy is back. `DatabaseConnections` counts PostgreSQL wire-protocol clients only: the [Redshift Data API](redshift-data.md) reaches the database around the proxy, so its connections are not counted. Datapoints older than 15 days are dropped hourly.
+
+```bash
+aws --endpoint-url http://localhost:4566 cloudwatch get-metric-statistics \
+  --namespace AWS/Redshift --metric-name HealthStatus \
+  --dimensions Name=ClusterIdentifier,Value=my-cluster \
+  --start-time "$(date -u -d '-10 minutes' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
+  --period 60 --statistics Sum
+```
+
+Set `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED=false` to turn publishing off. Publishing also requires the CloudWatch Metrics service to be enabled.
+
 ## DynamoDB zero-ETL
 
 The supported zero-ETL path is DynamoDB Streams to a provisioned Redshift cluster. The source ARN
@@ -348,6 +370,7 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 |----------|---------|-------------|
 | `FLOCI_SERVICES_REDSHIFT_ENABLED` | `true` | Enable or disable Redshift |
 | `FLOCI_SERVICES_REDSHIFT_AUTOMATED_SNAPSHOTS_ENABLED` | `true` | Run background automated snapshot and retention sweeps |
+| `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED` | `true` | Publish the `AWS/Redshift` metrics of available clusters to CloudWatch once a minute, see [CloudWatch metrics](#cloudwatch-metrics) |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_SWEEP_INTERVAL_SECONDS` | `60` | Delay between background snapshot sweeps |
 | `FLOCI_SERVICES_REDSHIFT_IMAGE_VERSION` | `postgres:15-alpine` | PostgreSQL Docker image backing each cluster |
 | `FLOCI_SERVICES_REDSHIFT_DEFAULT_PORT` | `5439` | Reported Redshift port hint (the real host port is dynamic and comes from `DescribeClusters`) |
