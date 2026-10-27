@@ -4220,6 +4220,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             attachment.setAttachTime(inst.getLaunchTime());
                             volume.getAttachments().add(attachment);
                             volumes.put(key(region, volume.getVolumeId()), volume);
+                            reservation.getLaunchVolumeIds().add(volume.getVolumeId());
                             if (rootDeviceName.equals(planned.deviceName())) {
                                 inst.setRootVolumeId(volume.getVolumeId());
                             }
@@ -4237,7 +4238,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             acquireCapacity(region, launched);
         } catch (RuntimeException failure) {
             try {
-                terminateInstances(region, launched.stream().map(Instance::getInstanceId).toList());
+                rollBackLaunch(region, reservation);
             } catch (RuntimeException cleanupFailure) {
                 failure.addSuppressed(cleanupFailure);
                 LOG.errorv(cleanupFailure, "Failed to clean up rejected capacity launch in {0}", region);
@@ -14353,6 +14354,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * Undoes a launch refused after its instances were stored: terminates them and deletes every
+     * volume the launch created, those it would keep on termination included, so nothing of the
+     * refused launch is left. The volumes are the ones the launch recorded as it created them, so
+     * one whose attachment already ended, as a failed container's are settled by whichever call
+     * reads them first, is still found. Only a volume termination left unattached is deleted: an
+     * instance whose termination fails keeps its volumes as they were, and a volume attached to
+     * another instance since stays.
+     */
+    public List<Map<String, String>> rollBackLaunch(String region, Reservation launch) {
+        try {
+            return terminateInstances(region, launch.getInstances().stream().map(Instance::getInstanceId).toList());
+        } finally {
+            for (String volumeId : launch.getLaunchVolumeIds()) {
+                String k = key(region, volumeId);
+                withVolumeLock(volumeId, () -> volumes.get(k)
+                        .filter(current -> current.getAttachments().isEmpty())
+                        .ifPresent(current -> deleteVolumeRecord(region, k, current)));
+            }
+        }
+    }
+
+    /**
      * Each volume attached to a terminating instance, the root included, goes as its attachment's
      * DeleteOnTermination says: deleted when it is set, unless another instance still has the
      * volume attached, and otherwise detached, left available or, still held by another
@@ -14390,11 +14413,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 boolean attachedElsewhere = vol.getAttachments().stream()
                         .anyMatch(other -> !inst.getInstanceId().equals(other.getInstanceId()));
                 if (att.isDeleteOnTermination() && !attachedElsewhere) {
-                    if (volumeBlockDeviceManager != null) {
-                        volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
-                    }
-                    volumes.delete(storeKey);
-                    removeTags(region, vol.getVolumeId());
+                    deleteVolumeRecord(region, storeKey, vol);
                     return;
                 }
                 vol.getAttachments().remove(att);
@@ -14405,6 +14424,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             vol.setState(vol.getAttachments().isEmpty() ? "available" : "in-use");
             volumes.put(storeKey, vol);
         }
+    }
+
+    /** Deletes a volume, its block device and its tags. Called under the volume's lock. */
+    private void deleteVolumeRecord(String region, String storeKey, Volume vol) {
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
+        }
+        volumes.delete(storeKey);
+        removeTags(region, vol.getVolumeId());
     }
 
     /**

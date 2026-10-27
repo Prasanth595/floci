@@ -976,7 +976,11 @@ launch creates one EBS volume for each device left, attached at that device:
   as do a device name `AttachVolume` would refuse ("Invalid device name ...") and a device the
   request or the template names twice ("/dev/sdh is being assigned to multiple times."), whether or
   not a launch template is used. `CreateFleet` checks the device names before answering `DryRun`.
-- Nothing of a refused launch is kept: no instance, volume or network interface.
+- Nothing of a refused launch is kept: no instance, volume or network interface. A launch undone
+  after its instances exist, an instant `CreateFleet` whose later launch fails or a `RunInstances`
+  whose capacity reservation another launch took in the meantime, deletes every volume it created,
+  those with `DeleteOnTermination` false included. Auto Scaling and CloudFormation undo instances
+  they launched by terminating them, so there the volumes termination keeps stay.
 
 `DescribeInstances` lists every EBS volume attached to the instance in `BlockDeviceMappings`, root
 device first: those its launch created and any attached since, each with its own

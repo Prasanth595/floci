@@ -1063,7 +1063,7 @@ public class Ec2QueryHandler {
         checkDryRun(p);
 
         List<FleetLaunchResult> results = new ArrayList<>(targetCapacity);
-        List<String> launchedInstanceIds = new ArrayList<>(targetCapacity);
+        List<Reservation> launched = new ArrayList<>(targetCapacity);
         try {
             for (int i = 0; i < targetCapacity; i++) {
                 FleetLaunch launch = launches.get(i % launches.size());
@@ -1087,18 +1087,19 @@ public class Ec2QueryHandler {
                         null, null, launch.blockDeviceMappings(), "spot".equals(capacityType), null,
                         launch.capacityReservationSpecification());
                 Instance instance = reservation.getInstances().get(0);
-                launchedInstanceIds.add(instance.getInstanceId());
+                launched.add(reservation);
                 results.add(new FleetLaunchResult(instance, launch));
             }
         } catch (RuntimeException e) {
-            if (!launchedInstanceIds.isEmpty()) {
+            if (!launched.isEmpty()) {
                 LOG.warnv("CreateFleet failed after launching instances {0}; rolling them back: {1}",
-                        launchedInstanceIds, e.getMessage());
+                        launched.stream().map(r -> r.getInstances().get(0).getInstanceId()).toList(), e.getMessage());
                 List<String> rollbackFailureInstanceIds = new ArrayList<>();
                 List<RuntimeException> rollbackFailures = new ArrayList<>();
-                for (String instanceId : launchedInstanceIds) {
+                for (Reservation reservation : launched) {
+                    String instanceId = reservation.getInstances().get(0).getInstanceId();
                     try {
-                        service.terminateInstances(region, List.of(instanceId));
+                        service.rollBackLaunch(region, reservation);
                     } catch (RuntimeException cleanupFailure) {
                         rollbackFailureInstanceIds.add(instanceId);
                         rollbackFailures.add(cleanupFailure);
