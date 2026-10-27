@@ -25,11 +25,13 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Core MemoryDB business logic — clusters, ACLs and users.
@@ -56,7 +58,7 @@ public class MemoryDbService {
 
     // Per the MemoryDB API: a user name must start with a letter and contain only
     // letters, digits and hyphens.
-    private static final java.util.regex.Pattern USER_NAME_PATTERN =
+    private static final Pattern USER_NAME_PATTERN =
             java.util.regex.Pattern.compile("[a-zA-Z][a-zA-Z0-9\\-]*");
 
     private final StorageBackend<String, Cluster> clusters;
@@ -312,7 +314,7 @@ public class MemoryDbService {
             throw new AwsException("DefaultUserRequired",
                     "A default user is required and must be specified.", 400);
         }
-        java.util.Set<String> seen = new java.util.HashSet<>();
+        Set<String> seen = new HashSet<>();
         for (String userName : spec.getUserNames()) {
             if (!seen.add(userName)) {
                 throw new AwsException("DuplicateUserNameFault",
@@ -638,7 +640,7 @@ public class MemoryDbService {
         return accountId + "-" + region + "-" + name;
     }
 
-    private <V> java.util.Optional<V> legacyGet(StorageBackend<String, V> store, String name, String region) {
+    private <V> Optional<V> legacyGet(StorageBackend<String, V> store, String name, String region) {
         String defaultAccount = regionResolver.getDefaultAccountId();
         String defaultRegion = regionResolver.getDefaultRegion();
         if ((defaultAccount != null && !java.util.Objects.equals(defaultAccount, regionResolver.getAccountId()))
@@ -648,7 +650,7 @@ public class MemoryDbService {
         return store.get(name);
     }
 
-    private <V> java.util.Optional<V> resourceGet(StorageBackend<String, V> store, String name, String region) {
+    private <V> Optional<V> resourceGet(StorageBackend<String, V> store, String name, String region) {
         Optional<V> result = store.get(key(region, name));
         if (result.isPresent()) {
             return result;

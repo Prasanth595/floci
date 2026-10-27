@@ -5,6 +5,9 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -101,7 +104,7 @@ class BcmPricingCalculatorIntegrationTest {
 
     @Test
     void createAcceptsUpToTwoHundredTagsAndRejectsMore() {
-        java.util.Map<String, String> tags = new java.util.LinkedHashMap<>();
+        Map<String, String> tags = new LinkedHashMap<>();
         for (int i = 0; i < 200; i++) {
             tags.put("tag" + i, "value");
         }

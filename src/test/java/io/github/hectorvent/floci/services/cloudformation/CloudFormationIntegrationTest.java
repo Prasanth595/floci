@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -71,8 +72,8 @@ class CloudFormationIntegrationTest {
 
     private static byte[] buildHandlerZip() {
         try {
-            var baos = new ByteArrayOutputStream();
-            try (var zos = new ZipOutputStream(baos)) {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
                 zos.putNextEntry(new ZipEntry("index.js"));
                 zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(StandardCharsets.UTF_8));
                 zos.closeEntry();
@@ -2861,7 +2862,7 @@ class CloudFormationIntegrationTest {
             .body(containsString("<StackId>"));
 
         // 2. Verify stack completed and the auto-generated table name follows the pattern
-        var describeResponse = given()
+        String describeResponse = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
             .formParam("StackName", "auto-name-stack")
@@ -3270,7 +3271,7 @@ class CloudFormationIntegrationTest {
 
         // Verify SSM Parameter name via SSM API using DescribeStackResources physical ID
         // We extract the auto-generated name from the stack resource and verify it's accessible
-        var ssmResourceXml = given()
+        String ssmResourceXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
             .formParam("StackName", "ssm-auto-stack")
@@ -8630,7 +8631,7 @@ class CloudFormationIntegrationTest {
         getStages(apiId).body("Items.size()", equalTo(1));
     }
 
-    private io.restassured.response.ValidatableResponse getRoutes(String apiId) {
+    private ValidatableResponse getRoutes(String apiId) {
         return given()
             .header("X-Amz-Target", "AmazonApiGatewayV2.GetRoutes")
             .contentType(APIGWV2_CONTENT_TYPE)
@@ -8641,7 +8642,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
     }
 
-    private io.restassured.response.ValidatableResponse getIntegrations(String apiId) {
+    private ValidatableResponse getIntegrations(String apiId) {
         return given()
             .header("X-Amz-Target", "AmazonApiGatewayV2.GetIntegrations")
             .contentType(APIGWV2_CONTENT_TYPE)
@@ -8652,7 +8653,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
     }
 
-    private io.restassured.response.ValidatableResponse getStages(String apiId) {
+    private ValidatableResponse getStages(String apiId) {
         return given()
             .header("X-Amz-Target", "AmazonApiGatewayV2.GetStages")
             .contentType(APIGWV2_CONTENT_TYPE)
@@ -8663,7 +8664,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
     }
 
-    private io.restassured.response.ValidatableResponse getAuthorizers(String apiId) {
+    private ValidatableResponse getAuthorizers(String apiId) {
         return given()
             .header("X-Amz-Target", "AmazonApiGatewayV2.GetAuthorizers")
             .contentType(APIGWV2_CONTENT_TYPE)
@@ -10972,7 +10973,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .extract().asString(), "MyStateMachine");
 
-        var stack = cloudFormationService.describeStacks(stackName, "us-east-1").getFirst();
+        Stack stack = cloudFormationService.describeStacks(stackName, "us-east-1").getFirst();
         stack.getResources().get("MyStateMachine").getAttributes().remove("FlociStepFunctionsNameMode");
 
         given()

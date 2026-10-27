@@ -26,6 +26,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -230,8 +231,8 @@ class SmtpRelayServerTest {
 
         private final ServerSocket serverSocket;
         private final Thread acceptThread;
-        private volatile java.util.concurrent.CountDownLatch delivered =
-                new java.util.concurrent.CountDownLatch(1);
+        private volatile CountDownLatch delivered =
+                new CountDownLatch(1);
         private volatile String mailFrom;
         private volatile String authCommand;
         private volatile String data;
@@ -253,7 +254,7 @@ class SmtpRelayServerTest {
         }
 
         void reset() {
-            delivered = new java.util.concurrent.CountDownLatch(1);
+            delivered = new CountDownLatch(1);
             mailFrom = null;
             authCommand = null;
             data = null;

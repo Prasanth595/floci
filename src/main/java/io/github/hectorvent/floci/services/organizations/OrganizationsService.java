@@ -674,7 +674,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         return requireAccount(requireOrganizationForCaller(callerAccountId), accountId);
     }
 
-    public java.util.Optional<OrganizationAccount> findAccountForPortal(String accountId) {
+    public Optional<OrganizationAccount> findAccountForPortal(String accountId) {
         if (accountId == null || !ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
             return java.util.Optional.empty();
         }
@@ -1023,7 +1023,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         } catch (AwsException e) {
             return;
         }
-        Set<String> targetIds = new java.util.LinkedHashSet<>(registeredOuIds);
+        Set<String> targetIds = new LinkedHashSet<>(registeredOuIds);
         organizationalUnitsIn(organization).stream()
                 .filter(ou -> "Security".equals(ou.getName()))
                 .map(OrganizationalUnit::getId)

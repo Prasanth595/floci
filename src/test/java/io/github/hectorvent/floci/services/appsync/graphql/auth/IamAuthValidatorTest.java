@@ -385,7 +385,7 @@ class IamAuthValidatorTest {
      */
     private static Map<String, String> signedWithSessionToken(String accessKeyId, String secretKey, String token)
             throws Exception {
-        Map<String, String> signed = new java.util.LinkedHashMap<>(AppSyncRequestSigner.signedHeaders(
+        Map<String, String> signed = new LinkedHashMap<>(AppSyncRequestSigner.signedHeaders(
                 "api-1", HOST, BODY, accessKeyId, secretKey, REGION, NOW));
         signed.put("X-Amz-Security-Token", token);
         return signed;

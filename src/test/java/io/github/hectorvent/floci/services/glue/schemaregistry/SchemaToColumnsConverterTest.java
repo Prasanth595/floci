@@ -220,7 +220,7 @@ class SchemaToColumnsConverterTest {
 
         List<Column> cols = SchemaToColumnsConverter.toColumns("PROTOBUF", def);
 
-        java.util.Map<String, String> byName = cols.stream()
+        Map<String, String> byName = cols.stream()
                 .collect(java.util.stream.Collectors.toMap(Column::getName, Column::getType));
         assertEquals(3, cols.size(), () -> "got cols: " + cols.stream().map(c -> c.getName() + ":" + c.getType()).toList());
         assertEquals("bigint", byName.get("id"));

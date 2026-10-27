@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigatewayv2;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.hamcrest.Matcher;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -14,6 +15,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
@@ -504,7 +506,7 @@ class WebSocketConnectionLifecycleTest {
         try {
             wsFuture.get(60, TimeUnit.SECONDS);
             fail("Expected WebSocket connection to fail with status " + expectedStatus);
-        } catch (java.util.concurrent.ExecutionException e) {
+        } catch (ExecutionException e) {
             // The java.net.http WebSocket client wraps the rejection in an ExecutionException
             // whose cause is a java.net.http.WebSocketHandshakeException (or IOException)
             Throwable cause = e.getCause();
@@ -525,9 +527,9 @@ class WebSocketConnectionLifecycleTest {
     }
 
     // Helper for Hamcrest anyOf with integers
-    private static org.hamcrest.Matcher<Integer> anyOf(int... values) {
+    private static Matcher<Integer> anyOf(int... values) {
         @SuppressWarnings("unchecked")
-        org.hamcrest.Matcher<Integer>[] matchers = new org.hamcrest.Matcher[values.length];
+        Matcher<Integer>[] matchers = new Matcher[values.length];
         for (int i = 0; i < values.length; i++) {
             matchers[i] = org.hamcrest.Matchers.equalTo(values[i]);
         }

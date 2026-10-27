@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 import java.util.logging.LogRecord;
 import java.util.stream.Stream;
 
@@ -611,7 +612,7 @@ class ContainerLogStreamerTest {
         assertEquals(List.of("unterminated-tail"), emitted);
     }
 
-    private static LogContainerCmd attachWith(java.util.function.BiFunction<ContainerLogStreamer, String, Closeable> attach) {
+    private static LogContainerCmd attachWith(BiFunction<ContainerLogStreamer, String, Closeable> attach) {
         DockerClient dockerClient = mock(DockerClient.class);
         LogContainerCmd command = mock(LogContainerCmd.class, RETURNS_SELF);
         when(dockerClient.logContainerCmd("container-1")).thenReturn(command);

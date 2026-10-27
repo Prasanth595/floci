@@ -37,6 +37,9 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
@@ -47,6 +50,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -5483,8 +5487,8 @@ class CognitoServiceTest {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = openClient(service, pool.getId(), "c", true);
 
-        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
-        mac.init(new javax.crypto.spec.SecretKeySpec(
+        Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(
                 client.getClientSecret().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
         String secretHash = Base64.getEncoder().encodeToString(
                 mac.doFinal(("alice" + client.getClientId()).getBytes(StandardCharsets.UTF_8)));
@@ -5645,7 +5649,7 @@ class CognitoServiceTest {
 
         IdentityProvider held = service.describeIdentityProvider(pool.getId(), "CopyOidc");
 
-        Map<String, String> updated = new java.util.LinkedHashMap<>(details);
+        Map<String, String> updated = new LinkedHashMap<>(details);
         updated.put("client_id", "after");
         service.updateIdentityProvider(pool.getId(), "CopyOidc", updated, null, null);
 

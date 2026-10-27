@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService.StoredMapping;
+import io.github.hectorvent.floci.services.apigateway.model.Account;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
@@ -22,6 +23,7 @@ import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
 import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
+import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
 import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
 import io.github.hectorvent.floci.services.apigateway.model.RestApi;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
@@ -346,13 +348,13 @@ public class ApiGatewayController {
             if (body == null || body.isBlank()) {
                 throw new AwsException("BadRequestException", "Request body is required", 400);
             }
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
+            JsonNode node = objectMapper.readTree(body).path("patchOperations");
             if (!node.isArray()) {
                 throw new AwsException("BadRequestException", "patchOperations must be an array", 400);
             }
 
             List<Map<String, String>> patchOperations = new ArrayList<>();
-            for (com.fasterxml.jackson.databind.JsonNode operationNode : node) {
+            for (JsonNode operationNode : node) {
                 if (operationNode == null || operationNode.isNull() || !operationNode.isObject()) {
                     throw new AwsException("BadRequestException", "Each patch operation must be an object", 400);
                 }
@@ -1423,7 +1425,7 @@ public class ApiGatewayController {
             throw new AwsException("BadRequestException", "Body is required for OpenAPI import", 400);
         }
         try {
-            com.fasterxml.jackson.databind.JsonNode root = objectMapper.readTree(payload);
+            JsonNode root = objectMapper.readTree(payload);
             if (root.isObject() && root.hasNonNull("body") && root.get("body").isTextual()) {
                 return root.get("body").asText();
             }
@@ -2451,7 +2453,7 @@ public class ApiGatewayController {
         return node;
     }
 
-    private ObjectNode toMethodSettingNode(io.github.hectorvent.floci.services.apigateway.model.MethodSetting setting) {
+    private ObjectNode toMethodSettingNode(MethodSetting setting) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("metricsEnabled", setting.isMetricsEnabled());
         node.put("loggingLevel", setting.getLoggingLevel());
@@ -2695,7 +2697,7 @@ public class ApiGatewayController {
         return node;
     }
 
-    private ObjectNode toAccountNode(io.github.hectorvent.floci.services.apigateway.model.Account account) {
+    private ObjectNode toAccountNode(Account account) {
         ObjectNode node = objectMapper.createObjectNode();
         if (account.getApiKeyVersion() != null) {
             node.put("apiKeyVersion", account.getApiKeyVersion());

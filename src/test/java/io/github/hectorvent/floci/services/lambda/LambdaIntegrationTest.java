@@ -10,6 +10,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.io.ByteArrayOutputStream;
 import java.util.Base64;
 import java.util.List;
+import java.util.Random;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -334,7 +335,7 @@ class LambdaIntegrationTest {
             // base64 encoding) actually exceeds Jackson's former 20 MB limit
             zos.putNextEntry(new ZipEntry("padding.bin"));
             byte[] chunk = new byte[1024 * 1024];
-            java.util.Random rng = new java.util.Random(42);
+            Random rng = new Random(42);
             for (int i = 0; i < 16; i++) {
                 rng.nextBytes(chunk);
                 zos.write(chunk);

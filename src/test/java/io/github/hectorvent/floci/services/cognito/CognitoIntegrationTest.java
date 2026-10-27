@@ -25,9 +25,11 @@ import java.security.Signature;
 import java.security.spec.RSAPublicKeySpec;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Spliterators;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -289,7 +291,7 @@ class CognitoIntegrationTest {
         assertTrue(schema.size() >= 20,
                 "DescribeUserPool must include all 20 Cognito standard attributes");
 
-        java.util.Set<String> names = new java.util.HashSet<>();
+        Set<String> names = new HashSet<>();
         schema.forEach(attr -> names.add(attr.path("Name").asText()));
 
         for (String expected : List.of("sub", "name", "given_name", "family_name", "middle_name",

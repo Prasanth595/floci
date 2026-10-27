@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -38,11 +39,13 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * Query-protocol handler for SES actions.
@@ -1175,7 +1178,7 @@ public class SesQueryHandler {
      */
     private List<String> parseReorderRuleNames(MultivaluedMap<String, String> params) {
         String prefix = "RuleNames.member.";
-        Map<Integer, String> byIndex = new java.util.TreeMap<>();
+        Map<Integer, String> byIndex = new TreeMap<>();
         for (String key : params.keySet()) {
             if (!key.startsWith(prefix)) {
                 continue;
@@ -1295,7 +1298,7 @@ public class SesQueryHandler {
 
     private List<String> receiptActionIndexTokens(MultivaluedMap<String, String> params) {
         String prefix = "Rule.Actions.member.";
-        Map<Integer, String> byValue = new java.util.HashMap<>();
+        Map<Integer, String> byValue = new HashMap<>();
         for (String key : params.keySet()) {
             if (!key.startsWith(prefix)) {
                 continue;
@@ -1456,7 +1459,7 @@ public class SesQueryHandler {
      * Floci stores the V2 canonical form internally, so the V1 handler translates
      * in both directions.
      */
-    private static final java.util.Map<String, String> V1_EVENT_TYPE_TO_INTERNAL =
+    private static final Map<String, String> V1_EVENT_TYPE_TO_INTERNAL =
             java.util.Map.ofEntries(
                     java.util.Map.entry("send", "SEND"),
                     java.util.Map.entry("reject", "REJECT"),
@@ -1469,9 +1472,9 @@ public class SesQueryHandler {
                     java.util.Map.entry("deliveryDelay", "DELIVERY_DELAY"),
                     java.util.Map.entry("subscription", "SUBSCRIPTION"));
 
-    private static final java.util.Map<String, String> INTERNAL_EVENT_TYPE_TO_V1;
+    private static final Map<String, String> INTERNAL_EVENT_TYPE_TO_V1;
     static {
-        java.util.Map<String, String> reverse = new java.util.HashMap<>();
+        Map<String, String> reverse = new HashMap<>();
         for (Map.Entry<String, String> e : V1_EVENT_TYPE_TO_INTERNAL.entrySet()) {
             reverse.put(e.getValue(), e.getKey());
         }
@@ -1566,7 +1569,7 @@ public class SesQueryHandler {
         JsonNode node;
         try {
             node = objectMapper.readTree(raw);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (JsonProcessingException e) {
             throw new AwsException("InvalidTemplate",
                     "Invalid TemplateData JSON: " + e.getMessage(), 400);
         }

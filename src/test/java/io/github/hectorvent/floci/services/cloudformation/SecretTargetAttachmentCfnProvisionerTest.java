@@ -23,6 +23,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -662,7 +663,7 @@ class SecretTargetAttachmentCfnProvisionerTest {
         resource.setLogicalId("Attachment");
         resource.setResourceType("AWS::SecretsManager::SecretTargetAttachment");
         resource.setPhysicalId(SECRET_ARN);
-        resource.setAttributes(new java.util.HashMap<>(Map.of(
+        resource.setAttributes(new HashMap<>(Map.of(
                 "__FlociSecretTargetManagedKeys",
                 "engine,host,port,dbname,dbInstanceIdentifier",
                 "__FlociSecretTargetOwner",

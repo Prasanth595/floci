@@ -2012,7 +2012,7 @@ class SamTransformIntegrationTest {
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-                zos.putNextEntry(new java.util.zip.ZipEntry("index.js"));
+                zos.putNextEntry(new ZipEntry("index.js"));
                 zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 zos.closeEntry();
             }

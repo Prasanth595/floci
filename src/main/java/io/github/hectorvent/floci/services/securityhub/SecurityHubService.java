@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.securityhub;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -581,7 +582,7 @@ public class SecurityHubService implements Resettable {
             throw invalid("Tags must contain at most 50 entries.");
         }
         tags.forEach((key, value) -> validateTag(
-                key, value == null ? null : new com.fasterxml.jackson.databind.node.TextNode(value)));
+                key, value == null ? null : new TextNode(value)));
     }
 
     private static void validateTag(String key, JsonNode value) {

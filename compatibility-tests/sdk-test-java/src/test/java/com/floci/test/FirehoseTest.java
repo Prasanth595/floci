@@ -4,6 +4,7 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.firehose.model.*;
+import software.amazon.awssdk.services.firehose.model.Record;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -98,7 +99,7 @@ class FirehoseTest {
     @Order(5)
     @DisplayName("Put record batch")
     void putRecordBatch() {
-        List<software.amazon.awssdk.services.firehose.model.Record> records = List.of(
+        List<Record> records = List.of(
                 software.amazon.awssdk.services.firehose.model.Record.builder().data(SdkBytes.fromString("{\"i\":1}", StandardCharsets.UTF_8)).build(),
                 software.amazon.awssdk.services.firehose.model.Record.builder().data(SdkBytes.fromString("{\"i\":2}", StandardCharsets.UTF_8)).build(),
                 software.amazon.awssdk.services.firehose.model.Record.builder().data(SdkBytes.fromString("{\"i\":3}", StandardCharsets.UTF_8)).build()

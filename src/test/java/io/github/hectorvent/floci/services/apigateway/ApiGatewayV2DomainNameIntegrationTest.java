@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.hamcrest.Matcher;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -671,7 +672,7 @@ class ApiGatewayV2DomainNameIntegrationTest {
             .statusCode(201);
     }
 
-    private static org.hamcrest.Matcher<Iterable<? super String>> hasItemEqualTo(String value) {
+    private static Matcher<Iterable<? super String>> hasItemEqualTo(String value) {
         return org.hamcrest.Matchers.hasItem(equalTo(value));
     }
 }

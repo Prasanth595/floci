@@ -36,7 +36,9 @@ import java.net.UnknownHostException;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
+import java.security.PrivateKey;
 import java.security.Security;
+import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.List;
@@ -948,12 +950,12 @@ class CloudFrontOriginHttpClientTest {
     }
 
     private static SSLContext serverSslContext(
-            X509Certificate certificate, java.security.PrivateKey privateKey) throws Exception {
+            X509Certificate certificate, PrivateKey privateKey) throws Exception {
         char[] password = "changeit".toCharArray();
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
         keyStore.load(null, password);
         keyStore.setKeyEntry("origin", privateKey, password,
-                new java.security.cert.Certificate[] { certificate });
+                new Certificate[] { certificate });
         KeyManagerFactory keyManagers = KeyManagerFactory.getInstance(
                 KeyManagerFactory.getDefaultAlgorithm());
         keyManagers.init(keyStore, password);

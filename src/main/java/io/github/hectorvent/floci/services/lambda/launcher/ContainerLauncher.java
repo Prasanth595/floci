@@ -46,13 +46,20 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -78,7 +85,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      */
     static final String DEFAULT_NAME_PREFIX = ContainerStorageHelper.NAME_PREFIX;
     /** A prefix must be a legal Docker name on its own: names must start alphanumeric. */
-    private static final java.util.regex.Pattern SAFE_NAME_PREFIX =
+    private static final Pattern SAFE_NAME_PREFIX =
             java.util.regex.Pattern.compile("^[A-Za-z0-9][A-Za-z0-9_.-]*$");
 
     /**
@@ -138,7 +145,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         this.layerService = layerService;
         this.awsEnv = awsEnv;
         this.executionRoleCredentials = executionRoleCredentials;
-        this.populateSemaphore = new java.util.concurrent.Semaphore(resolvePopulateConcurrency(config));
+        this.populateSemaphore = new Semaphore(resolvePopulateConcurrency(config));
     }
 
     @PostConstruct
@@ -681,7 +688,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * Docker and Kubernetes launchers append the function's Environment after the same baseline
      * and must apply this rule identically.
      */
-    public static boolean definesFullCredentialTriad(java.util.Map<String, String> environment) {
+    public static boolean definesFullCredentialTriad(Map<String, String> environment) {
         return environment.containsKey("AWS_ACCESS_KEY_ID")
                 && environment.containsKey("AWS_SECRET_ACCESS_KEY")
                 && environment.containsKey("AWS_SESSION_TOKEN");
@@ -706,7 +713,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     //
     // Per-instance rather than static so the permit count can come from configuration; Floci runs a
     // single @ApplicationScoped launcher, so this is still one gate for the whole emulator.
-    private final java.util.concurrent.Semaphore populateSemaphore;
+    private final Semaphore populateSemaphore;
 
     /**
      * Permits for {@link #populateSemaphore}: the configured value when set and positive,
@@ -756,7 +763,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     // ensureCodeVolume re-checks lifecycleManager.volumeExists() rather than trusting this alone.
     private static final String CODE_VOLUME_MARKER_DIR = "lambda-codevol-markers";
     private static final String NAMESPACE_LABEL = "floci_namespace";
-    private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
     // Deliberately never pruned: removing an entry while a caller elsewhere still held a reference
     // to its lock object let a third caller's computeIfAbsent create a replacement lock for the same
     // volume name, so the waiter (once granted the old lock) and the new caller (holding the new
@@ -764,12 +771,12 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     // exists to prevent. Bounded in practice by the number of distinct function+code-version
     // combinations ever launched, each entry a single Object; negligible next to the disk space the
     // rest of this fix reclaims.
-    private final java.util.concurrent.ConcurrentHashMap<String, Object> codeVolumeLocks = new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> codeVolumeLocks = new ConcurrentHashMap<>();
     private final Object codeVolumeMarkerIoLock = new Object();
 
     /** Each function's current code volume, so a redeploy can queue the superseded one for cleanup. */
-    private final java.util.concurrent.ConcurrentHashMap<String, String> functionCurrentVolume =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> functionCurrentVolume =
+            new ConcurrentHashMap<>();
 
     /**
      * Serializes the functionCurrentVolume/volumesPendingCleanup transition below, keyed by function
@@ -782,8 +789,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * the same lock-identity reason as codeVolumeLocks, and bounded the same way (one entry per
      * distinct function name ever launched).
      */
-    private final java.util.concurrent.ConcurrentHashMap<String, Object> functionVolumeTransitionLocks =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> functionVolumeTransitionLocks =
+            new ConcurrentHashMap<>();
 
     /**
      * Superseded code volumes queued for cleanup, mapped to the time they were superseded (millis
@@ -794,8 +801,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * out a grace period comfortably longer than a single container launch takes crosses that
      * window safely; removeVolume() also no-ops if the volume is still genuinely in use by then.
      */
-    private final java.util.concurrent.ConcurrentHashMap<String, Long> volumesPendingCleanup =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> volumesPendingCleanup =
+            new ConcurrentHashMap<>();
 
     /**
      * Counts launches that hold a resolved volume name but haven't yet handed it to Docker via
@@ -808,12 +815,12 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * time. Entries are removed once their count returns to zero, so this stays bounded like the
      * other per-volume maps.
      */
-    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> volumesInFlight =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicInteger> volumesInFlight =
+            new ConcurrentHashMap<>();
     /** Non-final and package-private, like {@link #CODE_VOLUME_MIN_BYTES}, so tests can shrink it
      *  instead of waiting out a real 60s window (restore it in a finally). */
     static long VOLUME_CLEANUP_GRACE_MS = 60_000L;
-    private final java.util.concurrent.ScheduledExecutorService volumeCleanupScheduler =
+    private final ScheduledExecutorService volumeCleanupScheduler =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
                     r -> { Thread t = new Thread(r, "floci-code-volume-cleanup"); t.setDaemon(true); return t; });
 
@@ -880,7 +887,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             // caller now holds this name but hasn't handed it to Docker yet, so a sweep that acquires
             // this same lock next must see the increment and skip deleting it. The caller releases
             // this via releaseCodeVolumeReference once create() succeeds (or the launch fails).
-            volumesInFlight.computeIfAbsent(volName, k -> new java.util.concurrent.atomic.AtomicInteger())
+            volumesInFlight.computeIfAbsent(volName, k -> new AtomicInteger())
                     .incrementAndGet();
         }
         return volName;
@@ -921,7 +928,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      */
     void cleanupSupersededVolumes() {
         long cutoff = System.currentTimeMillis() - VOLUME_CLEANUP_GRACE_MS;
-        for (String volName : new java.util.ArrayList<>(volumesPendingCleanup.keySet())) {
+        for (String volName : new ArrayList<>(volumesPendingCleanup.keySet())) {
             Long queuedAt = volumesPendingCleanup.get(volName);
             if (queuedAt == null || queuedAt > cutoff) {
                 continue;
@@ -937,7 +944,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 if (stillQueuedAt == null || stillQueuedAt > cutoff) {
                     continue;
                 }
-                java.util.concurrent.atomic.AtomicInteger inFlight = volumesInFlight.get(volName);
+                AtomicInteger inFlight = volumesInFlight.get(volName);
                 if (inFlight != null && inFlight.get() > 0) {
                     // A launch has resolved this volume but hasn't handed it to Docker yet, so no
                     // real container-to-volume reference exists for removeVolume's own in-use check
@@ -985,7 +992,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     /** Test-only: the current in-flight reference count for this volume name (0 if none). */
     int inFlightCount(String volName) {
-        java.util.concurrent.atomic.AtomicInteger count = volumesInFlight.get(volName);
+        AtomicInteger count = volumesInFlight.get(volName);
         return count == null ? 0 : count.get();
     }
 
@@ -1043,7 +1050,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             if (!Files.isRegularFile(marker, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 return false;
             }
-            java.util.Optional<java.util.Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
+            Optional<Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
             boolean inventoryUnavailable = volumeNames.isEmpty();
             if (!inventoryUnavailable && volumeNames.get().contains(volName)) {
                 return true;
@@ -1095,7 +1102,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     }
 
     private void pruneOrphanCodeVolumeMarkers(Path markerDir) {
-        java.util.Optional<java.util.Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
+        Optional<Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
         if (volumeNames.isEmpty() || !Files.isDirectory(markerDir)) {
             return;
         }
@@ -1105,7 +1112,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // only what this configuration could have written can never delete a concurrent
         // process's live markers.
         String markerPrefix = codeVolumeNamePrefix(config);
-        try (java.util.stream.Stream<Path> markers = Files.list(markerDir)) {
+        try (Stream<Path> markers = Files.list(markerDir)) {
             markers.filter(path -> Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS))
                     .filter(path -> path.getFileName().toString().startsWith(markerPrefix))
                     .filter(path -> !volumeNames.get().contains(path.getFileName().toString()))

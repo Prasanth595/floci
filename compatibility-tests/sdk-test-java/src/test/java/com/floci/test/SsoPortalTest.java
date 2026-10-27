@@ -18,6 +18,7 @@ import software.amazon.awssdk.services.ssooidc.model.RegisterClientResponse;
 import software.amazon.awssdk.services.ssooidc.model.StartDeviceAuthorizationResponse;
 import software.amazon.awssdk.services.sts.StsClient;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpRequest;
@@ -140,7 +141,7 @@ class SsoPortalTest {
             HttpResponse<String> response = TestFixtures.emulatorHttpClient().send(
                     HttpRequest.newBuilder(uri).GET().build(), HttpResponse.BodyHandlers.ofString());
             assertThat(response.statusCode()).isEqualTo(200);
-        } catch (java.io.IOException e) {
+        } catch (IOException e) {
             throw new RuntimeException(e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

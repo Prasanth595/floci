@@ -14,8 +14,10 @@ import io.github.hectorvent.floci.services.organizations.model.Organization;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class DetectiveService implements Resettable {
@@ -108,7 +110,7 @@ public class DetectiveService implements Resettable {
         requireGraphArn(region, graphArn);
         DetectiveState state = requireGraph(region);
         int newMembers = 0;
-        java.util.Set<String> seen = new java.util.HashSet<>();
+        Set<String> seen = new HashSet<>();
         for (String accountId : accountIds) {
             requireAccountId(accountId);
             if (seen.add(accountId) && !state.getMembers().containsKey(accountId)) {

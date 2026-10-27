@@ -9,6 +9,11 @@ import org.junit.jupiter.api.Test;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -2884,13 +2889,13 @@ class SamTransformProcessorTest {
             }
             """);
 
-        java.util.List<java.util.logging.LogRecord> logged = new java.util.concurrent.CopyOnWriteArrayList<>();
-        java.util.logging.Logger logger =
+        List<LogRecord> logged = new CopyOnWriteArrayList<>();
+        Logger logger =
                 java.util.logging.Logger.getLogger(SamTransformProcessor.class.getName());
-        java.util.logging.Level original = logger.getLevel();
-        java.util.logging.Handler handler = new java.util.logging.Handler() {
+        Level original = logger.getLevel();
+        Handler handler = new Handler() {
             @Override
-            public void publish(java.util.logging.LogRecord logRecord) {
+            public void publish(LogRecord logRecord) {
                 logged.add(logRecord);
             }
 
@@ -2924,7 +2929,7 @@ class SamTransformProcessorTest {
      * The record's text. Which logging backend is in play decides whether the parameters are
      * already substituted or still carried alongside the pattern.
      */
-    private static String text(java.util.logging.LogRecord record) {
+    private static String text(LogRecord record) {
         Object[] parameters = record.getParameters();
         return parameters == null || parameters.length == 0
                 ? record.getMessage()

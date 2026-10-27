@@ -904,7 +904,7 @@ public class LambdaService implements ResourceProvider {
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
         if (requestedVpcConfigUpdate != null) {
-            requestedVpcConfig = new java.util.HashMap<>(requestedVpcConfigUpdate);
+            requestedVpcConfig = new HashMap<>(requestedVpcConfigUpdate);
         }
         List<LambdaFileSystemConfig> requestedFileSystemConfigs = fn.getFileSystemConfigs();
         if (request.containsKey("FileSystemConfigs")) {
@@ -937,7 +937,7 @@ public class LambdaService implements ResourceProvider {
         }
         if (request.containsKey("Environment")) {
             if (environment != null && environment.containsKey("Variables")) {
-                fn.setEnvironment(environmentVariables != null ? environmentVariables : new java.util.HashMap<>());
+                fn.setEnvironment(environmentVariables != null ? environmentVariables : new HashMap<>());
             }
         }
 
@@ -2307,7 +2307,7 @@ public class LambdaService implements ResourceProvider {
     }
 
     /** The highest-numbered published version of a function, if any. */
-    private java.util.Optional<LambdaFunction> newestVersion(String region, String functionName) {
+    private Optional<LambdaFunction> newestVersion(String region, String functionName) {
         return functionStore.listVersions(region, functionName).stream()
                 .filter(v -> v.getVersion() != null && !"$LATEST".equals(v.getVersion()))
                 .filter(v -> v.getVersion().chars().allMatch(Character::isDigit))
@@ -2435,7 +2435,7 @@ public class LambdaService implements ResourceProvider {
             snapshot.setEnvironment(fn.getEnvironment());
             snapshot.setVpcConfig(fn.getVpcConfig() == null
                     ? null
-                    : new java.util.HashMap<>(fn.getVpcConfig()));
+                    : new HashMap<>(fn.getVpcConfig()));
             snapshot.setVpcId(fn.getVpcId());
             snapshot.setSnapStartApplyOn(fn.getSnapStartApplyOn());
             snapshot.setLogFormat(fn.getLogFormat());
@@ -3022,7 +3022,7 @@ public class LambdaService implements ResourceProvider {
 
     public LambdaAlias createAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
-                                   java.util.Map<String, Double> routingConfig) {
+                                   Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
         validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
@@ -3064,7 +3064,7 @@ public class LambdaService implements ResourceProvider {
 
     public LambdaAlias updateAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
-                                   java.util.Map<String, Double> routingConfig) {
+                                   Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
         validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
@@ -3440,14 +3440,14 @@ public class LambdaService implements ResourceProvider {
 
     /** Stable, account-scoped S3 key for a published layer version's archive. */
     public static String layerObjectKey(String accountId, String layerName, long version) {
-        var account = accountId != null ? accountId : "000000000000";
+        String account = accountId != null ? accountId : "000000000000";
         return "layers/" + account + "/" + layerName + "/" + version;
     }
 
     /** Percent-encodes each path segment of a bucket path or object key for use in a URL. */
     public static String encodeObjectPath(String path) {
-        var encoded = new StringBuilder();
-        for (var segment : path.split("/", -1)) {
+        StringBuilder encoded = new StringBuilder();
+        for (String segment : path.split("/", -1)) {
             if (!encoded.isEmpty()) {
                 encoded.append('/');
             }
@@ -3814,7 +3814,7 @@ public class LambdaService implements ResourceProvider {
                 throw new AwsException("ResourceNotFoundException",
                         "The resource you requested does not exist.", 404);
             }
-            Map<String, Object> policy = new java.util.LinkedHashMap<>();
+            Map<String, Object> policy = new LinkedHashMap<>();
             policy.put("Version", "2012-10-17");
             policy.put("Id", "default");
             policy.put("Statement", statements);

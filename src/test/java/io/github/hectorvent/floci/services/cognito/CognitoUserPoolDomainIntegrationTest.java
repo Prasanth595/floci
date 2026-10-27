@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -72,7 +73,7 @@ class CognitoUserPoolDomainIntegrationTest {
                 """.formatted(domainName)).path("CertificateArn").asText();
     }
 
-    private static io.restassured.response.Response acm(String action, String certificateArn) {
+    private static Response acm(String action, String certificateArn) {
         return RestAssuredJsonUtils.awsAction("CertificateManager", action, """
                 {
                   "CertificateArn": "%s"

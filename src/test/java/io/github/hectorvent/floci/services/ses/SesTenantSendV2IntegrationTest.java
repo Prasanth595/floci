@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -37,7 +38,7 @@ class SesTenantSendV2IntegrationTest {
     private static final String TEMPLATE = "floci-send-tpl";
     private static final String ARN_PREFIX = "arn:aws:ses:us-east-1:000000000000:";
 
-    private static io.restassured.specification.RequestSpecification v2() {
+    private static RequestSpecification v2() {
         return given().contentType("application/json").header("Authorization", AUTH);
     }
 

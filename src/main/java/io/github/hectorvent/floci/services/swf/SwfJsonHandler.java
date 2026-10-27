@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
+import java.util.function.ToDoubleFunction;
 
 /**
  * Translates the SWF JSON 1.0 wire protocol to and from {@link SwfService}.
@@ -445,7 +446,7 @@ public class SwfJsonHandler {
     }
 
     private ExecutionFilter timeFilter(JsonNode filterNode,
-                                       java.util.function.ToDoubleFunction<SwfWorkflowExecution> extractor) {
+                                       ToDoubleFunction<SwfWorkflowExecution> extractor) {
         if (filterNode == null || filterNode.isMissingNode() || filterNode.isNull()) {
             return ExecutionFilter.all();
         }

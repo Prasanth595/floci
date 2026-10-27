@@ -25,6 +25,7 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -460,7 +461,7 @@ public class AwsJsonCborController {
         int totalRead = 0;
         int maxRead = 10 * 1024 * 1024; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (GZIPInputStream gis = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed))) {
+        try (GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(compressed))) {
             int read;
             while ((read = gis.read(buffer)) != -1) {
                 totalRead += read;

@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
 import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
+import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
@@ -46,6 +47,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
@@ -688,7 +690,7 @@ class S3ServiceTest {
         s3Service.createBucket("test-bucket", "us-east-1");
         byte[] part1 = new byte[5 * 1024 * 1024];
         byte[] part2 = "Part2Data-World".getBytes(StandardCharsets.UTF_8);
-        var upload = s3Service.initiateMultipartUpload("test-bucket", "multipart.bin", "application/octet-stream");
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "multipart.bin", "application/octet-stream");
         s3Service.uploadPart("test-bucket", "multipart.bin", upload.getUploadId(), 1, part1);
         s3Service.uploadPart("test-bucket", "multipart.bin", upload.getUploadId(), 2, part2);
         S3Object source = s3Service.completeMultipartUpload("test-bucket", "multipart.bin", upload.getUploadId(),
@@ -1122,9 +1124,9 @@ class S3ServiceTest {
         websiteBucket("index.html", null);
         s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
 
-        var resolution = s3Service.resolveWebsiteRequest("site", "docs", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "docs", true, UNSIGNED);
 
-        var serve = assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution);
+        S3Service.WebsiteResolution.ServeObject serve = assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution);
         assertEquals("docs/index.html", serve.key());
     }
 
@@ -1134,7 +1136,7 @@ class S3ServiceTest {
         s3Service.putObject("site", "index.html", "root".getBytes(), "text/html", null);
 
         // The site root is a directory request even though the caller saw no trailing slash.
-        var resolution = s3Service.resolveWebsiteRequest("site", "", false, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "", false, UNSIGNED);
 
         assertEquals("index.html",
                 assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution).key());
@@ -1146,7 +1148,7 @@ class S3ServiceTest {
         s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
 
         // No trailing slash, no object at "docs", but an index lives beneath it.
-        var resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
 
         assertInstanceOf(S3Service.WebsiteResolution.RedirectToDirectory.class, resolution);
     }
@@ -1158,7 +1160,7 @@ class S3ServiceTest {
         s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
 
         // An exact object hit is served by the normal object path, not redirected.
-        var resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
 
         assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class, resolution);
     }
@@ -1168,9 +1170,9 @@ class S3ServiceTest {
         websiteBucket("index.html", "error.html");
         s3Service.putObject("site", "error.html", "oops".getBytes(), "text/html", null);
 
-        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
 
-        var err = assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class, resolution);
+        S3Service.WebsiteResolution.ErrorDocument err = assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class, resolution);
         assertEquals(404, err.status());
         assertArrayEquals("oops".getBytes(), err.object().getData());
     }
@@ -1179,7 +1181,7 @@ class S3ServiceTest {
     void resolveWebsiteRequestFallsBackToDefaultErrorWhenNoErrorDocumentConfigured() {
         websiteBucket("index.html", null);
 
-        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
 
         assertEquals(404,
                 assertInstanceOf(S3Service.WebsiteResolution.DefaultError.class, resolution).status());
@@ -1190,7 +1192,7 @@ class S3ServiceTest {
         // Configured but never uploaded: S3 serves its built-in page rather than 500-ing.
         websiteBucket("index.html", "error.html");
 
-        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
 
         assertEquals(404,
                 assertInstanceOf(S3Service.WebsiteResolution.DefaultError.class, resolution).status());
@@ -1200,7 +1202,7 @@ class S3ServiceTest {
     void resolveWebsiteRequestIsNotAWebsiteWithoutConfiguration() {
         s3Service.createBucket("plain", "us-east-1");
 
-        var resolution = s3Service.resolveWebsiteRequest("plain", "any", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("plain", "any", true, UNSIGNED);
 
         assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class, resolution);
     }
@@ -1271,7 +1273,7 @@ class S3ServiceTest {
         // Through the real storage layer rather than Jackson alone: written, flushed to disk, and
         // read back by a second service over the same file, the way a restart does it.
         Path bucketsFile = tempDir.resolve("s3-buckets.json");
-        var beforeRestart = new HybridStorage<String, Bucket>(
+        HybridStorage<String, Bucket> beforeRestart = new HybridStorage<String, Bucket>(
                 bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         S3Service before = new S3Service(beforeRestart, new InMemoryStorage<>(), tempDir.resolve("s3a"), false);
         before.createBucket("persisted-metrics", "us-east-1");
@@ -1279,7 +1281,7 @@ class S3ServiceTest {
         beforeRestart.flush();
         beforeRestart.shutdown();
 
-        var afterRestart = new HybridStorage<String, Bucket>(
+        HybridStorage<String, Bucket> afterRestart = new HybridStorage<String, Bucket>(
                 bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         afterRestart.load();
         try {
@@ -1334,7 +1336,7 @@ class S3ServiceTest {
 
     @Test
     void analyticsAndInventoryConfigurationsSurviveAJacksonRoundTrip() throws Exception {
-        var mapper = new ObjectMapper().findAndRegisterModules();
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         Bucket bucket = new Bucket("persisted-configs");
         bucket.setAnalyticsConfigurations(new LinkedHashMap<>(Map.of("a", "<Id>a</Id>")));
         bucket.setInventoryConfigurations(new LinkedHashMap<>(Map.of("i", "<Id>i</Id>")));
@@ -1348,7 +1350,7 @@ class S3ServiceTest {
     void metricsConfigurationsSurviveAJacksonRoundTrip() throws Exception {
         // Bucket records are persisted as JSON, so the configurations have to come back after a
         // restart, and a record written before the field existed has to still load.
-        var mapper = new ObjectMapper().findAndRegisterModules();
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         Bucket bucket = new Bucket("persisted");
         bucket.setMetricsConfigurations(new LinkedHashMap<>(
                 Map.of("EntireBucket", "<Id>EntireBucket</Id>")));
@@ -1381,7 +1383,7 @@ class S3ServiceTest {
         // mutation's re-read and its write would still be undone. That interleaving is too narrow
         // to force from a test, so what is asserted here is the property that closes it — the
         // delete waits for whoever holds the record's monitor.
-        var buckets = new InMemoryStorage<String, Bucket>();
+        InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<String, Bucket>();
         S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-monitor"), false);
         service.createBucket("monitor-bucket", "us-east-1");
         Bucket record = buckets.get("monitor-bucket").orElseThrow();
@@ -1410,13 +1412,13 @@ class S3ServiceTest {
         // would be undone by the write. The interleaving is forced rather than raced for: the test
         // holds the bucket monitor, lets the put resolve the record and block on it, deletes the
         // bucket from the same thread, and only then releases.
-        var buckets = new InMemoryStorage<String, Bucket>();
+        InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<String, Bucket>();
         S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-race"), false);
         service.createBucket("race-bucket", "us-east-1");
         Bucket record = buckets.get("race-bucket").orElseThrow();
 
-        var putStarted = new CountDownLatch(1);
-        var thrownByPut = new AtomicReference<Exception>();
+        CountDownLatch putStarted = new CountDownLatch(1);
+        AtomicReference<Exception> thrownByPut = new AtomicReference<Exception>();
         Thread put = new Thread(() -> {
             putStarted.countDown();
             try {
@@ -1445,13 +1447,13 @@ class S3ServiceTest {
         // Presence is not enough: deleted and recreated under the same name, the store holds a
         // different record, and writing the resolved one back would replace the new bucket with
         // the old one's state.
-        var buckets = new InMemoryStorage<String, Bucket>();
+        InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<String, Bucket>();
         S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-recreate"), false);
         service.createBucket("recreated-bucket", "us-east-1");
         Bucket original = buckets.get("recreated-bucket").orElseThrow();
 
-        var putStarted = new CountDownLatch(1);
-        var thrownByPut = new AtomicReference<Exception>();
+        CountDownLatch putStarted = new CountDownLatch(1);
+        AtomicReference<Exception> thrownByPut = new AtomicReference<Exception>();
         Thread put = new Thread(() -> {
             putStarted.countDown();
             try {
@@ -1484,10 +1486,10 @@ class S3ServiceTest {
         // monitor concurrent puts of different ids overwrite each other's work.
         s3Service.createBucket("metrics-race", "us-east-1");
         int count = 24;
-        var pool = Executors.newFixedThreadPool(8);
-        var start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
         try {
-            var submitted = new ArrayList<Future<?>>();
+            ArrayList<Future<?>> submitted = new ArrayList<Future<?>>();
             for (int i = 0; i < count; i++) {
                 String id = "config-" + i;
                 submitted.add(pool.submit(() -> {
@@ -1497,7 +1499,7 @@ class S3ServiceTest {
                 }));
             }
             start.countDown();
-            for (var future : submitted) {
+            for (Future<?> future : submitted) {
                 future.get(30, TimeUnit.SECONDS);
             }
         } finally {
@@ -1585,7 +1587,7 @@ class S3ServiceTest {
         // Through the real storage layer rather than Jackson alone: written, flushed to disk, and
         // read back by a second service over the same file, the way a restart does it.
         Path bucketsFile = tempDir.resolve("s3-buckets-tiering.json");
-        var beforeRestart = new HybridStorage<String, Bucket>(
+        HybridStorage<String, Bucket> beforeRestart = new HybridStorage<String, Bucket>(
                 bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         S3Service before = new S3Service(beforeRestart, new InMemoryStorage<>(), tempDir.resolve("s3b"), false);
         before.createBucket("persisted-tiering", "us-east-1");
@@ -1594,7 +1596,7 @@ class S3ServiceTest {
         beforeRestart.flush();
         beforeRestart.shutdown();
 
-        var afterRestart = new HybridStorage<String, Bucket>(
+        HybridStorage<String, Bucket> afterRestart = new HybridStorage<String, Bucket>(
                 bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         afterRestart.load();
         try {
@@ -1610,7 +1612,7 @@ class S3ServiceTest {
     void intelligentTieringConfigurationsSurviveAJacksonRoundTrip() throws Exception {
         // Bucket records are persisted as JSON, so the configurations have to come back after a
         // restart, and a record written before the field existed has to still load.
-        var mapper = new ObjectMapper().findAndRegisterModules();
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         Bucket bucket = new Bucket("persisted");
         bucket.setIntelligentTieringConfigurations(new LinkedHashMap<>(
                 Map.of("EntireBucket", "<Id>EntireBucket</Id>")));
@@ -1629,10 +1631,10 @@ class S3ServiceTest {
         // monitor concurrent puts of different ids overwrite each other's work.
         s3Service.createBucket("tiering-race", "us-east-1");
         int count = 24;
-        var pool = Executors.newFixedThreadPool(8);
-        var start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
         try {
-            var submitted = new ArrayList<Future<?>>();
+            ArrayList<Future<?>> submitted = new ArrayList<Future<?>>();
             for (int i = 0; i < count; i++) {
                 String id = "config-" + i;
                 submitted.add(pool.submit(() -> {
@@ -1643,7 +1645,7 @@ class S3ServiceTest {
                 }));
             }
             start.countDown();
-            for (var future : submitted) {
+            for (Future<?> future : submitted) {
                 future.get(30, TimeUnit.SECONDS);
             }
         } finally {

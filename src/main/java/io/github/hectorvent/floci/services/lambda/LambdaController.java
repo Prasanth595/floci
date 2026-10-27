@@ -38,6 +38,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -704,7 +705,7 @@ public class LambdaController {
         if (!(weights instanceof Map)) return null;
         Map<String, Object> raw = (Map<String, Object>) weights;
         if (raw.isEmpty()) return null;
-        java.util.Map<String, Double> result = new java.util.HashMap<>();
+        Map<String, Double> result = new HashMap<>();
         raw.forEach((k, v) -> result.put(k, ((Number) v).doubleValue()));
         return result;
     }

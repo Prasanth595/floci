@@ -384,7 +384,7 @@ class BatchCfnProvisionerTest {
 
     // ── replacement cleanup ──────────────────────────────────────────────────
 
-    private ObjectNode detail(String key, String arn, java.util.Map<String, Object> fields) {
+    private ObjectNode detail(String key, String arn, Map<String, Object> fields) {
         ObjectNode out = mapper.createObjectNode();
         ObjectNode item = out.putArray(key).addObject();
         item.put("arn", arn);

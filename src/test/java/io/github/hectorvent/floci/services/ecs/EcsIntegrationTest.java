@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -54,7 +55,7 @@ class EcsIntegrationTest {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private static io.restassured.specification.RequestSpecification ecs(String action) {
+    private static RequestSpecification ecs(String action) {
         return given()
                 .contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", TARGET_PREFIX + action);

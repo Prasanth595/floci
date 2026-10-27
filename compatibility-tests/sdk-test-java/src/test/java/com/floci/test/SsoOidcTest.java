@@ -10,10 +10,12 @@ import software.amazon.awssdk.services.ssooidc.model.CreateTokenWithIamResponse;
 import software.amazon.awssdk.services.ssooidc.model.RegisterClientResponse;
 import software.amazon.awssdk.services.ssooidc.model.StartDeviceAuthorizationResponse;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.security.NoSuchAlgorithmException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -73,7 +75,7 @@ class SsoOidcTest {
                 HttpResponse<String> browserResponse = TestFixtures.emulatorHttpClient().send(
                         request, java.net.http.HttpResponse.BodyHandlers.ofString());
                 assertThat(browserResponse.statusCode()).isEqualTo(200);
-            } catch (java.io.IOException e) {
+            } catch (IOException e) {
                 throw new RuntimeException(e);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -158,7 +160,7 @@ class SsoOidcTest {
                         .filter(value -> value.startsWith("code="))
                         .map(value -> java.net.URLDecoder.decode(value.substring(5), java.nio.charset.StandardCharsets.UTF_8))
                         .findFirst().orElseThrow();
-            } catch (java.io.IOException e) {
+            } catch (IOException e) {
                 throw new RuntimeException(e);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -187,7 +189,7 @@ class SsoOidcTest {
             byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
                     .digest(verifier.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
             return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
-        } catch (java.security.NoSuchAlgorithmException e) {
+        } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
     }

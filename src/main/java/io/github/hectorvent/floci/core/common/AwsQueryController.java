@@ -72,7 +72,7 @@ public class AwsQueryController {
     private final DocDbService docDbService;
     private final RdsService rdsService;
     /** ARNs already reported as held by both services, so the warning is logged once each. */
-    private final java.util.Set<String> reportedArnCollisions = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> reportedArnCollisions = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final SqsQueryHandler sqsQueryHandler;
     private final SnsQueryHandler snsQueryHandler;
     private final SesQueryHandler sesQueryHandler;

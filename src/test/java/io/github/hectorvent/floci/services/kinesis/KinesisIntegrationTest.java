@@ -17,6 +17,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -667,7 +668,7 @@ class KinesisIntegrationTest {
                 """)
         .when().post("/").then().statusCode(200);
 
-        java.util.Set<String> reported = new java.util.HashSet<>();
+        Set<String> reported = new HashSet<>();
         // Probe enough partition keys that hash(pk) % 2 hits both shards. With 50 keys the
         // odds of single-shard routing are ~1 in 2^49, so this is effectively deterministic.
         for (int i = 0; i < 50 && reported.size() < 2; i++) {
@@ -704,7 +705,7 @@ class KinesisIntegrationTest {
         }
         body.append("]}");
 
-        java.util.List<String> shardIds = given()
+        List<String> shardIds = given()
             .header("X-Amz-Target", "Kinesis_20131202.PutRecords")
             .contentType(KINESIS_CONTENT_TYPE)
             .body(body.toString())
@@ -714,7 +715,7 @@ class KinesisIntegrationTest {
             .body("Records.size()", equalTo(10))
             .extract().jsonPath().getList("Records.ShardId", String.class);
 
-        java.util.Set<String> distinct = new java.util.HashSet<>(shardIds);
+        Set<String> distinct = new HashSet<>(shardIds);
         org.junit.jupiter.api.Assertions.assertTrue(distinct.size() >= 2,
                 "PutRecords should route 10 mixed partition keys across at least 2 shards, got: " + distinct);
         for (String sid : shardIds) {

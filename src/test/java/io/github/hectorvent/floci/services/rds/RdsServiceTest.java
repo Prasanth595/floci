@@ -68,6 +68,7 @@ import java.lang.reflect.Field;
 import java.net.ServerSocket;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -5286,7 +5287,7 @@ class RdsServiceTest {
                 20, false, null, null, null, null, false);
         when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
 
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = rdsService.createDbSnapshot("mysnap", "mydb");
+        DbSnapshot snapshot = rdsService.createDbSnapshot("mysnap", "mydb");
 
         assertEquals("mysnap", snapshot.getDbSnapshotIdentifier());
         assertEquals("mydb", snapshot.getDbInstanceIdentifier());
@@ -5593,7 +5594,7 @@ class RdsServiceTest {
                 20, false, null, null, null, null, false);
         when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
 
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+        DbSnapshot snapshot =
                 rdsService.createDbSnapshot("mysnap", "mydb", Map.of("owner", "platform"));
 
         assertEquals(Map.of("owner", "platform"), snapshot.getTags());
@@ -5837,7 +5838,7 @@ class RdsServiceTest {
                 "admin", "password", "dbname", "db.t3.micro",
                 20, false, null, null, null, null, false);
         when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+        DbSnapshot snapshot =
                 rdsService.createDbSnapshot("mysnap", "mydb");
 
         rdsService.addTagsToResource(snapshot.getDbSnapshotArn(), Map.of("Name", "mysnap"));
@@ -5855,7 +5856,7 @@ class RdsServiceTest {
                 Map.of(), "us-west-2");
         when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
 
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+        DbSnapshot snapshot =
                 rdsService.createDbSnapshot("mysnap", "mydb", Map.of("owner", "west-team"), "us-west-2");
 
         assertEquals("arn:aws:rds:us-west-2:123456789012:snapshot:mysnap", snapshot.getDbSnapshotArn());
@@ -5966,11 +5967,11 @@ class RdsServiceTest {
         rdsService.createDbSnapshot("snap2", "mydb2");
 
         // 1. Describe all
-        Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> all = rdsService.describeDbSnapshots(null, null);
+        Collection<DbSnapshot> all = rdsService.describeDbSnapshots(null, null);
         assertEquals(2, all.size());
 
         // 2. Describe by snapshot ID
-        Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> snap1Result = rdsService.describeDbSnapshots("snap1", null);
+        Collection<DbSnapshot> snap1Result = rdsService.describeDbSnapshots("snap1", null);
         assertEquals(1, snap1Result.size());
         assertEquals("snap1", snap1Result.iterator().next().getDbSnapshotIdentifier());
 
@@ -5978,7 +5979,7 @@ class RdsServiceTest {
         assertThrows(AwsException.class, () -> rdsService.describeDbSnapshots("invalid-snap", null));
 
         // 4. Describe by DB instance ID
-        Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> inst1Result = rdsService.describeDbSnapshots(null, "mydb1");
+        Collection<DbSnapshot> inst1Result = rdsService.describeDbSnapshots(null, "mydb1");
         assertEquals(1, inst1Result.size());
         assertEquals("snap1", inst1Result.iterator().next().getDbSnapshotIdentifier());
     }
@@ -5991,7 +5992,7 @@ class RdsServiceTest {
         when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
         rdsService.createDbSnapshot("mysnap", "mydb");
 
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+        DbSnapshot snapshot =
                 rdsService.describeDbSnapshotAttributes("mysnap");
         assertEquals(List.of(), snapshot.getRestoreAccountIds());
 
@@ -6006,11 +6007,11 @@ class RdsServiceTest {
         when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
         rdsService.createDbSnapshot("mysnap", "mydb");
 
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot added = rdsService.modifyDbSnapshotAttribute(
+        DbSnapshot added = rdsService.modifyDbSnapshotAttribute(
                 "mysnap", "restore", List.of("111111111111", "222222222222"), List.of());
         assertEquals(List.of("111111111111", "222222222222"), added.getRestoreAccountIds());
 
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot removed = rdsService.modifyDbSnapshotAttribute(
+        DbSnapshot removed = rdsService.modifyDbSnapshotAttribute(
                 "mysnap", "restore", List.of(), List.of("111111111111"));
         assertEquals(List.of("222222222222"), removed.getRestoreAccountIds());
 
@@ -7159,7 +7160,7 @@ class RdsServiceTest {
             relayRunning.set(false);
             throw stopFailure;
         }).when(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
-        java.util.ArrayList<Boolean> startedModes = new java.util.ArrayList<>();
+        ArrayList<Boolean> startedModes = new ArrayList<>();
         doAnswer(invocation -> {
             startedModes.add(invocation.getArgument(3));
             relayRunning.set(true);
@@ -7213,7 +7214,7 @@ class RdsServiceTest {
             relayRunning.set(false);
             return null;
         }).when(proxyManager).stopProxy("db-proxy:" + proxy.getDbProxyArn());
-        java.util.ArrayList<Boolean> startedModes = new java.util.ArrayList<>();
+        ArrayList<Boolean> startedModes = new ArrayList<>();
         doAnswer(invocation -> {
             startedModes.add(invocation.getArgument(3));
             relayRunning.set(true);
@@ -9026,7 +9027,7 @@ class RdsServiceTest {
         rdsService.createOptionGroup("og1", "mariadb", "11.4", "mine");
         OptionGroupOption option = new OptionGroupOption("MARIADB_AUDIT_PLUGIN");
         option.setPort(11211);
-        option.setOptionSettings(new java.util.LinkedHashMap<>(
+        option.setOptionSettings(new LinkedHashMap<>(
                 Map.of("SERVER_AUDIT_EVENTS", "CONNECT")));
         option.setVpcSecurityGroupMemberships(List.of("sg-123"));
 
@@ -9045,12 +9046,12 @@ class RdsServiceTest {
     void modifyOptionGroupUpdatesAnExistingOptionInPlace() {
         rdsService.createOptionGroup("og1", "mariadb", "11.4", "mine");
         OptionGroupOption first = new OptionGroupOption("MARIADB_AUDIT_PLUGIN");
-        first.setOptionSettings(new java.util.LinkedHashMap<>(
+        first.setOptionSettings(new LinkedHashMap<>(
                 Map.of("SERVER_AUDIT_EVENTS", "CONNECT")));
         rdsService.modifyOptionGroup("og1", List.of(first), List.of());
 
         OptionGroupOption update = new OptionGroupOption("MARIADB_AUDIT_PLUGIN");
-        update.setOptionSettings(new java.util.LinkedHashMap<>(
+        update.setOptionSettings(new LinkedHashMap<>(
                 Map.of("SERVER_AUDIT_EVENTS", "CONNECT,QUERY")));
         OptionGroup group = rdsService.modifyOptionGroup("og1", List.of(update), List.of());
 
@@ -9978,7 +9979,7 @@ class RdsServiceTest {
                 20, false, null, null, null, null, false);
 
         instances.pauseOn(PausingStorageBackend.Call.PUT, "::mydb");
-        java.util.concurrent.atomic.AtomicReference<Throwable> modifyOutcome = new java.util.concurrent.atomic.AtomicReference<>();
+        AtomicReference<Throwable> modifyOutcome = new AtomicReference<>();
         Thread modify = new Thread(() -> {
             try {
                 service.modifyDbInstance("mydb", null, null, null, List.of(), null, null, null,

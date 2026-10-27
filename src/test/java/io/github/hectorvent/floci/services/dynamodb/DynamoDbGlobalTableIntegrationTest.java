@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.parsing.Parser;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -26,7 +27,7 @@ class DynamoDbGlobalTableIntegrationTest {
         RestAssured.registerParser("application/x-amz-json-1.0", Parser.JSON);
     }
 
-    private static io.restassured.response.Response call(String target, String body) {
+    private static Response call(String target, String body) {
         return given()
             .header("X-Amz-Target", "DynamoDB_20120810." + target)
             .contentType("application/x-amz-json-1.0")

@@ -30,6 +30,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.mockito.stubbing.Answer;
 
 import java.time.Instant;
 import java.util.List;
@@ -1470,7 +1471,7 @@ class RdsCfnProvisionerTest {
 
     /** RdsService hands back a cluster named after whatever id the provisioner asked to create. */
     private void createDbClusterEchoesRequestedId() {
-        org.mockito.stubbing.Answer<DbCluster> echo = invocation -> {
+        Answer<DbCluster> echo = invocation -> {
             DbCluster created = mock(DbCluster.class);
             doReturn(invocation.getArgument(0)).when(created).getDbClusterIdentifier();
             return created;

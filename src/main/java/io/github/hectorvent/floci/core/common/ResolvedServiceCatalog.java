@@ -94,6 +94,7 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -107,7 +108,7 @@ public class ResolvedServiceCatalog {
      * are {@code iot:} ({@code iot:DescribeJobExecution} and peers in the Service Authorization
      * Reference). Keep this minimal: every entry suppresses a distinct IAM namespace.
      */
-    private static final java.util.Map<String, String> CREDENTIAL_SCOPE_ALIASES =
+    private static final Map<String, String> CREDENTIAL_SCOPE_ALIASES =
             java.util.Map.of(
                     "s3express", "s3",
                     "iot-jobs-data", "iot",

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ssoadmin;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -117,7 +118,7 @@ class SsoAdminAssignmentsIntegrationTest {
                 .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
-    private static io.restassured.response.Response json(String target, String body) {
+    private static Response json(String target, String body) {
         return given().contentType(CONTENT_TYPE).header("Authorization", AUTH).header("X-Amz-Target", target)
                 .body(body).post("/");
     }

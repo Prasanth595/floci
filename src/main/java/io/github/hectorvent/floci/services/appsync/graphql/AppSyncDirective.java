@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
+import java.util.HashSet;
 import java.util.Set;
 
 public enum AppSyncDirective {
@@ -16,7 +17,7 @@ public enum AppSyncDirective {
 
     private static final Set<String> KNOWN_NAMES;
     static {
-        java.util.Set<String> names = new java.util.HashSet<>();
+        Set<String> names = new HashSet<>();
         names.add("skip");
         names.add("include");
         names.add("deprecated");

@@ -483,9 +483,9 @@ class KmsFeaturesTest {
         try {
             byte[] publicKeyDer = kms.getPublicKey(b -> b.keyId(keyId)).publicKey().asByteArray();
             PublicKey publicKey = KeyFactory.getInstance("RSA")
-                    .generatePublic(new java.security.spec.X509EncodedKeySpec(publicKeyDer));
+                    .generatePublic(new X509EncodedKeySpec(publicKeyDer));
             Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
-            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new OAEPParameterSpec(
                     "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA256,
                     javax.crypto.spec.PSource.PSpecified.DEFAULT));
             byte[] localCiphertext = cipher.doFinal("secret payload".getBytes(StandardCharsets.UTF_8));

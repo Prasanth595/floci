@@ -269,7 +269,7 @@ class ExecuteApiSigV4AuthorizerTest {
      */
     private static Map<String, String> signedWithSessionToken(String accessKeyId, String sessionToken)
             throws Exception {
-        Map<String, String> signed = new java.util.LinkedHashMap<>(ExecuteApiRequestSigner.signedHeaders(
+        Map<String, String> signed = new LinkedHashMap<>(ExecuteApiRequestSigner.signedHeaders(
                 "GET", PATH, Map.of(), HOST, null, accessKeyId, "session-secret", REGION, Instant.now()));
         signed.put("X-Amz-Security-Token", sessionToken);
         return signed;
@@ -333,7 +333,7 @@ class ExecuteApiSigV4AuthorizerTest {
         // x-amz-content-sha256 header alongside a replaced body must not restore the match:
         // the header is not in SignedHeaders, and a literal hash is never taken on trust.
         byte[] signedBody = "{\"amount\":1}".getBytes();
-        Map<String, String> signed = new java.util.LinkedHashMap<>(ExecuteApiRequestSigner.signedHeaders(
+        Map<String, String> signed = new LinkedHashMap<>(ExecuteApiRequestSigner.signedHeaders(
                 "POST", PATH, Map.of(), HOST, signedBody, "test", "test", REGION, Instant.now()));
         signed.put("x-amz-content-sha256", Digests.sha256Hex(signedBody));
 

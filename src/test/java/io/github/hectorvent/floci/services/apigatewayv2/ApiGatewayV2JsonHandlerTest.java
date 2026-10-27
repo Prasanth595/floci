@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -311,11 +313,11 @@ class ApiGatewayV2JsonHandlerTest {
                 .when().post("/")
                 .then().statusCode(201).extract().asString();
 
-        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-        com.fasterxml.jackson.databind.JsonNode created = mapper.readTree(createBody);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode created = mapper.readTree(createBody);
         String localIntegrationId = created.get("IntegrationId").asText();
         org.junit.jupiter.api.Assertions.assertEquals("HTTP_PROXY", created.get("IntegrationType").asText());
-        com.fasterxml.jackson.databind.JsonNode createdRP = created.get("RequestParameters");
+        JsonNode createdRP = created.get("RequestParameters");
         org.junit.jupiter.api.Assertions.assertNotNull(createdRP, "CreateIntegration response should include RequestParameters");
         org.junit.jupiter.api.Assertions.assertEquals("/public/$request.path.proxy", createdRP.get("overwrite:path").asText());
         org.junit.jupiter.api.Assertions.assertEquals("wallet.internal", createdRP.get("overwrite:header.Host").asText());
@@ -332,7 +334,7 @@ class ApiGatewayV2JsonHandlerTest {
                 .when().post("/")
                 .then().statusCode(200).extract().asString();
 
-        com.fasterxml.jackson.databind.JsonNode getRP = mapper.readTree(getBody).get("RequestParameters");
+        JsonNode getRP = mapper.readTree(getBody).get("RequestParameters");
         org.junit.jupiter.api.Assertions.assertNotNull(getRP, "GetIntegration response should include RequestParameters");
         org.junit.jupiter.api.Assertions.assertEquals("/public/$request.path.proxy", getRP.get("overwrite:path").asText());
         org.junit.jupiter.api.Assertions.assertEquals("$context.authorizer.claims.userId", getRP.get("append:header.x-user-id").asText());

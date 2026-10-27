@@ -33,7 +33,7 @@ class MapIterationSchedulerTest {
 
     @Test
     void maxConcurrencyOneStartsEachItemStrictlyInInputOrder() throws Exception {
-        List<Integer> starts = new java.util.concurrent.CopyOnWriteArrayList<>();
+        List<Integer> starts = new CopyOnWriteArrayList<>();
 
         List<Integer> results = MapIterationScheduler.execute(5, 1, index -> () -> {
             starts.add(index);

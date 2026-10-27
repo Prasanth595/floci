@@ -572,7 +572,7 @@ class FlociUiManagerTest {
         when(ui.containerName()).thenReturn("floci-ui");
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.findByName("floci-ui"))
-                .thenThrow(new com.github.dockerjava.api.exception.DockerClientException(
+                .thenThrow(new DockerClientException(
                         "Cannot connect to the Docker daemon"));
 
         FlociUiManager manager = new FlociUiManager(

@@ -67,7 +67,7 @@ class InstanceProfileTagsIntegrationTest {
         .then().statusCode(200);
     }
 
-    private static io.restassured.specification.RequestSpecification tagRequest(String profile,
+    private static RequestSpecification tagRequest(String profile,
                                                                                 int from, int to) {
         RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")

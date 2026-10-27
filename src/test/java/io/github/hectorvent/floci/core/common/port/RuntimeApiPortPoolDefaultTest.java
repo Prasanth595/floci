@@ -5,6 +5,11 @@ import io.smallrye.config.WithDefault;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -56,12 +61,12 @@ class RuntimeApiPortPoolDefaultTest {
 
     /** The value under {@code floci.services.lambda.<key>} in application.yml, or null. */
     private static Integer yamlValue(String key) throws Exception {
-        java.nio.file.Path yml = java.nio.file.Path.of("src/main/resources/application.yml");
+        Path yml = java.nio.file.Path.of("src/main/resources/application.yml");
         assertTrue(java.nio.file.Files.exists(yml), "application.yml not found at " + yml.toAbsolutePath());
-        java.util.regex.Pattern p =
+        Pattern p =
                 java.util.regex.Pattern.compile("^\\s*" + java.util.regex.Pattern.quote(key) + ":\\s*(\\d+)\\s*$");
         for (String line : java.nio.file.Files.readAllLines(yml)) {
-            java.util.regex.Matcher m = p.matcher(line);
+            Matcher m = p.matcher(line);
             if (m.matches()) {
                 return Integer.valueOf(m.group(1));
             }
@@ -128,7 +133,7 @@ class RuntimeApiPortPoolDefaultTest {
         // what happens to be listening on 12000+ on the machine running the suite.
         PortAllocator allocator = new PortAllocator(base, max, w -> { }, p -> true);
 
-        java.util.Set<Integer> handed = new java.util.HashSet<>();
+        Set<Integer> handed = new HashSet<>();
         for (int i = 0; i < MIN_USABLE_POOL_WIDTH; i++) {
             assertTrue(handed.add(allocator.allocate()),
                     "allocator handed out a duplicate port after " + handed.size() + " allocations");

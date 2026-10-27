@@ -287,8 +287,8 @@ public class CloudHsmV2Service {
         // Verify TrustAnchor is self-signed and SignedCert is issued by TrustAnchor
         try {
             JcaX509CertificateConverter converter = new JcaX509CertificateConverter();
-            java.security.cert.X509Certificate trustAnchorCert = converter.getCertificate(trustAnchorHolder);
-            java.security.cert.X509Certificate signedCertObj = converter.getCertificate(signedCertHolder);
+            X509Certificate trustAnchorCert = converter.getCertificate(trustAnchorHolder);
+            X509Certificate signedCertObj = converter.getCertificate(signedCertHolder);
 
             if (!trustAnchorHolder.getIssuer().equals(trustAnchorHolder.getSubject())) {
                 throw new AwsException("CloudHsmInvalidRequestException",

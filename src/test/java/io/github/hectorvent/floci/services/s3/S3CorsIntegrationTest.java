@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -642,7 +643,7 @@ class S3CorsIntegrationTest {
     @Test
     @Order(72)
     void accessControlAllowOriginAppearsExactlyOnce() {
-        io.restassured.response.Response resp = given()
+        Response resp = given()
             .header("Origin", "http://localhost:3000")
         .when()
             .get("/" + BUCKET + "/hello.txt")

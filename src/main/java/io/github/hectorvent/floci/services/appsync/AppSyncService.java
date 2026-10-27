@@ -24,6 +24,7 @@ import org.jboss.logging.Logger;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -1116,7 +1117,7 @@ public class AppSyncService {
             } catch (NumberFormatException e) {
                 try {
                     return java.time.Instant.parse(s).getEpochSecond();
-                } catch (java.time.format.DateTimeParseException ex) {
+                } catch (DateTimeParseException ex) {
                     throw new AwsException("BadRequestException",
                         "Invalid expires value: " + s + ". Expected epoch seconds or ISO 8601.", 400);
                 }

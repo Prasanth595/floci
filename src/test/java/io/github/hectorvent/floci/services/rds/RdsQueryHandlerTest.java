@@ -38,6 +38,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -2354,7 +2356,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void createDbSnapshot_success() {
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = new io.github.hectorvent.floci.services.rds.model.DbSnapshot();
+        DbSnapshot snapshot = new DbSnapshot();
         snapshot.setDbSnapshotIdentifier("mysnap");
         snapshot.setDbInstanceIdentifier("mydb");
         snapshot.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
@@ -2588,7 +2590,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void describeDbSnapshotAttributes_returnsRestoreAttribute() {
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = new io.github.hectorvent.floci.services.rds.model.DbSnapshot();
+        DbSnapshot snapshot = new DbSnapshot();
         snapshot.setDbSnapshotIdentifier("mysnap");
         snapshot.setRestoreAccountIds(List.of("111111111111"));
         when(service.describeDbSnapshotAttributes(eq("mysnap"), isNull())).thenReturn(snapshot);
@@ -2605,7 +2607,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void modifyDbSnapshotAttribute_passesValuesToAddAndRemove() {
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = new io.github.hectorvent.floci.services.rds.model.DbSnapshot();
+        DbSnapshot snapshot = new DbSnapshot();
         snapshot.setDbSnapshotIdentifier("mysnap");
         snapshot.setRestoreAccountIds(List.of("222222222222"));
         when(service.modifyDbSnapshotAttribute(eq("mysnap"), eq("restore"),
@@ -2947,11 +2949,11 @@ class RdsQueryHandlerTest {
         OptionGroupOption option = new OptionGroupOption("MEMCACHED");
         option.setOptionDescription("Innodb Memcached for MySQL");
         option.setPort(11211);
-        option.setOptionSettings(new java.util.LinkedHashMap<>(
+        option.setOptionSettings(new LinkedHashMap<>(
                 Map.of("BACKLOG_QUEUE_LIMIT", "1024")));
         option.setVpcSecurityGroupMemberships(List.of("sg-123"));
         option.setDbSecurityGroupMemberships(List.of("default"));
-        group.setOptions(new java.util.ArrayList<>(List.of(option)));
+        group.setOptions(new ArrayList<>(List.of(option)));
         when(service.listOptionGroups(null, null, null, null)).thenReturn(List.of(group));
 
         Response response = handler.handle("DescribeOptionGroups", params());

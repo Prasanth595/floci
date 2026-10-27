@@ -6,6 +6,8 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -131,7 +133,7 @@ class ServiceCatalogServiceActionConsumerTest {
 
         Response list = call("ListServiceActions", "{}");
         list.then().statusCode(200);
-        java.util.List<String> ids = list.jsonPath().getList("ServiceActionSummaries.Id", String.class);
+        List<String> ids = list.jsonPath().getList("ServiceActionSummaries.Id", String.class);
         long matches = ids.stream().filter(id::equals).count();
         org.junit.jupiter.api.Assertions.assertEquals(1L, matches,
                 "expected exactly one entry for " + id + " after update, found " + matches);
@@ -162,7 +164,7 @@ class ServiceCatalogServiceActionConsumerTest {
 
         Response list = call("ListServiceActions", "{}");
         list.then().statusCode(200);
-        java.util.List<String> ids = list.jsonPath().getList("ServiceActionSummaries.Id", String.class);
+        List<String> ids = list.jsonPath().getList("ServiceActionSummaries.Id", String.class);
         org.junit.jupiter.api.Assertions.assertFalse(ids.contains(""),
                 "association row leaked into ListServiceActions with an empty Id: " + ids);
         org.junit.jupiter.api.Assertions.assertTrue(ids.contains(actionId),

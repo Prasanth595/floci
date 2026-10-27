@@ -15,6 +15,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @ApplicationScoped
@@ -287,7 +288,7 @@ public class FirehoseJsonHandler {
     }
 
     /** DeliveryStreamType values the 2015-08-04 model enumerates. */
-    private static final java.util.Set<String> DELIVERY_STREAM_TYPES = java.util.Set.of(
+    private static final Set<String> DELIVERY_STREAM_TYPES = java.util.Set.of(
             "DirectPut", "KinesisStreamAsSource", "MSKAsSource", "DatabaseAsSource");
 
     /**

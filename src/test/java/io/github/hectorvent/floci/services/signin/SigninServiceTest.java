@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.signin.model.TokenResult;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -515,12 +516,12 @@ class SigninServiceTest {
         assertEquals(401, error.getHttpStatus());
     }
 
-    private void assertInvalidRequest(org.junit.jupiter.api.function.Executable request) {
+    private void assertInvalidRequest(Executable request) {
         SigninException error = assertThrows(SigninException.class, request);
         assertEquals("invalid_request", error.error());
     }
 
-    private void assertTokenValidation(org.junit.jupiter.api.function.Executable request) {
+    private void assertTokenValidation(Executable request) {
         SigninTokenException error = assertThrows(SigninTokenException.class, request);
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals("INVALID_REQUEST", error.responseError());

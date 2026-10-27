@@ -17,10 +17,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class ServiceCatalogService implements PassedRoleLookup {
@@ -235,7 +238,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
      * requested OU, and returns its account id.
      */
     private String accountFactoryAccountId(JsonNode request, String name, String accountId) {
-        Map<String, String> parameters = new java.util.HashMap<>();
+        Map<String, String> parameters = new HashMap<>();
         request.path("ProvisioningParameters").forEach(parameter ->
                 parameters.put(text(parameter, "Key"), text(parameter, "Value")));
         String email = parameters.get("AccountEmail");
@@ -523,7 +526,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
     static final List<String> DESCRIBE_PORTFOLIO_SHARE_TYPES =
             List.of("ACCOUNT", "ORGANIZATION", "ORGANIZATIONAL_UNIT", "ORGANIZATION_MEMBER_ACCOUNT");
 
-    private static final java.util.regex.Pattern ACCOUNT_ID_PATTERN =
+    private static final Pattern ACCOUNT_ID_PATTERN =
             java.util.regex.Pattern.compile("[0-9]{12}");
 
     /**
@@ -614,7 +617,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
         require(portfolioStore, portfolioId, "portfolio");
         String prefix = portfolioId + "|";
-        List<ObjectNode> results = new java.util.ArrayList<>();
+        List<ObjectNode> results = new ArrayList<>();
         for (String key : shareStore.keys()) {
             if (!key.startsWith(prefix)) {
                 continue;
@@ -770,7 +773,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         if (!associations.isArray() || associations.isEmpty()) {
             throw new AwsException("InvalidParametersException", "ServiceActionAssociations is required", 400);
         }
-        List<ObjectNode> failures = new java.util.ArrayList<>();
+        List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode assoc : associations) {
             String productId = text(assoc, "ProductId");
             String artifactId = text(assoc, "ProvisioningArtifactId");
@@ -826,7 +829,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         if (!associations.isArray() || associations.isEmpty()) {
             throw new AwsException("InvalidParametersException", "ServiceActionAssociations is required", 400);
         }
-        List<ObjectNode> failures = new java.util.ArrayList<>();
+        List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode assoc : associations) {
             String productId = text(assoc, "ProductId");
             String artifactId = text(assoc, "ProvisioningArtifactId");
@@ -1222,7 +1225,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
         require(portfolioStore, portfolioId, "portfolio");
         String prefix = portfolioId + "|";
-        List<String> accountIds = new java.util.ArrayList<>();
+        List<String> accountIds = new ArrayList<>();
         for (String key : shareStore.keys()) {
             if (!key.startsWith(prefix)) {
                 continue;
@@ -1273,7 +1276,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
             throw new AwsException("InvalidParametersException", "TagOptionId is required", 400);
         }
         require(tagOptionStore, tagOptionId, "TagOption");
-        List<ObjectNode> results = new java.util.ArrayList<>();
+        List<ObjectNode> results = new ArrayList<>();
         for (String key : associationStore.keys()) {
             associationStore.get(key).ifPresent(assoc -> {
                 if (!"TAG_OPTION".equals(text(assoc, "Type"))) {

@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -32,7 +33,7 @@ class SnsHttpDeliveryIntegrationTest {
     private static int httpPort;
     private static final List<ReceivedRequest> receivedRequests = new CopyOnWriteArrayList<>();
     private static final ObjectMapper objectMapper = new ObjectMapper();
-    private static final java.util.logging.Logger LOG =
+    private static final Logger LOG =
             java.util.logging.Logger.getLogger(SnsHttpDeliveryIntegrationTest.class.getName());
     record ReceivedRequest(String body, Map<String, List<String>> headers) {}
 

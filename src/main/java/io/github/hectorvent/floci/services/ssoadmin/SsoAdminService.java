@@ -40,14 +40,21 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.time.Duration;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -723,7 +730,7 @@ public class SsoAdminService implements Resettable {
                         || !KMS_KEY_ARN.matcher(kmsKeyArn).matches()) {
                     throw validation("EncryptionConfiguration.KmsKeyArn is required and must be a valid KMS key ARN.");
                 }
-                java.util.regex.Matcher kmsArnMatcher = KMS_KEY_ARN.matcher(kmsKeyArn);
+                Matcher kmsArnMatcher = KMS_KEY_ARN.matcher(kmsKeyArn);
                 if (!kmsArnMatcher.matches() || !instance.primaryRegion().equals(kmsArnMatcher.group(1))) {
                     throw validation("The customer managed KMS key must be in the IAM Identity Center primary Region.");
                 }
@@ -786,7 +793,7 @@ public class SsoAdminService implements Resettable {
         deleteByPermissionSet(permissionSetProvisioningOperations, PermissionSetProvisioningOperation::permissionSetArn,
                 instancePermissionSets);
         accessControlAttributeConfigurations.delete(instanceArn);
-        for (String key : new java.util.ArrayList<>(trustedTokenIssuers.keys())) {
+        for (String key : new ArrayList<>(trustedTokenIssuers.keys())) {
             TrustedTokenIssuer issuer = trustedTokenIssuers.get(key).orElse(null);
             if (issuer != null && instanceArn.equals(issuer.instanceArn())) {
                 trustedTokenIssuers.delete(key);
@@ -794,13 +801,13 @@ public class SsoAdminService implements Resettable {
                 resourceTagOverrides.delete(key);
             }
         }
-        for (String key : new java.util.ArrayList<>(trustedTokenIssuerClientTokens.keys())) {
+        for (String key : new ArrayList<>(trustedTokenIssuerClientTokens.keys())) {
             String issuerArn = trustedTokenIssuerClientTokens.get(key).orElse(null);
             if (issuerArn != null && trustedTokenIssuers.get(issuerArn).isEmpty()) {
                 trustedTokenIssuerClientTokens.delete(key);
             }
         }
-        for (String key : new java.util.ArrayList<>(instanceClientTokens.keys())) {
+        for (String key : new ArrayList<>(instanceClientTokens.keys())) {
             if (instanceArn.equals(instanceClientTokens.get(key).orElse(null))) {
                 instanceClientTokens.delete(key);
             }
@@ -817,31 +824,31 @@ public class SsoAdminService implements Resettable {
         applications.delete(applicationArn);
         applicationUpdateOverrides.delete(applicationArn);
         resourceTagOverrides.delete(applicationArn);
-        for (String key : new java.util.ArrayList<>(applicationAssignments.keys())) {
+        for (String key : new ArrayList<>(applicationAssignments.keys())) {
             ApplicationAssignment assignment = applicationAssignments.get(key).orElse(null);
             if (assignment != null && applicationArn.equals(assignment.applicationArn())) {
                 applicationAssignments.delete(key);
             }
         }
-        for (String key : new java.util.ArrayList<>(applicationClientTokens.keys())) {
+        for (String key : new ArrayList<>(applicationClientTokens.keys())) {
             if (applicationArn.equals(applicationClientTokens.get(key).orElse(null))) {
                 applicationClientTokens.delete(key);
             }
         }
-        for (String key : new java.util.ArrayList<>(applicationAccessScopes.keys())) {
+        for (String key : new ArrayList<>(applicationAccessScopes.keys())) {
             ApplicationAccessScope scope = applicationAccessScopes.get(key).orElse(null);
             if (scope != null && applicationArn.equals(scope.applicationArn())) {
                 applicationAccessScopes.delete(key);
             }
         }
         applicationAssignmentConfigurations.delete(applicationArn);
-        for (String key : new java.util.ArrayList<>(applicationAuthenticationMethods.keys())) {
+        for (String key : new ArrayList<>(applicationAuthenticationMethods.keys())) {
             ApplicationAuthenticationMethod method = applicationAuthenticationMethods.get(key).orElse(null);
             if (method != null && applicationArn.equals(method.applicationArn())) {
                 applicationAuthenticationMethods.delete(key);
             }
         }
-        for (String key : new java.util.ArrayList<>(applicationGrants.keys())) {
+        for (String key : new ArrayList<>(applicationGrants.keys())) {
             ApplicationGrant grant = applicationGrants.get(key).orElse(null);
             if (grant != null && applicationArn.equals(grant.applicationArn())) {
                 applicationGrants.delete(key);
@@ -991,7 +998,7 @@ public class SsoAdminService implements Resettable {
                 || accountId.equals(value) || rootArn.matcher(value).matches());
     }
 
-    private static boolean policyStringOrArrayMatches(JsonNode node, java.util.function.Predicate<String> predicate) {
+    private static boolean policyStringOrArrayMatches(JsonNode node, Predicate<String> predicate) {
         if (node == null) {
             return false;
         }
@@ -1773,8 +1780,8 @@ public class SsoAdminService implements Resettable {
 
     public List<Assignment> portalAssignmentsForUser(String userId) {
         validatePrincipalId(userId);
-        Map<String, Set<String>> groupsByIdentityStore = new java.util.HashMap<>();
-        Set<String> invalidIdentityStores = new java.util.HashSet<>();
+        Map<String, Set<String>> groupsByIdentityStore = new HashMap<>();
+        Set<String> invalidIdentityStores = new HashSet<>();
         return assignments.scan(key -> true).stream()
                 .filter(assignment -> {
                     if ("USER".equals(assignment.principalType())) {
@@ -2180,7 +2187,7 @@ public class SsoAdminService implements Resettable {
             if (duration.compareTo(Duration.ofHours(1)) < 0 || duration.compareTo(Duration.ofHours(12)) > 0) {
                 throw validation("SessionDuration must be between 1 and 12 hours.");
             }
-        } catch (java.time.format.DateTimeParseException e) {
+        } catch (DateTimeParseException e) {
             throw validation("SessionDuration must use ISO-8601 duration syntax.");
         }
         return value;
@@ -2227,7 +2234,7 @@ public class SsoAdminService implements Resettable {
             if (!filter.isObject() || filter.size() > 2) {
                 throw validation("Filter may contain only ApplicationAccount and ApplicationProvider.");
             }
-            for (java.util.Iterator<String> fields = filter.fieldNames(); fields.hasNext();) {
+            for (Iterator<String> fields = filter.fieldNames(); fields.hasNext();) {
                 String field = fields.next();
                 if (!Set.of("ApplicationAccount", "ApplicationProvider").contains(field)) {
                     throw validation("Filter may contain only ApplicationAccount and ApplicationProvider.");
@@ -2457,7 +2464,7 @@ public class SsoAdminService implements Resettable {
 
 
     private static <T> void deleteByPermissionSet(StorageBackend<String, T> storage,
-                                                  java.util.function.Function<T, String> permissionSetArn,
+                                                  Function<T, String> permissionSetArn,
                                                   Set<String> permissionSetArns) {
         for (String key : new ArrayList<>(storage.keys())) {
             T value = storage.get(key).orElse(null);

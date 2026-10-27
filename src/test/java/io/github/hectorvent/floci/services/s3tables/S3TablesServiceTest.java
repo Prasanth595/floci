@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.s3tables.model.S3Table;
 import io.github.hectorvent.floci.services.s3tables.model.TableBucket;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.util.List;
 import java.util.Map;
@@ -149,7 +150,7 @@ class S3TablesServiceTest {
                 null, null, Map.of(), REGION);
     }
 
-    private void assertError(String expectedCode, org.junit.jupiter.api.function.Executable action) {
+    private void assertError(String expectedCode, Executable action) {
         AwsException exception = assertThrows(AwsException.class, action);
         assertEquals(expectedCode, exception.getErrorCode());
     }
@@ -181,8 +182,8 @@ class S3TablesServiceTest {
     }
 
     private String updateMetadataWithToken(String arn, String token, String metadataLocation,
-                                           java.util.concurrent.CountDownLatch ready,
-                                           java.util.concurrent.CountDownLatch start) throws InterruptedException {
+                                           CountDownLatch ready,
+                                           CountDownLatch start) throws InterruptedException {
         ready.countDown();
         if (!start.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
             return "timed out";

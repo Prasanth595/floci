@@ -17,6 +17,11 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+import org.eclipse.paho.mqttv5.client.IMqttToken;
+import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
+import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
+import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
+import org.eclipse.paho.mqttv5.common.packet.UserProperty;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -327,11 +332,11 @@ class IotMqttEnabledIntegrationTest {
     }
 
     /** 8 KB correlation data plus user properties of the given key and value size, as AWS counts them. */
-    private static org.eclipse.paho.mqttv5.common.packet.MqttProperties awsMaximumProperties(int userPropertiesSize) {
-        org.eclipse.paho.mqttv5.common.packet.MqttProperties properties = new org.eclipse.paho.mqttv5.common.packet.MqttProperties();
+    private static MqttProperties awsMaximumProperties(int userPropertiesSize) {
+        MqttProperties properties = new MqttProperties();
         properties.setCorrelationData(randomPayload(8 * 1024));
         properties.setUserProperties(java.util.List.of(
-                new org.eclipse.paho.mqttv5.common.packet.UserProperty("k", "v".repeat(userPropertiesSize - 1))));
+                new UserProperty("k", "v".repeat(userPropertiesSize - 1))));
         return properties;
     }
 
@@ -1061,7 +1066,7 @@ class IotMqttEnabledIntegrationTest {
             Mqtt5TestClient testClient = new Mqtt5TestClient(client);
             client.setCallback(new org.eclipse.paho.mqttv5.client.MqttCallback() {
                 @Override
-                public void disconnected(org.eclipse.paho.mqttv5.client.MqttDisconnectResponse disconnectResponse) {
+                public void disconnected(MqttDisconnectResponse disconnectResponse) {
                 }
 
                 @Override
@@ -1074,7 +1079,7 @@ class IotMqttEnabledIntegrationTest {
                 }
 
                 @Override
-                public void deliveryComplete(org.eclipse.paho.mqttv5.client.IMqttToken token) {
+                public void deliveryComplete(IMqttToken token) {
                 }
 
                 @Override
@@ -1082,7 +1087,7 @@ class IotMqttEnabledIntegrationTest {
                 }
 
                 @Override
-                public void authPacketArrived(int reasonCode, org.eclipse.paho.mqttv5.common.packet.MqttProperties properties) {
+                public void authPacketArrived(int reasonCode, MqttProperties properties) {
                 }
             });
             client.setTimeToWait(10_000);
@@ -1099,10 +1104,10 @@ class IotMqttEnabledIntegrationTest {
         }
 
         void publish(String topic, byte[] payload) throws org.eclipse.paho.mqttv5.common.MqttException {
-            publish(topic, payload, 0, new org.eclipse.paho.mqttv5.common.packet.MqttProperties());
+            publish(topic, payload, 0, new MqttProperties());
         }
 
-        void publish(String topic, byte[] payload, int qos, org.eclipse.paho.mqttv5.common.packet.MqttProperties properties)
+        void publish(String topic, byte[] payload, int qos, MqttProperties properties)
                 throws org.eclipse.paho.mqttv5.common.MqttException {
             org.eclipse.paho.mqttv5.common.MqttMessage message = new org.eclipse.paho.mqttv5.common.MqttMessage(payload);
             message.setQos(qos);
@@ -1123,9 +1128,9 @@ class IotMqttEnabledIntegrationTest {
             client.close();
         }
 
-        private static org.eclipse.paho.mqttv5.client.MqttConnectionOptions connectOptions() {
-            org.eclipse.paho.mqttv5.client.MqttConnectionOptions options =
-                    new org.eclipse.paho.mqttv5.client.MqttConnectionOptions();
+        private static MqttConnectionOptions connectOptions() {
+            MqttConnectionOptions options =
+                    new MqttConnectionOptions();
             options.setCleanStart(true);
             options.setConnectionTimeout(2);
             options.setKeepAliveInterval(60);

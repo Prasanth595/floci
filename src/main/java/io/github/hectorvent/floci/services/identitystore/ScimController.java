@@ -35,6 +35,7 @@ import java.security.MessageDigest;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -1270,7 +1271,7 @@ public class ScimController {
     }
 
     private List<User> usersForGroup(String identityStoreId, List<User> users, String groupId) {
-        java.util.Set<String> userIds = identityStoreService.listMembershipsForScim(identityStoreId).stream()
+        Set<String> userIds = identityStoreService.listMembershipsForScim(identityStoreId).stream()
                 .filter(membership -> groupId.equals(membership.groupId()))
                 .map(Membership::userId)
                 .collect(java.util.stream.Collectors.toSet());
@@ -1332,7 +1333,7 @@ public class ScimController {
 
     private List<Group> groupsForMember(String identityStoreId, List<Group> groups, String memberId) {
         requireScimUser(identityStoreId, memberId);
-        java.util.Set<String> groupIds = identityStoreService.listMembershipsForScim(identityStoreId).stream()
+        Set<String> groupIds = identityStoreService.listMembershipsForScim(identityStoreId).stream()
                 .filter(membership -> memberId.equals(membership.userId()))
                 .map(Membership::groupId)
                 .collect(java.util.stream.Collectors.toSet());

@@ -42,6 +42,7 @@ import software.amazon.awssdk.services.sns.model.VerificationException;
 import software.amazon.awssdk.services.sns.model.VerifySmsSandboxPhoneNumberRequest;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.*;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -166,7 +167,7 @@ class SnsTest {
     void verifySqsDelivery() throws InterruptedException {
         Thread.sleep(500); // Allow async delivery
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
+        ReceiveMessageResponse recv = sqs.receiveMessage(
                 software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
                         .queueUrl(queueUrl)
                         .maxNumberOfMessages(1)
@@ -196,7 +197,7 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
+        ReceiveMessageResponse recv = sqs.receiveMessage(
                 software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
                         .queueUrl(queueUrl)
                         .maxNumberOfMessages(1)
@@ -249,7 +250,7 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse rawRecv = sqs.receiveMessage(
+        ReceiveMessageResponse rawRecv = sqs.receiveMessage(
                 software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
                         .queueUrl(rawQueueUrl)
                         .maxNumberOfMessages(1)
@@ -323,7 +324,7 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse fifoRecv = sqs.receiveMessage(
+        ReceiveMessageResponse fifoRecv = sqs.receiveMessage(
                 software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
                         .queueUrl(fifoQueueUrl)
                         .maxNumberOfMessages(1)
@@ -380,7 +381,7 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse cbdRecv = sqs.receiveMessage(
+        ReceiveMessageResponse cbdRecv = sqs.receiveMessage(
                 software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
                         .queueUrl(cbdQueueUrl)
                         .maxNumberOfMessages(1)
@@ -443,7 +444,7 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
+        ReceiveMessageResponse recv = sqs.receiveMessage(
                 software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
                         .queueUrl(mbQueueUrl)
                         .maxNumberOfMessages(10)
@@ -502,7 +503,7 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
+        ReceiveMessageResponse recv = sqs.receiveMessage(
                 software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
                         .queueUrl(nestedQueueUrl)
                         .maxNumberOfMessages(10)
@@ -575,7 +576,7 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse batchRecv = sqs.receiveMessage(
+        ReceiveMessageResponse batchRecv = sqs.receiveMessage(
                 software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
                         .queueUrl(batchQueueUrl)
                         .maxNumberOfMessages(10)

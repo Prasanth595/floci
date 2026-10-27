@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -28,7 +29,7 @@ class SesContactV2IntegrationTest {
     private static final String EMAIL = "alice@example.com";
     private static final String CONTACTS = "/v2/email/contact-lists/" + LIST + "/contacts";
 
-    private static io.restassured.response.Response post(String path, String body) {
+    private static Response post(String path, String body) {
         return given().contentType("application/json").header("Authorization", SES_AUTH)
                 .body(body).when().post(path);
     }

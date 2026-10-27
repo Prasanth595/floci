@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lakeformation;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lakeformation.model.*;
@@ -56,7 +57,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
                                Boolean hybridAccessEnabled, Boolean withFederation) {
         String resourceKey = region + ":" + resourceArn;
         ResourceInfo existing = resourcesStorage.get(resourceKey)
-                .orElseThrow(() -> new io.github.hectorvent.floci.core.common.AwsException(
+                .orElseThrow(() -> new AwsException(
                         "EntityNotFoundException", "Resource not found", 400));
         // Work on a defensive copy so concurrent readers (DescribeResource, ListResources)
         // never observe a partially-mutated ResourceInfo: they see either the old complete
@@ -112,7 +113,7 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
                                     } else if ("BEGINS_WITH".equals(op)) {
                                         if (values.stream().noneMatch(arn::startsWith)) return false;
                                     } else {
-                                        throw new io.github.hectorvent.floci.core.common.AwsException("InvalidInputException", "Unsupported ComparisonOperator: " + op, 400);
+                                        throw new AwsException("InvalidInputException", "Unsupported ComparisonOperator: " + op, 400);
                                     }
                                 }
                             }

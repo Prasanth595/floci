@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -102,7 +103,7 @@ class CloudFrontCfnProvisionerTest {
         return p;
     }
 
-    private static <T> T withIdentity(T model, java.util.function.Consumer<T> set) {
+    private static <T> T withIdentity(T model, Consumer<T> set) {
         set.accept(model);
         return model;
     }

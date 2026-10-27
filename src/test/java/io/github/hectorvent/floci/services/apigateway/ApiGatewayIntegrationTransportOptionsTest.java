@@ -39,6 +39,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
@@ -302,7 +303,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
     }
 
     /** A CA certificate, self-signed when {@code issuerDn} is its own subject. */
-    private static X509Certificate buildCa(X500Name subjectDn, java.security.PublicKey subjectKey,
+    private static X509Certificate buildCa(X500Name subjectDn, PublicKey subjectKey,
                                            X500Name issuerDn, PrivateKey issuerKey, Integer keyUsageBits,
                                            NameConstraints nameConstraints, Instant now) throws Exception {
         JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(

@@ -273,7 +273,7 @@ class RdsContainerManagerTest {
         manager.start("db1", "vol1", DatabaseEngine.SQLSERVER,
                 "mcr.microsoft.com/mssql/server:2022-latest", "sa", "Password123!", null);
 
-        org.mockito.ArgumentCaptor<ContainerSpec> spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        ArgumentCaptor<ContainerSpec> spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(spec.capture());
         assertEquals("mcr.microsoft.com/mssql/server:2022-latest", spec.getValue().image());
         assertTrue(spec.getValue().env().contains("ACCEPT_EULA=Y"));

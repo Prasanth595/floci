@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatcher;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -59,9 +61,9 @@ class Route53CfnProvisionerTest {
         JsonNode props = mapper.createObjectNode()
                 .put("Name", "ssm.us-east-1.amazonaws.com")
                 .set("HostedZoneConfig", mapper.createObjectNode().put("Comment", "central endpoint zone"));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1")));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+        ((ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -98,7 +100,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
                 .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
 
@@ -132,7 +134,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
                 .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
 
@@ -153,7 +155,7 @@ class Route53CfnProvisionerTest {
                         + "follow-up VPC association fails, so CREATE_FAILED cleanup still deletes it");
     }
 
-    private static org.mockito.ArgumentMatcher<VpcAssociation> sameVpc(VpcAssociation expected) {
+    private static ArgumentMatcher<VpcAssociation> sameVpc(VpcAssociation expected) {
         if (expected == null) {
             return java.util.Objects::isNull;
         }
@@ -205,7 +207,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -229,7 +231,7 @@ class Route53CfnProvisionerTest {
         Route53Service service = mock(Route53Service.class);
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -250,7 +252,7 @@ class Route53CfnProvisionerTest {
         Route53Service service = mock(Route53Service.class);
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "   ")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -278,9 +280,9 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1")));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+        ((ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("Key", "").put("Value", "blank-key-should-be-skipped"))
                 .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
 
@@ -323,7 +325,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
                 .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
 
@@ -363,7 +365,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+        ((ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -395,7 +397,7 @@ class Route53CfnProvisionerTest {
                 .put("Name", "www.example.com")
                 .put("Type", "A")
                 .put("TTL", "300");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("ResourceRecords",
+        ((ObjectNode) props).set("ResourceRecords",
                 mapper.createArrayNode().add("10.0.0.1"));
         CloudFormationTemplateEngine engine = recordEngine();
         ProvisionContext context = new ProvisionContext(engine, "us-east-1", "623666680275", "dns-stack");

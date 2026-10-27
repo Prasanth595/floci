@@ -11,6 +11,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -49,7 +54,7 @@ class S3DestinationValidatorTest {
     private static S3Destination withProcessor(String type, String... parameterNames) {
         Processor processor = new Processor();
         processor.setType(type);
-        java.util.List<ProcessorParameter> parameters = new java.util.ArrayList<>();
+        List<ProcessorParameter> parameters = new ArrayList<>();
         for (String name : parameterNames) {
             ProcessorParameter parameter = new ProcessorParameter();
             parameter.setParameterName(name);
@@ -475,7 +480,7 @@ class S3DestinationValidatorTest {
             + " Member must have length greater than or equal to 1,"
             + " Member must satisfy regular expression pattern: ";
 
-    private static S3Destination withColumnMappings(java.util.Map<String, String> mappings) {
+    private static S3Destination withColumnMappings(Map<String, String> mappings) {
         DeliveryStreamDescription.OpenXJsonSerDe openX = new DeliveryStreamDescription.OpenXJsonSerDe();
         openX.setColumnToJsonKeyMappings(mappings);
         DeliveryStreamDescription.Deserializer deserializer = new DeliveryStreamDescription.Deserializer();
@@ -525,7 +530,7 @@ class S3DestinationValidatorTest {
     /** However many entries break the rule, AWS reports keys once and values once. */
     @Test
     void mappingViolationsAreReportedOncePerAspectWithKeysFirst() {
-        java.util.Map<String, String> mappings = new java.util.LinkedHashMap<>();
+        Map<String, String> mappings = new LinkedHashMap<>();
         mappings.put("has space", "");
         mappings.put("also space", " ");
 

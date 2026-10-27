@@ -1,12 +1,17 @@
 package io.github.hectorvent.floci.services.verifiedpermissions;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -118,7 +123,7 @@ class VerifiedPermissionsIntegrationTest {
                 .then().statusCode(200).extract().path("policyStoreId");
     }
 
-    private static io.restassured.response.Response givenAws(String action, String body) {
+    private static Response givenAws(String action, String body) {
         return given().contentType(CONTENT_TYPE).header("Authorization", AUTH)
                 .header("X-Amz-Target", "VerifiedPermissions." + action).body(body)
                 .when().post("/");
@@ -208,7 +213,7 @@ class VerifiedPermissionsIntegrationTest {
                 .body("determiningPolicies.size()", equalTo(1));
 
         String blocked = entities.replace("\"blocked\":false", "\"blocked\":true");
-        java.util.LinkedHashMap<String,Object> blockedAuth = new java.util.LinkedHashMap<>(auth);
+        LinkedHashMap<String,Object> blockedAuth = new LinkedHashMap<>(auth);
         blockedAuth.put("entities", Map.of("cedarJson", blocked));
         givenAws("IsAuthorized", objectJson(blockedAuth)).then().statusCode(200)
                 .body("decision", equalTo("DENY"))
@@ -354,7 +359,7 @@ class VerifiedPermissionsIntegrationTest {
     @Test
     void identitySourceDocumentedCollectionLimits_areEnforced() {
         String store = createStore("OFF", "DISABLED");
-        java.util.List<String> emptyAudiences = java.util.List.of();
+        List<String> emptyAudiences = java.util.List.of();
         givenAws("CreateIdentitySource", objectJson(Map.of(
                         "policyStoreId", store,
                         "principalEntityType", "Demo::User",
@@ -367,8 +372,8 @@ class VerifiedPermissionsIntegrationTest {
 
     private static String objectJson(Object value) {
         try {
-            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(value);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return new ObjectMapper().writeValueAsString(value);
+        } catch (JsonProcessingException e) {
             throw new IllegalStateException(e);
         }
     }

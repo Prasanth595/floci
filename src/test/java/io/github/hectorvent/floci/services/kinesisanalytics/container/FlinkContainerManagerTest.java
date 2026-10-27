@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -296,8 +297,8 @@ class FlinkContainerManagerTest {
         assertTrue(config.contains(
                 "\"applicationARN\":\"%enc{arn:aws:kinesisanalytics:us-east-1:000000000000:application/100%%-\\\\-{env:PATH}-owned}{JSON}\""));
 
-        java.util.Properties parsed = new java.util.Properties();
-        parsed.load(new java.io.ByteArrayInputStream(config.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        Properties parsed = new Properties();
+        parsed.load(new ByteArrayInputStream(config.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         String loadedPattern = parsed.getProperty("appender.console.layout.pattern");
         assertTrue(loadedPattern.contains(
                 "\"applicationARN\":\"%enc{arn:aws:kinesisanalytics:us-east-1:000000000000:application/100%%-\\-{env:PATH}-owned}{JSON}\""));

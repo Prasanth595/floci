@@ -421,10 +421,10 @@ public class RdsService implements Resettable, ResourceProvider {
         this.proxyTargetGroups = proxyTargetGroups;
         this.taggingService = taggingService;
         this.metricsService = null;
-        this.globalClusters = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
-        this.snapshots = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
+        this.globalClusters = new InMemoryStorage<>();
+        this.snapshots = new InMemoryStorage<>();
         this.clusterSnapshots = new InMemoryStorage<>();
-        this.snapshotData = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
+        this.snapshotData = new InMemoryStorage<>();
         this.eventSubscriptions = new InMemoryStorage<>();
         this.certificateOverrides = new InMemoryStorage<>();
         this.clusterEndpoints = new InMemoryStorage<>();
@@ -990,7 +990,7 @@ public class RdsService implements Resettable, ResourceProvider {
         snapshot.setOptionGroupName(instance.getOptionGroupName());
         snapshot.setStorageEncrypted(instance.isStorageEncrypted());
         snapshot.setKmsKeyId(instance.getKmsKeyId());
-        snapshot.setTags(tags != null ? new java.util.LinkedHashMap<>(tags) : new java.util.LinkedHashMap<>());
+        snapshot.setTags(tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>());
         snapshot.setDbSnapshotArn(regionResolver.buildArn("rds", effectiveRegion, "snapshot:" + snapshotId));
 
         String sqlDump = "";
@@ -1880,7 +1880,7 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "AttributeName must be restore.", 400);
         }
-        List<String> updated = new java.util.ArrayList<>(snapshot.getRestoreAccountIds());
+        List<String> updated = new ArrayList<>(snapshot.getRestoreAccountIds());
         if (valuesToAdd != null) {
             valuesToAdd.stream().filter(v -> !updated.contains(v)).forEach(updated::add);
         }
@@ -2434,7 +2434,7 @@ public class RdsService implements Resettable, ResourceProvider {
     public synchronized void addTagsToResource(
             String resourceName, Map<String, String> tags, String region) {
         TagHandle handle = resolveTagHandle(resourceName, region);
-        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
+        Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         updated.putAll(tags);
         handle.save().accept(updated);
     }
@@ -2446,13 +2446,13 @@ public class RdsService implements Resettable, ResourceProvider {
     public synchronized void removeTagsFromResource(
             String resourceName, Collection<String> tagKeys, String region) {
         TagHandle handle = resolveTagHandle(resourceName, region);
-        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
+        Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         tagKeys.forEach(updated::remove);
         handle.save().accept(updated);
     }
 
     /** A resolved tag target: its current tags plus a sink that persists an updated map. */
-    private record TagHandle(Map<String, String> tags, java.util.function.Consumer<Map<String, String>> save) {}
+    private record TagHandle(Map<String, String> tags, Consumer<Map<String, String>> save) {}
 
     /**
      * Resolves a tagging ResourceName to its backing resource.
@@ -7060,13 +7060,13 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbParameterGroup modifyDbParameterGroup(String name,
-                                                    java.util.Map<String, String> parameters) {
+                                                    Map<String, String> parameters) {
         return modifyDbParameterGroup(
                 name, parameters, regionResolver.getDefaultRegion());
     }
 
     public DbParameterGroup modifyDbParameterGroup(
-            String name, java.util.Map<String, String> parameters, String region) {
+            String name, Map<String, String> parameters, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbParameterGroup group = getDbParameterGroup(name, effectiveRegion);
         if (parameters != null) {
@@ -7334,13 +7334,13 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbClusterParameterGroup modifyDbClusterParameterGroup(String name,
-                                                                  java.util.Map<String, String> parameters) {
+                                                                  Map<String, String> parameters) {
         return modifyDbClusterParameterGroup(
                 name, parameters, regionResolver.getDefaultRegion());
     }
 
     public DbClusterParameterGroup modifyDbClusterParameterGroup(
-            String name, java.util.Map<String, String> parameters, String region) {
+            String name, Map<String, String> parameters, String region) {
         String effectiveRegion = effectiveRegion(region);
         if (managedClusterParameterGroup(name) != null) {
             throw new AwsException("InvalidDBParameterGroupState",
@@ -8089,7 +8089,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String key = dbProxyKey(region, dbProxyName);
         String accountId = currentAccountId();
         Optional<DbProxy> ownerProxy = findDbProxy(dbProxyName, region);
-        java.util.function.Predicate<DbProxyTargetGroup> owner = candidate ->
+        Predicate<DbProxyTargetGroup> owner = candidate ->
                 ownerProxy.isPresent()
                         && targetGroupBelongsTo(candidate, accountId, region)
                         && targetGroupMatchesProxy(candidate, ownerProxy.get());
@@ -9006,7 +9006,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String accountId = AwsArnUtils.accountOrDefault(proxy.getDbProxyArn(), defaultAccountId);
         String region = regionFromArn(proxy.getDbProxyArn());
         String proxyKey = dbProxyKey(region, proxy.getDbProxyName());
-        java.util.function.Predicate<DbProxyTargetGroup> legacyOwner = candidate ->
+        Predicate<DbProxyTargetGroup> legacyOwner = candidate ->
                 targetGroupCanMigrateToProxy(candidate, proxy);
         DbProxyTargetGroup targetGroup;
         if (proxyTargetGroups instanceof AccountAwareStorageBackend<DbProxyTargetGroup> aware) {
@@ -9191,7 +9191,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveAccountId = accountId != null ? accountId : currentAccountId();
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, clusterId);
-        java.util.function.Predicate<DbCluster> owner = cluster -> hasRdsResourceIdentity(
+        Predicate<DbCluster> owner = cluster -> hasRdsResourceIdentity(
                 cluster.getDbClusterArn(), effectiveAccountId, effectiveRegion,
                 "cluster", clusterId);
         if (clusters instanceof AccountAwareStorageBackend<DbCluster> aware) {
@@ -9222,7 +9222,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveAccountId = accountId != null ? accountId : currentAccountId();
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, instanceId);
-        java.util.function.Predicate<DbInstance> owner = instance -> hasRdsResourceIdentity(
+        Predicate<DbInstance> owner = instance -> hasRdsResourceIdentity(
                 instance.getDbInstanceArn(), effectiveAccountId, effectiveRegion,
                 "db", instanceId);
         if (instances instanceof AccountAwareStorageBackend<DbInstance> aware) {
@@ -9290,7 +9290,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveAccountId = accountId != null ? accountId : currentAccountId();
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, snapshotId);
-        java.util.function.Predicate<DbSnapshot> owner = snapshot -> hasRdsResourceIdentity(
+        Predicate<DbSnapshot> owner = snapshot -> hasRdsResourceIdentity(
                 snapshot.getDbSnapshotArn(), effectiveAccountId, effectiveRegion, "snapshot", snapshotId);
         if (snapshots instanceof AccountAwareStorageBackend<DbSnapshot> aware) {
             return aware.getForAccountMigratingLegacyKeys(
@@ -9334,7 +9334,7 @@ public class RdsService implements Resettable, ResourceProvider {
             String accountId, String region, String groupName) {
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, groupName);
-        java.util.function.Predicate<DbSubnetGroup> owner = group ->
+        Predicate<DbSubnetGroup> owner = group ->
                 Objects.equals(groupName, group.getDbSubnetGroupName())
                         && hasRdsResourceIdentity(
                         group.getDbSubnetGroupArn(), accountId, effectiveRegion,
@@ -9447,7 +9447,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         String key = dbResourceKey(effectiveRegion, groupName);
-        java.util.function.Predicate<DbParameterGroup> owner = group ->
+        Predicate<DbParameterGroup> owner = group ->
                 Objects.equals(groupName, group.getDbParameterGroupName())
                         && parameterGroupBelongsToRegion(group, effectiveRegion);
         Optional<DbParameterGroup> resolved;
@@ -9528,7 +9528,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         String key = dbResourceKey(effectiveRegion, groupName);
-        java.util.function.Predicate<DbClusterParameterGroup> owner = group ->
+        Predicate<DbClusterParameterGroup> owner = group ->
                 Objects.equals(groupName, group.getDbClusterParameterGroupName())
                         && clusterParameterGroupBelongsToRegion(group, effectiveRegion);
         Optional<DbClusterParameterGroup> resolved;
@@ -9611,7 +9611,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         String key = dbResourceKey(effectiveRegion, groupName);
-        java.util.function.Predicate<OptionGroup> owner = group ->
+        Predicate<OptionGroup> owner = group ->
                 Objects.equals(groupName, group.getOptionGroupName())
                         && optionGroupBelongsToRegion(group, effectiveRegion);
         Optional<OptionGroup> resolved;
