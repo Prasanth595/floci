@@ -974,7 +974,7 @@ public class Route53Service implements Resettable {
                                 List<ResourceRecordSet> current, String zoneName) {
         String recordName = normalizeRecordName(rrs.getName());
         String zone = normalizeRecordName(zoneName);
-        if (!".".equals(zone) && !recordName.equals(zone) && !recordName.endsWith("." + zone)) {
+        if (!".".equals(zone) && !DomainNames.isWithin(recordName, zone)) {
             throw new AwsException("InvalidChangeBatch",
                     "RRSet with DNS name " + normalizeName(rrs.getName()) + " is not permitted in zone "
                             + normalizeName(zoneName), 400);
