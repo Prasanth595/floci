@@ -3263,51 +3263,35 @@ public class ApiGatewayExecuteController {
             return new RequestAuthorizerResult(null, null); // Not a REQUEST authorizer — skip
         }
 
-        // Validate identity sources — if any configured source is missing, return 401 without invoking Lambda
-        List<String> identitySources = authorizer.getIdentitySource();
-        if (identitySources != null && !identitySources.isEmpty()) {
-            MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
-            for (String expression : identitySources) {
-                if (expression.startsWith("$request.header.")) {
-                    String headerName = expression.substring("$request.header.".length());
-                    String value = headers.getHeaderString(headerName);
-                    if (value == null || value.isEmpty()) {
-                        return new RequestAuthorizerResult(Response.status(401)
-                                .entity(jsonMessage("Unauthorized"))
-                                .type(MediaType.APPLICATION_JSON).build(), null);
-                    }
-                } else if (expression.startsWith("$request.querystring.")) {
-                    String paramName = expression.substring("$request.querystring.".length());
-                    String value = queryParams.getFirst(paramName);
-                    if (value == null || value.isEmpty()) {
-                        return new RequestAuthorizerResult(Response.status(401)
-                                .entity(jsonMessage("Unauthorized"))
-                                .type(MediaType.APPLICATION_JSON).build(), null);
-                    }
-                }
-                // $context.* identity sources are always present — no validation needed
-            }
-        }
-
-        // Build the authorizer event payload based on the configured payload format version
         String payloadFormatVersion = authorizer.getAuthorizerPayloadFormatVersion();
-        String eventJson;
-        if ("2.0".equals(payloadFormatVersion)) {
-            ObjectNode event = buildRequestAuthorizerEventV2(httpMethod, path, route.getRouteKey(),
-                    apiId, stageName, region, headers, uriInfo, stageVariables, identitySources);
-            for (JsonNode identity : event.path("identitySource")) {
-                if (identity.isNull() || identity.asText().isEmpty()) {
+        boolean formatTwo = "2.0".equals(payloadFormatVersion);
+        ObjectNode event = formatTwo
+                ? buildRequestAuthorizerEventV2(httpMethod, path, route.getRouteKey(),
+                        apiId, stageName, region, headers, uriInfo, stageVariables)
+                : buildRequestAuthorizerEventV1(httpMethod, path, apiId, stageName,
+                        region, headers, uriInfo, stageVariables);
+        ((ObjectNode) event.path("requestContext")).put("routeKey", route.getRouteKey());
+        List<String> identityValues = new ArrayList<>();
+        List<String> identitySources = authorizer.getIdentitySource();
+        if (identitySources != null) {
+            for (String source : identitySources) {
+                String value = httpApiAuthorizerIdentityValue(event, source);
+                if (value == null || value.isEmpty()) {
                     return new RequestAuthorizerResult(Response.status(401)
                             .entity(jsonMessage("Unauthorized"))
                             .type(MediaType.APPLICATION_JSON).build(), null);
                 }
+                identityValues.add(value);
             }
-            eventJson = event.toString();
-        } else {
-            // Default to 1.0 format
-            eventJson = buildRequestAuthorizerEventV1(httpMethod, path, apiId, stageName,
-                    region, headers, uriInfo, stageVariables);
         }
+        if (formatTwo) {
+            event.set("identitySource", objectMapper.valueToTree(identityValues));
+        } else {
+            String identities = String.join(",", identityValues);
+            event.put("identitySource", identities);
+            event.put("authorizationToken", identities);
+        }
+        String eventJson = event.toString();
 
         // Extract the Lambda function name from the authorizer URI
         String functionName = functionNameFromUri(authorizer.getAuthorizerUri());
@@ -3419,7 +3403,7 @@ public class ApiGatewayExecuteController {
      * <p>Package-private so the shape can be asserted directly, the way {@code buildV2ProxyEvent}
      * is.
      */
-    String buildRequestAuthorizerEventV1(String httpMethod, String path,
+    ObjectNode buildRequestAuthorizerEventV1(String httpMethod, String path,
                                          String apiId, String stageName, String region,
                                          HttpHeaders headers, UriInfo uriInfo,
                                          Map<String, String> stageVariables) {
@@ -3458,12 +3442,18 @@ public class ApiGatewayExecuteController {
         ctx.put("resourcePath", preservedPath);
         ctx.put("stage", stageName);
         ctx.put("requestId", UUID.randomUUID().toString());
-
-        try {
-            return objectMapper.writeValueAsString(event);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to serialize v1 authorizer event", e);
-        }
+        ctx.put("protocol", "HTTP/1.1");
+        Instant now = Instant.now();
+        ctx.put("requestTime", GATEWAY_REQUEST_TIME.format(now.atZone(ZoneOffset.UTC)));
+        ctx.put("requestTimeEpoch", now.toEpochMilli());
+        String arnRegion = region != null ? region : regionResolver.getDefaultRegion();
+        ctx.put("domainName", AwsEndpoints.executeApiHost(apiId, arnRegion));
+        ctx.put("domainPrefix", apiId);
+        ObjectNode identity = ctx.putObject("identity");
+        identity.put("sourceIp", "127.0.0.1");
+        identity.put("userAgent", headers.getHeaderString("User-Agent") != null
+                ? headers.getHeaderString("User-Agent") : "");
+        return event;
     }
 
     /**
@@ -3473,7 +3463,7 @@ public class ApiGatewayExecuteController {
     ObjectNode buildRequestAuthorizerEventV2(String httpMethod, String path, String routeKey,
                                           String apiId, String stageName, String region,
                                           HttpHeaders headers, UriInfo uriInfo,
-                                          Map<String, String> stageVariables, List<String> identitySources) {
+                                          Map<String, String> stageVariables) {
         // rawPath is by contract the raw, unmodified path, so recover the trailing slash the
         // JAX-RS {proxy} binding stripped. routeArn keeps the normalized path for the same reason
         // methodArn does in the 1.0 shape above.
@@ -3514,19 +3504,14 @@ public class ApiGatewayExecuteController {
         http.put("userAgent", headers.getHeaderString("User-Agent") != null
                 ? headers.getHeaderString("User-Agent") : "");
 
-        ArrayNode identities = event.putArray("identitySource");
-        if (identitySources != null) {
-            for (String source : identitySources) {
-                identities.add(v2AuthorizerIdentityValue(event, source));
-            }
-        }
         return event;
     }
 
-    private static String v2AuthorizerIdentityValue(ObjectNode event, String source) {
+    private static String httpApiAuthorizerIdentityValue(ObjectNode event, String source) {
+        boolean formatTwo = "2.0".equals(event.path("version").asText());
         JsonNode value;
         if (source.startsWith("$request.header.")) {
-            value = event.path("headers").path(source.substring("$request.header.".length()).toLowerCase(Locale.ROOT));
+            return findHeaderIgnoreCase(event.path("headers"), source.substring("$request.header.".length())).orElse(null);
         } else if (source.startsWith("$request.querystring.")) {
             value = event.path("queryStringParameters").path(source.substring("$request.querystring.".length()));
         } else if (source.startsWith("$stageVariables.")) {
@@ -3536,18 +3521,21 @@ public class ApiGatewayExecuteController {
             if ("path".equals(variable)) {
                 JsonNode context = event.path("requestContext");
                 String stage = context.path("stage").asText();
-                return ("$default".equals(stage) ? "" : "/" + stage) + context.path("http").path("path").asText();
+                String path = formatTwo ? context.path("http").path("path").asText() : context.path("path").asText();
+                return ("$default".equals(stage) ? "" : "/" + stage) + path;
             }
-            String field = switch (variable) {
-                case "httpMethod" -> "http.method";
-                case "protocol" -> "http.protocol";
-                case "identity.sourceIp" -> "http.sourceIp";
-                case "identity.userAgent" -> "http.userAgent";
-                case "requestTime" -> "time";
-                case "requestTimeEpoch" -> "timeEpoch";
-                case "extendedRequestId" -> "requestId";
-                default -> variable;
-            };
+            String field = "extendedRequestId".equals(variable) ? "requestId" : variable;
+            if (formatTwo) {
+                field = switch (variable) {
+                    case "httpMethod" -> "http.method";
+                    case "protocol" -> "http.protocol";
+                    case "identity.sourceIp" -> "http.sourceIp";
+                    case "identity.userAgent" -> "http.userAgent";
+                    case "requestTime" -> "time";
+                    case "requestTimeEpoch" -> "timeEpoch";
+                    default -> field;
+                };
+            }
             value = event.at("/requestContext/" + field.replace('.', '/'));
         } else {
             return null;

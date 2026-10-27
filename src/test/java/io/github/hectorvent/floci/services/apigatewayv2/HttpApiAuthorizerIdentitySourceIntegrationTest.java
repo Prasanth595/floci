@@ -4,21 +4,22 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
-import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.http.ContentType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.services.apigatewayv2.LambdaAuthorizerApiFixtures.AUTHORIZER;
+import static io.github.hectorvent.floci.services.apigatewayv2.LambdaAuthorizerApiFixtures.BACKEND;
+import static io.github.hectorvent.floci.services.apigatewayv2.LambdaAuthorizerApiFixtures.result;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -26,14 +27,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 @QuarkusTest
 class HttpApiAuthorizerIdentitySourceIntegrationTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String AUTHORIZER = "arn:aws:lambda:us-east-1:000000000000:function:identity-source-authorizer";
-    private static final String BACKEND = "arn:aws:lambda:us-east-1:000000000000:function:identity-source-backend";
 
     @InjectMock
     LambdaService lambdaService;
@@ -41,17 +39,22 @@ class HttpApiAuthorizerIdentitySourceIntegrationTest {
     private final AtomicReference<JsonNode> authorizerEvent = new AtomicReference<>();
     private String apiId;
     private String stageName = "test";
+    private String payloadFormat = "2.0";
     private boolean allowed = true;
 
     @BeforeEach
     void stubLambdaBoundary() {
-        when(lambdaService.invokeTarget(eq("us-east-1"), eq(AUTHORIZER), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenAnswer(invocation -> {
-                    authorizerEvent.set(MAPPER.readTree((byte[]) invocation.getArgument(2)));
-                    return result("{\"isAuthorized\":" + allowed + "}");
-                });
-        when(lambdaService.invokeTarget(eq("us-east-1"), eq(BACKEND), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(result("{\"statusCode\":200,\"body\":\"allowed\"}"));
+        LambdaAuthorizerApiFixtures.stubAuthorizer(lambdaService, event -> {
+            authorizerEvent.set(event);
+            if ("1.0".equals(payloadFormat)) {
+                return result("{\"principalId\":\"user\",\"policyDocument\":{\"Version\":\"2012-10-17\","
+                        + "\"Statement\":[{\"Action\":\"execute-api:Invoke\",\"Effect\":\""
+                        + (allowed ? "Allow" : "Deny") + "\",\"Resource\":\""
+                        + event.path("methodArn").asText() + "\"}]}}");
+            }
+            return result("{\"isAuthorized\":" + allowed + "}");
+        });
+        LambdaAuthorizerApiFixtures.stubBackend(lambdaService);
     }
 
     @AfterEach
@@ -92,8 +95,9 @@ class HttpApiAuthorizerIdentitySourceIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"test", "$default"})
-    void contextPathIncludesOnlyANamedStage(String stage) {
+    @CsvSource({"1.0,test", "1.0,$default", "2.0,test", "2.0,$default"})
+    void contextPathIncludesOnlyANamedStage(String format, String stage) {
+        payloadFormat = format;
         stageName = stage;
         configureApi(List.of("$context.path"));
         given().get(path()).then().statusCode(200);
@@ -108,8 +112,10 @@ class HttpApiAuthorizerIdentitySourceIntegrationTest {
         assertIdentities(List.of("one,two", "first,second", "one,two"));
     }
 
-    @Test
-    void noConfiguredSourcesProducesAnEmptyArray() {
+    @ParameterizedTest
+    @ValueSource(strings = {"1.0", "2.0"})
+    void noConfiguredSourcesProducesAnEmptyIdentityValue(String format) {
+        payloadFormat = format;
         configureApi(List.of());
         given().get(path()).then().statusCode(200);
         assertIdentities(List.of());
@@ -133,6 +139,68 @@ class HttpApiAuthorizerIdentitySourceIntegrationTest {
     }
 
     @Test
+    void formatOneResolvesSourcesAndRendersCommaSeparatedIdentityFields() {
+        payloadFormat = "1.0";
+        configureApi(List.of("$request.header.authorization", "$request.querystring.Token",
+                "$stageVariables.tenant", "$context.routeKey", "$context.stage", "$context.requestId"));
+        given().header("Authorization", "Bearer identity").queryParam("Token", "query-value")
+                .get(path()).then().statusCode(200);
+        String expected = "Bearer identity,query-value,stage-tenant,GET /items,test,"
+                + authorizerEvent.get().path("requestContext").path("requestId").asText();
+        assertEquals(expected, authorizerEvent.get().path("identitySource").asText());
+        assertEquals(expected, authorizerEvent.get().path("authorizationToken").asText());
+    }
+
+    @Test
+    void formatOneContextAliasesUseTheValuesFromThisEvent() {
+        payloadFormat = "1.0";
+        configureApi(List.of("$context.httpMethod", "$context.protocol", "$context.identity.sourceIp",
+                "$context.identity.userAgent", "$context.requestTime", "$context.requestTimeEpoch", "$context.extendedRequestId"));
+        given().header("User-Agent", "identity-client").get(path()).then().statusCode(200);
+        JsonNode context = authorizerEvent.get().path("requestContext");
+        assertEquals(String.join(",", "GET", "HTTP/1.1", context.path("identity").path("sourceIp").asText(),
+                "identity-client", context.path("requestTime").asText(), context.path("requestTimeEpoch").asText(),
+                context.path("requestId").asText()), authorizerEvent.get().path("identitySource").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$request.header.Missing", "$request.querystring.Missing", "$request.querystring.Token",
+            "$stageVariables.missing", "$context.missing", "$context.identity"})
+    void formatOneMissingOrWrongCaseSourceDoesNotInvokeLambda(String source) {
+        payloadFormat = "1.0";
+        configureApi(List.of(source));
+        given().queryParam("token", "wrong-case").get(path()).then().statusCode(401);
+        verify(lambdaService, never()).invokeTarget(eq("us-east-1"), eq(AUTHORIZER), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(lambdaService, never()).invokeTarget(eq("us-east-1"), eq(BACKEND), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void formatOneRepeatedRequestValuesUseTheLastDeliveredValues() {
+        payloadFormat = "1.0";
+        configureApi(List.of("$request.querystring.Token", "$request.header.X-Identity", "$request.querystring.Token"));
+        given().header("X-Identity", "first", "second").queryParam("Token", "one", "two")
+                .get(path()).then().statusCode(200);
+        assertIdentities(List.of("two", "second", "two"));
+    }
+
+    @Test
+    void formatOneEmptyLastQueryValueDoesNotInvokeLambda() {
+        payloadFormat = "1.0";
+        configureApi(List.of("$request.querystring.Token"));
+        given().queryParam("Token", "present", "").get(path()).then().statusCode(401);
+        verify(lambdaService, never()).invokeTarget(eq("us-east-1"), eq(AUTHORIZER), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1.0", "2.0"})
+    void anEarlierEmptyQueryValueDoesNotHideTheDeliveredValue(String format) {
+        payloadFormat = format;
+        configureApi(List.of("$request.querystring.Token"));
+        given().queryParam("Token", "", "present").get(path()).then().statusCode(200);
+        assertIdentities(List.of("1.0".equals(format) ? "present" : ",present"));
+    }
+
+    @Test
     void identityValuesDoNotBypassADenyResponse() {
         allowed = false;
         configureApi(List.of("$request.header.Authorization"));
@@ -143,7 +211,11 @@ class HttpApiAuthorizerIdentitySourceIntegrationTest {
 
     private void assertIdentities(List<String> expected) {
         assertNotNull(authorizerEvent.get());
-        assertEquals(MAPPER.valueToTree(expected), authorizerEvent.get().get("identitySource"));
+        JsonNode identities = "1.0".equals(payloadFormat) ? MAPPER.valueToTree(String.join(",", expected)) : MAPPER.valueToTree(expected);
+        assertEquals(identities, authorizerEvent.get().get("identitySource"));
+        if ("1.0".equals(payloadFormat)) {
+            assertEquals(identities, authorizerEvent.get().get("authorizationToken"));
+        }
     }
 
     private String path() {
@@ -151,25 +223,8 @@ class HttpApiAuthorizerIdentitySourceIntegrationTest {
     }
 
     private void configureApi(List<String> sources) {
-        apiId = given().contentType(ContentType.JSON).body(Map.of("name", "identity-sources", "protocolType", "HTTP"))
-                .post("/v2/apis").then().statusCode(201).extract().path("apiId");
-        String apiPath = "/v2/apis/" + apiId;
-        given().contentType(ContentType.JSON).body(Map.of("stageName", stageName, "stageVariables", Map.of("tenant", "stage-tenant")))
-                .post(apiPath + "/stages").then().statusCode(201);
-        String authorizerId = given().contentType(ContentType.JSON)
-                .body(Map.of("name", "identity-source", "authorizerType", "REQUEST", "authorizerPayloadFormatVersion", "2.0",
-                        "authorizerUri", AUTHORIZER, "enableSimpleResponses", true, "identitySource", sources))
-                .post(apiPath + "/authorizers").then().statusCode(201).extract().path("authorizerId");
-        String integrationId = given().contentType(ContentType.JSON)
-                .body(Map.of("integrationType", "AWS_PROXY", "payloadFormatVersion", "2.0", "integrationUri", BACKEND))
-                .post(apiPath + "/integrations").then().statusCode(201).extract().path("integrationId");
-        given().contentType(ContentType.JSON)
-                .body(Map.of("routeKey", "GET /items", "authorizationType", "CUSTOM", "authorizerId", authorizerId,
-                        "target", "integrations/" + integrationId))
-                .post(apiPath + "/routes").then().statusCode(201);
-    }
-
-    private InvokeResult result(String payload) {
-        return new InvokeResult(200, null, payload.getBytes(StandardCharsets.UTF_8), null, "request");
+        apiId = LambdaAuthorizerApiFixtures.createApi("HTTP", stageName, Map.of("tenant", "stage-tenant"),
+                Map.of("authorizerPayloadFormatVersion", payloadFormat, "enableSimpleResponses", "2.0".equals(payloadFormat),
+                        "identitySource", sources));
     }
 }
