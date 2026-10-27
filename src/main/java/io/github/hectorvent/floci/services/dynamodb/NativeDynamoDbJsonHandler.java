@@ -1628,6 +1628,7 @@ public class NativeDynamoDbJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode responses = objectMapper.createObjectNode();
+        Map<String, Double> unitsByTable = new LinkedHashMap<>();
         for (Map.Entry<String, List<JsonNode>> entry : result.responses().entrySet()) {
             String tblName = entry.getKey();
             JsonNode tableRequest = requestItems.get(tblName);
@@ -1637,8 +1638,14 @@ public class NativeDynamoDbJsonHandler {
                     ? tableRequest.get("ExpressionAttributeNames") : null;
             JsonNode attrToGet = tableRequest != null && tableRequest.has("AttributesToGet")
                     ? tableRequest.get("AttributesToGet") : null;
+            // Each key costs what a GetItem of the whole item costs, even a missing or projected one.
+            TableDefinition table = dynamoDbService.requireTableForItemCall(tblName, region);
+            boolean consistentRead = tableRequest != null && tableRequest.path("ConsistentRead").asBoolean(false);
+            int missingKeys = (tableRequest != null ? tableRequest.path("Keys").size() : 0) - entry.getValue().size();
+            double units = missingKeys * readCapacityUnits(0, consistentRead);
             ArrayNode tableItems = objectMapper.createArrayNode();
             for (JsonNode item : entry.getValue()) {
+                units += readCapacityUnits(DynamoDbItemSize.billedItemSize(table, item), consistentRead);
                 JsonNode projected;
                 if (projExpr != null) {
                     projected = ProjectionEvaluator.project(item, projExpr, exprNames);
@@ -1652,10 +1659,11 @@ public class NativeDynamoDbJsonHandler {
                 tableItems.add(projected);
             }
             responses.set(tblName, tableItems);
+            unitsByTable.put(tblName, units);
         }
         response.set("Responses", responses);
         response.set("UnprocessedKeys", objectMapper.createObjectNode());
-        addBatchConsumedCapacity(response, request, items, false);
+        addBatchConsumedCapacity(response, request, unitsByTable);
         return Response.ok(response).build();
     }
 
@@ -3100,25 +3108,23 @@ public class NativeDynamoDbJsonHandler {
     }
 
     /**
-     * Builds a list-style ConsumedCapacity for batch operations.
+     * Builds the list-style ConsumedCapacity of BatchGetItem, one entry per table.
      */
     private void addBatchConsumedCapacity(ObjectNode response, JsonNode request,
-                                           Map<String, ?> tableItems, boolean isWrite) {
+                                           Map<String, Double> unitsByTable) {
         String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
         if ("NONE".equals(returnCC)) return;
 
         ArrayNode ccArray = objectMapper.createArrayNode();
-        for (String tableName : tableItems.keySet()) {
+        unitsByTable.forEach((tableName, units) -> {
             ObjectNode cc = objectMapper.createObjectNode();
             cc.put("TableName", DynamoDbTableNames.resolve(tableName));
-            cc.put("CapacityUnits", isWrite ? 1.0 : 0.5);
+            cc.put("CapacityUnits", units);
             if ("INDEXES".equals(returnCC)) {
-                ObjectNode tableCap = objectMapper.createObjectNode();
-                tableCap.put("CapacityUnits", isWrite ? 1.0 : 0.5);
-                cc.set("Table", tableCap);
+                cc.set("Table", capacityUnitsNode(units, null));
             }
             ccArray.add(cc);
-        }
+        });
         response.set("ConsumedCapacity", ccArray);
     }
 
