@@ -2672,6 +2672,9 @@ public class RedshiftService implements ManagedSecretRotator {
 
         return switch (type) {
             case "eventsubscription" -> {
+                if (id.isBlank()) {
+                    throw new AwsException("InvalidParameterValue", "Invalid resource name: " + resourceName, 400);
+                }
                 EventSubscription subscription = eventService().describeSubscriptions(id, null, null, null, null)
                         .items().getFirst();
                 yield new TagHandle(subscription.getTags(), updated -> eventService().replaceSubscriptionTags(id, updated));

@@ -407,6 +407,35 @@ class RedshiftEventServiceTest {
     }
 
     @Test
+    void anEventIsPublishedToTheTopicItWasMatchedAgainstWhenTheSubscriptionChangesMidDelivery() throws Exception {
+        create("watcher", "cluster", List.of(), List.of(), null);
+        String replacementTopic = "arn:aws:sns:us-east-1:000000000000:replacement";
+        CountDownLatch delivering = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(sns.topicExists(anyString(), anyString())).thenAnswer(invocation -> {
+            delivering.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS), "Delivery was not released");
+            return true;
+        });
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> recording = executor.submit(() ->
+                    service.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created"));
+            try {
+                assertTrue(delivering.await(5, TimeUnit.SECONDS), "Delivery did not start");
+                service.modifySubscription("watcher", replacementTopic, "cluster-snapshot", null, null, null, null,
+                        ALL_SOURCES_EXIST);
+            } finally {
+                release.countDown();
+            }
+            recording.get(5, TimeUnit.SECONDS);
+        }
+
+        verify(sns).publish(eq(TOPIC), any(), anyString(), anyString(), anyString());
+        verify(sns, never()).publish(eq(replacementTopic), any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
     void theTopicPolicyIsCheckedForRedshiftBeforeEachPublish() {
         create("watcher", null, List.of(), List.of(), null);
 

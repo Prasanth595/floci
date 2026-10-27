@@ -134,12 +134,42 @@ public class RedshiftEventService {
     }
 
     private void deliver(RedshiftEvent event, String accountId, String region) {
-        for (EventSubscription subscription : subscriptions.scanForAccount(accountId, key -> key.startsWith(region + "/"))) {
-            if (!matches(subscription, event)) {
-                continue;
-            }
-            publish(subscription, event, accountId, region);
+        for (Delivery delivery : matchingDeliveries(event, accountId, region)) {
+            publish(delivery, event, accountId, region);
         }
+    }
+
+    /**
+     * Filters and topic are read under the lock {@link #modifySubscription} holds, so an event is never matched
+     * against one version of a subscription and published to the topic of another.
+     */
+    private synchronized List<Delivery> matchingDeliveries(RedshiftEvent event, String accountId, String region) {
+        List<Delivery> matching = new ArrayList<>();
+        for (EventSubscription subscription : subscriptions.scanForAccount(accountId, key -> key.startsWith(region + "/"))) {
+            EventSubscription snapshot = snapshot(subscription);
+            if (matches(snapshot, event)) {
+                matching.add(new Delivery(subscription, snapshot));
+            }
+        }
+        return matching;
+    }
+
+    /** {@code stored} identifies the subscription a failure is recorded against; {@code snapshot} is what matched. */
+    private record Delivery(EventSubscription stored, EventSubscription snapshot) { }
+
+    private static EventSubscription snapshot(EventSubscription subscription) {
+        EventSubscription copy = new EventSubscription();
+        copy.setCustomerAwsId(subscription.getCustomerAwsId());
+        copy.setCustSubscriptionId(subscription.getCustSubscriptionId());
+        copy.setSnsTopicArn(subscription.getSnsTopicArn());
+        copy.setStatus(subscription.getStatus());
+        copy.setSubscriptionCreationTime(subscription.getSubscriptionCreationTime());
+        copy.setSourceType(subscription.getSourceType());
+        copy.setSourceIdsList(new ArrayList<>(subscription.getSourceIdsList()));
+        copy.setEventCategoriesList(new ArrayList<>(subscription.getEventCategoriesList()));
+        copy.setSeverity(subscription.getSeverity());
+        copy.setEnabled(subscription.isEnabled());
+        return copy;
     }
 
     private static boolean matches(EventSubscription subscription, RedshiftEvent event) {
@@ -161,11 +191,12 @@ public class RedshiftEventService {
         return subscription.getSeverity() == null || subscription.getSeverity().equals(event.getSeverity());
     }
 
-    private void publish(EventSubscription subscription, RedshiftEvent event, String accountId, String region) {
+    private void publish(Delivery delivery, RedshiftEvent event, String accountId, String region) {
+        EventSubscription subscription = delivery.snapshot();
         String topicArn = subscription.getSnsTopicArn();
         // A missing topic has no policy to consult, so it would read as a denial; name it for what it is.
         if (!snsService.topicExists(topicArn, AwsArnUtils.parse(topicArn).region())) {
-            updateFailureStatus(subscription, topicArn, "topic-not-exist", accountId, region);
+            updateFailureStatus(delivery.stored(), topicArn, "topic-not-exist", accountId, region);
             LOG.warnv("The topic {0} of the subscription does not exist; event {1} was not published",
                     topicArn, event.getEventId());
             return;
@@ -175,7 +206,7 @@ public class RedshiftEventService {
         // The topic's policy decides alone, as for any service publishing on its own behalf.
         if (serviceCallAuthorizer.authorize("redshift", "sns:Publish", topicArn, subscriptionArn, accountId)
                 != Decision.ALLOW) {
-            updateFailureStatus(subscription, topicArn, "no-permission", accountId, region);
+            updateFailureStatus(delivery.stored(), topicArn, "no-permission", accountId, region);
             LOG.warnv("The policy of {0} does not let Redshift publish event {1}", topicArn, event.getEventId());
             return;
         }
@@ -185,9 +216,9 @@ public class RedshiftEventService {
                     () -> snsService.publish(topicArn, null, notification(event), SNS_SUBJECT, topicRegion));
         } catch (AwsException e) {
             if ("NotFound".equals(e.getErrorCode())) {
-                updateFailureStatus(subscription, topicArn, "topic-not-exist", accountId, region);
+                updateFailureStatus(delivery.stored(), topicArn, "topic-not-exist", accountId, region);
             } else if (isAuthorizationFailure(e)) {
-                updateFailureStatus(subscription, topicArn, "no-permission", accountId, region);
+                updateFailureStatus(delivery.stored(), topicArn, "no-permission", accountId, region);
             }
             LOG.warnv(e, "Could not publish Redshift event {0} to {1}", event.getEventId(), topicArn);
         } catch (RuntimeException e) {
