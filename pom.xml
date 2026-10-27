@@ -422,6 +422,24 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sns</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sqs</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>cloudformation</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>ssm</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>

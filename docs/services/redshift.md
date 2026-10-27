@@ -14,14 +14,14 @@ Snapshot-dump and catalog-seed uploads retry transient Docker I/O failures for u
 
 For running SQL without a PostgreSQL wire connection (the way Lambda and Step Functions do), see the [Redshift Data API](redshift-data.md).
 
-## Events
+## Events and notifications
 
 `DescribeEvents` returns the last hour by default, accepts `StartTime`, `EndTime`,
 `Duration`, and a paired `SourceType`/`SourceIdentifier` filter, and retains the last
 14 days. `MaxRecords` accepts 20 through 100; continue with the returned `Marker`.
 These bounds follow the [AWS DescribeEvents API](https://docs.aws.amazon.com/redshift/latest/APIReference/API_DescribeEvents.html).
-History is isolated by account and region and uses the configured Redshift storage
-mode, including persistent, hybrid and WAL storage.
+History and event subscriptions are isolated by account and region and use the
+configured Redshift storage mode, including persistent, hybrid and WAL storage.
 
 Floci records cluster creation, deletion, reboot, restore, password changes,
 parameter-group association and security-group changes. Snapshot operations record
@@ -33,15 +33,65 @@ type. It does not advertise hardware failures, maintenance or other conditions F
 does not simulate. Security-group and scheduled-action source types are accepted as
 filters, but Floci does not model resources or generate events for those source types.
 
+Use `CreateEventSubscription`, `ModifyEventSubscription`, `DescribeEventSubscriptions`
+and `DeleteEventSubscription` to manage SNS delivery. A subscription can filter source
+type, source IDs, categories and severity. Omitted severity receives both INFO and
+ERROR; explicit severity selects only that severity. All specified filters must match.
+Only standard SNS topics are accepted, as required by
+[AWS subscription rules](https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-event-notifications-subscribe.html).
+Subscriptions default to enabled; set `Enabled=false` to stop delivery without deleting
+the subscription. The limit is 20 subscriptions per account and region.
+
+Matching events are published to SNS with subject `Amazon Redshift Notification`.
+The JSON message includes `Event Source`, `Event Time`, `Source ID`, `Event ID`,
+`Event Categories`, `Severity` and `Event Message`. AWS does not specify a stable
+notification-body schema in the API reference; this message format is Floci's
+representation of the event details, not a claim of byte-for-byte AWS parity.
+A deleted topic changes subscription status to `topic-not-exist`; authorization
+failures change it to `no-permission`. Notification delivery failures are logged
+and do not roll back the Redshift operation.
+
 For example, parameter-group events work without a database container:
 
 ```bash
+TOPIC=$(aws --endpoint-url http://localhost:4566 sns create-topic \
+  --name redshift-events --query TopicArn --output text)
+aws --endpoint-url http://localhost:4566 redshift create-event-subscription \
+  --subscription-name parameter-events --sns-topic-arn "$TOPIC" \
+  --source-type cluster-parameter-group --event-categories configuration
 aws --endpoint-url http://localhost:4566 redshift create-cluster-parameter-group \
   --parameter-group-name event-demo --parameter-group-family redshift-1.0 \
   --description 'Event example'
 aws --endpoint-url http://localhost:4566 redshift describe-events \
   --source-type cluster-parameter-group --source-identifier event-demo
 ```
+
+### CloudFormation
+
+`AWS::Redshift::EventSubscription` creates a real subscription. `Ref` returns its
+name; `Fn::GetAtt` supports `CustomerAwsId`, `CustSubscriptionId`, `Status`,
+`SubscriptionCreationTime`, `SourceIdsList` and `EventCategoriesList`, with the last
+two returned as lists. Updating filters, enabled state, topic and tags reconciles the
+existing subscription; changing `SubscriptionName` replaces it. Removing optional
+filters from the template clears them. Stack deletion removes the subscription.
+The attributes follow the [CloudFormation resource schema](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-redshift-eventsubscription.html).
+
+### EventBridge
+
+Successful Redshift management writes also emit a simulated API event to the default
+EventBridge bus in the request's account and region. Match `source: aws.redshift`,
+`detail-type: AWS API Call via CloudTrail` and `detail.eventName`, for example
+`CreateClusterParameterGroup`. This uses the
+[documented API-event route](https://docs.aws.amazon.com/eventbridge/latest/ref/events-ref-redshift.html).
+Read operations and failed requests do not emit these events. Disabling EventBridge
+stops publication without affecting Redshift operations.
+
+This route does not require a CloudTrail trail in Floci. It supplies operation,
+time, region and account metadata, without a full audit identity, request parameters
+or response elements. Passwords and other operation data are never passed to this
+publisher. Direct `Redshift Integration Monitoring`, `Redshift Integration Configuration`
+and `Redshift Integration Operation` event payloads are not implemented. The Redshift
+Data API's statement events are separate; see [Redshift Data API](redshift-data.md).
 
 ## Supported Actions
 
@@ -74,8 +124,12 @@ aws --endpoint-url http://localhost:4566 redshift describe-events \
 | `CreateSnapshotCopyGrant` | Register a snapshot copy grant, defaulting `KmsKeyId` to the AWS-managed Redshift key. `SnapshotCopyGrantName` must be 1-63 characters, start with a lowercase letter, and contain only lowercase letters, digits and non-consecutive hyphens |
 | `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name, paged with `MaxRecords` and `Marker` |
 | `DeleteSnapshotCopyGrant` | Remove a snapshot copy grant |
-| `DescribeEvents` | - |
-| `DescribeEventCategories` | - |
+| `DescribeEvents` | Return retained events filtered by source and time, with marker pagination |
+| `DescribeEventCategories` | List implemented event IDs, categories and severities by source type |
+| `CreateEventSubscription` | Create an enabled or disabled subscription delivering matching events to a standard SNS topic |
+| `ModifyEventSubscription` | Update the specified subscription filters, topic or enabled state |
+| `DeleteEventSubscription` | Delete an event notification subscription |
+| `DescribeEventSubscriptions` | List event subscriptions filtered by name or tags |
 | `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. No snapshot is copied |
 | `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
 | `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
