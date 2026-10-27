@@ -1628,6 +1628,7 @@ public class NativeDynamoDbJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode responses = objectMapper.createObjectNode();
+        boolean capacityRequested = !"NONE".equals(request.path("ReturnConsumedCapacity").asText("NONE"));
         Map<String, Double> unitsByTable = new LinkedHashMap<>();
         for (Map.Entry<String, List<JsonNode>> entry : result.responses().entrySet()) {
             String tblName = entry.getKey();
@@ -1638,14 +1639,8 @@ public class NativeDynamoDbJsonHandler {
                     ? tableRequest.get("ExpressionAttributeNames") : null;
             JsonNode attrToGet = tableRequest != null && tableRequest.has("AttributesToGet")
                     ? tableRequest.get("AttributesToGet") : null;
-            // Each key costs what a GetItem of the whole item costs, even a missing or projected one.
-            TableDefinition table = dynamoDbService.requireTableForItemCall(tblName, region);
-            boolean consistentRead = tableRequest != null && tableRequest.path("ConsistentRead").asBoolean(false);
-            int missingKeys = (tableRequest != null ? tableRequest.path("Keys").size() : 0) - entry.getValue().size();
-            double units = missingKeys * readCapacityUnits(0, consistentRead);
             ArrayNode tableItems = objectMapper.createArrayNode();
             for (JsonNode item : entry.getValue()) {
-                units += readCapacityUnits(DynamoDbItemSize.billedItemSize(table, item), consistentRead);
                 JsonNode projected;
                 if (projExpr != null) {
                     projected = ProjectionEvaluator.project(item, projExpr, exprNames);
@@ -1659,12 +1654,29 @@ public class NativeDynamoDbJsonHandler {
                 tableItems.add(projected);
             }
             responses.set(tblName, tableItems);
-            unitsByTable.put(tblName, units);
+            if (capacityRequested) {
+                unitsByTable.put(tblName, batchGetReadUnits(tblName, tableRequest, entry.getValue(), region));
+            }
         }
         response.set("Responses", responses);
         response.set("UnprocessedKeys", objectMapper.createObjectNode());
         addBatchConsumedCapacity(response, request, unitsByTable);
         return Response.ok(response).build();
+    }
+
+    /**
+     * Each key costs what a GetItem of the whole item costs, even a missing or projected one.
+     */
+    private double batchGetReadUnits(String tableName, JsonNode tableRequest, List<JsonNode> found,
+                                     String region) {
+        TableDefinition table = dynamoDbService.requireTableForItemCall(tableName, region);
+        boolean consistentRead = tableRequest != null && tableRequest.path("ConsistentRead").asBoolean(false);
+        int missingKeys = (tableRequest != null ? tableRequest.path("Keys").size() : 0) - found.size();
+        double units = missingKeys * readCapacityUnits(0, consistentRead);
+        for (JsonNode item : found) {
+            units += readCapacityUnits(DynamoDbItemSize.billedItemSize(table, item), consistentRead);
+        }
+        return units;
     }
 
     private Response handleUpdateTable(JsonNode request, String region) {
