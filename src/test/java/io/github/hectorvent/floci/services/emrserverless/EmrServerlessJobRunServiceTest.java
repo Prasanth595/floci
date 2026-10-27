@@ -7,10 +7,12 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.emrserverless.model.Application;
 import io.github.hectorvent.floci.services.emrserverless.model.CreateApplicationRequest;
 import io.github.hectorvent.floci.services.emrserverless.model.JobDriver;
 import io.github.hectorvent.floci.services.emrserverless.model.JobRun;
 import io.github.hectorvent.floci.services.emrserverless.model.JobRunRecord;
+import io.github.hectorvent.floci.services.emrserverless.model.MonitoringConfiguration;
 import io.github.hectorvent.floci.services.emrserverless.model.RuntimeConfiguration;
 import io.github.hectorvent.floci.services.emrserverless.model.StartJobRunRequest;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -261,6 +263,71 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(List.of("s3://bucket/jobs/app.jar"), job.application());
         assertEquals(Duration.ofMinutes(30), job.timeout());
         assertEquals(Duration.ZERO, runner.jobs.get(1).timeout());
+        assertNull(job.logFolder());
+    }
+
+    @Test
+    void aRunsDriverLogsGoUnderItsOwnS3LogUriOrElseTheApplications() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        CreateApplicationRequest create = new CreateApplicationRequest();
+        create.setName("logged");
+        create.setReleaseLabel("emr-7.5.0");
+        create.setType("SPARK");
+        create.setClientToken(UUID.randomUUID().toString());
+        create.setMonitoringConfiguration(s3LogUri("s3://logs/app-level"));
+        String logged = applications.createApplication(create).getApplicationId();
+        StartJobRunRequest ownLogUri = request(null, null);
+        ownLogUri.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("s3MonitoringConfiguration", Map.of("logUri", "s3://logs/job-level/"))));
+        // "To remove s3MonitoringConfiguration, pass an empty declaration {} for the configuration."
+        StartJobRunRequest removed = request(null, null);
+        removed.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("s3MonitoringConfiguration", Map.of())));
+
+        String inherited = service.startJobRun(logged, request(null, null)).getJobRunId();
+        String overridden = service.startJobRun(logged, ownLogUri).getJobRunId();
+        service.startJobRun(logged, removed);
+        for (int i = 0; i < 3; i++) {
+            runNext();
+        }
+
+        assertEquals("s3://logs/app-level/applications/" + logged + "/jobs/" + inherited + "/SPARK_DRIVER/",
+                runner.jobs.get(0).logFolder());
+        assertEquals("s3://logs/job-level/applications/" + logged + "/jobs/" + overridden + "/SPARK_DRIVER/",
+                runner.jobs.get(1).logFolder());
+        assertNull(runner.jobs.get(2).logFolder());
+    }
+
+    @Test
+    void aRetriedRunsDriverLogsAreUnderItsAttemptFromRelease710() {
+        Application app = new Application();
+        app.setMonitoringConfiguration(s3LogUri("s3://logs"));
+
+        assertEquals("s3://logs/applications/app/jobs/run/attempts/1/SPARK_DRIVER/",
+                EmrServerlessJobRunService.driverLogFolder(app, run("emr-7.1.0", "STREAMING", null)));
+        assertEquals("s3://logs/applications/app/jobs/run/attempts/1/SPARK_DRIVER/",
+                EmrServerlessJobRunService.driverLogFolder(app, run("emr-spark-8.1.0", "BATCH", 3)));
+        assertEquals("s3://logs/applications/app/jobs/run/SPARK_DRIVER/",
+                EmrServerlessJobRunService.driverLogFolder(app, run("emr-7.1.0", "BATCH", 1)));
+        assertEquals("s3://logs/applications/app/jobs/run/SPARK_DRIVER/",
+                EmrServerlessJobRunService.driverLogFolder(app, run("emr-7.0.0", "STREAMING", null)));
+    }
+
+    private static MonitoringConfiguration s3LogUri(String logUri) {
+        MonitoringConfiguration monitoring = new MonitoringConfiguration();
+        monitoring.setProperty("s3MonitoringConfiguration", Map.of("logUri", logUri));
+        return monitoring;
+    }
+
+    private static JobRun run(String releaseLabel, String mode, Integer maxAttempts) {
+        JobRun run = new JobRun();
+        run.setApplicationId("app");
+        run.setJobRunId("run");
+        run.setReleaseLabel(releaseLabel);
+        run.setMode(mode);
+        run.setRetryPolicy(maxAttempts != null ? Map.of("maxAttempts", maxAttempts) : null);
+        return run;
     }
 
     @Test
@@ -446,6 +513,8 @@ class EmrServerlessJobRunServiceTest {
         String afterReset = service.startJobRun(applicationId, request(null, null)).getJobRunId();
         runNext();
         assertEquals("SUCCESS", store.get(afterReset).orElseThrow().getJobRun().getState());
+        // A running driver goes on, and the runner stops one whose run the reset removed.
+        assertEquals(List.of(false, true, false, false), runner.cancelledAsRunning);
     }
 
     @Test
@@ -471,6 +540,8 @@ class EmrServerlessJobRunServiceTest {
         final List<Job> jobs = new ArrayList<>();
         final Set<String> stopped = new HashSet<>();
         final List<String> driversStarted = new ArrayList<>();
+        // What progress.cancelled() said once the driver ran, and again after whileRunning.
+        final List<Boolean> cancelledAsRunning = new ArrayList<>();
         Outcome outcome = Outcome.exitedWith(0);
         Runnable whileRunning = () -> { };
         Runnable whileTimingOut = () -> { };
@@ -484,7 +555,9 @@ class EmrServerlessJobRunServiceTest {
             }
             driversStarted.add(job.runId());
             progress.started();
+            cancelledAsRunning.add(progress.cancelled());
             whileRunning.run();
+            cancelledAsRunning.add(progress.cancelled());
             if (outcome.timedOut()) {
                 progress.timedOut();
                 whileTimingOut.run();
@@ -495,6 +568,11 @@ class EmrServerlessJobRunServiceTest {
         @Override
         public void stop(String runId) {
             stopped.add(runId);
+        }
+
+        @Override
+        public void removeLeftoverDrivers(String service) {
+            // A test's drivers live no longer than its runs.
         }
     }
 }

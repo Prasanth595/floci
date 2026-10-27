@@ -193,6 +193,11 @@ public class CodeArtifactService implements Resettable {
     // currentContainerBackedPackageFence's own javadoc for what this protects against.
     private final ConcurrentHashMap<String, Long> containerBackedPackageDeletionFence = new ConcurrentHashMap<>();
     private final AtomicLong containerBackedPackageDeletionCounter = new AtomicLong();
+    // Same race guard, scoped to one version instead of the whole package: see
+    // currentContainerBackedVersionFence's own javadoc. Shares containerBackedPackageDeletionCounter
+    // rather than a counter of its own, so a snapshot that compares equal at write time still proves
+    // neither this version nor the whole package was removed in between, with a single scalar.
+    private final ConcurrentHashMap<String, Long> containerBackedVersionDeletionFence = new ConcurrentHashMap<>();
     // Maven, npm, pypi, and nuget publishes go straight to their own sidecar and never create a
     // packageVersions record (see CONTAINER_BACKED_FORMATS), so DescribeDomain's assetSizeBytes
     // can't see their bytes by summing packageVersions the way it does for generic. Each format's
@@ -1297,6 +1302,282 @@ public class CodeArtifactService implements Resettable {
         }
         return applyPackageVersionStatusChange(region, domain, domainOwner, repository, format, namespace,
                 packageName, "disposing", versions, versionRevisions, expectedStatus, "Disposed", true);
+    }
+
+    /**
+     * Permanently removes one or more versions of a package, every real asset included. Confirmed
+     * against the wire model and the User Guide rather than assumed from the shared {@code
+     * PackageVersionError} enum alone, the same discipline {@link #disposePackageVersions}'s own
+     * javadoc used:
+     * <ul>
+     * <li>{@code DeletePackageVersionsRequest} has no {@code versionRevisions} field at all
+     * (confirmed directly against {@code service-2.json}'s member list), only a single {@code
+     * expectedStatus} applied to the whole batch. Unlike {@link #updatePackageVersionsStatus}/
+     * {@link #disposePackageVersions}, this can never fail {@code MISMATCHED_REVISION}.
+     * <li>{@code expectedStatus} reuses the full, unrestricted {@code PackageVersionStatus} shape
+     * (confirmed against the wire model: unlike {@code targetStatus}, it is not narrowed to its
+     * own request-specific enum the way {@link #UPDATE_EXPECTED_STATUSES}/{@link
+     * #DISPOSE_EXPECTED_STATUSES} are), so every one of the six real status values is accepted.
+     * <li>Deleting is explicitly documented as allowed from every status, {@code Disposed}
+     * included: "the only action that can be taken on a package version that has been disposed is
+     * for it to be deleted." This never reuses {@link #checkStatusTransitionAllowed}, whose
+     * Disposed-blocks-further-change rule is specific to {@link #updatePackageVersionsStatus}/
+     * {@link #disposePackageVersions} and would otherwise wrongly reject exactly the one case AWS
+     * says this action must accept.
+     * <li>Unlike {@link #disposePackageVersions}, which keeps a tombstone record so {@link
+     * #describePackageVersion} can keep answering {@code Disposed}, a deleted version is
+     * documented as "no longer in the repository" at all, the same as one that was never
+     * published. {@link #describePackageVersion}/{@link #getPackageVersionAsset} must 404 on it
+     * afterward, and the freed coordinate can be freely republished (unlike Archived/Disposed,
+     * which {@link #publishPackageVersion}'s own check blocks).
+     * <li>The whole call is still all-or-nothing, the same documented behavior {@link
+     * #disposePackageVersions} shares: every version that would otherwise have succeeded is
+     * reported {@code SKIPPED} rather than partially applied.
+     * </ul>
+     *
+     * <p>{@code synchronized} for the same reason every other package-mutating method here is.
+     */
+    public synchronized PackageVersionStatusChangeResult deletePackageVersions(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            List<String> versions, String expectedStatus) {
+        validatePackageCoordinates(format, namespace, packageName, "deleting versions of");
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        if (expectedStatus != null && !PACKAGE_VERSION_STATUSES.contains(expectedStatus)) {
+            throw validation("expectedStatus must be one of " + PACKAGE_VERSION_STATUSES + ".");
+        }
+        if (versions == null || versions.isEmpty()) {
+            throw validation("versions is required and must specify at least one version.");
+        }
+        if (versions.size() > MAX_PACKAGE_VERSIONS_PER_BATCH_CALL) {
+            throw validation("A single call can process at most " + MAX_PACKAGE_VERSIONS_PER_BATCH_CALL
+                    + " versions.");
+        }
+        List<String> requestedVersions = List.copyOf(new LinkedHashSet<>(versions));
+        for (String version : requestedVersions) {
+            validatePackageToken("packageVersion", version);
+        }
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            return deleteContainerBackedPackageVersions(region, domain, owner, repository, format, namespace,
+                    packageName, requestedVersions, expectedStatus);
+        }
+        return deleteGenericPackageVersions(region, domain, owner, repository, format, namespace, packageName,
+                requestedVersions, expectedStatus);
+    }
+
+    /**
+     * The one check shared by every requested version in {@link #deletePackageVersions}, for
+     * either storage branch: {@code null} means the version is eligible to actually be deleted; a
+     * non-null result is the exact failure to report. Deliberately does not reuse {@link
+     * #checkStatusTransitionAllowed}: that method's Disposed-blocks-further-change rule does not
+     * apply here (see {@link #deletePackageVersions}'s own javadoc), and there is no revision to
+     * check against at all, since the real request shape has no {@code versionRevisions} field.
+     */
+    private static PackageVersionError checkDeletionAllowed(String currentStatus, String expectedStatus) {
+        if (expectedStatus != null && !expectedStatus.equals(currentStatus)) {
+            return new PackageVersionError("MISMATCHED_STATUS", "current status: " + currentStatus
+                    + ", expected status: " + expectedStatus);
+        }
+        return null;
+    }
+
+    /**
+     * The {@code generic} branch of {@link #deletePackageVersions}: removes the version's record
+     * from {@code packageVersions} first, exactly the way {@link #deletePackage} already does for
+     * a whole package's worth of versions, and for the same reason: once the record is gone, no
+     * caller can reach its bytes through it regardless of whether the best-effort cleanup below
+     * succeeds, so a cleanup failure (logged, not thrown) can never leave a surviving record
+     * pointing at bytes that are already gone. This differs from {@link #disposePackageVersions}'s
+     * own stricter ordering deliberately: that action keeps a tombstone a failed cleanup could
+     * misrepresent, this one does not.
+     */
+    private PackageVersionStatusChangeResult deleteGenericPackageVersions(String region, String domain, String owner,
+            String repository, String format, String namespace, String packageName, List<String> requestedVersions,
+            String expectedStatus) {
+        Map<String, PackageVersionError> failures = new LinkedHashMap<>();
+        List<String> pending = new ArrayList<>();
+        Map<String, CodeArtifactPackageVersion> byVersion = new LinkedHashMap<>();
+        for (String version : requestedVersions) {
+            String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+            CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key).orElse(null);
+            if (pv == null) {
+                failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version " + version));
+                continue;
+            }
+            PackageVersionError failure = checkDeletionAllowed(pv.getStatus(), expectedStatus);
+            if (failure != null) {
+                failures.put(version, failure);
+                continue;
+            }
+            byVersion.put(version, pv);
+            pending.add(version);
+        }
+        if (!failures.isEmpty()) {
+            for (String version : pending) {
+                failures.put(version, new PackageVersionError("SKIPPED", "Version " + version + " is skipped"));
+            }
+            return new PackageVersionStatusChangeResult(Map.of(), failures);
+        }
+
+        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+        for (String version : pending) {
+            CodeArtifactPackageVersion pv = byVersion.get(version);
+            String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+            packageVersions.deleteForAccount(owner, key);
+            for (PackageAsset asset : pv.getAssets().values()) {
+                try {
+                    deleteAssetContent(owner, key, asset.getName());
+                } catch (UncheckedIOException e) {
+                    LOG.warnv(e, "Could not delete CodeArtifact asset file for {0}/{1}: {2}", key,
+                            asset.getName(), e.getMessage());
+                }
+            }
+            successes.put(version, new SuccessfulPackageVersionInfo(pv.getRevision(), "Deleted"));
+        }
+        return new PackageVersionStatusChangeResult(successes, Map.of());
+    }
+
+    /**
+     * The container-backed branch of {@link #deletePackageVersions}: deletes every one of the
+     * version's real assets first, through the exact same {@link #deleteContainerBackedVersionAssets}
+     * {@link #disposePackageVersions} already uses (real deletion, byte accounting, and Maven
+     * metadata cleanup are identical regardless of which action triggered them), propagating any
+     * sidecar failure rather than swallowing it, the same ordering {@link #deletePackage}'s own
+     * container-backed branch already uses for a whole package. The status override is only
+     * cleared afterward, with {@link #clearContainerBackedStatusOverride} rather than {@link
+     * #writeContainerBackedStatusOverride}: unlike {@link #disposePackageVersions}, this leaves no
+     * tombstone, so {@link #containerBackedVersionExists} reports the version gone entirely once
+     * both steps finish, matching the User Guide's "no longer in the repository" wording.
+     */
+    private PackageVersionStatusChangeResult deleteContainerBackedPackageVersions(String region, String domain,
+            String owner, String repository, String format, String namespace, String packageName,
+            List<String> requestedVersions, String expectedStatus) {
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package '" + packageName + "' was not found.", packageName, "package"));
+        List<RepositorySidecarManager.PackageVersionTimestamp> raw;
+        try {
+            raw = manager.listPackageVersions(repoId, domain, repository, namespace, packageName);
+        } catch (UnsupportedOperationException e) {
+            throw new AwsException("InternalServerException", "Deleting " + format + " package versions is not "
+                    + "yet supported by this emulator.", 500);
+        }
+        // Keyed by normalized version (see normalizedContainerBackedVersion), the same as
+        // applyContainerBackedStatusChange's own realPublishedTimes. Raised by Greptile's review:
+        // BaGetter's own listing can spell a NuGet version differently than a caller's own
+        // request does, and the override side index already normalizes on write, so comparing
+        // both against the same normalized form here is what keeps existence checks, override
+        // reads, and the deletion gate below consistent with every other container-backed lookup.
+        Map<String, Instant> realPublishedTimes = new LinkedHashMap<>();
+        for (RepositorySidecarManager.PackageVersionTimestamp v : raw) {
+            realPublishedTimes.put(normalizedContainerBackedVersion(format, v.version()), v.publishedTime());
+        }
+        Map<String, PackageVersionStatusOverride> overridesByVersion = containerBackedOverridesForPackage(owner,
+                region, domain, repository, format, namespace, packageName);
+
+        Map<String, PackageVersionError> failures = new LinkedHashMap<>();
+        List<String> pending = new ArrayList<>();
+        Map<String, String> finalRevisionByVersion = new LinkedHashMap<>();
+        for (String version : requestedVersions) {
+            String matchVersion = normalizedContainerBackedVersion(format, version);
+            boolean existsNow = realPublishedTimes.containsKey(matchVersion)
+                    || overridesByVersion.containsKey(matchVersion);
+            if (!existsNow) {
+                failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version " + version));
+                continue;
+            }
+            PackageVersionStatusOverride override = overridesByVersion.get(matchVersion);
+            String currentStatus = override != null ? override.status() : "Published";
+            String currentRevision = override != null ? override.revision()
+                    : synthesizeContainerBackedRevision(format, repoId, namespace, packageName, version);
+            PackageVersionError failure = checkDeletionAllowed(currentStatus, expectedStatus);
+            if (failure != null) {
+                failures.put(version, failure);
+                continue;
+            }
+            finalRevisionByVersion.put(version, currentRevision);
+            pending.add(version);
+        }
+        if (!failures.isEmpty()) {
+            for (String version : pending) {
+                failures.put(version, new PackageVersionError("SKIPPED", "Version " + version + " is skipped"));
+            }
+            return new PackageVersionStatusChangeResult(Map.of(), failures);
+        }
+
+        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+        for (String version : pending) {
+            String matchVersion = normalizedContainerBackedVersion(format, version);
+            PackageVersionStatusOverride override = overridesByVersion.get(matchVersion);
+            boolean retryingPendingAssets = override != null && !override.pendingAssetNames().isEmpty();
+            boolean sidecarStillListsIt = realPublishedTimes.containsKey(matchVersion);
+            if (retryingPendingAssets || sidecarStillListsIt) {
+                List<String> assetNames;
+                if (retryingPendingAssets) {
+                    // A retry of a previously partially-failed dispose, or of this same delete
+                    // call (see the write below): reuse exactly what is still known to need
+                    // cleanup rather than asking the sidecar again, since npm's own listing can no
+                    // longer answer this once a prior attempt's own per-asset delete already
+                    // updated the packument (see PackageVersionStatusOverride's own javadoc).
+                    // Raised by Greptile's review: this case used to fall through to the sidecar
+                    // listing below, which for npm no longer named the version at all once its
+                    // packument update had landed, so these assets were silently skipped and the
+                    // override cleared anyway, orphaning the tarball on disk.
+                    assetNames = override.pendingAssetNames();
+                } else {
+                    try {
+                        assetNames = manager.listPackageVersionAssetNames(repoId, domain, repository, namespace,
+                                packageName, version);
+                    } catch (UnsupportedOperationException e) {
+                        throw new AwsException("InternalServerException", "Deleting a package version of this "
+                                + "format is not yet supported by this emulator.", 500);
+                    }
+                }
+                // Written before deleting, exactly like disposePackageVersions's own ordering: a
+                // sidecar failing partway through this version's own asset deletions must leave
+                // pendingAssetNames naming only what genuinely remains, so a retry (another
+                // DeletePackageVersions call on the same coordinate) can still find it afterward.
+                Instant publishedTime = realPublishedTimes.get(matchVersion);
+                writeContainerBackedStatusOverride(owner, region, domain, repository, format, namespace,
+                        packageName, version,
+                        new PackageVersionStatusOverride(override != null ? override.status() : "Published",
+                                override != null ? override.revision() : finalRevisionByVersion.get(version),
+                                override != null ? override.publishedEpochSeconds()
+                                        : (publishedTime == null ? null : publishedTime.getEpochSecond()),
+                                assetNames));
+                // Called even when assetNames ends up empty here (every real asset already
+                // deleted by an earlier attempt): raised by Greptile's review, {@code
+                // deleteContainerBackedVersionAssets}'s own trailing {@code recordVersionDisposed}
+                // call is what retries Maven's metadata.xml/checksum cleanup, and gating this call
+                // on a non-empty list, as an earlier version of this fix did, meant a retry whose
+                // only remaining failure was that metadata update (sidecarStillListsIt true,
+                // nothing left in a fresh asset listing) skipped retrying it and cleared the
+                // override anyway.
+                deleteContainerBackedVersionAssets(manager, repoId, owner, region, domain, repository, format,
+                        namespace, packageName, version, assetNames);
+            }
+            clearContainerBackedStatusOverride(owner, region, domain, repository, format, namespace, packageName,
+                    version);
+            // npm/pypi readmes are captured separately at publish time (see
+            // recordPublishedPackageVersionReadme's own javadoc) and never answered live from the
+            // sidecar the way nuget's readme is, so deleting the version here would otherwise leave
+            // getPackageVersionReadme still serving it forever.
+            String readmeKey = packageVersionKey(region, domain, repository, format, namespace,
+                    accountingPackageName(format, packageName), version);
+            packageVersionReadmes.remove(ownerScopedKey(owner, readmeKey));
+            // Bumps this version's own fence (see currentContainerBackedVersionFence's own
+            // javadoc): raised by Greptile's review, without this a publish's readme capture
+            // already in flight for this exact version, delayed past this delete, would resurrect
+            // the readme just removed above, since nothing short of this would ever invalidate its
+            // own snapshot.
+            containerBackedVersionDeletionFence.put(ownerScopedKey(owner, readmeKey),
+                    containerBackedPackageDeletionCounter.incrementAndGet());
+            successes.put(version, new SuccessfulPackageVersionInfo(finalRevisionByVersion.get(version), "Deleted"));
+        }
+        return new PackageVersionStatusChangeResult(successes, Map.of());
     }
 
     private PackageVersionStatusChangeResult applyPackageVersionStatusChange(String region, String domain,
@@ -2962,8 +3243,8 @@ public class CodeArtifactService implements Resettable {
             if (readme == null) {
                 return;
             }
-            long readmeFenceSnapshot = currentContainerBackedPackageFence(region, domain, owner,
-                    destinationRepository, format, namespace, packageName);
+            long readmeFenceSnapshot = currentContainerBackedVersionFence(region, domain, owner,
+                    destinationRepository, format, namespace, packageName, version);
             recordPublishedPackageVersionReadme(region, domain, owner, destinationRepository, format, namespace,
                     packageName, version, readme, readmeFenceSnapshot);
         } catch (RuntimeException e) {
@@ -3245,18 +3526,19 @@ public class CodeArtifactService implements Resettable {
      * existence here, inside the same {@code synchronized} call that does the write, closes that
      * window the same way every other mutating method here already does.
      *
-     * <p>{@code packageFenceSnapshot} is whatever {@link #currentContainerBackedPackageFence}
-     * returned when the proxy called it, right before issuing the real write this call reports the
-     * readme of, the exact same snapshot the proxy already takes to call
-     * {@link #recordContainerBackedAssetBytes}. Without comparing it here too, a publish's readme
-     * capture that runs on a delayed callback (npm's own, off the event loop) after a concurrent
-     * {@link #deletePackage} or native unpublish has already removed this package would resurrect
-     * a readme for a package {@link #getPackageVersionReadme} should now 404 on, the same window
-     * {@code recordContainerBackedAssetBytes} already closes for byte accounting.
+     * <p>{@code fenceSnapshot} is whatever {@link #currentContainerBackedVersionFence} returned
+     * when the proxy called it, right before issuing the real write this call reports the readme
+     * of. Without comparing it here too, a publish's readme capture that runs on a delayed callback
+     * (npm's own, off the event loop) after a concurrent {@link #deletePackage}, native unpublish,
+     * or {@link #deletePackageVersions} call for this exact version has already removed it would
+     * resurrect a readme {@link #getPackageVersionReadme} should now 404 on. Raised by Greptile's
+     * review: this used to compare against {@link #currentContainerBackedPackageFence} alone, which
+     * only ever changes on a whole-package removal, so a single version's own deletion never
+     * invalidated a readme capture already in flight for it.
      */
     public synchronized void recordPublishedPackageVersionReadme(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, String version,
-            String readme, long packageFenceSnapshot) {
+            String readme, long fenceSnapshot) {
         if (!isValidPackageToken(packageName) || !isValidPackageToken(version)
                 || (namespace != null && !isValidPackageToken(namespace))) {
             LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'' version ''{3}'': the namespace, name, "
@@ -3272,14 +3554,16 @@ public class CodeArtifactService implements Resettable {
         }
         String accountingName = accountingPackageName(format, packageName);
         String fenceKey = packageKey(region, domain, repository, format, namespace, accountingName);
-        long currentFence = containerBackedPackageDeletionFence.getOrDefault(ownerScopedKey(owner, fenceKey), 0L);
-        if (currentFence != packageFenceSnapshot) {
-            LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'': a DeletePackage removed it from the "
-                    + "{3} sidecar (possibly replaced by a different publish) while this publish was in flight.",
-                    domain, repository, packageName, format);
+        String key = packageVersionKey(region, domain, repository, format, namespace, accountingName, version);
+        long currentFence = Math.max(containerBackedPackageDeletionFence.getOrDefault(ownerScopedKey(owner,
+                fenceKey), 0L), containerBackedVersionDeletionFence.getOrDefault(ownerScopedKey(owner, key), 0L));
+        if (currentFence != fenceSnapshot) {
+            LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'' version ''{3}'': a DeletePackage or "
+                    + "DeletePackageVersions removed it from the {4} sidecar (possibly replaced by a different "
+                    + "publish) while this publish was in flight.", domain, repository, packageName, version,
+                    format);
             return;
         }
-        String key = packageVersionKey(region, domain, repository, format, namespace, accountingName, version);
         packageVersionReadmes.put(ownerScopedKey(owner, key), readme == null ? "" : readme);
     }
 
@@ -3391,6 +3675,7 @@ public class CodeArtifactService implements Resettable {
         packageOriginConfigs.clear();
         containerBackedAssetBytes.clear();
         containerBackedPackageDeletionFence.clear();
+        containerBackedVersionDeletionFence.clear();
         packageVersionReadmes.clear();
         containerBackedPackageVersionStatusOverrides.clear();
         containerBackedOverriddenVersionsByPackage.clear();
@@ -3506,6 +3791,36 @@ public class CodeArtifactService implements Resettable {
         String key = packageKey(region, domain, repository, format, namespace, accountingPackageName(format,
                 packageName));
         return containerBackedPackageDeletionFence.getOrDefault(ownerScopedKey(owner, key), 0L);
+    }
+
+    /**
+     * Same purpose as {@link #currentContainerBackedPackageFence}, narrowed to one version: a
+     * snapshot a format proxy takes right before issuing a real per-version write (an npm publish's
+     * own readme, or pypi's twine upload description), for {@link
+     * #recordPublishedPackageVersionReadme} to compare against once that write completes. Unlike
+     * byte accounting, which only ever runs for a whole package at a time (see {@link
+     * #recordContainerBackedAssetBytes}'s own javadoc) and so has no per-version snapshot of its
+     * own, a captured readme is keyed per version, and {@link #deletePackageVersions} can remove
+     * just one version's readme without touching its siblings'. Raised by Greptile's review:
+     * {@link #deletePackageVersions} cleared a deleted version's own captured readme without
+     * bumping any fence at all, so a publish callback already in flight for that exact version,
+     * delayed past the delete (Verdaccio's own response arriving well after this emulator's side of
+     * the delete already finished), would resurrect the readme it just removed. Returns whichever
+     * of the package-wide fence or this version's own is higher, so a snapshot taken here still
+     * catches a whole-package removal ({@link #deletePackage}, or a native {@code npm unpublish}
+     * via {@link #forgetContainerBackedPackage}) exactly the way {@link
+     * #currentContainerBackedPackageFence} already does on its own.
+     */
+    public long currentContainerBackedVersionFence(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String version) {
+        String owner = effectiveOwner(domainOwner);
+        String accountingName = accountingPackageName(format, packageName);
+        String packageFenceKey = ownerScopedKey(owner, packageKey(region, domain, repository, format, namespace,
+                accountingName));
+        String versionFenceKey = ownerScopedKey(owner, packageVersionKey(region, domain, repository, format,
+                namespace, accountingName, version));
+        return Math.max(containerBackedPackageDeletionFence.getOrDefault(packageFenceKey, 0L),
+                containerBackedVersionDeletionFence.getOrDefault(versionFenceKey, 0L));
     }
 
     /**

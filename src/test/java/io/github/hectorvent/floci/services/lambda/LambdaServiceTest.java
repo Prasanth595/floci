@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -512,6 +513,29 @@ class LambdaServiceTest {
         assertEquals(2, functions.size());
         assertTrue(functions.stream().anyMatch(f -> f.getFunctionName().equals("fn-1")));
         assertTrue(functions.stream().anyMatch(f -> f.getFunctionName().equals("fn-2")));
+    }
+
+    @Test
+    void listFunctionsCapsPagesAtFiftyAndScopesMarkersToRegion() {
+        for (int i = 51; i >= 0; i--) {
+            service.createFunction(REGION, baseRequest("page-fn-%03d".formatted(i)));
+        }
+        service.createFunction("eu-west-1", baseRequest("other-region-fn"));
+
+        PaginatedResult<LambdaFunction> first = service.listFunctions(REGION, "10000", null);
+        assertEquals(50, first.items().size());
+        assertEquals("page-fn-000", first.items().getFirst().getFunctionName());
+        assertEquals("page-fn-049", first.items().getLast().getFunctionName());
+        assertNotNull(first.nextToken());
+
+        PaginatedResult<LambdaFunction> second = service.listFunctions(REGION, "10000", first.nextToken());
+        assertEquals(List.of("page-fn-050", "page-fn-051"),
+                second.items().stream().map(LambdaFunction::getFunctionName).toList());
+        assertNull(second.nextToken());
+
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> service.listFunctions("eu-west-1", "1", first.nextToken()));
+        assertEquals("InvalidParameterValueException", invalid.getErrorCode());
     }
 
     @Test

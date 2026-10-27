@@ -154,6 +154,44 @@ outside 1 to 1000. `PathPrefix` and `Scope` filter before paging, and roles and 
 policies are listed in name order so a `Marker` resumes where the previous page stopped.
 `ListPolicies` does not yet apply `OnlyAttached` or `PolicyUsageFilter`.
 
+The declared constraints on the managed-policy family are read from the model rather than from a
+hand-written check, `tools/aws/regen_iam_shapes.py` vendoring them for `GetPolicy`, `DeletePolicy`,
+`CreatePolicyVersion`, `GetPolicyVersion`, `DeletePolicyVersion`, `SetDefaultPolicyVersion` and the
+six attach and detach operations. A `PolicyArn` is held to `arnType`'s 20 to 2048 characters, a
+`VersionId` to `policyVersionIdType`'s pattern, a `PolicyDocument` to its 1 to 131072 characters and
+its pattern, and each principal name to its own bound, which for a role is the 1 to 64 characters of
+`[\w+=,.@-]` this service already answered. The check runs ahead of the operation, so a value that
+breaks a constraint is a 400 `ValidationError` where it used to reach the store and answer
+`NoSuchEntity` 404, the ordering the rest of this package already follows. A member sent empty is a
+member the request carries, so it breaks its own constraints rather than reading as absent, and a
+member breaking two of them is reported twice, as a `ServiceSpecificCredentialId` breaking both of
+its own already is. That is the one place the wording moves rather than only the status: a name sent
+empty breaks its minimum and its pattern at once, so these operations report both, where the
+hand-written check the rest of the service still uses stops at the first and reports the minimum
+alone. A boolean member publishes no constraint to hold it to, so a `SetAsDefault` that is neither
+`true` nor `false` reaches the operation, which reads anything but `true` as false.
+
+A list is read the same way, from the parameters the protocol numbers under its name:
+`Audience.member.1` or the bare `Audience.1`, with a member of a list of structures carrying its
+fields under that prefix as `Tags.member.1.Key` does. Each is named in a message the way this
+service already names one, `filter.1.member` and `tags.1.member.key`, under the index the request
+spelled rather than the position the member sits at, and the count is held to the list's own
+bounds with the value left out of the message. A member outside its enum is reported under its own
+index for the same reason, which is a reading: two other services here answer one against the
+whole list instead, and nothing recorded says which form AWS answers on this protocol. A list of
+no members is how an absent list arrives, so a required one reads as null rather than as a list
+breaking a minimum of 1. A structure member arrives as `TaskPolicyArn.Arn` and is named
+`taskPolicyArn.arn`. A map is not read yet, nor is anything nested deeper than a list of
+structures. The request form is published, `AcquireRole`'s own sample numbering a map as
+`ReplacementValues.entry.1.key` and `.entry.1.value`, but the message this service answers for one
+names the whole map rather than the entry that broke a constraint, and nothing here says which AWS
+names, so reading a map would move a merged answer on a guess. `GetAccountAuthorizationDetails` is
+the first operation read through the walk, and nothing of it was read before: a `Filter` member
+outside the model's enum, a `MaxItems` outside 1 to 1000 and a `Marker` breaking its length or its
+pattern were all answered with a 200. A number too large for a 64-bit integer is a number all the
+same, so a `MaxItems` of `9223372036854775808` breaks the maximum rather than reading as no number
+at all.
+
 ### Permission Boundaries
 
 | Action | Description |
@@ -1418,8 +1456,9 @@ Policy evaluation follows the standard AWS precedence:
 
 IAM authorization denials return HTTP 400 `AccessDeniedException` for AWS JSON 1.0/1.1
 requests. REST-JSON requests return HTTP 403 `AccessDeniedException`; AWS Query and S3
-requests retain HTTP 403 XML `AccessDenied` responses. The routed protocol determines
-the status, not just the request's content type.
+requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which return HTTP 403
+`AuthorizationError`, the error every SNS operation lists for a caller denied access, whichever
+action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge

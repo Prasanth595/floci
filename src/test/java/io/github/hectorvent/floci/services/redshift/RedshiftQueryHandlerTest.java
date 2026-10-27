@@ -34,6 +34,17 @@ import static org.mockito.Mockito.*;
 class RedshiftQueryHandlerTest {
 
     @Test
+    void nonFiniteEventTimestampsReturnAnAwsValidationError() {
+        for (String invalid : List.of("NaN", "Infinity", "-Infinity", "1e300")) {
+            MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+            params.putSingle("StartTime", invalid);
+            AwsException error = assertThrows(AwsException.class, () -> handler.handle("DescribeEvents", params));
+            assertEquals("InvalidParameterValue", error.getErrorCode());
+        }
+        verifyNoInteractions(service);
+    }
+
+    @Test
     void modifyClusterIamRolesParsesAndReturnsDefaultRole() {
         String role = "arn:aws:iam::111111111111:role/default";
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();

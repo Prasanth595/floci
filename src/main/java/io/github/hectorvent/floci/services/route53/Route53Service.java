@@ -972,6 +972,13 @@ public class Route53Service implements Resettable {
 
     private void validateChange(String action, ResourceRecordSet rrs,
                                 List<ResourceRecordSet> current, String zoneName) {
+        String recordName = normalizeRecordName(rrs.getName());
+        String zone = normalizeRecordName(zoneName);
+        if (!".".equals(zone) && !recordName.equals(zone) && !recordName.endsWith("." + zone)) {
+            throw new AwsException("InvalidChangeBatch",
+                    "RRSet with DNS name " + normalizeName(rrs.getName()) + " is not permitted in zone "
+                            + normalizeName(zoneName), 400);
+        }
         if ("DELETE".equals(action) && isApexSoaOrNs(rrs, zoneName)) {
             throw new AwsException("InvalidChangeBatch",
                     "Invalid resource record set: Deleting the SOA or NS record at the zone apex is not permitted.", 400);

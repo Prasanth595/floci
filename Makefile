@@ -25,6 +25,10 @@
 # by tools/aws/regen_ecs_shapes.py.
 # src/main/resources/aws/ecr-request-shapes.json, the ECR request constraints, is generated
 # from botocore's ECR model by tools/aws/regen_ecr_shapes.py.
+# src/main/resources/aws/rds-ca-certificates.json, each Region's RDS certificate authorities, is
+# generated from the certificate bundles AWS publishes by tools/aws/regen_rds_ca_certificates.py.
+# src/main/resources/aws/iam-request-shapes.json, the IAM request constraints of the operations
+# read from the model, is generated from botocore's IAM model by tools/aws/regen_iam_shapes.py.
 # src/main/resources/aws/emr-serverless-shapes.json, the shapes the Step Functions emr-serverless
 # integrations recase against, is generated from botocore's EMR Serverless model by
 # tools/aws/regen_emr_serverless_shapes.py.
@@ -59,7 +63,7 @@ PREFIX ?= $(HOME)/.local
 
 .DEFAULT_GOAL := help
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
-        docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test \
+        docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test rename-test \
         slr-check slr-table slr-audit slr-test \
         aws-data-sync aws-data-check aws-data-test \
         iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
@@ -198,6 +202,9 @@ partition-audit: ## Print the per-package table of remaining partition literals
 partition-test: ## Run the partition tooling's unit tests
 	$(PYTHON) -m pytest tools/partition -q
 
+rename-test: ## Run the package rename tool's unit tests (tools/rename, reuses the partition lexer)
+	$(PYTHON) -m pytest tools/rename -q
+
 slr-check: ## CI gate: the service-linked role table must match the vendored AWS data
 	@$(PYTHON) tools/slr/service_linked_roles.py --check || { \
 		echo ""; \
@@ -223,10 +230,12 @@ slr-test: ## Run the service-linked role tooling's unit tests
 aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-policy catalog from local/aws (commit the result)
 	$(PYTHON) tools/aws/regen_partitions.py
 	$(PYTHON) tools/aws/regen_region_facts.py
+	$(PYTHON) tools/aws/regen_rds_ca_certificates.py
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
 	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
 	$(PYTHON) tools/aws/regen_ecr_shapes.py
+	$(PYTHON) tools/aws/regen_iam_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
 	$(PYTHON) tools/aws/regen_sesv2_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_shapes.py
@@ -249,9 +258,21 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 		echo "       Run 'make aws-data-sync' with local/aws checked out and commit the result."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_rds_ca_certificates.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/rds-ca-certificates.json is out of date or malformed."; \
+		echo "       Run 'tools/aws/regen_rds_ca_certificates.py --download', then 'make aws-data-sync', and commit the result."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_dynamodb_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/dynamodb-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_iam_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}

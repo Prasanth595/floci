@@ -144,6 +144,7 @@ public class IamQueryHandler {
         LOG.debugv("IAM action: {0}", action);
 
         try {
+            IamRequestShapes.check(action, params);
             return switch (action) {
             // Users
             case "CreateUser" -> handleCreateUser(params);

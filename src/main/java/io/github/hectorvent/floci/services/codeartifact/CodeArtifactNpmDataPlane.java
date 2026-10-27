@@ -341,6 +341,21 @@ public class CodeArtifactNpmDataPlane {
                                                     scope.region(), npmRequest.domain(), scope.owner(),
                                                     npmRequest.repository(), "npm", check.identity().namespace(),
                                                     check.identity().packageName());
+                                            // One snapshot per version in this envelope, narrower
+                                            // than fenceSnapshot above: raised by Greptile's review,
+                                            // a version DeletePackageVersions removes while this
+                                            // same callback is still in flight for it must not have
+                                            // its readme resurrected, something the package-wide
+                                            // fenceSnapshot alone (unaffected by a single version's
+                                            // own deletion) cannot catch.
+                                            Map<String, Long> readmeFenceSnapshots = new HashMap<>();
+                                            check.readmeByVersion().keySet().forEach(version ->
+                                                    readmeFenceSnapshots.put(version,
+                                                            service.currentContainerBackedVersionFence(
+                                                                    scope.region(), npmRequest.domain(),
+                                                                    scope.owner(), npmRequest.repository(), "npm",
+                                                                    check.identity().namespace(),
+                                                                    check.identity().packageName(), version)));
                                             vertx.fileSystem().open(path, new OpenOptions().setRead(true))
                                                     .onComplete(reopened -> {
                                                         if (reopened.failed()) {
@@ -356,7 +371,7 @@ public class CodeArtifactNpmDataPlane {
                                                                 reopened.result(), scope, npmRequest.domain(),
                                                                 npmRequest.repository(), check.identity(),
                                                                 check.totalAttachmentBytes(), fenceSnapshot,
-                                                                check.readmeByVersion(),
+                                                                check.readmeByVersion(), readmeFenceSnapshots,
                                                                 check.beforeRevisionByVersion());
                                                     });
                                         });
@@ -673,7 +688,11 @@ public class CodeArtifactNpmDataPlane {
      * when the envelope couldn't be parsed (see {@link #checkRepublish}), so both become no-ops
      * in that case regardless of what Verdaccio answers. {@code fenceSnapshot} is whatever
      * {@link CodeArtifactService#currentContainerBackedPackageFence} returned at the caller's own
-     * earlier snapshot point, before this request was ever forwarded.
+     * earlier snapshot point, before this request was ever forwarded; {@code readmeFenceSnapshots}
+     * is the same idea, one entry per version in {@code readmeByVersion}, from {@link
+     * CodeArtifactService#currentContainerBackedVersionFence} instead, so a single version's own
+     * {@code DeletePackageVersions} in between can invalidate just that version's readme capture
+     * without the whole-package {@code fenceSnapshot} needing to change.
      *
      * <p>All of this bookkeeping runs in one {@code executeBlocking} call, and the response is
      * only piped to the client once that call completes, not before: a client that requests this
@@ -683,7 +702,8 @@ public class CodeArtifactNpmDataPlane {
     private void forwardSpooled(RoutingContext context, String backendBaseUrl, String backendPath,
             ReadStream<Buffer> body, AuthorizationTokenScope scope, String domain, String repository,
             PackageIdentity identity, long totalAttachmentBytes, long fenceSnapshot,
-            Map<String, String> readmeByVersion, Map<String, String> beforeRevisionByVersion) {
+            Map<String, String> readmeByVersion, Map<String, Long> readmeFenceSnapshots,
+            Map<String, String> beforeRevisionByVersion) {
         URI backend = URI.create(backendBaseUrl);
         RequestOptions options = new RequestOptions()
                 .setHost(backend.getHost())
@@ -740,7 +760,8 @@ public class CodeArtifactNpmDataPlane {
                             readmeByVersion.forEach((version, readme) ->
                                     service.recordPublishedPackageVersionReadme(scope.region(), domain,
                                             scope.owner(), repository, "npm", identity.namespace(),
-                                            identity.packageName(), version, readme, fenceSnapshot));
+                                            identity.packageName(), version, readme,
+                                            readmeFenceSnapshots.get(version)));
                             // Found by Qodo review: readmeByVersion's own keys are every version in
                             // this publish envelope, independent of whether any of them actually
                             // carried a readme, so reusing it here clears a stale Archived/Disposed

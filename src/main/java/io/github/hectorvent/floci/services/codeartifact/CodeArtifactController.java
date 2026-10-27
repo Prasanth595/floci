@@ -575,6 +575,28 @@ public class CodeArtifactController {
         return ok(packageVersionStatusChangeResponse(result));
     }
 
+    /**
+     * Unlike {@link #updatePackageVersionsStatus}/{@link #disposePackageVersions}, the real
+     * {@code DeletePackageVersionsRequest} has no {@code versionRevisions} member at all
+     * (confirmed against the wire model, see {@code CodeArtifactService#deletePackageVersions}'s
+     * own javadoc), so nothing here reads one.
+     */
+    @POST
+    @Path("/v1/package/versions/delete")
+    public Response deletePackageVersions(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                           @QueryParam("domain-owner") String domainOwner,
+                                           @QueryParam("repository") String repository,
+                                           @QueryParam("format") String format,
+                                           @QueryParam("namespace") String namespace,
+                                           @QueryParam("package") String packageName, String body) {
+        JsonNode req = readTree(body);
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(region, domain,
+                domainOwner, repository, format, namespace, packageName,
+                readStringArray(req.get("versions"), "versions"), req.path("expectedStatus").asText(null));
+        return ok(packageVersionStatusChangeResponse(result));
+    }
+
     private ObjectNode packageVersionStatusChangeResponse(CodeArtifactService.PackageVersionStatusChangeResult
             result) {
         ObjectNode response = objectMapper.createObjectNode();

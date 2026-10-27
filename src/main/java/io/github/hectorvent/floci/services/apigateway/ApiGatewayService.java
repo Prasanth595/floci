@@ -80,6 +80,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
@@ -133,9 +134,10 @@ public class ApiGatewayService implements ResourceProvider {
     private final Object domainNameLock = new Object();
     private final Object vpcLinkTagLock = new Object();
     /**
-     * Guards a usage plan patch and delete. A patch writes back the stages, throttle and quota it
-     * read, so two at once would restore one another's stale values, and a delete between its read
-     * and its write would be undone.
+     * Guards a usage plan patch, its delete, the CloudFormation limits replacement, the rollback
+     * restore and the {@code readUsagePlan} read. A patch writes back what it read, so two at once
+     * would restore one another's stale values, and a delete between its read and its write would
+     * be undone.
      */
     private final Object usagePlanLock = new Object();
     private final TlsCertificateManager certificateManager;
@@ -162,6 +164,8 @@ public class ApiGatewayService implements ResourceProvider {
             "EDGE endpoint type is not supported for APIGatewayV2 domainName";
     /** The characters AWS allows in an API mapping key, its level separator included, and the most it takes. */
     private static final Pattern API_MAPPING_KEY = Pattern.compile("[A-Za-z0-9$\\-_.+!*'(),/]+");
+    static final Pattern VPC_LINK_STAGE_VARIABLE =
+            Pattern.compile("\\$\\{stageVariables\\.([A-Za-z0-9_]+)\\}");
     private static final int MAX_API_MAPPING_KEY_LENGTH = 300;
     private static final String MAPPING_KEY_SLASHES_MESSAGE =
             "API mapping key should not start with a '/' or have consecutive '/'s.";
@@ -1546,6 +1550,13 @@ public class ApiGatewayService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid Usage Plan ID specified", 404));
     }
 
+    /** Reads the stored plan under the lock patches hold, so the reader sees one revision of it. */
+    public <T> T readUsagePlan(String region, String usagePlanId, Function<UsagePlan, T> reader) {
+        synchronized (usagePlanLock) {
+            return reader.apply(getUsagePlan(region, usagePlanId));
+        }
+    }
+
     public UsagePlan updateUsagePlan(String region, String usagePlanId, List<Map<String, String>> patchOperations) {
         synchronized (usagePlanLock) {
             UsagePlan plan = getUsagePlan(region, usagePlanId);
@@ -1624,6 +1635,37 @@ public class ApiGatewayService implements ResourceProvider {
         plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
         return plan;
+    }
+
+    /**
+     * Replaces a usage plan's stages, throttle and quota wholesale. CloudFormation drives them to the
+     * template's desired state on update, as it does tags, so a stage the template dropped has to go.
+     */
+    public UsagePlan replaceUsagePlanLimits(String region, String usagePlanId, UsagePlan.Limits limits) {
+        synchronized (usagePlanLock) {
+            UsagePlan plan = getUsagePlan(region, usagePlanId);
+            plan.applyLimits(limits);
+            usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+            return plan;
+        }
+    }
+
+    /**
+     * Sets a usage plan's name, description, stages, throttle, quota and tags to exactly the given
+     * values, a null description included, which no patch can set. It is for putting back the plan
+     * as it was before a failed CloudFormation update changed it.
+     */
+    public UsagePlan restoreUsagePlan(String region, String usagePlanId, String name, String description,
+                                      UsagePlan.Limits limits, Map<String, String> tags) {
+        synchronized (usagePlanLock) {
+            UsagePlan plan = getUsagePlan(region, usagePlanId);
+            plan.setName(name);
+            plan.setDescription(description);
+            plan.applyLimits(limits);
+            plan.setTags(new HashMap<>(tags));
+            usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+            return plan;
+        }
     }
 
     public void tagUsagePlan(String region, String usagePlanId, Map<String, String> tags) {
@@ -3385,6 +3427,10 @@ public class ApiGatewayService implements ResourceProvider {
         if (patchOperations != null) {
             String nextType = integration.getType();
             String nextTransferMode = integration.getResponseTransferMode();
+            String nextConnectionType = integration.getConnectionType();
+            String nextConnectionId = integration.getConnectionId();
+            boolean connectionPatched = false;
+            boolean connectionIdPatched = false;
             for (Map<String, String> op : patchOperations) {
                 String opType = op.get("op");
                 if (!"add".equals(opType) && !"replace".equals(opType)) {
@@ -3409,11 +3455,46 @@ public class ApiGatewayService implements ResourceProvider {
                     case "/responseTransferMode":
                         nextTransferMode = transferMode(value);
                         break;
+                    case "/connectionType":
+                        if (!"replace".equals(opType)) {
+                            throw new AwsException("BadRequestException", "Invalid operation", 400);
+                        }
+                        nextConnectionType = value;
+                        connectionPatched = true;
+                        break;
+                    case "/connectionId":
+                        if (!"replace".equals(opType)) {
+                            throw new AwsException("BadRequestException", "Invalid operation", 400);
+                        }
+                        nextConnectionId = value;
+                        connectionPatched = true;
+                        connectionIdPatched = true;
+                        break;
                     default:
                         throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
                 }
             }
             validateTransferMode(nextTransferMode, nextType);
+            if (connectionPatched) {
+                if ("VPC_LINK".equals(nextConnectionType)) {
+                    if (nextConnectionId == null || nextConnectionId.isBlank()
+                            || (!VPC_LINK_STAGE_VARIABLE.matcher(nextConnectionId).matches()
+                                    && vpcLinkStore.get(vpcLinkKey(region, nextConnectionId)).isEmpty()
+                                    && !apiGatewayV2Service.hasVpcLink(region, nextConnectionId))) {
+                        throw new AwsException("BadRequestException",
+                                "Invalid VPC link identifier specified: " + nextConnectionId, 400);
+                    }
+                } else if ("INTERNET".equals(nextConnectionType)) {
+                    if (connectionIdPatched) {
+                        throw new AwsException("BadRequestException",
+                                "Connection ID requires VPC_LINK", 400);
+                    }
+                    nextConnectionId = null;
+                } else {
+                    throw new AwsException("BadRequestException",
+                            "Invalid connection type: " + nextConnectionType, 400);
+                }
+            }
             for (Map<String, String> op : patchOperations) {
                 String path = op.get("path");
                 String value = op.get("value");
@@ -3436,9 +3517,16 @@ public class ApiGatewayService implements ResourceProvider {
                     case "/responseTransferMode":
                         integration.setResponseTransferMode(transferMode(value));
                         break;
+                    case "/connectionType":
+                    case "/connectionId":
+                        break;
                     default:
                         throw new IllegalStateException("Unreachable: validated above");
                 }
+            }
+            if (connectionPatched) {
+                integration.setConnectionType(nextConnectionType);
+                integration.setConnectionId(nextConnectionId);
             }
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));

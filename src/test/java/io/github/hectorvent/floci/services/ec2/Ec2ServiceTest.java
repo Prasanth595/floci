@@ -61,6 +61,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.awaitility.Awaitility;
 import org.bouncycastle.openssl.PEMKeyPair;
@@ -78,6 +79,8 @@ import org.mockito.MockedStatic;
 
 import java.io.IOException;
 import java.io.StringReader;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
@@ -98,6 +101,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -120,6 +124,7 @@ import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.TRUNCAT
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -223,6 +228,82 @@ class Ec2ServiceTest {
         assertEquals(List.of(userTag), service.resourceTags("us-east-1", ids.getFirst()));
     }
 
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createNetworkInterfaceRejectsMissingGroupsBeforeAllocatingAddresses(boolean includeExistingGroup) {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        Subnet subnet = service.describeSubnets(region, List.of(), Map.of()).getFirst();
+        String missingGroup = "sg-0f294603eafad4835";
+        SecurityGroup existingGroup = service.createSecurityGroup(region, "interface-validation",
+                "interface validation", subnet.getVpcId());
+        List<String> groupIds = includeExistingGroup
+                ? List.of(existingGroup.getGroupId(), missingGroup) : List.of(missingGroup);
+        int availableAddresses = subnet.getAvailableIpAddressCount();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createNetworkInterface(
+                region, subnet.getSubnetId(), null, null, List.of(), groupIds, List.of()));
+
+        assertEquals("InvalidSecurityGroupID.NotFound", error.getErrorCode());
+        assertEquals("The securityGroup ID '" + missingGroup + "' does not exist", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeNetworkInterfaces(region, List.of(), Map.of()).networkInterfaces().isEmpty());
+        assertEquals(availableAddresses, service.describeSubnets(region, List.of(subnet.getSubnetId()), Map.of())
+                .getFirst().getAvailableIpAddressCount());
+    }
+
+    @Test
+    void createNetworkInterfaceRejectsGroupsFromAnotherVpcBeforeAllocatingAddresses() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        Subnet subnet = service.describeSubnets(region, List.of(), Map.of()).getFirst();
+        String foreignVpc = service.createVpc(region, "10.93.0.0/16", false).getVpcId();
+        SecurityGroup foreignGroup = service.createSecurityGroup(region, "foreign-interface-group",
+                "foreign interface group", foreignVpc);
+        int availableAddresses = subnet.getAvailableIpAddressCount();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createNetworkInterface(
+                region, subnet.getSubnetId(), null, null, List.of(),
+                List.of(foreignGroup.getGroupId()), List.of()));
+
+        assertEquals("InvalidGroup.NotFound", error.getErrorCode());
+        assertTrue(service.describeNetworkInterfaces(region, List.of(), Map.of()).networkInterfaces().isEmpty());
+        assertEquals(availableAddresses, service.describeSubnets(region, List.of(subnet.getSubnetId()), Map.of())
+                .getFirst().getAvailableIpAddressCount());
+    }
+
+    @Test
+    void createNetworkInterfaceRetainsAnExistingSubnetVpcGroup() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        Subnet subnet = service.describeSubnets(region, List.of(), Map.of()).getFirst();
+        SecurityGroup group = service.createSecurityGroup(region, "valid-interface-group",
+                "valid interface group", subnet.getVpcId());
+
+        NetworkInterface networkInterface = service.createNetworkInterface(region, subnet.getSubnetId(),
+                null, null, List.of(), List.of(group.getGroupId()), List.of());
+
+        assertEquals(List.of(group.getGroupId()), networkInterface.getGroups().stream()
+                .map(GroupIdentifier::getGroupId).toList());
+        assertEquals(subnet.getVpcId(), networkInterface.getVpcId());
+        assertEquals(1, service.describeNetworkInterfaces(region, List.of(), Map.of()).networkInterfaces().size());
+    }
+
+    @Test
+    void runInstancesRetainsItsMissingSecurityGroupErrorWithoutAllocatingResources() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        Subnet subnet = service.describeSubnets(region, List.of(), Map.of()).getFirst();
+
+        AwsException error = assertThrows(AwsException.class, () -> service.runInstances(
+                region, "ami-test", "t3.micro", 1, 1, null, List.of("sg-0f294603eafad4835"),
+                subnet.getSubnetId(), null, List.of(), null, null));
+
+        assertEquals("InvalidGroup.NotFound", error.getErrorCode());
+        assertTrue(service.describeInstances(region, List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeVolumes(region, List.of(), Map.of()).isEmpty());
+    }
 
     @Test
     void subnetAvailableAddressesTrackAllocationsAndRelease() {
@@ -1084,6 +1165,37 @@ class Ec2ServiceTest {
                 List.of(vpcId), List.of(new Tag("k", "v".repeat(257))))).getErrorCode());
         // Unicode characters, not UTF-16 units: 128 emoji are a valid key.
         service.createTags("us-east-1", List.of(vpcId), List.of(new Tag("\uD83D\uDE00".repeat(128), "v")));
+    }
+
+    @Test
+    void validateNewResourceTagsRejectsWhatCreateTagsRejects() {
+        List<Tag> fiftyKeys = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            fiftyKeys.add(new Tag("k" + i, "v"));
+        }
+        fiftyKeys.add(new Tag("k0", "a repeated key counts once"));
+
+        Ec2Service.validateNewResourceTags(fiftyKeys);
+
+        AwsException reserved = assertThrows(AwsException.class,
+                () -> Ec2Service.validateNewResourceTags(List.of(new Tag("aws:Name", "v"))));
+        assertEquals("InvalidParameterValue", reserved.getErrorCode());
+        assertEquals("Value ( aws:Name ) for parameter key is invalid. "
+                + "Tag keys starting with 'aws:' are reserved for internal use", reserved.getMessage());
+        AwsException longKey = assertThrows(AwsException.class,
+                () -> Ec2Service.validateNewResourceTags(List.of(new Tag("k".repeat(129), "v"))));
+        assertEquals("InvalidParameterValue", longKey.getErrorCode());
+        assertEquals("Tag key exceeds the maximum length of 128 characters", longKey.getMessage());
+        AwsException longValue = assertThrows(AwsException.class,
+                () -> Ec2Service.validateNewResourceTags(List.of(new Tag("k", "v".repeat(257)))));
+        assertEquals("InvalidParameterValue", longValue.getErrorCode());
+        assertEquals("Tag value exceeds the maximum length of 256 characters", longValue.getMessage());
+        List<Tag> fiftyOneKeys = new ArrayList<>(fiftyKeys);
+        fiftyOneKeys.add(new Tag("k50", "v"));
+        AwsException overLimit = assertThrows(AwsException.class,
+                () -> Ec2Service.validateNewResourceTags(fiftyOneKeys));
+        assertEquals("TagLimitExceeded", overLimit.getErrorCode());
+        assertEquals("The maximum number of Tags for a resource has been reached.", overLimit.getMessage());
     }
 
     private static Ec2Service tagTestService(StorageFactory storageFactory) {
@@ -4701,6 +4813,127 @@ class Ec2ServiceTest {
         AwsException error = assertThrows(AwsException.class, () -> service.importKeyPair(
                 "us-east-1", "shared-key-name", Ec2KeyMaterial.generateRsa().openSshPublicKey()));
         assertEquals("InvalidKeyPair.Duplicate", error.getErrorCode());
+    }
+
+    /**
+     * A second CreateKeyPair or ImportKeyPair for a name, arriving after the first has found the name
+     * free but before its key pair is stored, is refused as a duplicate. The store parks the first
+     * request's write until the second has finished or waits on a lock the first holds, which forces
+     * that interleaving on every run.
+     */
+    @ParameterizedTest
+    @CsvSource({"create, create", "import, import", "create, import", "import, create"})
+    void secondRequestForAKeyPairNameBeingStoredIsRefused(String first, String second) throws Exception {
+        ParkingStore<KeyPair> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<>(parking, null, "000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+        String publicKey = Ec2KeyMaterial.generateRsa().openSshPublicKey();
+        Function<String, KeyPair> request = action -> "create".equals(action)
+                ? service.createKeyPair("us-east-1", "contested", "ed25519", null)
+                : service.importKeyPair("us-east-1", "contested", publicKey);
+        AtomicReference<Thread> firstWorker = new AtomicReference<>();
+        AtomicReference<Thread> secondWorker = new AtomicReference<>();
+        parking.parkNextWrite();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<KeyPair> firstResult = workers.submit(() -> {
+                firstWorker.set(Thread.currentThread());
+                return request.apply(first);
+            });
+            assertTrue(parking.awaitParked(), "the first request never stored its key pair");
+            Future<KeyPair> secondResult = workers.submit(() -> {
+                secondWorker.set(Thread.currentThread());
+                return request.apply(second);
+            });
+            Awaitility.await("the second request to finish or to wait in storeNewKeyPair")
+                    .atMost(Duration.ofSeconds(30)).until(() -> secondResult.isDone()
+                    || isBlockedIn(secondWorker.get(), "storeNewKeyPair", firstWorker.get()));
+            parking.release();
+
+            KeyPair stored = firstResult.get(30, TimeUnit.SECONDS);
+            ExecutionException refusal = assertThrows(ExecutionException.class,
+                    () -> secondResult.get(30, TimeUnit.SECONDS), "both requests got the name");
+            AwsException duplicate = assertInstanceOf(AwsException.class, refusal.getCause());
+            assertEquals("InvalidKeyPair.Duplicate", duplicate.getErrorCode());
+            assertEquals("The keypair 'contested' already exists", duplicate.getMessage());
+            assertEquals(400, duplicate.getHttpStatus());
+            assertEquals(List.of(stored.getKeyPairId()), service.describeKeyPairs("us-east-1", List.of(), List.of())
+                    .stream().map(KeyPair::getKeyPairId).toList());
+        } finally {
+            parking.release();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * A DeleteKeyPair arriving while a tag write has read the key pair and not yet written it back
+     * waits for that write, so the tag write cannot put back the key pair the delete removes, and the
+     * freed name then goes to one new key pair. Armed once the key pair is created, the store parks the
+     * next write, which is the tag write's, until the delete has finished or waits on a lock the tag
+     * write holds.
+     */
+    @Test
+    void deleteKeyPairWaitsForATagWriteOnTheKeyPair() throws Exception {
+        ParkingStore<KeyPair> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<>(parking, null, "000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+        KeyPair original = service.createKeyPair("us-east-1", "retagged", "ed25519", null);
+        parking.parkNextWrite();
+        AtomicReference<Thread> tagWorker = new AtomicReference<>();
+        AtomicReference<Thread> deleteWorker = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> tagging = workers.submit(() -> {
+                tagWorker.set(Thread.currentThread());
+                service.createTags("us-east-1", List.of(original.getKeyPairId()), List.of(new Tag("Team", "blue")));
+            });
+            assertTrue(parking.awaitParked(), "the tag write never stored the key pair");
+            Future<KeyPair> deleting = workers.submit(() -> {
+                deleteWorker.set(Thread.currentThread());
+                return service.deleteKeyPair("us-east-1", "retagged", null);
+            });
+            Awaitility.await("the delete to finish or to wait in deleteKeyPair")
+                    .atMost(Duration.ofSeconds(30)).until(() -> deleting.isDone()
+                    || isBlockedIn(deleteWorker.get(), "deleteKeyPair", tagWorker.get()));
+            parking.release();
+            tagging.get(30, TimeUnit.SECONDS);
+
+            assertEquals(original.getKeyPairId(), deleting.get(30, TimeUnit.SECONDS).getKeyPairId());
+            assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty(),
+                    "the tag write put the deleted key pair back");
+            KeyPair recreated = service.createKeyPair("us-east-1", "retagged", "ed25519", null);
+            assertEquals(List.of(recreated.getKeyPairId()), service.describeKeyPairs("us-east-1", List.of(), List.of())
+                    .stream().map(KeyPair::getKeyPairId).toList());
+        } finally {
+            parking.release();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * Whether {@code waiter} waits, in the named Ec2Service method, to enter a monitor {@code owner}
+     * holds. The method is named on purpose: a wait anywhere else may not be at the lock under test, so
+     * the race tests time out rather than pass without exercising it. Moving that lock into another
+     * method means updating the name here.
+     */
+    private static boolean isBlockedIn(Thread waiter, String method, Thread owner) {
+        if (waiter == null) {
+            return false;
+        }
+        ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(waiter.threadId(), 1);
+        return info != null && info.getThreadState() == Thread.State.BLOCKED
+                && info.getLockOwnerId() == owner.threadId()
+                && info.getStackTrace().length == 1
+                && Ec2Service.class.getName().equals(info.getStackTrace()[0].getClassName())
+                && method.equals(info.getStackTrace()[0].getMethodName());
     }
 
     @Test

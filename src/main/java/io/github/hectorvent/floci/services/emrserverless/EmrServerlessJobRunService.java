@@ -84,6 +84,7 @@ public class EmrServerlessJobRunService implements Resettable {
     // The service a container run's driver belongs to, which names it and labels it.
     private static final String SERVICE = "emr-serverless";
     private static final String SPARK_DEFAULTS = "spark-defaults";
+    private static final String S3_MONITORING = "s3MonitoringConfiguration";
     // No source gives AWS's wording for these; they are Floci's.
     static final String HIVE_NOT_RUN = "Floci runs Spark job runs only, and this is a Hive job run.";
     static final String INTERRUPTED = "Floci stopped while the job run was in progress.";
@@ -459,7 +460,7 @@ public class EmrServerlessJobRunService implements Resettable {
                 ? Duration.ZERO : Duration.ofMinutes(minutes);
         SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
                 run.getReleaseLabel(), imageTemplate, dockerNetwork, run.getExecutionRole(), sparkDefaults(app, run),
-                application(run.getJobDriver().getSparkSubmit()), timeout);
+                application(run.getJobDriver().getSparkSubmit()), timeout, driverLogFolder(app, run));
         executing.add(run.getJobRunId());
         long launchedIn = generation;
         runExecutor.execute(() -> execute(job, launchedIn));
@@ -507,10 +508,12 @@ public class EmrServerlessJobRunService implements Resettable {
         // The runs live in storage, which the reset has already wiped.
     }
 
-    // Whether a run's driver may still start: a cancelled run is past it, and so is one a reset removed.
-    private synchronized boolean waitingToStart(String jobRunId, long launchedIn) {
+    // Whether a run's driver may still start, or go on: a cancelled run is past it, and so is one a reset removed.
+    private synchronized boolean stillGoing(String jobRunId, long launchedIn) {
         return launchedIn == generation && store.get(jobRunId)
-                .map(record -> STATE_SCHEDULED.equals(record.getJobRun().getState())).orElse(false);
+                .map(record -> STATE_SCHEDULED.equals(record.getJobRun().getState())
+                        || STATE_RUNNING.equals(record.getJobRun().getState()))
+                .orElse(false);
     }
 
     private synchronized void driverStarted(String jobRunId, long launchedIn) {
@@ -607,6 +610,43 @@ public class EmrServerlessJobRunService implements Resettable {
             }
         }
         return properties;
+    }
+
+    /**
+     * The S3 folder a run's driver logs go to, or null without an S3 log destination. The run's
+     * {@code s3MonitoringConfiguration} supersedes the application's ("MonitoringConfiguration -
+     * Configuration type"), and an empty one removes it. Under its {@code logUri} the user guide puts a
+     * run's logs at {@code /applications/<applicationId>/jobs/<jobId>}, with
+     * {@code /attempts/<attemptNumber>} after it for "all streaming jobs and any batch jobs that have retry
+     * enabled" from release 7.1.0, and the driver's in {@code SPARK_DRIVER/}.
+     */
+    static String driverLogFolder(Application app, JobRun run) {
+        Object overrides = run.getConfigurationOverrides() != null
+                ? run.getConfigurationOverrides().get("monitoringConfiguration") : null;
+        Object s3;
+        if (overrides instanceof Map<?, ?> monitoring && monitoring.containsKey(S3_MONITORING)) {
+            s3 = monitoring.get(S3_MONITORING);
+        } else {
+            s3 = app.getMonitoringConfiguration() != null
+                    ? app.getMonitoringConfiguration().getProperties().get(S3_MONITORING) : null;
+        }
+        String logUri = s3 instanceof Map<?, ?> configuration && configuration.get("logUri") instanceof String uri
+                ? uri : null;
+        String attempts = retried(run) && retriesAttempts(run.getReleaseLabel()) ? "attempts/" + ATTEMPT + "/" : "";
+        return EmrServerlessSparkRunner.logFolder(logUri, "applications/" + run.getApplicationId() + "/jobs/"
+                + run.getJobRunId() + "/" + attempts + "SPARK_DRIVER/");
+    }
+
+    // A STREAMING run is retried, and a BATCH run whose retryPolicy allows more than one attempt.
+    private static boolean retried(JobRun run) {
+        Object maxAttempts = run.getRetryPolicy() != null ? run.getRetryPolicy().get("maxAttempts") : null;
+        return MODE_STREAMING.equals(run.getMode()) || maxAttempts instanceof Number number && number.intValue() > 1;
+    }
+
+    // "EMR Serverless releases 7.1.0 and higher support retry attempts for streaming jobs and batch jobs."
+    private static boolean retriesAttempts(String releaseLabel) {
+        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 1)
+                || SPARK_RUNTIME_RELEASE_LABEL.matcher(releaseLabel != null ? releaseLabel : "").matches();
     }
 
     private static void addSparkDefaults(Map<String, String> properties, Map<?, ?> configuration) {
@@ -859,7 +899,7 @@ public class EmrServerlessJobRunService implements Resettable {
         @Override
         public boolean cancelled() {
             return !RequestScopes.callAs(job.accountId(), job.region(),
-                    () -> waitingToStart(job.runId(), launchedIn));
+                    () -> stillGoing(job.runId(), launchedIn));
         }
     }
 }

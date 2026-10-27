@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StopContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.exception.NotModifiedException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -24,15 +25,18 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ContainerLifecycleManagerTeardownTest {
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void laterOwnedStopsReachDockerWhileEarlierRemovalsAreBlocked(boolean strict) throws Exception {
+    @ValueSource(strings = {"strict", "best-effort", "stop-only"})
+    void laterOwnedStopsReachDockerWhileEarlierRemovalsAreBlocked(String mode) throws Exception {
         DockerClient docker = mock(DockerClient.class);
         ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
         StopContainerCmd stop = mock(StopContainerCmd.class);
@@ -70,8 +74,10 @@ class ContainerLifecycleManagerTeardownTest {
             assertTrue(removing.await(10, TimeUnit.SECONDS));
             owners.add(Thread.ofVirtual().start(() -> {
                 try {
-                    if (strict) {
+                    if ("strict".equals(mode)) {
                         manager.stopAndRemoveStrict("ninth", null);
+                    } else if ("stop-only".equals(mode)) {
+                        manager.stop("ninth", 5);
                     } else {
                         manager.stopAndRemove("ninth", null);
                     }
@@ -90,7 +96,11 @@ class ContainerLifecycleManagerTeardownTest {
         }
         assertNull(failure.get());
         verify(docker).stopContainerCmd("ninth");
-        verify(docker).removeContainerCmd("ninth");
+        if ("stop-only".equals(mode)) {
+            verify(docker, never()).removeContainerCmd("ninth");
+        } else {
+            verify(docker).removeContainerCmd("ninth");
+        }
     }
 
     @Test
@@ -139,6 +149,26 @@ class ContainerLifecycleManagerTeardownTest {
         IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> manager.stopAndRemoveStrict("exited-strict", null));
         assertEquals(0, failure.getSuppressed().length);
+    }
+
+    @Test
+    void aStopLeavesTheContainerInPlaceAndCountsAnExitedOrMissingOneAsStopped() {
+        DockerClient docker = mock(DockerClient.class);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        when(docker.stopContainerCmd(anyString())).thenReturn(stop);
+        when(stop.withTimeout(anyInt())).thenReturn(stop);
+        doAnswer(invocation -> null)
+                .doThrow(new NotModifiedException("Container already stopped"))
+                .doThrow(new NotFoundException("No such container"))
+                .when(stop).exec();
+
+        manager.stop("running", 0);
+        manager.stop("exited", 0);
+        manager.stop("gone", 0);
+
+        verify(stop, times(3)).exec();
+        verify(docker, never()).removeContainerCmd(anyString());
     }
 
 }

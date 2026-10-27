@@ -43,6 +43,12 @@ quarkus:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
     delay-enabled: true
+  virtual-threads:
+    # AWS JSON 1.0, CBOR, Query, Invoke and function URL requests run on virtual threads (see
+    # AwsJsonController), long polls among them. At shutdown, interrupt any still running after
+    # 10 s, the interval Quarkus uses for worker threads, instead of its default minute.
+    # Fixed at build time.
+    shutdown-timeout: 10s
   index-dependency:
     swagger-models-v2:
       group-id: io.swagger
@@ -527,6 +533,8 @@ floci:
       default-image: "valkey/valkey:8"
     redshift:
       enabled: true
+      automated-snapshots-enabled: true
+      snapshot-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
       poll-interval-ms: 1000
@@ -590,6 +598,12 @@ floci:
       cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
       step-duration-seconds: 0              # 0 = a step completes as soon as it starts
       cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
+      runner-mode: immediate                # docker = run each Spark step's spark-submit in a container
+      # docker-network: floci-network
+      # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
+      # Remove the step drivers a previous run of this deployment left on the daemon when the EMR
+      # service starts. Scoped to this deployment's own containers.
+      reconcile-containers-on-startup: true
     wafv2:
       enabled: true
     scheduler:
@@ -740,6 +754,7 @@ floci:
       host-port-bind-address: "127.0.0.1"
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      allow-privileged-containers: false
       # Remove the ECS containers a previous run of this deployment left on the daemon before
       # the service scheduler starts replacements. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true

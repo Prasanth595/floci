@@ -350,6 +350,7 @@ This is what lets a browser read a `401`/`403`/`400` as such instead of as a COR
 | `AWS_IAM` access key the emulator never issued | `ACCESS_DENIED` |
 | Lambda authorizer returns `Deny` | `ACCESS_DENIED` |
 | Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` |
+| Cognito authorizer gets no token, an invalid one, one from another pool, or one claiming none of the method's authorization scopes (`401 Unauthorized`) | `UNAUTHORIZED` |
 | Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` |
 | Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` |
 | `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` |
@@ -592,7 +593,8 @@ Usage plan product codes are not supported, so an `add`, `replace` or `remove` o
 `BadRequestException`.
 Values are validated with API Gateway's messages: a quota needs a `DAY`, `WEEK` or `MONTH` period and
 an offset inside it, a per-method throttle needs a plan throttle, and adding a stage the plan already
-lists is a `ConflictException`.
+lists is a `ConflictException`. `AWS::ApiGateway::UsagePlan` maps its `ApiStages`, with each stage's
+`Throttle`, and its `Throttle` and `Quota` the same way, and an update replaces them.
 
 Floci does not check that a stage's API, stage or method exists, does not filter `GetUsagePlans` by
 `keyId`, and does not enforce throttles or quotas.
@@ -725,6 +727,15 @@ curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{pa
 
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
+
+HTTP API Lambda REQUEST authorizers resolve header, query string, context, and
+stage variable sources once, in configured order. Format `2.0` carries the values
+in an `identitySource` array; format `1.0` carries them as comma-separated
+`identitySource` and `authorizationToken` strings. Headers are case-insensitive;
+query names are case-sensitive. No configured sources produces an empty array
+or string. A missing or empty configured value returns `401` without invoking
+Lambda in either format. Repeated request values use each event's delivered
+representation: last value in format `1.0`, comma-joined values in format `2.0`.
 
 A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
 format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole

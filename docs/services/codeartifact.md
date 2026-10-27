@@ -50,6 +50,7 @@ behind them yet.
 | `CopyPackageVersions` | Copies one or more versions of a package from one repository to another in the same domain. |
 | `UpdatePackageVersionsStatus` | Moves one or more versions of a package to `Published`, `Unlisted`, or `Archived`; all-or-nothing per call, with `versionRevisions`/`expectedStatus` as optional preconditions. |
 | `DisposePackageVersions` | Permanently deletes a package version's assets and sets its status to `Disposed`; irreversible, and shares `UpdatePackageVersionsStatus`'s all-or-nothing batch semantics. |
+| `DeletePackageVersions` | Permanently removes one or more versions of a package, real assets included; unlike `DisposePackageVersions`, leaves no trace, the freed coordinates can be freely republished, and it is the one action allowed on an already-`Disposed` version. |
 | `TagResource` | Adds or updates tags on a domain or repository ARN. |
 | `UntagResource` | Removes tags by key from a domain or repository ARN. |
 | `ListTagsForResource` | Lists the tags on a domain or repository ARN. |
@@ -256,12 +257,12 @@ state.
   that is not the caller's own account looks up that account's domain/repository with no
   trust-policy or permissions-policy enforcement, consistent with Floci's IAM enforcement being
   opt-in elsewhere, but worth knowing if you rely on domain-sharing semantics.
-- **`ListPackages` and `DeletePackageVersions` aren't implemented.** Every other package-version
-  lifecycle action is: a version can be moved to `Unlisted`/`Archived`/`Published` with
-  `UpdatePackageVersionsStatus`, or to `Disposed` (assets permanently deleted) with
-  `DisposePackageVersions`. The only way to move a version out of `Unfinished` today is still
-  either a follow-up `PublishPackageVersion` call that omits the `unfinished` flag, or
-  `UpdatePackageVersionsStatus` itself.
+- **`ListPackages` isn't implemented.** Every package-version lifecycle action now is: a version
+  can be moved to `Unlisted`/`Archived`/`Published` with `UpdatePackageVersionsStatus`, to
+  `Disposed` (assets permanently deleted) with `DisposePackageVersions`, or removed outright,
+  from every status including `Disposed`, with `DeletePackageVersions`. The only way to move a
+  version out of `Unfinished` today is still either a follow-up `PublishPackageVersion` call that
+  omits the `unfinished` flag, or `UpdatePackageVersionsStatus` itself.
 - **A container-backed (`maven`/`npm`/`pypi`/`nuget`) version's status override does not survive a
   Floci restart.** It's kept in memory only, for the same reason the byte-count and readme
   bookkeeping those formats already need are: the sidecar content it describes doesn't survive a

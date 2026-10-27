@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -14,6 +15,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.s3.PreSignedUrlGenerator;
+import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -141,14 +143,19 @@ public class LambdaController {
 
     @GET
     @Path("/functions")
-    public Response listFunctions(@Context HttpHeaders headers) {
+    public Response listFunctions(@Context HttpHeaders headers,
+                                  @QueryParam("MaxItems") String maxItems,
+                                  @QueryParam("Marker") String marker) {
         String region = regionResolver.resolveRegion(headers);
-        List<LambdaFunction> functions = lambdaService.listFunctions(region);
+        PaginatedResult<LambdaFunction> page = lambdaService.listFunctions(region, maxItems, marker);
 
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Functions");
-        for (LambdaFunction fn : functions) {
+        for (LambdaFunction fn : page.items()) {
             items.add(objectMapper.valueToTree(buildFunctionConfiguration(fn)));
+        }
+        if (page.nextToken() != null) {
+            root.put("NextMarker", page.nextToken());
         }
         return Response.ok(root).build();
     }
@@ -239,9 +246,12 @@ public class LambdaController {
     private static final int ASYNC_REQUEST_LIMIT = 1 * 1024 * 1024;
     private static final int SYNC_RESPONSE_LIMIT = 6 * 1024 * 1024;
 
+    // A synchronous invocation waits for its function to finish; on a virtual thread that wait does
+    // not hold one of the shared request workers.
     @POST
     @Path("/functions/{functionName}/invocations")
     @Consumes(MediaType.WILDCARD)
+    @RunOnVirtualThread
     public Response invoke(@Context HttpHeaders headers,
                            @Context UriInfo uriInfo,
                            @PathParam("functionName") String functionName,

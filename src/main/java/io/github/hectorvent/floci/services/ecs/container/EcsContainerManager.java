@@ -109,7 +109,7 @@ public class EcsContainerManager {
 
     /** EC2 error codes the task ENI path can raise, none of which RunTask declares. */
     private static final Set<String> EC2_NETWORK_LOOKUP_FAILURES =
-            Set.of("InvalidSubnetID.NotFound", "InvalidGroup.NotFound");
+            Set.of("InvalidSubnetID.NotFound", "InvalidGroup.NotFound", "InvalidSecurityGroupID.NotFound");
     /** How long a container waits for a dependency that has to COMPLETE, SUCCEED or get HEALTHY. */
     private static final int DEPENDENCY_WAIT_SECONDS = 60;
     private static final long DEPENDENCY_POLL_MILLIS = 200;
@@ -248,6 +248,13 @@ public class EcsContainerManager {
 
     EcsTaskHandle startTask(EcsTask task, TaskDefinition taskDef,
                             List<ContainerOverride> containerOverrides, String region, long firelensBackoffMillis) {
+        if (!config.services().ecs().allowPrivilegedContainers()
+                && taskDef.getContainerDefinitions().stream()
+                        .anyMatch(def -> Boolean.TRUE.equals(def.getPrivileged()))) {
+            throw new AwsException("ClientException",
+                    "Privileged containers require floci.services.ecs.allow-privileged-containers"
+                            + " (FLOCI_SERVICES_ECS_ALLOW_PRIVILEGED_CONTAINERS) to be enabled.", 400);
+        }
         String taskId = extractTaskId(task.getTaskArn());
 
         Map<String, String> containerIds = new LinkedHashMap<>();
@@ -439,6 +446,9 @@ public class EcsContainerManager {
                 }
                 if (Boolean.TRUE.equals(def.getReadonlyRootFilesystem())) {
                     specBuilder.withReadonlyRootfs();
+                }
+                if (Boolean.TRUE.equals(def.getPrivileged())) {
+                    specBuilder.withPrivileged(true);
                 }
                 // Checked at registration too; again here, as for a host volume, for a definition
                 // persisted before the policy covered devices.

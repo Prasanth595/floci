@@ -1724,6 +1724,10 @@ public interface EmulatorConfig {
 
     interface RedshiftServiceConfig {
         @WithDefault("true")
+        boolean automatedSnapshotsEnabled();
+        @WithDefault("60")
+        long snapshotSweepIntervalSeconds();
+        @WithDefault("true")
         boolean enabled();
         @WithDefault("5439")
         int defaultPort();
@@ -1979,6 +1983,33 @@ public interface EmulatorConfig {
         /** How long a cluster stays TERMINATING before it is TERMINATED; 0 ends it at once. */
         @WithDefault("0")
         int clusterTerminationDelaySeconds();
+
+        /**
+         * {@code immediate} completes each step by time without running anything; {@code docker} runs each
+         * Spark step's {@code spark-submit} in a container of the release's EMR Serverless image.
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        Optional<String> dockerNetwork();
+
+        /**
+         * The image a {@code docker} step uses, with {@code %s} standing for the cluster's release label,
+         * for example "registry.internal/emr-serverless/spark/%s:20250425". If omitted, Floci uses the
+         * release's public EMR Serverless image on Amazon ECR Public.
+         */
+        Optional<String> imageTemplate();
+
+        /**
+         * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver a previous run
+         * of <em>this same</em> Floci left on the daemon (matched by the {@code io.floci.owner} label) when
+         * the EMR service starts. Turn it off when two Floci instances share a daemon with the same port
+         * and no resource namespace, so one does not remove the other's drivers.
+         *
+         * Env var: FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
     }
 
     interface WafV2ServiceConfig {
@@ -2382,6 +2413,10 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean allowUnsafeHostVolumes();
+
+        /** Allow ECS task definitions to launch Docker containers with host-level privilege. */
+        @WithDefault("false")
+        boolean allowPrivilegedContainers();
 
         /**
          * When true, Floci removes on startup, in Docker mode, every ECS container a previous run
