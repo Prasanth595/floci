@@ -91,6 +91,8 @@ class CloudFormationDeleteStackRetainResourcesTest {
 
         assertThat(s3.getObjectAsBytes(r -> r.bucket(dataBucket).key("kept.txt")).asUtf8String())
                 .isEqualTo("kept");
+        assertThatThrownBy(() -> s3.headBucket(r -> r.bucket(stackName + "-other")))
+                .isInstanceOf(NoSuchBucketException.class);
         assertThat(cfn.describeStackEventsPaginator(r -> r.stackName(stackId)).stackEvents().stream()
                 .filter(event -> "DataBucket".equals(event.logicalResourceId()))
                 .findFirst())
