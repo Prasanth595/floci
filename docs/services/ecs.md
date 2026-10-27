@@ -855,6 +855,7 @@ Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | *(unset)* | Approved parent directories for host volume bind mounts (`volumes[].host.sourcePath`) and container devices (`linuxParameters.devices[].hostPath`) |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing the `HOST_VOLUME_ROOTS` allowlist; traversal, the bare root, and the Docker socket are still always rejected |
+| `FLOCI_SERVICES_ECS_ALLOW_PRIVILEGED_CONTAINERS` | `false` | Allow EC2 task containers requesting `privileged: true` to run with Docker privilege on the host |
 | `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, in Docker mode, remove the ECS containers a previous run of this Floci left on the daemon before the scheduler starts replacement tasks (see [Restarts](#restarts)) |
 | `FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR` | `default` | How task images are pulled at launch, as the ECS agent's `ECS_IMAGE_PULL_BEHAVIOR`: `default`, `always`, `once` or `prefer-cached` (see [Image pulls](#image-pulls)) |
 | `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED` | `false` | Vend real task IAM role credentials to task containers |
@@ -983,6 +984,8 @@ Always rejected, regardless of configuration:
 - `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES=true`: allow any host path (for local development where any host path should be mountable). The traversal, bare-root, and Docker socket blocks above are never bypassed by this flag.
 
 A container device's `hostPath` (`linuxParameters.devices`) goes through the same checks and the same allowlist, since a device hands the container the host's hardware.
+
+An EC2 task definition may contain `privileged: true`, but Docker-backed tasks using it stop before launch unless the Floci operator sets `FLOCI_SERVICES_ECS_ALLOW_PRIVILEGED_CONTAINERS=true`. A privileged container has access to all host devices and can bypass the host path restrictions above, so enable this only when task definition callers are trusted.
 
 A rejected `sourcePath` or device `hostPath` fails `RegisterTaskDefinition` with `InvalidParameterException`; a rejection caught again at `RunTask` time (e.g. a task definition registered before this policy existed) stops the task with that message as its `stoppedReason`. Named Docker volumes, EFS volumes, and host volumes with no `sourcePath` (ephemeral storage shared within a task) are unaffected by these checks.
 

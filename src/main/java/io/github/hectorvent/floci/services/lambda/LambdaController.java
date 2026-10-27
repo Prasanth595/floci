@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -142,14 +143,19 @@ public class LambdaController {
 
     @GET
     @Path("/functions")
-    public Response listFunctions(@Context HttpHeaders headers) {
+    public Response listFunctions(@Context HttpHeaders headers,
+                                  @QueryParam("MaxItems") String maxItems,
+                                  @QueryParam("Marker") String marker) {
         String region = regionResolver.resolveRegion(headers);
-        List<LambdaFunction> functions = lambdaService.listFunctions(region);
+        PaginatedResult<LambdaFunction> page = lambdaService.listFunctions(region, maxItems, marker);
 
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Functions");
-        for (LambdaFunction fn : functions) {
+        for (LambdaFunction fn : page.items()) {
             items.add(objectMapper.valueToTree(buildFunctionConfiguration(fn)));
+        }
+        if (page.nextToken() != null) {
+            root.put("NextMarker", page.nextToken());
         }
         return Response.ok(root).build();
     }

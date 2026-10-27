@@ -164,6 +164,8 @@ public class ApiGatewayService implements ResourceProvider {
             "EDGE endpoint type is not supported for APIGatewayV2 domainName";
     /** The characters AWS allows in an API mapping key, its level separator included, and the most it takes. */
     private static final Pattern API_MAPPING_KEY = Pattern.compile("[A-Za-z0-9$\\-_.+!*'(),/]+");
+    static final Pattern VPC_LINK_STAGE_VARIABLE =
+            Pattern.compile("\\$\\{stageVariables\\.([A-Za-z0-9_]+)\\}");
     private static final int MAX_API_MAPPING_KEY_LENGTH = 300;
     private static final String MAPPING_KEY_SLASHES_MESSAGE =
             "API mapping key should not start with a '/' or have consecutive '/'s.";
@@ -3425,6 +3427,10 @@ public class ApiGatewayService implements ResourceProvider {
         if (patchOperations != null) {
             String nextType = integration.getType();
             String nextTransferMode = integration.getResponseTransferMode();
+            String nextConnectionType = integration.getConnectionType();
+            String nextConnectionId = integration.getConnectionId();
+            boolean connectionPatched = false;
+            boolean connectionIdPatched = false;
             for (Map<String, String> op : patchOperations) {
                 String opType = op.get("op");
                 if (!"add".equals(opType) && !"replace".equals(opType)) {
@@ -3449,11 +3455,46 @@ public class ApiGatewayService implements ResourceProvider {
                     case "/responseTransferMode":
                         nextTransferMode = transferMode(value);
                         break;
+                    case "/connectionType":
+                        if (!"replace".equals(opType)) {
+                            throw new AwsException("BadRequestException", "Invalid operation", 400);
+                        }
+                        nextConnectionType = value;
+                        connectionPatched = true;
+                        break;
+                    case "/connectionId":
+                        if (!"replace".equals(opType)) {
+                            throw new AwsException("BadRequestException", "Invalid operation", 400);
+                        }
+                        nextConnectionId = value;
+                        connectionPatched = true;
+                        connectionIdPatched = true;
+                        break;
                     default:
                         throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
                 }
             }
             validateTransferMode(nextTransferMode, nextType);
+            if (connectionPatched) {
+                if ("VPC_LINK".equals(nextConnectionType)) {
+                    if (nextConnectionId == null || nextConnectionId.isBlank()
+                            || (!VPC_LINK_STAGE_VARIABLE.matcher(nextConnectionId).matches()
+                                    && vpcLinkStore.get(vpcLinkKey(region, nextConnectionId)).isEmpty()
+                                    && !apiGatewayV2Service.hasVpcLink(region, nextConnectionId))) {
+                        throw new AwsException("BadRequestException",
+                                "Invalid VPC link identifier specified: " + nextConnectionId, 400);
+                    }
+                } else if ("INTERNET".equals(nextConnectionType)) {
+                    if (connectionIdPatched) {
+                        throw new AwsException("BadRequestException",
+                                "Connection ID requires VPC_LINK", 400);
+                    }
+                    nextConnectionId = null;
+                } else {
+                    throw new AwsException("BadRequestException",
+                            "Invalid connection type: " + nextConnectionType, 400);
+                }
+            }
             for (Map<String, String> op : patchOperations) {
                 String path = op.get("path");
                 String value = op.get("value");
@@ -3476,9 +3517,16 @@ public class ApiGatewayService implements ResourceProvider {
                     case "/responseTransferMode":
                         integration.setResponseTransferMode(transferMode(value));
                         break;
+                    case "/connectionType":
+                    case "/connectionId":
+                        break;
                     default:
                         throw new IllegalStateException("Unreachable: validated above");
                 }
+            }
+            if (connectionPatched) {
+                integration.setConnectionType(nextConnectionType);
+                integration.setConnectionId(nextConnectionId);
             }
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));

@@ -728,6 +728,15 @@ curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{pa
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 
+HTTP API Lambda REQUEST authorizers resolve header, query string, context, and
+stage variable sources once, in configured order. Format `2.0` carries the values
+in an `identitySource` array; format `1.0` carries them as comma-separated
+`identitySource` and `authorizationToken` strings. Headers are case-insensitive;
+query names are case-sensitive. No configured sources produces an empty array
+or string. A missing or empty configured value returns `401` without invoking
+Lambda in either format. Repeated request values use each event's delivered
+representation: last value in format `1.0`, comma-joined values in format `2.0`.
+
 A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
 format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole
 number from 100 to 599 (text that spells one, such as `"201"`, is taken) are answered `500` with

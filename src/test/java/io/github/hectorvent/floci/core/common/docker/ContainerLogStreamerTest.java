@@ -130,6 +130,61 @@ class ContainerLogStreamerTest {
         verify(cloudWatchLogsService, never()).putLogEventsForAccount(any(), any(), any(), anyList(), any());
     }
 
+    @Test
+    void aByStreamAttachSendsEachStreamToItsOwnLogStream() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        LogContainerCmd command = mock(LogContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.logContainerCmd("container-1")).thenReturn(command);
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(dockerClient, cloudWatchLogsService);
+
+        streamer.attachByStreamForAccount("555555555555", "container-1", "/aws/emr-serverless",
+                "/jobs/1/SPARK_DRIVER/stdout", "/jobs/1/SPARK_DRIVER/stderr", "us-east-1", "emr-serverless:1");
+        ArgumentCaptor<ContainerLogStreamer.LogReassemblyCallback> callback =
+                ArgumentCaptor.forClass(ContainerLogStreamer.LogReassemblyCallback.class);
+        verify(command).exec(callback.capture());
+
+        List<LogRecord> records = LogCapture.capture(ContainerLogStreamer.class, () -> {
+            callback.getValue().onNext(new Frame(StreamType.STDOUT, utf8("Pi is roughly 3.14\n")));
+            callback.getValue().onNext(new Frame(StreamType.STDERR, utf8("INFO SparkContext: stopped\n")));
+        });
+
+        assertEquals(2, records.size());
+        verify(cloudWatchLogsService).createLogStreamForAccount(
+                "555555555555", "/aws/emr-serverless", "/jobs/1/SPARK_DRIVER/stdout", "us-east-1");
+        verify(cloudWatchLogsService).createLogStreamForAccount(
+                "555555555555", "/aws/emr-serverless", "/jobs/1/SPARK_DRIVER/stderr", "us-east-1");
+        verify(cloudWatchLogsService).putLogEventsForAccount(eq("555555555555"), eq("/aws/emr-serverless"),
+                eq("/jobs/1/SPARK_DRIVER/stdout"),
+                argThat(events -> "Pi is roughly 3.14".equals(events.getFirst().get("message"))), eq("us-east-1"));
+        verify(cloudWatchLogsService).putLogEventsForAccount(eq("555555555555"), eq("/aws/emr-serverless"),
+                eq("/jobs/1/SPARK_DRIVER/stderr"),
+                argThat(events -> "INFO SparkContext: stopped".equals(events.getFirst().get("message"))),
+                eq("us-east-1"));
+    }
+
+    @Test
+    void aByStreamAttachForwardsAStreamWithoutALogStreamOnlyToTheConsole() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        LogContainerCmd command = mock(LogContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.logContainerCmd("container-1")).thenReturn(command);
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(dockerClient, cloudWatchLogsService);
+
+        streamer.attachByStreamForAccount("555555555555", "container-1", "/aws/emr-serverless",
+                "/jobs/1/SPARK_DRIVER/stdout", null, "us-east-1", "emr-serverless:1");
+        ArgumentCaptor<ContainerLogStreamer.LogReassemblyCallback> callback =
+                ArgumentCaptor.forClass(ContainerLogStreamer.LogReassemblyCallback.class);
+        verify(command).exec(callback.capture());
+
+        List<LogRecord> records = LogCapture.capture(ContainerLogStreamer.class, () ->
+                callback.getValue().onNext(new Frame(StreamType.STDERR, utf8("INFO SparkContext: stopped\n"))));
+
+        assertEquals(1, records.size());
+        verify(cloudWatchLogsService, never()).createLogStreamForAccount(any(), any(), eq(null), any());
+        verify(cloudWatchLogsService, never()).putLogEventsForAccount(any(), any(), any(), anyList(), any());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void execStreamAlwaysReachesCloudWatchAndConsoleIsOptional(boolean logToConsole) {
@@ -509,6 +564,21 @@ class ContainerLogStreamerTest {
         cb.onComplete();
 
         assertEquals(List.of("no-newline-tail"), emitted);
+    }
+
+    @Test
+    void reassembledLinesKeepTheStreamTheyCameFrom() {
+        List<String> emitted = new ArrayList<>();
+        ContainerLogStreamer.LogReassemblyCallback cb = new ContainerLogStreamer.LogReassemblyCallback(
+                1_000, (stream, line) -> emitted.add(stream + ": " + line));
+
+        cb.onNext(new Frame(StreamType.STDOUT, utf8("Pi is ")));
+        cb.onNext(new Frame(StreamType.STDERR, utf8("INFO starting\n")));
+        cb.onNext(new Frame(StreamType.STDOUT, utf8("roughly 3.14\n")));
+        cb.onNext(new Frame(StreamType.STDERR, utf8("INFO stopp")));
+        cb.onComplete();
+
+        assertEquals(List.of("STDERR: INFO starting", "STDOUT: Pi is roughly 3.14", "STDERR: INFO stopp"), emitted);
     }
 
     @Test

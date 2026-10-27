@@ -667,6 +667,35 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void creationEventIsRecordedBeforeAQueuedClusterOperationCanRun() throws Exception {
+        when(cm.start(any(), any(), any(), any()))
+                .thenReturn(new RedshiftContainerHandle("container", "event-cluster", "localhost", 5432));
+        AtomicReference<Cluster> stored = new AtomicReference<>();
+        when(clusterBackend.get("event-cluster")).thenAnswer(invocation -> Optional.ofNullable(stored.get()));
+        doAnswer(invocation -> {
+            stored.set(invocation.getArgument(1));
+            return null;
+        }).when(clusterBackend).put(eq("event-cluster"), any(Cluster.class));
+        AtomicReference<Future<?>> queued = new AtomicReference<>();
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            doAnswer(invocation -> {
+                queued.set(executor.submit(() -> service.rebootCluster("event-cluster")));
+                assertThrows(TimeoutException.class, () -> queued.get().get(300, TimeUnit.MILLISECONDS),
+                        "A queued reboot ran before the creation event was recorded");
+                return null;
+            }).when(events).record(eq(RedshiftEventCatalog.CLUSTER_CREATED), eq("event-cluster"), anyString());
+
+            service.createCluster("event-cluster", "dc2.large", "admin", "password123");
+            queued.get().get(5, TimeUnit.SECONDS);
+        }
+
+        InOrder recorded = inOrder(events);
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_CREATED), eq("event-cluster"), anyString());
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_REBOOTED), eq("event-cluster"), anyString());
+    }
+
+    @Test
     void failedClusterOperationsNeverRecordSuccessEvents() {
         when(cm.start(any(), any(), any(), any())).thenThrow(new RuntimeException("startup failed"));
         assertThrows(AwsException.class,
@@ -686,6 +715,41 @@ class RedshiftServiceTest {
         doThrow(new RuntimeException("proxy stop failed")).when(proxyManager).stopProxy("111111111111:event-cluster");
         assertThrows(AwsException.class, () -> service.deleteCluster("event-cluster"));
 
+        verifyNoInteractions(events);
+    }
+
+    @Test
+    void managedPasswordClusterRecordsCreationOnlyAfterTheSecretExists() {
+        when(cm.start(eq("111111111111"), eq("event-managed"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "event-managed", "localhost", 5432));
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:event-managed");
+        secret.setCurrentVersionId("version-1");
+        when(secretsManagerService.createSecret(eq("redshift/event-managed"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1"))).thenReturn(secret);
+
+        service.createClusterWithManagedMasterPassword("event-managed", "dc2.large", "admin", null,
+                List.of(), List.of(), null, "us-east-1");
+
+        InOrder recorded = inOrder(secretsManagerService, events);
+        recorded.verify(secretsManagerService).createSecret(eq("redshift/event-managed"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1"));
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_CREATED), eq("event-managed"), anyString());
+        recorded.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void managedPasswordClusterRolledBackAfterSecretFailureRecordsNoEvents() {
+        when(cm.start(eq("111111111111"), eq("event-failed"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "event-failed", "localhost", 5432));
+        when(secretsManagerService.createSecret(eq("redshift/event-failed"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1")))
+                .thenThrow(new AwsException("InternalFailure", "secret store unavailable", 500));
+
+        assertThrows(AwsException.class, () -> service.createClusterWithManagedMasterPassword(
+                "event-failed", "dc2.large", "admin", null, List.of(), List.of(), null, "us-east-1"));
+
+        verify(clusterBackend).delete("event-failed");
         verifyNoInteractions(events);
     }
 

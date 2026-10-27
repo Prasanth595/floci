@@ -11,8 +11,10 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -99,6 +101,8 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_TOPIC_LENGTH = 249;
     private static final int MAX_TOPICS = 1;
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
+    private static final int LIST_FUNCTIONS_PAGE_SIZE = 50;
+    private static final int MAX_LIST_FUNCTIONS_ITEMS = 10_000;
     // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
     private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
     // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
@@ -199,6 +203,7 @@ public class LambdaService implements ResourceProvider {
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> policyMutationLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
+    private final SignedMarkers listFunctionMarkers = new SignedMarkers();
 
     /**
      * Package-private constructor for testing without CDI. Config defaults
@@ -729,6 +734,17 @@ public class LambdaService implements ResourceProvider {
 
     public List<LambdaFunction> listFunctions(String region) {
         return functionStore.list(region);
+    }
+
+    public PaginatedResult<LambdaFunction> listFunctions(String region, String maxItems, String marker) {
+        List<String> errors = new ArrayList<>();
+        Integer requested = LambdaPagination.parseMaxItems(maxItems, MAX_LIST_FUNCTIONS_ITEMS, errors);
+        if (!errors.isEmpty()) {
+            throw SmithyValidationErrors.validationException(errors);
+        }
+        String scope = regionResolver.getAccountId() + "\n" + region + "\n";
+        return LambdaPagination.paginate(listFunctions(region), LambdaFunction::getFunctionName,
+                requested, LIST_FUNCTIONS_PAGE_SIZE, marker, listFunctionMarkers, scope);
     }
 
     public LambdaFunction updateFunctionCode(String region, String functionName, Map<String, Object> request) {

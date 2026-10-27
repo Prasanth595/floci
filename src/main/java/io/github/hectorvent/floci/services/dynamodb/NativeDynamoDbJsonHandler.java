@@ -663,7 +663,9 @@ public class NativeDynamoDbJsonHandler {
         }
 
         JsonNode item = dynamoDbService.getItem(tableName, key, region);
-        var itemBytes = item != null ? DynamoDbItemSize.calculateItemSize(item) : 0;
+        int itemBytes = item != null
+                ? DynamoDbItemSize.billedItemSize(dynamoDbService.requireTableForItemCall(tableName, region), item)
+                : 0;
         if (item != null && projectionExpression != null) {
             item = ProjectionEvaluator.project(item, projectionExpression, exprAttrNames);
         } else if (item != null && attributesToGet != null) {
@@ -1626,6 +1628,8 @@ public class NativeDynamoDbJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode responses = objectMapper.createObjectNode();
+        boolean capacityRequested = !"NONE".equals(request.path("ReturnConsumedCapacity").asText("NONE"));
+        Map<String, Double> unitsByTable = new LinkedHashMap<>();
         for (Map.Entry<String, List<JsonNode>> entry : result.responses().entrySet()) {
             String tblName = entry.getKey();
             JsonNode tableRequest = requestItems.get(tblName);
@@ -1650,11 +1654,29 @@ public class NativeDynamoDbJsonHandler {
                 tableItems.add(projected);
             }
             responses.set(tblName, tableItems);
+            if (capacityRequested) {
+                unitsByTable.put(tblName, batchGetReadUnits(tblName, tableRequest, entry.getValue(), region));
+            }
         }
         response.set("Responses", responses);
         response.set("UnprocessedKeys", objectMapper.createObjectNode());
-        addBatchConsumedCapacity(response, request, items, false);
+        addBatchConsumedCapacity(response, request, unitsByTable);
         return Response.ok(response).build();
+    }
+
+    /**
+     * Each key costs what a GetItem of the whole item costs, even a missing or projected one.
+     */
+    private double batchGetReadUnits(String tableName, JsonNode tableRequest, List<JsonNode> found,
+                                     String region) {
+        TableDefinition table = dynamoDbService.requireTableForItemCall(tableName, region);
+        boolean consistentRead = tableRequest != null && tableRequest.path("ConsistentRead").asBoolean(false);
+        int missingKeys = (tableRequest != null ? tableRequest.path("Keys").size() : 0) - found.size();
+        double units = missingKeys * readCapacityUnits(0, consistentRead);
+        for (JsonNode item : found) {
+            units += readCapacityUnits(DynamoDbItemSize.billedItemSize(table, item), consistentRead);
+        }
+        return units;
     }
 
     private Response handleUpdateTable(JsonNode request, String region) {
@@ -3098,25 +3120,23 @@ public class NativeDynamoDbJsonHandler {
     }
 
     /**
-     * Builds a list-style ConsumedCapacity for batch operations.
+     * Builds the list-style ConsumedCapacity of BatchGetItem, one entry per table.
      */
     private void addBatchConsumedCapacity(ObjectNode response, JsonNode request,
-                                           Map<String, ?> tableItems, boolean isWrite) {
+                                           Map<String, Double> unitsByTable) {
         String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
         if ("NONE".equals(returnCC)) return;
 
         ArrayNode ccArray = objectMapper.createArrayNode();
-        for (String tableName : tableItems.keySet()) {
+        unitsByTable.forEach((tableName, units) -> {
             ObjectNode cc = objectMapper.createObjectNode();
             cc.put("TableName", DynamoDbTableNames.resolve(tableName));
-            cc.put("CapacityUnits", isWrite ? 1.0 : 0.5);
+            cc.put("CapacityUnits", units);
             if ("INDEXES".equals(returnCC)) {
-                ObjectNode tableCap = objectMapper.createObjectNode();
-                tableCap.put("CapacityUnits", isWrite ? 1.0 : 0.5);
-                cc.set("Table", tableCap);
+                cc.set("Table", capacityUnitsNode(units, null));
             }
             ccArray.add(cc);
-        }
+        });
         response.set("ConsumedCapacity", ccArray);
     }
 
