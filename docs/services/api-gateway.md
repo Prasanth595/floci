@@ -357,7 +357,11 @@ This is what lets a browser read a `401`/`403`/`400` as such instead of as a COR
 | Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` | `InternalServerErrorException` |
 | Lambda proxy function error, malformed proxy payload, or missing function | `INTEGRATION_FAILURE` | `InternalServerErrorException` |
 
-A customised `statusCode` overrides the status Floci would otherwise send; the `x-amzn-ErrorType` stays, as on AWS. Throttling, quota, request size and WAF answers are not produced on the execute plane, so
+A customised `statusCode` overrides the status Floci would otherwise send; the `x-amzn-ErrorType` stays, as on AWS.
+A gateway response that maps its own `gatewayresponse.header.x-amzn-ErrorType` (that exact key) replaces it for
+`BAD_REQUEST_PARAMETERS`, `BAD_REQUEST_BODY`, `UNSUPPORTED_MEDIA_TYPE`, `API_CONFIGURATION_ERROR` and
+`INTEGRATION_FAILURE`, and is sent ahead of it for the other types, as AWS does. Throttling, quota, request
+size and WAF answers are not produced on the execute plane, so
 `THROTTLED`, `QUOTA_EXCEEDED`, `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be configured but never
 fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than treated as a gateway
 response.

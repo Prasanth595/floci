@@ -72,6 +72,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -579,7 +580,7 @@ public class ApiGatewayExecuteController {
                 // A function error or a payload that is not a proxy response is answered by the
                 // gateway itself, so a configured INTEGRATION_FAILURE / DEFAULT_5XX shapes it.
                 return gatewayResponseOr(response, scope, GatewayResponseType.INTEGRATION_FAILURE,
-                        "Internal server error");
+                        "Internal server error", null);
             }
             return response;
         } catch (AwsException e) {
@@ -3929,10 +3930,20 @@ public class ApiGatewayExecuteController {
 
     private Response gatewayResponse(GatewayResponseScope scope, GatewayResponseType type, int status,
                                      String message, String validationError) {
-        return gatewayResponseBuilder(scope, type, status, message, validationError)
-                .header("x-amzn-ErrorType", gatewayErrorType(type))
+        Response fallback = Response.status(status).entity(jsonMessage(message)).type(MediaType.APPLICATION_JSON)
                 .build();
+        return gatewayResponseOr(fallback, scope, type, message, validationError);
     }
+
+    /**
+     * The types whose gateway response sends only its own {@code x-amzn-ErrorType} when it maps one
+     * (that exact key); the others send the mapped value ahead of theirs (measured on a REST API,
+     * eu-west-1, 2026-10-26).
+     */
+    private static final Set<GatewayResponseType> MAPPED_ERROR_TYPE_REPLACES = EnumSet.of(
+            GatewayResponseType.BAD_REQUEST_PARAMETERS, GatewayResponseType.BAD_REQUEST_BODY,
+            GatewayResponseType.UNSUPPORTED_MEDIA_TYPE, GatewayResponseType.API_CONFIGURATION_ERROR,
+            GatewayResponseType.INTEGRATION_FAILURE);
 
     /**
      * The {@code x-amzn-ErrorType} AWS sends with a gateway response of {@code type}, customised or
@@ -3961,16 +3972,19 @@ public class ApiGatewayExecuteController {
     }
 
     /**
-     * For the sites whose uncustomised answer is not the {@code {"message"}} body (a bare status,
-     * or the Lambda payload passed through): the answer stays as it was unless the API customised
-     * a gateway response for it.
+     * The {@code fallback} answer stays as it was (a {@code {"message"}} body, a bare status, or the
+     * Lambda payload passed through) unless the API customised a gateway response for it.
      */
     private Response gatewayResponseOr(Response fallback, GatewayResponseScope scope, GatewayResponseType type,
-                                       String message) {
+                                       String message, String validationError) {
         GatewayResponse configured = apiGatewayService.resolveGatewayResponse(scope.region(), scope.apiId(),
                 type, fallback.getStatus());
         Response.ResponseBuilder builder = configured == null ? Response.fromResponse(fallback)
-                : renderGatewayResponse(scope, configured, type, fallback.getStatus(), message, null);
+                : renderGatewayResponse(scope, configured, type, fallback.getStatus(), message, validationError);
+        if (configured != null && MAPPED_ERROR_TYPE_REPLACES.contains(type)
+                && configured.getResponseParameters().containsKey(GATEWAY_RESPONSE_HEADER_PREFIX + "x-amzn-ErrorType")) {
+            return builder.build();
+        }
         return builder.header("x-amzn-ErrorType", gatewayErrorType(type)).build();
     }
 

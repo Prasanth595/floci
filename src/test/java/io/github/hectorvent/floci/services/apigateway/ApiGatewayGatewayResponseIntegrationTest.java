@@ -13,6 +13,8 @@ import java.time.temporal.ChronoUnit;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -472,6 +474,27 @@ class ApiGatewayGatewayResponseIntegrationTest {
                 .header("Access-Control-Allow-Origin", equalTo("*"))
                 .header("x-amzn-ErrorType", equalTo("InternalServerErrorException"))
                 .body("message", equalTo("Internal server error"));
+    }
+
+    @Test
+    void aMappedErrorTypeReplacesTheDefaultOnlyWhereAwsDoes() {
+        deployMockApi();
+        putGatewayResponse("DEFAULT_4XX", "{\"responseParameters\":{"
+                + "\"gatewayresponse.header.x-amzn-ErrorType\":\"'Mapped4xx'\"}}");
+        putGatewayResponse("DEFAULT_5XX", "{\"responseParameters\":{"
+                + "\"gatewayresponse.header.x-amzn-ErrorType\":\"'Mapped5xx'\"}}");
+
+        // Measured (eu-west-1, 2026-10-26): validation and configuration failures send only the
+        // mapped value, an API key rejection sends it ahead of its own.
+        assertThat(given().when().get("/execute-api/" + apiId + "/api/validated")
+                .then().statusCode(400).extract().headers().getValues("x-amzn-ErrorType"),
+                contains("Mapped4xx"));
+        assertThat(given().when().get("/execute-api/" + apiId + "/api/broken")
+                .then().statusCode(500).extract().headers().getValues("x-amzn-ErrorType"),
+                contains("Mapped5xx"));
+        assertThat(given().when().get("/execute-api/" + apiId + "/api/keyed")
+                .then().statusCode(403).extract().headers().getValues("x-amzn-ErrorType"),
+                contains("Mapped4xx", "ForbiddenException"));
     }
 
     // ──────────────────────────── fixtures ────────────────────────────
