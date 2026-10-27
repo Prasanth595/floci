@@ -68,7 +68,6 @@ class EmulatorInfoControllerTest {
     }
 
     @Test
-    @DisplayName("Should describe the emulator as a Console Contract v2 manifest")
     void info_isTheConsoleContractManifest() {
         EmulatorConfig manifestConfig = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(manifestConfig.effectiveBaseUrl()).thenReturn("http://floci:4566");
