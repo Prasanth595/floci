@@ -550,7 +550,8 @@ class CloudWatchMetricsServiceTest {
         assertEquals("INSUFFICIENT_DATA", createdAlarm.path("stateValue").asText());
         assertEquals(created, createdAlarm.path("alarmConfigurationUpdatedTimestamp").asText());
         assertTrue(created.endsWith("+0000"));
-        for (String hidden : List.of("region", "tags", "stateReason", "stateReasonData", "alarmType", "unit")) {
+        for (String hidden : List.of("region", "tags", "stateReason", "stateReasonData", "alarmType", "unit",
+                "stateTransitionedTimestamp")) {
             assertFalse(createdAlarm.has(hidden), hidden);
         }
 
@@ -590,6 +591,18 @@ class CloudWatchMetricsServiceTest {
         assertTrue(history("filtered", List.of("CompositeAlarm"), null, null, null, null, null).isEmpty());
         assertTrue(service.describeAlarmHistory("filtered", null, null, null, null, null, null, null, "eu-west-1")
                 .items().isEmpty());
+    }
+
+    // A state change's history entry and the alarm's StateTransitionedTimestamp come from the same instant.
+    @Test
+    void aStateUpdateHistoryEntryIsStampedWithTheAlarmsTransitionTime() {
+        putAlarm("stamped");
+        service.setAlarmState("stamped", "ALARM", "breached", null, REGION);
+
+        MetricAlarm alarm = service.describeAlarms(List.of("stamped"), null, REGION).getFirst();
+        AlarmHistoryItem entry = history("stamped", null, "StateUpdate", null, null, null, null).getFirst();
+        assertEquals(alarm.getStateTransitionedTimestamp(), entry.timestamp() / 1000);
+        assertEquals(alarm.getStateUpdatedTimestamp(), entry.timestamp() / 1000);
     }
 
     @Test

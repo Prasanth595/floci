@@ -468,7 +468,8 @@ public class CloudWatchMetricsService {
     /** The alarm as history items show it: AWS's timestamp strings, without state reasons, tags or Floci's bookkeeping. */
     private static ObjectNode snapshot(Alarm alarm) {
         ObjectNode node = MAPPER.valueToTree(alarm);
-        node.remove(List.of("region", "tags", "stateReason", "stateReasonData", "alarmType"));
+        node.remove(List.of("region", "tags", "stateReason", "stateReasonData", "alarmType",
+                "stateTransitionedTimestamp"));
         node.put("alarmConfigurationUpdatedTimestamp", AlarmSnsNotifier.TIMESTAMP_FORMAT.format(
                 Instant.ofEpochSecond(alarm.getAlarmConfigurationUpdatedTimestamp())));
         node.put("stateUpdatedTimestamp", AlarmSnsNotifier.TIMESTAMP_FORMAT.format(
@@ -689,7 +690,7 @@ public class CloudWatchMetricsService {
         }
         alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
         if (!state.equals(oldState)) {
-            recordHistory(alarm, region, "StateUpdate", "Alarm updated from " + oldState + " to " + state, data);
+            recordHistory(alarm, region, "StateUpdate", "Alarm updated from " + oldState + " to " + state, data, now);
         }
     }
 
@@ -710,7 +711,11 @@ public class CloudWatchMetricsService {
 
     /** Called only under this service's monitor, which also guards the sequence and the prune deadline. */
     private void recordHistory(Alarm alarm, String region, String type, String summary, ObjectNode data) {
-        Instant now = Instant.now();
+        recordHistory(alarm, region, type, summary, data, Instant.now());
+    }
+
+    /** As above, stamped with {@code now}: a state change passes the instant it gave the alarm. */
+    private void recordHistory(Alarm alarm, String region, String type, String summary, ObjectNode data, Instant now) {
         if (!now.isBefore(nextHistoryPrune)) {
             long cutoffMillis = now.minus(HISTORY_RETENTION).toEpochMilli();
             deleteInEveryAccount(historyStore, item -> item.timestamp() < cutoffMillis);
