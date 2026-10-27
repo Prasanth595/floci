@@ -958,8 +958,9 @@ public class Ec2QueryHandler {
                 .start("groupSet").end("groupSet")
                 .start("instancesSet");
         Map<String, String> capacityAssociations = service.capacityReservationAssociations(region);
+        Map<String, List<VolumeAttachment>> volumeAttachments = service.instanceVolumeAttachments(res.getInstances());
         for (Instance inst : res.getInstances()) {
-            xml.start("item").raw(instanceXml(inst, capacityAssociations)).end("item");
+            xml.start("item").raw(instanceXml(inst, capacityAssociations, volumeAttachments)).end("item");
         }
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
@@ -1422,6 +1423,8 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("reservationSet");
         Map<String, String> capacityAssociations = service.capacityReservationAssociations(region);
+        Map<String, List<VolumeAttachment>> volumeAttachments = service.instanceVolumeAttachments(
+                reservations.stream().flatMap(res -> res.getInstances().stream()).toList());
         for (Reservation res : reservations) {
             xml.start("item")
                     .elem("reservationId", res.getReservationId())
@@ -1429,7 +1432,7 @@ public class Ec2QueryHandler {
                     .start("groupSet").end("groupSet")
                     .start("instancesSet");
             for (Instance inst : res.getInstances()) {
-                xml.start("item").raw(instanceXml(inst, capacityAssociations)).end("item");
+                xml.start("item").raw(instanceXml(inst, capacityAssociations, volumeAttachments)).end("item");
             }
             xml.end("instancesSet").end("item");
         }
@@ -5136,7 +5139,8 @@ public class Ec2QueryHandler {
 
     // ─── XML fragment builders ────────────────────────────────────────────────
 
-    private String instanceXml(Instance inst, Map<String, String> capacityAssociations) {
+    private String instanceXml(Instance inst, Map<String, String> capacityAssociations,
+                               Map<String, List<VolumeAttachment>> volumeAttachments) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("instanceId", inst.getInstanceId())
                 .elem("imageId", inst.getImageId())
@@ -5266,7 +5270,7 @@ public class Ec2QueryHandler {
         if (capacityReservationId != null) {
             xml.elem("capacityReservationId", capacityReservationId);
         }
-        instanceBlockDeviceMappingXml(xml, inst);
+        instanceBlockDeviceMappingXml(xml, volumeAttachments.getOrDefault(inst.getInstanceId(), List.of()));
         if (inst.getIamInstanceProfileArn() != null) {
             xml.start("iamInstanceProfile")
                     .elem("arn", inst.getIamInstanceProfileArn())
@@ -5278,9 +5282,9 @@ public class Ec2QueryHandler {
     }
 
     /** An instance's {@code blockDeviceMapping}: the EBS volumes attached to it, root device first. */
-    private void instanceBlockDeviceMappingXml(XmlBuilder xml, Instance inst) {
+    private void instanceBlockDeviceMappingXml(XmlBuilder xml, List<VolumeAttachment> attachments) {
         xml.start("blockDeviceMapping");
-        for (VolumeAttachment attachment : service.instanceVolumeAttachments(inst)) {
+        for (VolumeAttachment attachment : attachments) {
             xml.start("item")
                     .elem("deviceName", attachment.getDevice())
                     .start("ebs")

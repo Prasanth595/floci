@@ -13680,23 +13680,42 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * The EBS volumes attached to an instance, as its block device mapping reports them: the
-     * volumes its launch created and any attached since, root device first, then by device name.
+     * The EBS volumes attached to each of the instances, as their block device mappings report
+     * them: the volumes a launch created and any attached since, root device first, then by device
+     * name. The volume store is read once for all of them, so a response listing many instances
+     * does not scan it once per instance. A terminated instance has none, whichever way it ended.
      */
-    public List<VolumeAttachment> instanceVolumeAttachments(Instance instance) {
-        String region = instance.getRegion();
-        // A terminated instance has no volumes left, whichever way it ended.
-        if (region == null || instance.getState() != null && "terminated".equals(instance.getState().getName())) {
-            return List.of();
+    public Map<String, List<VolumeAttachment>> instanceVolumeAttachments(Collection<Instance> instances) {
+        Map<String, List<VolumeAttachment>> byInstance = new HashMap<>();
+        Map<String, Instance> live = new HashMap<>();
+        Set<String> regions = new HashSet<>();
+        for (Instance instance : instances) {
+            byInstance.put(instance.getInstanceId(), new ArrayList<>());
+            if (instance.getRegion() != null
+                    && (instance.getState() == null || !"terminated".equals(instance.getState().getName()))) {
+                live.put(instance.getInstanceId(), instance);
+                regions.add(instance.getRegion());
+            }
         }
-        String rootDevice = instance.getRootDeviceName();
-        return volumes.scan(k -> k.startsWith(region + "::")).stream()
-                .filter(volume -> region.equals(volume.getRegion()))
-                .flatMap(volume -> volume.getAttachments().stream())
-                .filter(attachment -> instance.getInstanceId().equals(attachment.getInstanceId()))
-                .sorted(Comparator.comparing((VolumeAttachment attachment) -> !isSameDevice(attachment.getDevice(), rootDevice))
-                        .thenComparing(VolumeAttachment::getDevice, Comparator.nullsLast(Comparator.naturalOrder())))
-                .toList();
+        for (String region : regions) {
+            for (Volume volume : volumes.scan(k -> k.startsWith(region + "::"))) {
+                if (!region.equals(volume.getRegion())) {
+                    continue;
+                }
+                // A copy: termination, a settle, AttachVolume and DetachVolume change the list
+                // under the volume's lock, which a read does not take.
+                for (VolumeAttachment attachment : new ArrayList<>(volume.getAttachments())) {
+                    Instance instance = live.get(attachment.getInstanceId());
+                    if (instance != null && region.equals(instance.getRegion())) {
+                        byInstance.get(instance.getInstanceId()).add(attachment);
+                    }
+                }
+            }
+        }
+        live.values().forEach(instance -> byInstance.get(instance.getInstanceId()).sort(
+                Comparator.comparing((VolumeAttachment a) -> !isSameDevice(a.getDevice(), instance.getRootDeviceName()))
+                        .thenComparing(VolumeAttachment::getDevice, Comparator.nullsLast(Comparator.naturalOrder()))));
+        return byInstance;
     }
 
     public VolumeAttachment attachVolume(String region, String volumeId, String instanceId, String device) {
