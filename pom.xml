@@ -19,7 +19,7 @@
         <jackson.version>2.22.2</jackson.version>
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
-        <wire.version>6.4.7</wire.version>
+        <wire.version>7.0.4</wire.version>
     </properties>
 
     <dependencyManagement>
