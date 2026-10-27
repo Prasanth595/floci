@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamAuthorizedActions;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
@@ -541,6 +542,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 region, accountId, akid)) {
             return;
         }
+        if (abortIfConnectorPassDenied(ctx, caller, callerArns.orElse(null), resolvedAuthorization.operation(),
+                region, accountId, akid)) {
+            return;
+        }
         if (tagOnCreate.isPresent() && abortIfTagOnCreateDenied(ctx, caller, principal, callerArns.orElse(null),
                 action, resolvedAuthorization.operation(), tagOnCreate.get(), credentialScope, resources, region,
                 accountId, akid)) {
@@ -954,6 +959,41 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     List.of(passed.roleArn()), List.of(context), region, accountId, akid)) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    /**
+     * A request that names a Lambda network connector also needs {@code lambda:PassNetworkConnector} on it (see
+     * {@link PassedNetworkConnectors}), checked as the caller on the connector as the request names it, with the
+     * keys that say who is calling. A connector has no resource policy. The refusal is Lambda's, which names the
+     * policy type that refused it and the ARN of a managed policy or boundary that denies. Returns true when the
+     * request was aborted.
+     */
+    private boolean abortIfConnectorPassDenied(ContainerRequestContext ctx, CallerContext caller,
+                                               CallerArns callerArns, String operation, String region,
+                                               String accountId, String akid) {
+        String action = PassedNetworkConnectors.ACTION;
+        for (String connector : PassedNetworkConnectors.of(operation, ctx, region)) {
+            Map<String, List<String>> context = new HashMap<>();
+            if (callerArns != null) {
+                callerArns.putPrincipalKeys(context);
+            }
+            Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
+                    context, connector, region, accountId, accountId);
+            if (evaluator.evaluate(caller, null, action, connector, effectiveContext) != Decision.DENY) {
+                continue;
+            }
+            LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, connector);
+            String user = callerArns != null ? callerArns.callerArn()
+                    : AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid).toString();
+            String reason = AccessDeniedMessages.firstRefusal(evaluator, caller,
+                    iamService.heldPolicies(akid).orElse(null), action, connector, effectiveContext);
+            ctx.abortWith(Response.status(403).type(MediaType.APPLICATION_JSON)
+                    .header("X-Amzn-Errortype", "AccessDeniedException")
+                    .entity(Map.of("Message", AccessDeniedMessages.notAuthorized(user, action, connector, reason)))
+                    .build());
+            return true;
         }
         return false;
     }
@@ -1709,7 +1749,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * <ul>
      *   <li>S3 → S3-flavored XML {@code <Error>...</Error>}</li>
      *   <li>{@code application/x-www-form-urlencoded} body → AWS Query
-     *       {@code <ErrorResponse>...</ErrorResponse>} (IAM/STS/EC2/SQS/SNS/...)</li>
+     *       {@code <ErrorResponse>...</ErrorResponse>} (IAM/STS/EC2/SQS/SNS/...), with the code
+     *       {@link #queryAccessDeniedCode} gives the service that serves the request</li>
      *   <li>JSON 1.x: JSON with HTTP 400; REST-JSON: JSON with HTTP 403</li>
      *   <li>CBOR: the request's own encoding with HTTP 403, from {@link #accessDeniedForRequest},
      *       which has the request to read it from</li>
@@ -1750,10 +1791,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return s3XmlAccessDenied(message, resourcePath);
         }
         if (protocol == WireProtocol.AWS_QUERY || isFormEncoded(requestMediaType)) {
-            return queryXmlAccessDenied(message);
+            return queryXmlError(queryAccessDeniedCode(credentialScope), message);
         }
         int status = protocol == WireProtocol.AWS_JSON_1_0 || protocol == WireProtocol.AWS_JSON_1_1 ? 400 : 403;
         return jsonAccessDenied(message, status);
+    }
+
+    /**
+     * The code a Query service refuses a request it does not authorize with, whichever action was denied:
+     * SNS's {@code AuthorizationError}, a 403 every SNS operation lists ("Indicates that the user has been
+     * denied access to the requested resource") and the one SDKs raise as {@code AuthorizationErrorException},
+     * and {@code AccessDenied} for every other service.
+     */
+    private static String queryAccessDeniedCode(String credentialScope) {
+        return "sns".equals(credentialScope) ? "AuthorizationError" : "AccessDenied";
     }
 
     private static String formatS3ResourcePath(String resourceArn) {

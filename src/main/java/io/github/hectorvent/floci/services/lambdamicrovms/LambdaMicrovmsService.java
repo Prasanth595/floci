@@ -566,6 +566,19 @@ public class LambdaMicrovmsService {
         return List.copyOf(find(region, ref).versions);
     }
 
+    /**
+     * The version a Web Function revision names by its version-qualified ARN. Only the connector id names it,
+     * not its name, and only in {@code region}.
+     */
+    public synchronized Optional<NetworkConnectorVersion> connectorVersion(String region, String connectorArn,
+                                                                         long version) {
+        Optional<NetworkConnector> connector = in(connectors, region)
+                .filter(c -> connectorArn.equals(c.arn))
+                .findFirst();
+        connector.ifPresent(LambdaMicrovmsService::backfillVersions);
+        return connector.flatMap(c -> c.versions.stream().filter(v -> v.version == version).findFirst());
+    }
+
     private record ConnectorRef(String unqualified, boolean arn, String idOrName, Long version) {
 
         static ConnectorRef parse(String identifier) {
@@ -599,11 +612,15 @@ public class LambdaMicrovmsService {
                                 : LambdaArnUtils.networkConnectorVersionArn(arn, ref.version()));
                     });
         }
-        // One stored before versions has only its latest version.
+        backfillVersions(connector);
+        return connector;
+    }
+
+    /** One stored before versions has only its latest version. */
+    private static void backfillVersions(NetworkConnector connector) {
         if (connector.versions.isEmpty()) {
             connector.versions.add(snapshot(connector, connector.latestVersion));
         }
-        return connector;
     }
 
     private static AwsException connectorNotFound(String arn) {

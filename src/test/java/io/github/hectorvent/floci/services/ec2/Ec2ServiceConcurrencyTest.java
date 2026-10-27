@@ -127,7 +127,7 @@ class Ec2ServiceConcurrencyTest {
             try {
                 runRace(i -> {
                     service.createNetworkAclEntry(region, aclId, 100 + i, "6", "allow", false,
-                            "10.0." + i + ".0/24", 80, 80, false);
+                            "10.0." + i + ".0/24", null, null, null, 80, 80, false);
                     return "entry-" + i;
                 });
             } finally {

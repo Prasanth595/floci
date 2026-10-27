@@ -332,6 +332,12 @@
         <!-- Testing -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sagemaker</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
@@ -393,6 +399,18 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>bcmdataexports</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>servicediscovery</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>servicecatalog</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>

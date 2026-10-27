@@ -1178,6 +1178,10 @@ public class ApiGatewayV2Service {
                 .orElseThrow(() -> new AwsException("NotFoundException", "VpcLink not found", 404));
     }
 
+    public boolean hasVpcLink(String region, String vpcLinkId) {
+        return vpcLinkStore.get(vpcLinkKey(region, vpcLinkId)).isPresent();
+    }
+
     public List<VpcLink> getVpcLinks(String region) {
         String prefix = region + "::";
         return vpcLinkStore.scan(k -> k.startsWith(prefix));
