@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.s3;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.HybridStorage;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -18,28 +20,37 @@ import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.s3.model.WebsiteConfiguration;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -100,16 +111,16 @@ class S3ServiceTest {
     }
 
     @Test
-    @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
+    @DisabledOnOs(OS.WINDOWS)
     void constructorThrowsWhenDataRootUncreatable() throws Exception {
-        org.junit.jupiter.api.Assumptions.assumeFalse("root".equals(System.getProperty("user.name")),
+        Assumptions.assumeFalse("root".equals(System.getProperty("user.name")),
                 "root ignores directory write permissions");
         Path readOnlyParent = tempDir.resolve("ro");
         Files.createDirectories(readOnlyParent);
         assertTrue(readOnlyParent.toFile().setWritable(false));
         try {
             Path dataRoot = readOnlyParent.resolve("s3");
-            assertThrows(java.io.UncheckedIOException.class,
+            assertThrows(UncheckedIOException.class,
                     () -> new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false));
         } finally {
             assertTrue(readOnlyParent.toFile().setWritable(true));
@@ -1260,16 +1271,16 @@ class S3ServiceTest {
         // Through the real storage layer rather than Jackson alone: written, flushed to disk, and
         // read back by a second service over the same file, the way a restart does it.
         Path bucketsFile = tempDir.resolve("s3-buckets.json");
-        var beforeRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
-                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        var beforeRestart = new HybridStorage<String, Bucket>(
+                bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         S3Service before = new S3Service(beforeRestart, new InMemoryStorage<>(), tempDir.resolve("s3a"), false);
         before.createBucket("persisted-metrics", "us-east-1");
         before.putBucketMetricsConfiguration("persisted-metrics", "EntireBucket", "<Id>EntireBucket</Id>");
         beforeRestart.flush();
         beforeRestart.shutdown();
 
-        var afterRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
-                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        var afterRestart = new HybridStorage<String, Bucket>(
+                bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         afterRestart.load();
         try {
             S3Service after = new S3Service(afterRestart, new InMemoryStorage<>(), tempDir.resolve("s3a"), false);
@@ -1323,10 +1334,10 @@ class S3ServiceTest {
 
     @Test
     void analyticsAndInventoryConfigurationsSurviveAJacksonRoundTrip() throws Exception {
-        var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        var mapper = new ObjectMapper().findAndRegisterModules();
         Bucket bucket = new Bucket("persisted-configs");
-        bucket.setAnalyticsConfigurations(new java.util.LinkedHashMap<>(Map.of("a", "<Id>a</Id>")));
-        bucket.setInventoryConfigurations(new java.util.LinkedHashMap<>(Map.of("i", "<Id>i</Id>")));
+        bucket.setAnalyticsConfigurations(new LinkedHashMap<>(Map.of("a", "<Id>a</Id>")));
+        bucket.setInventoryConfigurations(new LinkedHashMap<>(Map.of("i", "<Id>i</Id>")));
 
         Bucket reloaded = mapper.readValue(mapper.writeValueAsString(bucket), Bucket.class);
         assertEquals("<Id>a</Id>", reloaded.getAnalyticsConfigurations().get("a"));
@@ -1337,9 +1348,9 @@ class S3ServiceTest {
     void metricsConfigurationsSurviveAJacksonRoundTrip() throws Exception {
         // Bucket records are persisted as JSON, so the configurations have to come back after a
         // restart, and a record written before the field existed has to still load.
-        var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        var mapper = new ObjectMapper().findAndRegisterModules();
         Bucket bucket = new Bucket("persisted");
-        bucket.setMetricsConfigurations(new java.util.LinkedHashMap<>(
+        bucket.setMetricsConfigurations(new LinkedHashMap<>(
                 Map.of("EntireBucket", "<Id>EntireBucket</Id>")));
 
         Bucket reloaded = mapper.readValue(mapper.writeValueAsString(bucket), Bucket.class);
@@ -1355,7 +1366,7 @@ class S3ServiceTest {
      * hope for it, which keeps the test both instant and immune to a slow machine.
      */
     private static void awaitBlockedOnMonitor(Thread thread) throws InterruptedException {
-        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (thread.getState() != Thread.State.BLOCKED) {
             if (System.nanoTime() > deadline) {
                 fail("thread never reached the bucket monitor");
@@ -1378,7 +1389,7 @@ class S3ServiceTest {
         Thread delete = new Thread(() -> service.deleteBucket("monitor-bucket"));
         synchronized (record) {
             delete.start();
-            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (delete.getState() != Thread.State.BLOCKED) {
                 assertTrue(buckets.get("monitor-bucket").isPresent(),
                         "DeleteBucket removed the record without waiting for the bucket monitor");
@@ -1404,8 +1415,8 @@ class S3ServiceTest {
         service.createBucket("race-bucket", "us-east-1");
         Bucket record = buckets.get("race-bucket").orElseThrow();
 
-        var putStarted = new java.util.concurrent.CountDownLatch(1);
-        var thrownByPut = new java.util.concurrent.atomic.AtomicReference<Exception>();
+        var putStarted = new CountDownLatch(1);
+        var thrownByPut = new AtomicReference<Exception>();
         Thread put = new Thread(() -> {
             putStarted.countDown();
             try {
@@ -1439,8 +1450,8 @@ class S3ServiceTest {
         service.createBucket("recreated-bucket", "us-east-1");
         Bucket original = buckets.get("recreated-bucket").orElseThrow();
 
-        var putStarted = new java.util.concurrent.CountDownLatch(1);
-        var thrownByPut = new java.util.concurrent.atomic.AtomicReference<Exception>();
+        var putStarted = new CountDownLatch(1);
+        var thrownByPut = new AtomicReference<Exception>();
         Thread put = new Thread(() -> {
             putStarted.countDown();
             try {
@@ -1473,10 +1484,10 @@ class S3ServiceTest {
         // monitor concurrent puts of different ids overwrite each other's work.
         s3Service.createBucket("metrics-race", "us-east-1");
         int count = 24;
-        var pool = java.util.concurrent.Executors.newFixedThreadPool(8);
-        var start = new java.util.concurrent.CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(8);
+        var start = new CountDownLatch(1);
         try {
-            var submitted = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            var submitted = new ArrayList<Future<?>>();
             for (int i = 0; i < count; i++) {
                 String id = "config-" + i;
                 submitted.add(pool.submit(() -> {
@@ -1487,7 +1498,7 @@ class S3ServiceTest {
             }
             start.countDown();
             for (var future : submitted) {
-                future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+                future.get(30, TimeUnit.SECONDS);
             }
         } finally {
             pool.shutdownNow();
@@ -1574,8 +1585,8 @@ class S3ServiceTest {
         // Through the real storage layer rather than Jackson alone: written, flushed to disk, and
         // read back by a second service over the same file, the way a restart does it.
         Path bucketsFile = tempDir.resolve("s3-buckets-tiering.json");
-        var beforeRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
-                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        var beforeRestart = new HybridStorage<String, Bucket>(
+                bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         S3Service before = new S3Service(beforeRestart, new InMemoryStorage<>(), tempDir.resolve("s3b"), false);
         before.createBucket("persisted-tiering", "us-east-1");
         before.putBucketIntelligentTieringConfiguration("persisted-tiering", "EntireBucket",
@@ -1583,8 +1594,8 @@ class S3ServiceTest {
         beforeRestart.flush();
         beforeRestart.shutdown();
 
-        var afterRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
-                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        var afterRestart = new HybridStorage<String, Bucket>(
+                bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         afterRestart.load();
         try {
             S3Service after = new S3Service(afterRestart, new InMemoryStorage<>(), tempDir.resolve("s3b"), false);
@@ -1599,9 +1610,9 @@ class S3ServiceTest {
     void intelligentTieringConfigurationsSurviveAJacksonRoundTrip() throws Exception {
         // Bucket records are persisted as JSON, so the configurations have to come back after a
         // restart, and a record written before the field existed has to still load.
-        var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        var mapper = new ObjectMapper().findAndRegisterModules();
         Bucket bucket = new Bucket("persisted");
-        bucket.setIntelligentTieringConfigurations(new java.util.LinkedHashMap<>(
+        bucket.setIntelligentTieringConfigurations(new LinkedHashMap<>(
                 Map.of("EntireBucket", "<Id>EntireBucket</Id>")));
 
         Bucket reloaded = mapper.readValue(mapper.writeValueAsString(bucket), Bucket.class);
@@ -1618,10 +1629,10 @@ class S3ServiceTest {
         // monitor concurrent puts of different ids overwrite each other's work.
         s3Service.createBucket("tiering-race", "us-east-1");
         int count = 24;
-        var pool = java.util.concurrent.Executors.newFixedThreadPool(8);
-        var start = new java.util.concurrent.CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(8);
+        var start = new CountDownLatch(1);
         try {
-            var submitted = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            var submitted = new ArrayList<Future<?>>();
             for (int i = 0; i < count; i++) {
                 String id = "config-" + i;
                 submitted.add(pool.submit(() -> {
@@ -1633,7 +1644,7 @@ class S3ServiceTest {
             }
             start.countDown();
             for (var future : submitted) {
-                future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+                future.get(30, TimeUnit.SECONDS);
             }
         } finally {
             pool.shutdownNow();

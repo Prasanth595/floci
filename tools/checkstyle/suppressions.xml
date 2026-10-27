@@ -283,19 +283,15 @@
     <suppress id="NoFqcn" files="/services/lakeformation/LakeFormationService\.java$"/>
     <suppress id="NoFqcn" files="/services/lakeformation/MemoryLakeFormationStorage\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/ApiGatewayController\.java$"/>
-    <suppress id="NoFqcn" files="/services/lambda/DynamoDbStreamsEventSourcePollerTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/LambdaAccountScopedCodeTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/LambdaController\.java$"/>
-    <suppress id="NoFqcn" files="/services/lambda/LambdaImageConfigTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/LambdaIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/LambdaQualifiedReadIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/LambdaServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/LambdaService\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/LambdaStructureSerializationIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/LambdaTagController\.java$"/>
-    <suppress id="NoFqcn" files="/services/lambda/SqsEventSourcePollerTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/launcher/ContainerLauncherCodeVolumeReuseTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/lambda/launcher/ContainerLauncherTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/launcher/ContainerLauncher\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/launcher/ImageCacheService\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/launcher/kubernetes/LambdaPodSpecFactory\.java$"/>
@@ -341,8 +337,6 @@
     <suppress id="NoFqcn" files="/services/s3/S3MultipartIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/s3/S3PresignedPostAuthEnforcementIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/s3/S3SelectIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/s3/S3ServiceAnnotationsTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/s3/S3ServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/s3/S3Service\.java$"/>
     <suppress id="NoFqcn" files="/services/s3/S3VirtualHostIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/s3/model/S3Object\.java$"/>
