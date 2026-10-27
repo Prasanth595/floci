@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -14,16 +15,10 @@ import software.amazon.jdbc.authentication.AwsCredentialsManager;
 import software.amazon.jdbc.wrapper.ConnectionWrapper;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.Properties;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -35,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @DisplayName("RDS AWS Advanced JDBC Wrapper")
 class RdsAwsAdvancedJdbcWrapperTest {
-    private static final Logger LOG = Logger.getLogger(RdsAwsAdvancedJdbcWrapperTest.class.getName());
+    private static final Logger LOG = Logger.getLogger(RdsAwsAdvancedJdbcWrapperTest.class);
     private static final String USERNAME = "clusteradmin";
     private static final String PASSWORD = "ClusterPassword1";
     private static final String IAM_USERNAME = "iam_user";
@@ -48,19 +43,16 @@ class RdsAwsAdvancedJdbcWrapperTest {
 
     @BeforeAll
     static void createCluster() {
+        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Connects through the Floci proxy host with test credentials");
         rds = TestFixtures.rdsClient();
         clusterId = TestFixtures.uniqueName("jdbc-wrapper");
         memberId = clusterId + "-1";
-        try {
-            DBCluster cluster = rds.createDBCluster(b -> b.dbClusterIdentifier(clusterId)
-                    .engine("aurora-postgresql").masterUsername(USERNAME).masterUserPassword(PASSWORD)
-                    .databaseName(DATABASE).enableIAMDatabaseAuthentication(true)).dbCluster();
-            rds.createDBInstance(b -> b.dbInstanceIdentifier(memberId).dbClusterIdentifier(clusterId)
-                    .engine("aurora-postgresql").dbInstanceClass("db.serverless"));
-            port = cluster.port();
-        } catch (Exception e) {
-            Assumptions.assumeTrue(false, "Aurora cluster creation unavailable in this environment: " + e.getMessage());
-        }
+        DBCluster cluster = rds.createDBCluster(b -> b.dbClusterIdentifier(clusterId)
+                .engine("aurora-postgresql").masterUsername(USERNAME).masterUserPassword(PASSWORD)
+                .databaseName(DATABASE).enableIAMDatabaseAuthentication(true)).dbCluster();
+        rds.createDBInstance(b -> b.dbInstanceIdentifier(memberId).dbClusterIdentifier(clusterId)
+                .engine("aurora-postgresql").dbInstanceClass("db.serverless"));
+        port = cluster.port();
     }
 
     @AfterAll
@@ -71,12 +63,12 @@ class RdsAwsAdvancedJdbcWrapperTest {
         try {
             rds.deleteDBInstance(b -> b.dbInstanceIdentifier(memberId).skipFinalSnapshot(true));
         } catch (RdsException e) {
-            LOG.log(Level.WARNING, "Could not clean up member " + memberId, e);
+            LOG.warnv(e, "Could not clean up member {0}", memberId);
         }
         try {
             rds.deleteDBCluster(b -> b.dbClusterIdentifier(clusterId).skipFinalSnapshot(true));
         } catch (RdsException e) {
-            LOG.log(Level.WARNING, "Could not clean up cluster " + clusterId, e);
+            LOG.warnv(e, "Could not clean up cluster {0}", clusterId);
         }
         rds.close();
     }
@@ -146,17 +138,7 @@ class RdsAwsAdvancedJdbcWrapperTest {
     }
 
     private static Connection awaitConnection(Properties properties) throws Exception {
-        String url = "jdbc:aws-wrapper:postgresql://" + TestFixtures.proxyHost() + ":" + port + "/" + DATABASE;
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
-        SQLException last = null;
-        while (Instant.now().isBefore(deadline)) {
-            try {
-                return DriverManager.getConnection(url, properties);
-            } catch (SQLException e) {
-                last = e;
-                Thread.sleep(1000);
-            }
-        }
-        throw last != null ? last : new SQLException("Timed out waiting for Aurora cluster endpoint");
+        return TestFixtures.awaitJdbcConnection(
+                "jdbc:aws-wrapper:postgresql://" + TestFixtures.proxyHost() + ":" + port + "/" + DATABASE, properties);
     }
 }
