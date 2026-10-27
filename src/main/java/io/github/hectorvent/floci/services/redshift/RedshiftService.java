@@ -312,9 +312,25 @@ public class RedshiftService implements ManagedSecretRotator {
     public Cluster createCluster(String identifier, String nodeType, String username, String password,
                                  String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
                                  List<String> iamRoleArns, String defaultIamRoleArn, Integer automatedRetention) {
+        Cluster cluster = createClusterWithoutEvent(identifier, nodeType, username, password,
+                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention);
+        emitClusterCreated(identifier);
+        return cluster;
+    }
+
+    // Callers that still have setup to finish record the event themselves once it succeeds.
+    private Cluster createClusterWithoutEvent(String identifier, String nodeType, String username, String password,
+                                              String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
+                                              List<String> iamRoleArns, String defaultIamRoleArn,
+                                              Integer automatedRetention) {
         validateAutomatedRetention(nodeType, automatedRetention == null ? 1 : automatedRetention);
         return mutateCluster(identifier, () -> createClusterLocked(identifier, nodeType, username, password,
                 clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention));
+    }
+
+    private void emitClusterCreated(String identifier) {
+        emitEvent(RedshiftEventCatalog.CLUSTER_CREATED, identifier, "Amazon Redshift cluster '" + identifier
+                + "' has been created at " + eventTime() + " and is ready for use.");
     }
 
     private Cluster createClusterLocked(String identifier, String nodeType, String username, String password,
@@ -397,8 +413,6 @@ public class RedshiftService implements ManagedSecretRotator {
 
         clusters.put(identifier, cluster);
         clusters.flush();
-        emitEvent(RedshiftEventCatalog.CLUSTER_CREATED, identifier, "Amazon Redshift cluster '" + identifier
-                + "' has been created at " + eventTime() + " and is ready for use.");
         return cluster;
     }
 
@@ -434,13 +448,15 @@ public class RedshiftService implements ManagedSecretRotator {
             String kmsKeyId, String region, String defaultIamRoleArn, Integer automatedRetention) {
         requireSecretsManager();
         String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
-        Cluster cluster = createCluster(identifier, nodeType, username, password,
+        Cluster cluster = createClusterWithoutEvent(identifier, nodeType, username, password,
                 clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention);
         if (region != null) {
             cluster.setSnapshotRegion(region);
         }
         try {
-            return createManagedMasterSecret(cluster, kmsKeyId, region);
+            Cluster created = createManagedMasterSecret(cluster, kmsKeyId, region);
+            emitClusterCreated(identifier);
+            return created;
         } catch (RuntimeException e) {
             rollbackManagedMasterPasswordCluster(cluster);
             throw e;

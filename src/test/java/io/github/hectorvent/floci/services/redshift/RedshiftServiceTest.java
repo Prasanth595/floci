@@ -689,6 +689,41 @@ class RedshiftServiceTest {
         verifyNoInteractions(events);
     }
 
+    @Test
+    void managedPasswordClusterRecordsCreationOnlyAfterTheSecretExists() {
+        when(cm.start(eq("111111111111"), eq("event-managed"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "event-managed", "localhost", 5432));
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:event-managed");
+        secret.setCurrentVersionId("version-1");
+        when(secretsManagerService.createSecret(eq("redshift/event-managed"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1"))).thenReturn(secret);
+
+        service.createClusterWithManagedMasterPassword("event-managed", "dc2.large", "admin", null,
+                List.of(), List.of(), null, "us-east-1");
+
+        InOrder recorded = inOrder(secretsManagerService, events);
+        recorded.verify(secretsManagerService).createSecret(eq("redshift/event-managed"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1"));
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_CREATED), eq("event-managed"), anyString());
+        recorded.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void managedPasswordClusterRolledBackAfterSecretFailureRecordsNoEvents() {
+        when(cm.start(eq("111111111111"), eq("event-failed"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "event-failed", "localhost", 5432));
+        when(secretsManagerService.createSecret(eq("redshift/event-failed"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1")))
+                .thenThrow(new AwsException("InternalFailure", "secret store unavailable", 500));
+
+        assertThrows(AwsException.class, () -> service.createClusterWithManagedMasterPassword(
+                "event-failed", "dc2.large", "admin", null, List.of(), List.of(), null, "us-east-1"));
+
+        verify(clusterBackend).delete("event-failed");
+        verifyNoInteractions(events);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void snapshotEventsReportStartAndTheActualOutcome(boolean fails) {
