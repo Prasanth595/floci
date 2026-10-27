@@ -44,8 +44,8 @@ public class RedshiftEventSubscriptionCfnProvisioner implements CfnResourceProvi
         }
         String topic = ctx.resolveOptional(props, "SnsTopicArn");
         String type = ctx.resolveOptional(props, "SourceType");
-        List<String> ids = strings(props, "SourceIds", ctx);
-        List<String> categories = strings(props, "EventCategories", ctx);
+        List<String> ids = ctx.resolveStringList(props, "SourceIds");
+        List<String> categories = ctx.resolveStringList(props, "EventCategories");
         String severity = ctx.resolveOptional(props, "Severity");
         String enabledValue = ctx.resolveOptional(props, "Enabled");
         Boolean enabled = enabledValue == null ? true : Boolean.valueOf(enabledValue);
@@ -159,22 +159,4 @@ public class RedshiftEventSubscriptionCfnProvisioner implements CfnResourceProvi
         return array;
     }
 
-    private static List<String> strings(JsonNode props, String name, ProvisionContext ctx) {
-        JsonNode value = props == null ? null : props.get(name);
-        if (value == null || value.isNull()) {
-            return List.of();
-        }
-        JsonNode resolved = ctx.engine().resolveNode(value);
-        if (resolved == null || resolved.isNull()) {
-            return List.of();
-        }
-        if (!resolved.isArray()) {
-            throw new AwsException("ValidationError", name + " must be a list.", 400);
-        }
-        List<String> values = new ArrayList<>();
-        for (JsonNode member : resolved) {
-            values.add(ctx.engine().resolve(member));
-        }
-        return values;
-    }
 }

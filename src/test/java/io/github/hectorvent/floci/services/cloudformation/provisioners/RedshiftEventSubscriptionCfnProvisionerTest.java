@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.redshift.model.EventSubscription;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -159,6 +160,12 @@ class RedshiftEventSubscriptionCfnProvisionerTest {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(invocation -> invocation.getArgument(0, JsonNode.class).asText());
         when(engine.resolveNode(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(engine.resolveStringList(any())).thenAnswer(invocation -> {
+            List<String> values = new ArrayList<>();
+            JsonNode array = invocation.getArgument(0);
+            array.forEach(value -> values.add(value.asText()));
+            return values;
+        });
         return new ProvisionContext(engine, "us-east-1", "000000000000", "event-stack", prior);
     }
 

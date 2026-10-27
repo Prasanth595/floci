@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
@@ -15,6 +17,7 @@ import software.amazon.awssdk.services.redshift.model.RedshiftException;
 
 import java.net.URI;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -29,6 +32,50 @@ class RedshiftEventSubscriptionCfnIntegrationTest {
 
     @TestHTTPResource
     URI endpoint;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CommaDelimitedList", "List<String>"})
+    void listParametersPopulateSubscriptionFilters(String parameterType) {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stack = "redshift-list-parameters-" + suffix;
+        String name = "redshift-list-watcher-" + suffix;
+        String group = "redshift-list-group-" + suffix;
+        String body = template(name, true, true)
+                .replace("\"Resources\": {", """
+                        "Parameters": {
+                          "Categories": {"Type":"%s"},
+                          "Sources": {"Type":"%s"}
+                        },
+                        "Resources": {
+                        """.formatted(parameterType, parameterType))
+                .replace("\"SourceType\":\"cluster\"",
+                        "\"SourceType\":\"cluster-parameter-group\",\"SourceIds\":{\"Ref\":\"Sources\"}")
+                .replace("\"EventCategories\":[\"management\"]", "\"EventCategories\":{\"Ref\":\"Categories\"}");
+        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
+        try (CloudFormationClient cfn = CloudFormationClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .credentialsProvider(credentials).build();
+                RedshiftClient redshift = RedshiftClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                        .credentialsProvider(credentials).build()) {
+            redshift.createClusterParameterGroup(request -> request.parameterGroupName(group)
+                    .parameterGroupFamily("redshift-1.0").description("list parameter source"));
+            try {
+                cfn.createStack(request -> request.stackName(stack).templateBody(body).parameters(
+                        parameter -> parameter.parameterKey("Categories").parameterValue("configuration,management"),
+                        parameter -> parameter.parameterKey("Sources").parameterValue(group)));
+                try {
+                    assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, AUTH).status());
+                    EventSubscription created = subscription(redshift, name);
+                    assertEquals(List.of("configuration", "management"), created.eventCategoriesList());
+                    assertEquals(List.of(group), created.sourceIdsList());
+                } finally {
+                    cfn.deleteStack(request -> request.stackName(stack));
+                    CfnStackWaits.awaitStackDeleted(stack);
+                }
+            } finally {
+                redshift.deleteClusterParameterGroup(request -> request.parameterGroupName(group));
+            }
+        }
+    }
 
     @Test
     void rollbackRestoresSubscriptionWhoseSourceWasDeletedAfterCreation() {
