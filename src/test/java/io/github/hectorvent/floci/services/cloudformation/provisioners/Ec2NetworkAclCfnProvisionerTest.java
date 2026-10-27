@@ -39,6 +39,7 @@ class Ec2NetworkAclCfnProvisionerTest {
     private ProvisionContext ctx() {
         // The engine is a collaborator; scalars resolve to their text and {"Ref": "X"} nodes
         // resolve to "resolved-X", enough to prove every property goes through the engine.
+        // {"Ref": "AWS::NoValue"} resolves to "", as it does in the real engine.
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
@@ -46,7 +47,8 @@ class Ec2NetworkAclCfnProvisionerTest {
                 return null;
             }
             if (node.isObject() && node.has("Ref")) {
-                return "resolved-" + node.get("Ref").asText();
+                String ref = node.get("Ref").asText();
+                return "AWS::NoValue".equals(ref) ? "" : "resolved-" + ref;
             }
             return node.asText();
         });
@@ -169,6 +171,26 @@ class Ec2NetworkAclCfnProvisionerTest {
 
         verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 110, "1", "allow", false,
                 "0.0.0.0/0", null, 8, -1, null, null, true);
+    }
+
+    @Test
+    void aclEntryOmitsIcmpTypeAndCodeThatResolveToNoValue() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("RuleNumber", 120)
+                .put("Protocol", "1")
+                .put("RuleAction", "allow")
+                .put("CidrBlock", "0.0.0.0/0");
+        ObjectNode icmp = mapper.createObjectNode();
+        icmp.set("Type", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        icmp.set("Code", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        props.set("Icmp", icmp);
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 120, "1", "allow", false,
+                "0.0.0.0/0", null, null, null, null, null, true);
     }
 
     /**
