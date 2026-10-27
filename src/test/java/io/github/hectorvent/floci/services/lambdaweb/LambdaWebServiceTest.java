@@ -50,8 +50,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class LambdaWebServiceTest {
@@ -65,7 +63,6 @@ class LambdaWebServiceTest {
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
     private final ServiceCallAuthorizer serviceCalls = mock(ServiceCallAuthorizer.class);
     private final LambdaMicrovmsService microvms = new LambdaMicrovmsService(new RegionResolver(REGION, ACCOUNT_ID), null);
-    private final LambdaWebConnectorPass connectorPass = mock(LambdaWebConnectorPass.class);
 
     @TempDir
     Path storageDir;
@@ -92,7 +89,7 @@ class LambdaWebServiceTest {
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config,
                 s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null, executionRole, serviceCalls,
-                microvms, connectorPass);
+                microvms);
         service.initializeStorage();
         return service;
     }
@@ -401,28 +398,6 @@ class LambdaWebServiceTest {
     }
 
     @Test
-    void passNetworkConnectorIsCheckedOnceTheConnectorArnPassesItsOwnChecks() {
-        LambdaWebService service = service();
-        String connector = "arn:aws:lambda:us-east-1:000000000000:network-connector:nc-1:";
-        doThrow(new LambdaWebAccessDeniedException("not passable"))
-                .when(connectorPass).require(REGION, ACCOUNT_ID, "unknown", connector + "1");
-
-        ObjectNode reserved = revisionConfig(ROLE, connector + "1");
-        ((ObjectNode) reserved.get("serviceConfig")).putObject("environmentVariables").put("AWS_REGION", "x");
-        assertEquals("not passable", message(() -> service.createRevision(REGION, "missing", reserved)));
-        assertEquals("not passable", message(() -> service.createFunction(REGION, perRegionFunction(connector + "1"))));
-
-        assertEquals("The egress network connector ARN: '" + connector + "0' is not valid."
-                        + " Invalid network connector version format - must be numeric: 0",
-                message(() -> service.createRevision(REGION, "missing", revisionConfig(ROLE, connector + "0"))));
-        String otherAccount = connector.replace("000000000000", "111111111111") + "1";
-        assertEquals("Cross-account pass lambda-network-connector is not allowed.",
-                message(() -> service.createRevision(REGION, "missing", revisionConfig(ROLE, otherAccount))));
-        verify(connectorPass, never()).require(REGION, ACCOUNT_ID, "unknown", connector + "0");
-        verify(connectorPass, never()).require(REGION, ACCOUNT_ID, "unknown", otherAccount);
-    }
-
-    @Test
     void aRevisionNamesAWebFunctionConnectorVersionByItsId() {
         LambdaWebService service = service();
         service.createFunction(REGION, createRequest("app"));
@@ -455,7 +430,11 @@ class LambdaWebServiceTest {
     void onlyHomeRegionEndpointsServeARevisionWithAConnector() {
         LambdaWebService service = service();
         String connectorArn = connector("web", "WebFunction").arn + ":1";
-        ObjectNode perRegion = perRegionFunction(connectorArn);
+        ObjectNode perRegion = createRequest("app");
+        perRegion.set("revisionConfig", revisionConfig(ROLE, connectorArn));
+        perRegion.set("endpointConfig", mapper.createObjectNode().put("endpointName", "dev")
+                .put("endpointType", "PerRegion").put("authType", "ApplicationManaged"));
+        ((ObjectNode) perRegion.get("endpointConfig")).putArray("regions").add("us-west-2");
         String refused = "The endpointType PerRegion cannot be used with a revision that has an"
                 + " egressNetworkConnectorArn specified. Only the endpointType HomeRegion supports such revisions.";
         assertEquals(refused, message(() -> service.createFunction(REGION, perRegion)));
@@ -488,15 +467,6 @@ class LambdaWebServiceTest {
         assertEquals(notServed.replace("PerRegion", "MultiRegion"),
                 message(() -> service.updateEndpoint(REGION, "app", "mr", update)));
         assertEquals(plain, service.getEndpoint(REGION, "app", "pr").revisionWeights.get(0).revisionId);
-    }
-
-    private ObjectNode perRegionFunction(String connectorArn) {
-        ObjectNode request = createRequest("app");
-        request.set("revisionConfig", revisionConfig(ROLE, connectorArn));
-        request.set("endpointConfig", mapper.createObjectNode().put("endpointName", "dev")
-                .put("endpointType", "PerRegion").put("authType", "ApplicationManaged"));
-        ((ObjectNode) request.get("endpointConfig")).putArray("regions").add("us-west-2");
-        return request;
     }
 
     private ObjectNode weighted(String name, String endpointType, String... revisionIds) {

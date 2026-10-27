@@ -1,9 +1,10 @@
 name: IAM Data Drift
 
-# Checks the six vendored files that come from AWS's live service reference rather than from a
+# Checks the seven vendored files that come from AWS's live service reference rather than from a
 # pinned dependency: the IAM service namespace list, the map of which resource each IAM action is
 # authorized against, the map of operations AWS authorizes as an action of another name, the
 # table of the operations that pass a role and the services they pass it to, the table of the
+# operations that pass a Lambda network connector, the table of the
 # tagging actions operations that tag what they create need, and the table of the resources each
 # operation's request names. That
 # needs the live service reference index, so unlike every other check here it can
@@ -45,6 +46,9 @@ on:
       - 'src/main/resources/aws/iam-passed-roles.json'
       - 'tools/aws/regen_iam_passed_roles.py'
       - 'tools/aws/test_regen_iam_passed_roles.py'
+      - 'src/main/resources/aws/iam-passed-network-connectors.json'
+      - 'tools/aws/regen_iam_passed_network_connectors.py'
+      - 'tools/aws/test_regen_iam_passed_network_connectors.py'
       - 'src/main/resources/aws/iam-tag-on-create.json'
       - 'tools/aws/regen_iam_tag_on_create.py'
       - 'tools/aws/test_regen_iam_tag_on_create.py'

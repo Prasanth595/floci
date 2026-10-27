@@ -71,7 +71,9 @@ PREFIX ?= $(HOME)/.local
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
         cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
         iam-authorized-actions-verify iam-authorized-actions-test iam-passed-roles-sync iam-passed-roles-check \
-        iam-passed-roles-verify iam-passed-roles-test iam-tag-on-create-sync iam-tag-on-create-check \
+        iam-passed-roles-verify iam-passed-roles-test iam-passed-network-connectors-sync \
+        iam-passed-network-connectors-check iam-passed-network-connectors-verify \
+        iam-passed-network-connectors-test iam-tag-on-create-sync iam-tag-on-create-check \
         iam-tag-on-create-verify iam-tag-on-create-test iam-request-resources-sync iam-request-resources-check \
         iam-request-resources-verify iam-request-resources-test iam-data-verify
 
@@ -339,6 +341,7 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 		exit 1; \
 	}
 	@$(MAKE) --no-print-directory iam-passed-roles-check
+	@$(MAKE) --no-print-directory iam-passed-network-connectors-check
 	@$(MAKE) --no-print-directory iam-tag-on-create-check
 	@$(MAKE) --no-print-directory iam-request-resources-check
 
@@ -411,6 +414,9 @@ IAM_AUTHORIZED_ACTIONS_PATHS := src/main/resources/aws/iam-authorized-actions.js
 	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py
 IAM_PASSED_ROLES_PATHS := src/main/resources/aws/iam-passed-roles.json $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_passed_roles.py
+IAM_PASSED_NETWORK_CONNECTORS_PATHS := src/main/resources/aws/iam-passed-network-connectors.json \
+	tools/aws/regen_iam_passed_network_connectors.py $(IAM_PASSED_ROLES_GENERATOR) \
+	tools/aws/test_regen_iam_passed_network_connectors.py
 IAM_TAG_ON_CREATE_PATHS := src/main/resources/aws/iam-tag-on-create.json tools/aws/regen_iam_tag_on_create.py \
 	$(IAM_PASSED_ROLES_GENERATOR) tools/aws/test_regen_iam_tag_on_create.py
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
@@ -421,7 +427,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; passed=0; tagged=0; requested=0; \
+	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; \
 	covers() { \
 		[ -z "$(strip $(CHANGED))" ] && return 0; \
 		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
@@ -440,6 +446,9 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	if covers "$(IAM_PASSED_ROLES_PATHS)" "the table of the roles operations pass"; then \
 		$(MAKE) --no-print-directory iam-passed-roles-verify || passed=$$?; \
 	fi; \
+	if covers "$(IAM_PASSED_NETWORK_CONNECTORS_PATHS)" "the table of the network connectors operations pass"; then \
+		$(MAKE) --no-print-directory iam-passed-network-connectors-verify || connectors=$$?; \
+	fi; \
 	if covers "$(IAM_TAG_ON_CREATE_PATHS)" "the table of the tagging actions creates need"; then \
 		$(MAKE) --no-print-directory iam-tag-on-create-verify || tagged=$$?; \
 	fi; \
@@ -447,7 +456,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		$(MAKE) --no-print-directory iam-request-resources-verify || requested=$$?; \
 	fi; \
 	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
-			|| [ $$tagged -ne 0 ] || [ $$requested -ne 0 ]; then \
+			|| [ $$connectors -ne 0 ] || [ $$tagged -ne 0 ] || [ $$requested -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -461,6 +470,9 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		fi; \
 		if [ $$passed -ne 0 ]; then \
 			echo "       the table of the roles operations pass, see its message above"; \
+		fi; \
+		if [ $$connectors -ne 0 ]; then \
+			echo "       the table of the network connectors operations pass, see its message above"; \
 		fi; \
 		if [ $$tagged -ne 0 ]; then \
 			echo "       the table of the tagging actions creates need, see its message above"; \
@@ -528,6 +540,33 @@ iam-passed-roles-verify: ## CI gate (online): every vendored operation must stil
 
 iam-passed-roles-test: ## Run the IAM passed role generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_iam_passed_roles.py -q
+
+iam-passed-network-connectors-sync: ## Regenerate src/main/resources/aws/iam-passed-network-connectors.json from AWS and botocore (commit the result)
+	$(PYTHON) tools/aws/regen_iam_passed_network_connectors.py
+
+iam-passed-network-connectors-check: ## CI gate (offline): every vendored connector member must be what the pinned botocore gives
+	@$(PYTHON) tools/aws/regen_iam_passed_network_connectors.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-passed-network-connectors.json is malformed or out of date."; \
+		echo "       Run 'make iam-passed-network-connectors-sync' and commit the result."; \
+		exit 1; \
+	}
+
+iam-passed-network-connectors-verify: ## CI gate (online): every vendored operation must still pass a connector as AWS says
+	@$(PYTHON) tools/aws/regen_iam_passed_network_connectors.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored table reads a connector from an operation AWS does not check it for."; \
+		echo "       Run 'make iam-passed-network-connectors-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+iam-passed-network-connectors-test: ## Run the IAM passed network connector generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_iam_passed_network_connectors.py -q
 
 iam-tag-on-create-sync: ## Regenerate src/main/resources/aws/iam-tag-on-create.json from AWS and botocore (commit the result)
 	$(PYTHON) tools/aws/regen_iam_tag_on_create.py

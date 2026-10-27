@@ -1803,6 +1803,26 @@ when the caller may not pass the role.
   REST services whose routes no rule maps yet, and API Gateway, which is authorized by HTTP method,
   are not read either.
 
+A request that names a Lambda network connector also needs `lambda:PassNetworkConnector` on it. The
+Lambda developer guide has "The caller must have `lambda:PassNetworkConnector` on the referenced
+connector whenever a `create-web-function` or `create-web-function-revision` call sets
+`egressNetworkConnectorArn`." Every operation the Service Reference lists with the action is checked
+from a table generated the same way, `src/main/resources/aws/iam-passed-network-connectors.json`: a
+Web Function's `egressNetworkConnectorArn`, and the `egressNetworkConnectors` of a MicroVM image and a
+MicroVM and the `ingressNetworkConnectors` of a MicroVM. Each connector is checked as the request
+names it, the egress ones before the ingress ones, after `iam:PassRole`, as on AWS. A MicroVM request
+that names no egress connector, or an empty list, is checked on the Lambda-managed connector
+`arn:aws:lambda:<Region>:aws:network-connector:aws-network-connector:INTERNET_EGRESS`, and a
+`RunMicrovm` with no ingress connector on `aws-network-connector:HTTP_INGRESS`, as on AWS. A refusal
+is Lambda's `403 AccessDeniedException` with `{"Message":"User: <caller> is not authorized to
+perform: lambda:PassNetworkConnector on resource: <connector> <reason>"}`. The reason names the first
+policy type that refuses, in the order service control policies, identity policies, permissions
+boundary, session policy, by its explicit deny or by the allow it lacks, and an explicit deny in a
+managed policy or a boundary also names that policy's ARN. The check runs before the request reaches
+Lambda, so it comes before Lambda's own checks of the connector ARN, which AWS runs first. AppSync's
+`CreateDataSource` and `UpdateDataSource` are listed too, but botocore's model has no member for their
+connector, so they are not read.
+
 A request that tags the resource it creates also needs the service's tagging action. The SNS API
 reference has "To be able to tag a topic on creation, you must have the sns:CreateTopic and
 sns:TagResource permissions.", and the EC2 user guide "If tags are specified in the resource-creating

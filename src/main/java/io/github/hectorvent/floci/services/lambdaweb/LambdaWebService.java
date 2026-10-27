@@ -151,7 +151,6 @@ public class LambdaWebService implements Resettable {
     private final LambdaWebExecutionRole executionRole;
     private final ServiceCallAuthorizer serviceCalls;
     private final LambdaMicrovmsService microvmsService;
-    private final LambdaWebConnectorPass connectorPass;
 
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
@@ -165,8 +164,7 @@ public class LambdaWebService implements Resettable {
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
                             S3Service s3Service, LambdaWebCode code, ObjectMapper objectMapper,
                             Instance<RequestContext> requestContext, LambdaWebExecutionRole executionRole,
-                            ServiceCallAuthorizer serviceCalls, LambdaMicrovmsService microvmsService,
-                            LambdaWebConnectorPass connectorPass) {
+                            ServiceCallAuthorizer serviceCalls, LambdaMicrovmsService microvmsService) {
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
         this.config = config;
@@ -177,7 +175,6 @@ public class LambdaWebService implements Resettable {
         this.executionRole = executionRole;
         this.serviceCalls = serviceCalls;
         this.microvmsService = microvmsService;
-        this.connectorPass = connectorPass;
     }
 
     @PostConstruct
@@ -595,7 +592,6 @@ public class LambdaWebService implements Resettable {
             if (!AwsArnUtils.parse(connectorArn).accountId().equals(regionResolver.getAccountId())) {
                 throw new LambdaWebAccessDeniedException("Cross-account pass lambda-network-connector is not allowed.");
             }
-            connectorPass.require(region, regionResolver.getAccountId(), accessKeyId(), connectorArn);
         }
         Map<String, String> environment = LambdaWebJson.stringMap(service, "environmentVariables", false);
         if (environment != null) {
