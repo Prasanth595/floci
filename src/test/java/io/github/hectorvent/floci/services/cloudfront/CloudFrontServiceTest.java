@@ -1596,6 +1596,39 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void listCachePolicies_badType_rejectsWithCachePolicyMessage() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        AwsException error = assertAws("InvalidArgument",
+                () -> service.listCachePolicies(null, 100, "unsupported"));
+
+        assertEquals("Cache policy Type must be managed or custom.", error.getMessage());
+    }
+
+    @Test
+    void listOriginRequestPolicies_badType_rejectsWithOriginRequestPolicyMessage() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        AwsException error = assertAws("InvalidArgument",
+                () -> service.listOriginRequestPolicies(null, 100, "unsupported"));
+
+        assertEquals("Origin request policy Type must be managed or custom.", error.getMessage());
+    }
+
+    @Test
+    void listResponseHeadersPolicies_badTypeAndUnknownMarker_rejectWithOwnMessages() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        AwsException badType = assertAws("InvalidArgument",
+                () -> service.listResponseHeadersPolicies(null, 100, "unsupported"));
+        AwsException badMarker = assertAws("InvalidArgument",
+                () -> service.listResponseHeadersPolicies("missing-marker", 100, null));
+
+        assertEquals("Response headers policy Type must be managed or custom.", badType.getMessage());
+        assertEquals("The specified marker is invalid.", badMarker.getMessage());
+    }
+
+    @Test
     void refusesToUpdateOrDeleteAManagedCachePolicy() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
         CachePolicy managed = service.getCachePolicy("658327ea-f89d-4fab-a63d-7e88639e58f6");

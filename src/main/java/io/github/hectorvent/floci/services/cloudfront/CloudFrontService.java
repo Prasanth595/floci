@@ -39,6 +39,7 @@ import java.net.URI;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -113,6 +114,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final Map<String, OriginRequestPolicy> MANAGED_ORIGIN_REQUEST_POLICIES =
             managedOriginRequestPolicies();
     private static final Map<String, CachePolicy> MANAGED_CACHE_POLICIES = managedCachePolicies();
+    private static final String MANAGED_POLICY_ETAG = "E23ZP02F085DFQ";
 
     private final StorageBackend<String, Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
@@ -725,19 +727,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
      * lowercase {@code managed} or {@code custom} value.
      */
     public List<CachePolicy> listCachePolicies(String marker, int maxItems, String type) {
-        if (type != null && !"custom".equals(type) && !"managed".equals(type)) {
-            throw new AwsException("InvalidArgument",
-                    "Cache policy Type must be managed or custom.", 400);
-        }
-        List<CachePolicy> all = new ArrayList<>();
-        if (!"managed".equals(type)) {
-            all.addAll(cachePolicyStore.scan(k -> true));
-        }
-        if (!"custom".equals(type)) {
-            all.addAll(MANAGED_CACHE_POLICIES.values());
-        }
-        all.sort((a, b) -> a.getName() != null && b.getName() != null
-                ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
+        List<CachePolicy> all = mergeCustomAndManaged(type, "Cache policy",
+                cachePolicyStore.scan(k -> true), MANAGED_CACHE_POLICIES.values(),
+                CachePolicy::getName, CachePolicy::getId);
         return paginate(all, marker, maxItems, CachePolicy::getId);
     }
 
@@ -807,19 +799,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
      * AWS lowercase {@code managed} or {@code custom} value.
      */
     public List<OriginRequestPolicy> listOriginRequestPolicies(String marker, int maxItems, String type) {
-        if (type != null && !"custom".equals(type) && !"managed".equals(type)) {
-            throw new AwsException("InvalidArgument",
-                    "Origin request policy Type must be managed or custom.", 400);
-        }
-        List<OriginRequestPolicy> all = new ArrayList<>();
-        if (!"managed".equals(type)) {
-            all.addAll(orpStore.scan(k -> true));
-        }
-        if (!"custom".equals(type)) {
-            all.addAll(MANAGED_ORIGIN_REQUEST_POLICIES.values());
-        }
-        all.sort((a, b) -> a.getName() != null && b.getName() != null
-                ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
+        List<OriginRequestPolicy> all = mergeCustomAndManaged(type, "Origin request policy",
+                orpStore.scan(k -> true), MANAGED_ORIGIN_REQUEST_POLICIES.values(),
+                OriginRequestPolicy::getName, OriginRequestPolicy::getId);
         return paginate(all, marker, maxItems, OriginRequestPolicy::getId);
     }
 
@@ -887,22 +869,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public List<ResponseHeadersPolicy> listResponseHeadersPolicies(
             String marker, int maxItems, String type) {
-        String normalizedType = type;
-        if (normalizedType != null
-                && !"custom".equals(normalizedType)
-                && !"managed".equals(normalizedType)) {
-            throw new AwsException("InvalidArgument",
-                    "Response headers policy Type must be managed or custom.", 400);
-        }
-        List<ResponseHeadersPolicy> all = new ArrayList<>();
-        if (!"managed".equals(normalizedType)) {
-            all.addAll(rhpStore.scan(k -> true));
-        }
-        if (!"custom".equals(normalizedType)) {
-            all.addAll(MANAGED_RESPONSE_HEADERS_POLICIES.values());
-        }
-        all.sort((a, b) -> a.getName() != null && b.getName() != null
-                ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
+        List<ResponseHeadersPolicy> all = mergeCustomAndManaged(type, "Response headers policy",
+                rhpStore.scan(k -> true), MANAGED_RESPONSE_HEADERS_POLICIES.values(),
+                ResponseHeadersPolicy::getName, ResponseHeadersPolicy::getId);
         if (marker != null && !marker.isEmpty()) {
             int idx = -1;
             for (int i = 0; i < all.size(); i++) {
@@ -1227,7 +1196,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         CachePolicy policy = new CachePolicy();
         policy.setId(id);
         policy.setName(name);
-        policy.setEtag("E23ZP02F085DFQ");
+        policy.setEtag(MANAGED_POLICY_ETAG);
         policy.setLastModifiedTime(Instant.EPOCH);
         policy.setConfig(Map.copyOf(config));
         policies.put(id, policy);
@@ -1244,7 +1213,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         policy.setId(id);
         policy.setName(name);
         policy.setComment(comment);
-        policy.setEtag("E23ZP02F085DFQ");
+        policy.setEtag(MANAGED_POLICY_ETAG);
         policy.setLastModifiedTime(Instant.EPOCH);
         policy.setConfig(Map.copyOf(config));
         return policy;
@@ -1267,7 +1236,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         policy.setId(id);
         policy.setName(name);
         policy.setComment(comment);
-        policy.setEtag("E23ZP02F085DFQ");
+        policy.setEtag(MANAGED_POLICY_ETAG);
         policy.setLastModifiedTime(Instant.EPOCH);
         policy.setConfig(config);
         return policy;
@@ -2409,6 +2378,27 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
         }
         return sb.toString();
+    }
+
+    private static <T> List<T> mergeCustomAndManaged(String type, String policyLabel,
+                                                     Collection<T> custom, Collection<T> managed,
+                                                     Function<T, String> nameFn,
+                                                     Function<T, String> idFn) {
+        if (type != null && !"custom".equals(type) && !"managed".equals(type)) {
+            throw new AwsException("InvalidArgument",
+                    policyLabel + " Type must be managed or custom.", 400);
+        }
+        List<T> all = new ArrayList<>();
+        if (!"managed".equals(type)) {
+            all.addAll(custom);
+        }
+        if (!"custom".equals(type)) {
+            all.addAll(managed);
+        }
+        all.sort((a, b) -> nameFn.apply(a) != null && nameFn.apply(b) != null
+                ? nameFn.apply(a).compareTo(nameFn.apply(b))
+                : idFn.apply(a).compareTo(idFn.apply(b)));
+        return all;
     }
 
     private <T> List<T> paginate(List<T> all, String marker, int maxItems,
