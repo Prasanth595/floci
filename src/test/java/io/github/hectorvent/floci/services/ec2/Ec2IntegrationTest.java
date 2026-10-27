@@ -5886,6 +5886,7 @@ class Ec2IntegrationTest {
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
     }
 
+    /** The type of the instance's root volume, ami-0abcdef1234567890's /dev/xvda; data devices also get volumes. */
     private String rootVolumeType(String instanceId) {
         return given()
             .formParam("Action", "DescribeVolumes")
@@ -5896,6 +5897,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .extract().path("DescribeVolumesResponse.volumeSet.item.volumeType");
+            .extract().path("DescribeVolumesResponse.volumeSet.item.find { it.attachmentSet.item.device == '/dev/xvda' }"
+                    + ".volumeType");
     }
 }
