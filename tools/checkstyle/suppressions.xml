@@ -229,7 +229,6 @@
     <suppress id="NoFqcn" files="/services/emrserverless/EmrServerlessIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/eventbridge/EventBridgeServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/eventbridge/EventBridgeService\.java$"/>
-    <suppress id="NoFqcn" files="/services/eventbridge/ReplayDispatcherTest\.java$"/>
     <suppress id="NoFqcn" files="/services/firehose/FirehoseCompressionDecoder\.java$"/>
     <suppress id="NoFqcn" files="/services/firehose/FirehoseDataFormatConversionTest\.java$"/>
     <suppress id="NoFqcn" files="/services/firehose/FirehoseJsonHandler\.java$"/>
@@ -312,7 +311,6 @@
     <suppress id="NoFqcn" files="/services/organizations/OrganizationsService\.java$"/>
     <suppress id="NoFqcn" files="/services/pipes/PipesKafkaRestClientTest\.java$"/>
     <suppress id="NoFqcn" files="/services/pipes/PipesPollerIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/pipes/PipesTargetInvokerTest\.java$"/>
     <suppress id="NoFqcn" files="/services/pricing/PricingService\.java$"/>
     <suppress id="NoFqcn" files="/services/rds/PausingStorageBackend\.java$"/>
     <suppress id="NoFqcn" files="/services/rds/RdsClusterEngineModeStorageEncryptedIntegrationTest\.java$"/>
