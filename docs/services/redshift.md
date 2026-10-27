@@ -260,6 +260,8 @@ first sweep. Cleanup after deleting a cluster runs on the next sweep.
 
 Floci publishes metrics for every `available` cluster to the `AWS/Redshift` CloudWatch namespace once a minute, each stamped with the minute that ended. The only dimension is `ClusterIdentifier`.
 
+Each minute is attempted at most once per publisher lifetime. After a pause, overdue ticks skip minutes already attempted instead of publishing duplicate samples. Failed writes are not retried within the same minute because they may already have stored some samples.
+
 | Metric | Unit | Value |
 | --- | --- | --- |
 | `HealthStatus` | `Count` | `1` while the cluster is `available` |

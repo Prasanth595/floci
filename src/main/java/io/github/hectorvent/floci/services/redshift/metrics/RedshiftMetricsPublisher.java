@@ -42,6 +42,7 @@ public class RedshiftMetricsPublisher {
     private final Iterable<RedshiftMetricCollector> collectors;
     private final boolean enabled;
     private final ScheduledExecutorService scheduler;
+    private long lastAttemptedMinute = Long.MIN_VALUE;
 
     @Inject
     public RedshiftMetricsPublisher(RedshiftService redshiftService, CloudWatchMetricsService metricsService,
@@ -93,7 +94,13 @@ public class RedshiftMetricsPublisher {
      * Nothing may escape: the scheduler stops for good after a tick throws. One cluster's failed
      * collection or write drops only that cluster's samples for the minute.
      */
-    void publish(Instant now) {
+    synchronized void publish(Instant now) {
+        long minute = endedMinute(now);
+        if (minute <= lastAttemptedMinute) {
+            return;
+        }
+        // Claim before writing: a failed tick may already have stored some samples.
+        lastAttemptedMinute = minute;
         List<RedshiftMetricTarget> targets;
         try {
             targets = redshiftService.availableMetricTargets();
@@ -101,7 +108,6 @@ public class RedshiftMetricsPublisher {
             LOG.warnv(e, "Listing Redshift clusters for AWS/Redshift metrics failed; this minute's samples are dropped");
             return;
         }
-        long minute = endedMinute(now);
         for (RedshiftMetricTarget target : targets) {
             try {
                 List<MetricDatum> datums = new ArrayList<>();

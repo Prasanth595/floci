@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -78,6 +79,50 @@ class RedshiftMetricsPublisherTest {
         assertEquals(1, written.getValue().size());
         assertEquals("HealthStatus", written.getValue().getFirst().getMetricName());
         assertEquals(endedMinute, written.getValue().getFirst().getTimestamp());
+    }
+
+    @Test
+    void overdueTicksPublishEachMinuteOnlyOnce() {
+        when(redshift.availableMetricTargets()).thenReturn(List.of(target("111111111111", "warehouse")));
+        RedshiftMetricsPublisher publisher = publisher((target, timestamp) -> List.of(sample("warehouse", timestamp)));
+
+        publisher.publish(Instant.parse("2026-10-27T12:04:01Z"));
+        publisher.publish(Instant.parse("2026-10-27T12:04:02Z"));
+        publisher.publish(Instant.parse("2026-10-27T12:04:20Z"));
+        publisher.publish(Instant.parse("2026-10-27T12:05:01Z"));
+
+        ArgumentCaptor<List<MetricDatum>> written = ArgumentCaptor.forClass(List.class);
+        verify(cloudWatch, times(2)).putMetricDataForAccount(eq("111111111111"), eq(NAMESPACE),
+                written.capture(), eq(REGION));
+        assertEquals(List.of(Instant.parse("2026-10-27T12:03:00Z").getEpochSecond(),
+                        Instant.parse("2026-10-27T12:04:00Z").getEpochSecond()),
+                written.getAllValues().stream().map(datums -> datums.getFirst().getTimestamp()).toList());
+        verify(redshift, times(2)).availableMetricTargets();
+    }
+
+    @Test
+    void clockMovingBackwardsDoesNotRepublishAnEarlierMinute() {
+        when(redshift.availableMetricTargets()).thenReturn(List.of(target("111111111111", "warehouse")));
+        RedshiftMetricsPublisher publisher = publisher((target, timestamp) -> List.of(sample("warehouse", timestamp)));
+
+        publisher.publish(Instant.parse("2026-10-27T12:04:01Z"));
+        publisher.publish(Instant.parse("2026-10-27T12:03:01Z"));
+        publisher.publish(Instant.parse("2026-10-27T12:04:01Z"));
+
+        verify(cloudWatch).putMetricDataForAccount(eq("111111111111"), eq(NAMESPACE), anyList(), eq(REGION));
+    }
+
+    @Test
+    void aFailedWriteIsNotRetriedWithinTheMinute() {
+        when(redshift.availableMetricTargets()).thenReturn(List.of(target("111111111111", "warehouse")));
+        doThrow(new IllegalStateException("write may have stored some samples")).when(cloudWatch)
+                .putMetricDataForAccount(anyString(), anyString(), anyList(), anyString());
+        RedshiftMetricsPublisher publisher = publisher((target, timestamp) -> List.of(sample("warehouse", timestamp)));
+
+        publisher.publish(Instant.parse("2026-10-27T12:04:01Z"));
+        publisher.publish(Instant.parse("2026-10-27T12:04:02Z"));
+
+        verify(cloudWatch).putMetricDataForAccount(eq("111111111111"), eq(NAMESPACE), anyList(), eq(REGION));
     }
 
     @Test
