@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
 import io.github.hectorvent.floci.services.lambda.durable.DurableWire;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObject;
@@ -342,8 +343,8 @@ public class LambdaService implements ResourceProvider {
                 if (!acceptable) {
                     throw new AwsException("AccessDeniedException",
                             "User is not authorized to perform: lambda:GetLayerVersion on resource: "
-                                    + arn + " because no resource-based policy allows the"
-                                    + " lambda:GetLayerVersion action", 403);
+                                    + arn + " " + PolicyType.RESOURCE_BASED_POLICY.noAllow("lambda:GetLayerVersion"),
+                            403);
                 }
                 LOG.warnv("Layer {0} belongs to another account; recorded on the function but its"
                         + " content will not be mounted at /opt", arn);

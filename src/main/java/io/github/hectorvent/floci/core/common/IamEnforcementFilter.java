@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.AccessDeniedMessages;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamAuthorizedActions;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
@@ -1192,7 +1193,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 String denyMessage = "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
                         + " is not authorized to perform: " + action
                         + " on resource: \"" + resource + "\""
-                        + " because no identity-based policy allows the " + action + " action";
+                        + " " + PolicyType.IDENTITY_BASED_POLICY.noAllow(action);
                 emitS3DenialIfApplicable(akid, operationAction, resource, ctx, region, denyMessage);
                 ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx, resource));
                 return true;
@@ -1480,7 +1481,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String denyMessage = "User: " + AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "user/" + akid)
                     + " is not authorized to perform: " + action
                     + " on resource: \"" + resource + "\""
-                    + " because no identity-based policy allows the " + action + " action";
+                    + " " + PolicyType.IDENTITY_BASED_POLICY.noAllow(action);
             if (deniedEvent != null) {
                 emitS3Denial(akid, deniedEvent.name(), resource, deniedEvent.region(), denyMessage);
             }
