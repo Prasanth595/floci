@@ -1725,6 +1725,13 @@ public interface EmulatorConfig {
     interface RedshiftServiceConfig {
         @WithDefault("true")
         boolean automatedSnapshotsEnabled();
+
+        /**
+         * Publish the AWS/Redshift CloudWatch metrics of every available cluster once a minute.
+         * Env: FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED
+         */
+        @WithDefault("true")
+        boolean cloudwatchMetricsEnabled();
         @WithDefault("60")
         long snapshotSweepIntervalSeconds();
         @WithDefault("true")

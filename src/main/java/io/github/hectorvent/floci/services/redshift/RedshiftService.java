@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.RedshiftEventCatalog.EventInfo;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
+import io.github.hectorvent.floci.services.redshift.metrics.RedshiftMetricTarget;
 import io.github.hectorvent.floci.services.redshift.model.AutomatedSnapshotState;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
@@ -785,6 +786,15 @@ public class RedshiftService implements ManagedSecretRotator {
             return List.of(cluster.get());
         }
         return clusters.scanForAccount(accountId, k -> true);
+    }
+
+    /** The available clusters of every account, for the AWS/Redshift metrics publisher. */
+    public List<RedshiftMetricTarget> availableMetricTargets() {
+        return clusters.scanAllAccountEntries(k -> true).stream()
+                .filter(entry -> "available".equals(entry.value().getClusterStatus()))
+                .map(entry -> new RedshiftMetricTarget(entry.accountId(), snapshotRegion(entry.value()),
+                        entry.value()))
+                .toList();
     }
 
     /** Internal deletion used by provisioner cleanup, which explicitly skips the final snapshot. */
