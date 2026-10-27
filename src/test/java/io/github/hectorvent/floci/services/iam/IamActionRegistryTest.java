@@ -22,7 +22,9 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.when;
@@ -622,6 +624,28 @@ class IamActionRegistryTest {
         // The data-plane object tagging the query names keeps its own action on its own path.
         assertEquals("s3:GetObjectTagging", s3Action("GET", "/bucket/key.txt", "tagging"));
         assertEquals("s3:GetObjectVersionTagging", s3Action("GET", "/bucket/key.txt", "tagging", "versionId=1"));
+    }
+
+    /**
+     * The envelope a denial answers in follows the route and not the action: a request the
+     * control controller serves is an S3 Control one however its query reads, and a data-plane
+     * request is not one, even one travelling under the control prefix, as into a bucket
+     * actually named v20180820.
+     */
+    @Test
+    void theControlRoutesDecideWhetherARequestIsAnS3ControlOne() {
+        assertTrue(IamActionRegistry.isS3ControlRequest("s3",
+                mockCtx("GET", "/v20180820/tags/arn:aws:s3:::repro-bucket",
+                        new MultivaluedHashMap<>(), null, "")));
+        assertTrue(IamActionRegistry.isS3ControlRequest("s3",
+                mockCtx("PUT", "/v20180820/configuration/publicAccessBlock",
+                        new MultivaluedHashMap<>(), null, "")));
+        assertFalse(IamActionRegistry.isS3ControlRequest("s3",
+                mockCtx("GET", "/v20180820/other/key.txt", new MultivaluedHashMap<>(), null, "")));
+        assertFalse(IamActionRegistry.isS3ControlRequest("s3",
+                mockCtx("GET", "/bucket/key.txt", new MultivaluedHashMap<>(), null, "")));
+        assertFalse(IamActionRegistry.isS3ControlRequest("lambda",
+                mockCtx("GET", "/2015-03-31/functions", new MultivaluedHashMap<>(), null, "")));
     }
 
     @Test

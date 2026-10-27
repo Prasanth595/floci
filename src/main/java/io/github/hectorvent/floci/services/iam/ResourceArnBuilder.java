@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
+import io.github.hectorvent.floci.services.s3.S3ControlArnUtils;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -829,11 +830,11 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The ARN an S3 Control tagging route names in its path, decoded as its handler decodes it:
-     * the Go SDK, and so Terraform's provider, percent-encodes the ARN's colons and slashes, so
-     * the path may still carry them. A path naming no ARN leaves the wildcard, which the handler
-     * answers {@code InvalidRequest} under, and nothing is rebuilt from the bucket it names: the
-     * ARN as the caller wrote it is the resource.
+     * The ARN an S3 Control tagging route names in its path, read with the one parse the handler
+     * and the policy lookup share: the Go SDK, and so Terraform's provider, percent-encodes the
+     * ARN's colons and slashes, so the path may still carry them. A path naming no ARN leaves
+     * the wildcard, which the handler answers {@code InvalidRequest} under, and nothing is
+     * rebuilt from the bucket it names: the ARN as the caller wrote it is the resource.
      */
     private static String taggedS3ControlArn(String path) {
         String tagged = path.startsWith(S3_CONTROL_TAGS_PREFIX)
@@ -842,8 +843,7 @@ public class ResourceArnBuilder {
             return "*";
         }
         try {
-            String decoded = URLDecoder.decode(tagged, StandardCharsets.UTF_8);
-            return AwsArnUtils.isArn(decoded) ? decoded : "*";
+            return S3ControlArnUtils.parse(tagged).map(AwsArnUtils.Arn::toString).orElse("*");
         } catch (IllegalArgumentException malformedEncoding) {
             return "*";
         }

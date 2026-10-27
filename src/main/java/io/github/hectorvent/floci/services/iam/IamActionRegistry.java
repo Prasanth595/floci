@@ -15,7 +15,6 @@ import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.util.List;
-import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -36,10 +35,12 @@ public class IamActionRegistry {
     /**
      * A route and the action it is checked as. A rule naming a query parameter matches only a request
      * carrying it with that value, as {@code GET /layers?find=LayerVersion} is GetLayerVersionByArn
-     * where {@code GET /layers} is ListLayers.
+     * where {@code GET /layers} is ListLayers. A rule flagged to match before the S3 query
+     * overrides is one of the S3 Control routes, which the control plane answers whatever its
+     * query string carries.
      */
     private record ActionRule(String service, String method, Pattern pathPattern, String queryParameter,
-                              String queryValue, String action) {
+                              String queryValue, String action, boolean beforeS3QueryOverrides) {
 
         boolean matches(String scope, String requestMethod, String path, ContainerRequestContext ctx) {
             return service.equals(scope) && method.equals(requestMethod) && pathPattern.matcher(path).find()
@@ -49,34 +50,35 @@ public class IamActionRegistry {
     }
 
     /**
-     * The S3 Control routes, matched before the data-plane query overrides and before the rule
-     * table: the control plane answers a tagging route whatever its query string carries, so a
-     * parameter such as {@code ?tagging} must not re-point the authorization at the data-plane
-     * object tagging it suggests, and the rules below would otherwise read {@code /v20180820/...}
-     * as a bucket named v20180820.
+     * The routes of the S3 Control model, checked as the actions the Service Reference gives
+     * them by {@code IamRestRouteCoverageTest}. S3 Control clients sign with the s3 scope
+     * (botocore's s3control model declares signingName "s3"), so its operations are
+     * {@code s3:} actions, and its routes must be matched before the S3 data-plane query
+     * overrides: the control plane answers a tagging route whatever its query string carries,
+     * so a parameter such as {@code ?tagging} must not re-point the authorization at the
+     * data-plane object tagging it suggests, and the data-plane rules below would otherwise
+     * read {@code /v20180820/...} as a bucket named v20180820.
      *
-     * <p>S3 Control clients sign with the s3 scope (botocore's s3control model declares
-     * signingName "s3") and its operations are s3: actions, per the Service Authorization
-     * Reference's Amazon S3 operations table and the S3 User Guide's account operations.
-     * ListTagsForResource, TagResource and UntagResource name the bucket or access point they
-     * act on; ListAccessPoints and the account-level Block Public Access configure the account,
-     * where the User Guide requires PutAccountPublicAccessBlock or GetAccountPublicAccessBlock
-     * (a delete needs the same action as the write it undoes).
+     * <p>The account-level Block Public Access is the one route the Service Reference cannot
+     * settle, because it files S3's and S3 Control's GetPublicAccessBlock, PutPublicAccessBlock
+     * and DeletePublicAccessBlock under the bucket actions; the S3 User Guide's Block Public
+     * Access page gives the account level its own actions, and the exception is written down
+     * where the data is checked. ListAccessPoints and the account actions have no resource
+     * type, so IAM checks them against the wildcard rather than a bucket.
      */
-    private static final List<ActionRule> S3_CONTROL_RULES = List.of(
-        rule("s3", "GET",    "^/v20180820/tags/.+",               "s3:ListTagsForResource"),
-        rule("s3", "POST",   "^/v20180820/tags/.+",               "s3:TagResource"),
-        rule("s3", "DELETE", "^/v20180820/tags/.+",               "s3:UntagResource"),
-        rule("s3", "GET",    "^/v20180820/accesspoint/?$",        "s3:ListAccessPoints"),
-        rule("s3", "PUT",    "^/v20180820/configuration/publicAccessBlock/?$",
-                "s3:PutAccountPublicAccessBlock"),
-        rule("s3", "GET",    "^/v20180820/configuration/publicAccessBlock/?$",
-                "s3:GetAccountPublicAccessBlock"),
-        rule("s3", "DELETE", "^/v20180820/configuration/publicAccessBlock/?$",
-                "s3:PutAccountPublicAccessBlock")
-    );
-
     private static final List<ActionRule> RULES = List.of(
+        // ── S3 Control ───────────────────────────────────────────────────────────
+        s3ControlRule("GET",    "^/v20180820/tags/.+",        "s3:ListTagsForResource"),
+        s3ControlRule("POST",   "^/v20180820/tags/.+",        "s3:TagResource"),
+        s3ControlRule("DELETE", "^/v20180820/tags/.+",        "s3:UntagResource"),
+        s3ControlRule("GET",    "^/v20180820/accesspoint/?$", "s3:ListAccessPoints"),
+        s3ControlRule("PUT",    "^/v20180820/configuration/publicAccessBlock/?$",
+                "s3:PutAccountPublicAccessBlock"),
+        s3ControlRule("GET",    "^/v20180820/configuration/publicAccessBlock/?$",
+                "s3:GetAccountPublicAccessBlock"),
+        s3ControlRule("DELETE", "^/v20180820/configuration/publicAccessBlock/?$",
+                "s3:PutAccountPublicAccessBlock"),
+
         // ── S3 ─────────────────────────────────────────────────────────────────
         rule("s3", "GET",    "^/?$",                              "s3:ListAllMyBuckets"),
         rule("s3", "PUT",    "^/[^/]+/?$",                       "s3:CreateBucket"),
@@ -544,27 +546,35 @@ public class IamActionRegistry {
     private static ActionRule rule(String service, String method, String path, String queryParameter,
                                    String queryValue, String action) {
         return new ActionRule(service, method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), queryParameter,
-                queryValue, action);
+                queryValue, action, false);
+    }
+
+    private static ActionRule s3ControlRule(String method, String path, String action) {
+        return new ActionRule("s3", method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), null, null,
+                action, true);
     }
 
     /**
-     * The actions the S3 Control routes under {@code /v20180820} resolve to, as the rules above
-     * map them. They are {@code s3:} actions, because S3 Control clients sign with the s3 scope
-     * and the Service Authorization Reference lists the operations under Amazon S3, but a
-     * request one of them names is S3 Control's, and answers it differently from the data plane:
-     * S3 Control errors wrap in an {@code <ErrorResponse>} envelope, where S3's are bare.
+     * Whether the request is one of the S3 Control routes, as the rules flag them. A denial then
+     * answers in S3 Control's own REST-XML envelope, the only one the s3control SDK
+     * deserializers read (issue #557), so the route decides the shape and not the action: the
+     * data plane resolves actions a control route never shares, and an action-name list would
+     * have to track every route to stay right. A request whose route cannot be read, which only
+     * a synthetic context is, is not a control one.
      */
-    static final Set<String> S3_CONTROL_ACTIONS = Set.of(
-            "s3:ListTagsForResource",
-            "s3:TagResource",
-            "s3:UntagResource",
-            "s3:ListAccessPoints",
-            "s3:PutAccountPublicAccessBlock",
-            "s3:GetAccountPublicAccessBlock");
-
-    /** Whether {@code action} is one of the actions an S3 Control route resolves to. */
-    public static boolean isS3ControlAction(String action) {
-        return action != null && S3_CONTROL_ACTIONS.contains(action);
+    public static boolean isS3ControlRequest(String credentialScope, ContainerRequestContext ctx) {
+        if (!"s3".equals(credentialScope) || ctx.getMethod() == null || ctx.getUriInfo() == null
+                || ctx.getUriInfo().getRequestUri() == null) {
+            return false;
+        }
+        String method = ctx.getMethod().toUpperCase();
+        String path = rawPath(ctx.getUriInfo());
+        for (ActionRule rule : RULES) {
+            if (rule.beforeS3QueryOverrides() && rule.matches(credentialScope, method, path, ctx)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -638,8 +648,8 @@ public class IamActionRegistry {
             // An S3 Control route is matched before the query overrides below, which would read the
             // query string of a route the control plane answers whatever it carries: ?tagging on a
             // tagging route is caller-supplied noise, not the object sub-resource it names.
-            for (ActionRule rule : S3_CONTROL_RULES) {
-                if (rule.matches(credentialScope, method, path, ctx)) {
+            for (ActionRule rule : RULES) {
+                if (rule.beforeS3QueryOverrides() && rule.matches(credentialScope, method, path, ctx)) {
                     return rule.action();
                 }
             }

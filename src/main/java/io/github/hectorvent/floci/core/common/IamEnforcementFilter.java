@@ -1735,6 +1735,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             // 403, the status the Kinesis and CloudWatch common errors give AccessDeniedException.
             return cborError(ctx, "AccessDeniedException", accessDeniedMessage(action), 403);
         }
+        // The route decides the envelope, not the resolved action: a request on an S3 Control
+        // route is S3 Control's however its action reads, and only its ErrorResponse wrapper
+        // reaches the s3control SDK deserializers (issue #557).
+        if (IamActionRegistry.isS3ControlRequest(credentialScope, ctx)) {
+            return s3ControlXmlAccessDenied(accessDeniedMessage(action));
+        }
         return accessDeniedResponse(action, credentialScope, ctx.getMediaType(), resourceArn, protocol);
     }
 
@@ -1746,9 +1752,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                          String resourceArn, WireProtocol protocol) {
         String message = accessDeniedMessage(action);
         if ("s3".equals(credentialScope)) {
-            if (IamActionRegistry.isS3ControlAction(action)) {
-                return s3ControlXmlAccessDenied(message);
-            }
             String resourcePath = formatS3ResourcePath(resourceArn);
             return s3XmlAccessDenied(message, resourcePath);
         }

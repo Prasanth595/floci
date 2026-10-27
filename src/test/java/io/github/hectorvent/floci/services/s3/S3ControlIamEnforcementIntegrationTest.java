@@ -15,6 +15,7 @@ import java.util.UUID;
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 
 /**
  * With {@code iam.enforcement-enabled=true}, S3 Control's routes are authorized as the {@code s3:}
@@ -40,6 +41,7 @@ class S3ControlIamEnforcementIntegrationTest {
     final PartitionCleanup cleanup = new PartitionCleanup();
 
     private static final String ACCOUNT = "000000000000";
+    private static final String OTHER_ACCOUNT = "222222222222";
     private static final String S3_CONTROL_ERROR_ENVELOPE =
             "<ErrorResponse xmlns=\"http://awss3control.amazonaws.com/doc/2018-08-20/\">";
 
@@ -389,26 +391,144 @@ class S3ControlIamEnforcementIntegrationTest {
                 .body(containsString("is not authorized to perform: s3:ListAccessPoints"));
     }
 
+    /**
+     * The regional form names the account whose bucket it acts on, so a grant on
+     * {@code arn:aws:s3:us-east-1:222222222222:bucket/<name>} authorizes a caller in another
+     * account, whom the bucket's own policy admits, to read and change the tags of
+     * 222222222222's bucket, and never of its own same-named one, which the plain bucket name
+     * would otherwise resolve to. The bucket's policy is found in the account the ARN names,
+     * the same bucket the read and the write act on.
+     */
+    @Test
+    void aRegionalArnActsOnTheBucketOfTheAccountItNames() {
+        String bucket = "control-cross-account-" + UUID.randomUUID().toString().substring(0, 8);
+        String regionalArn = "arn:aws:s3:us-east-1:" + OTHER_ACCOUNT + ":bucket/" + bucket;
+        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
+                auth(OTHER_ACCOUNT, "s3"), bucket));
+        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
+                auth("test", "s3"), bucket));
+        createBucketWithTag(bucket, "Team", "other", auth(OTHER_ACCOUNT, "s3"));
+        createBucketWithTag(bucket, "Team", "own", auth("test", "s3"));
+
+        String userName = "s3-control-cross-" + UUID.randomUUID().toString().substring(0, 8);
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(cleanup,
+                baseUri.getPort(), auth("test", "iam"), userName);
+        String userArn = "arn:aws:iam::" + ACCOUNT + ":user/" + userName;
+        String identityPolicy = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListTagsForResource","s3:TagResource"],
+                   "Resource":"%1$s"}]}"""
+                .formatted(regionalArn);
+        EnforcementFixtures.putUserPolicy(baseUri.getPort(), auth("test", "iam"), userName, "p",
+                identityPolicy);
+        String user = credentials.accessKeyId();
+
+        given()
+                .header("Authorization", auth(OTHER_ACCOUNT, "s3"))
+                .contentType("application/json")
+                .body("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Principal":{"AWS":"%1$s"},
+                           "Action":["s3:ListTagsForResource","s3:TagResource"],
+                           "Resource":"%2$s"}]}"""
+                        .formatted(userArn, regionalArn))
+        .when()
+                .put("/" + bucket + "?policy")
+        .then()
+                .statusCode(200);
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/" + regionalArn)
+        .then()
+                .statusCode(200)
+                .body(containsString("<Key>Team</Key>"))
+                .body(containsString("<Value>other</Value>"));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+                .contentType("application/xml")
+                .body("<Tagging><Tags><Tag><Key>Owner</Key><Value>team</Value></Tag></Tags></Tagging>")
+        .when()
+                .post("/v20180820/tags/" + regionalArn)
+        .then()
+                .statusCode(204);
+
+        given()
+                .header("Authorization", auth(OTHER_ACCOUNT, "s3"))
+        .when()
+                .get("/" + bucket + "?tagging")
+        .then()
+                .statusCode(200)
+                .body(containsString("<Key>Owner</Key>"))
+                .body(not(containsString("<Value>own</Value>")));
+
+        given()
+                .header("Authorization", auth("test", "s3"))
+        .when()
+                .get("/" + bucket + "?tagging")
+        .then()
+                .statusCode(200)
+                .body(containsString("<Value>own</Value>"))
+                .body(not(containsString("<Key>Owner</Key>")));
+    }
+
+    /**
+     * A tagging ARN naming a bucket its account does not own answers {@code NoSuchBucket}, not
+     * the tags of the caller's same-named bucket: the handler acts on the bucket the ARN names
+     * or on nothing.
+     */
+    @Test
+    void aRegionalArnNamingABucketItsAccountDoesNotOwnAnswersNoSuchBucket() {
+        String bucket = "control-absent-" + UUID.randomUUID().toString().substring(0, 8);
+        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
+                auth("test", "s3"), bucket));
+        createBucketWithTag(bucket, "Team", "own", auth("test", "s3"));
+
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListTagsForResource","Resource":"*"}]}""");
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+        .when()
+                .get("/v20180820/tags/arn:aws:s3:us-east-1:" + OTHER_ACCOUNT + ":bucket/" + bucket)
+        .then()
+                .statusCode(404)
+                .body(containsString(S3_CONTROL_ERROR_ENVELOPE))
+                .body(containsString("<Code>NoSuchBucket</Code>"));
+    }
+
     /** A bucket created by the root stand-in, tagged through the data plane, as Terraform reads it. */
     private String bucketWithTags(String prefix) {
         String bucket = prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
         cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
                 auth("test", "s3"), bucket));
+        createBucketWithTag(bucket, "Env", "dev", auth("test", "s3"));
+        return bucket;
+    }
+
+    /** A bucket carrying one tag, created and tagged through the data plane under {@code authorization}. */
+    private static void createBucketWithTag(String bucket, String key, String value, String authorization) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .header("Authorization", authorization)
         .when()
                 .put("/" + bucket)
         .then()
                 .statusCode(200);
         given()
-                .header("Authorization", auth("test", "s3"))
+                .header("Authorization", authorization)
                 .contentType("application/xml")
-                .body("<Tagging><TagSet><Tag><Key>Env</Key><Value>dev</Value></Tag></TagSet></Tagging>")
+                .body("<Tagging><TagSet><Tag><Key>" + key + "</Key><Value>" + value
+                        + "</Value></Tag></TagSet></Tagging>")
         .when()
                 .put("/" + bucket + "?tagging")
         .then()
                 .statusCode(204);
-        return bucket;
     }
 
     /** The access key of a new IAM user holding {@code policy} inline. */
