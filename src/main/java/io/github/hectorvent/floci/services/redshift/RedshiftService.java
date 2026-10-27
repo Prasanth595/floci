@@ -312,20 +312,14 @@ public class RedshiftService implements ManagedSecretRotator {
     public Cluster createCluster(String identifier, String nodeType, String username, String password,
                                  String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
                                  List<String> iamRoleArns, String defaultIamRoleArn, Integer automatedRetention) {
-        Cluster cluster = createClusterWithoutEvent(identifier, nodeType, username, password,
-                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention);
-        emitClusterCreated(identifier);
-        return cluster;
-    }
-
-    // Callers that still have setup to finish record the event themselves once it succeeds.
-    private Cluster createClusterWithoutEvent(String identifier, String nodeType, String username, String password,
-                                              String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
-                                              List<String> iamRoleArns, String defaultIamRoleArn,
-                                              Integer automatedRetention) {
         validateAutomatedRetention(nodeType, automatedRetention == null ? 1 : automatedRetention);
-        return mutateCluster(identifier, () -> createClusterLocked(identifier, nodeType, username, password,
-                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention));
+        // The event is recorded under the cluster lock so a queued delete or reboot cannot log first.
+        return mutateCluster(identifier, () -> {
+            Cluster cluster = createClusterLocked(identifier, nodeType, username, password,
+                    clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention);
+            emitClusterCreated(identifier);
+            return cluster;
+        });
     }
 
     private void emitClusterCreated(String identifier) {
@@ -448,7 +442,8 @@ public class RedshiftService implements ManagedSecretRotator {
             String kmsKeyId, String region, String defaultIamRoleArn, Integer automatedRetention) {
         requireSecretsManager();
         String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
-        Cluster cluster = createClusterWithoutEvent(identifier, nodeType, username, password,
+        // Runs under the cluster lock taken by the caller, which also covers the event recorded below.
+        Cluster cluster = createClusterLocked(identifier, nodeType, username, password,
                 clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention);
         if (region != null) {
             cluster.setSnapshotRegion(region);

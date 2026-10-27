@@ -667,6 +667,35 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void creationEventIsRecordedBeforeAQueuedClusterOperationCanRun() throws Exception {
+        when(cm.start(any(), any(), any(), any()))
+                .thenReturn(new RedshiftContainerHandle("container", "event-cluster", "localhost", 5432));
+        AtomicReference<Cluster> stored = new AtomicReference<>();
+        when(clusterBackend.get("event-cluster")).thenAnswer(invocation -> Optional.ofNullable(stored.get()));
+        doAnswer(invocation -> {
+            stored.set(invocation.getArgument(1));
+            return null;
+        }).when(clusterBackend).put(eq("event-cluster"), any(Cluster.class));
+        AtomicReference<Future<?>> queued = new AtomicReference<>();
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            doAnswer(invocation -> {
+                queued.set(executor.submit(() -> service.rebootCluster("event-cluster")));
+                assertThrows(TimeoutException.class, () -> queued.get().get(300, TimeUnit.MILLISECONDS),
+                        "A queued reboot ran before the creation event was recorded");
+                return null;
+            }).when(events).record(eq(RedshiftEventCatalog.CLUSTER_CREATED), eq("event-cluster"), anyString());
+
+            service.createCluster("event-cluster", "dc2.large", "admin", "password123");
+            queued.get().get(5, TimeUnit.SECONDS);
+        }
+
+        InOrder recorded = inOrder(events);
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_CREATED), eq("event-cluster"), anyString());
+        recorded.verify(events).record(eq(RedshiftEventCatalog.CLUSTER_REBOOTED), eq("event-cluster"), anyString());
+    }
+
+    @Test
     void failedClusterOperationsNeverRecordSuccessEvents() {
         when(cm.start(any(), any(), any(), any())).thenThrow(new RuntimeException("startup failed"));
         assertThrows(AwsException.class,
