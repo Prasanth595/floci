@@ -831,7 +831,7 @@ public class Route53Service implements Resettable {
 
     private Optional<String> resolveVpcOwnerAccount(VpcAssociation vpc) {
         if (vpc == null || ec2Service == null) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
         return ec2Service.findVpcOwnerAccount(vpc.getVpcRegion(), vpc.getVpcId());
     }

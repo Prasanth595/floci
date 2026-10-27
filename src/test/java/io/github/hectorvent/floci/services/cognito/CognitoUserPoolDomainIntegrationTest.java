@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -166,8 +167,8 @@ class CognitoUserPoolDomainIntegrationTest {
                 }
                 """.formatted(customDomain, poolId, CERTIFICATE_ARN));
 
-        org.junit.jupiter.api.Assertions.assertTrue(response.path("CloudFrontDomain").isTextual());
-        org.junit.jupiter.api.Assertions.assertFalse(response.path("CloudFrontDomain").asText().isBlank());
+        Assertions.assertTrue(response.path("CloudFrontDomain").isTextual());
+        Assertions.assertFalse(response.path("CloudFrontDomain").asText().isBlank());
     }
 
     @Test
@@ -184,7 +185,7 @@ class CognitoUserPoolDomainIntegrationTest {
         assertEquals(poolId, description.path("UserPoolId").asText());
         assertEquals(CERTIFICATE_ARN, description.path("CustomDomainConfig").path("CertificateArn").asText());
         assertEquals("ACTIVE", description.path("Status").asText());
-        org.junit.jupiter.api.Assertions.assertNotNull(description.path("CloudFrontDistribution").asText(null));
+        Assertions.assertNotNull(description.path("CloudFrontDistribution").asText(null));
 
         String secondPrefixDomain = prefixDomain + "-again";
         cognitoJson("CreateUserPoolDomain", """

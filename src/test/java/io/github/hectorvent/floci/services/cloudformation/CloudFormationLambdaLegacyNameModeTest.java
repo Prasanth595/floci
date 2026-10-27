@@ -148,7 +148,7 @@ class CloudFormationLambdaLegacyNameModeTest {
     /** Collects the messages LambdaCfnProvisioner logs while {@code action} runs. */
     private List<String> provisionerLogMessages(Runnable action) {
         Logger logger =
-                java.util.logging.Logger.getLogger(LambdaCfnProvisioner.class.getName());
+                Logger.getLogger(LambdaCfnProvisioner.class.getName());
         List<String> messages = new CopyOnWriteArrayList<>();
         Handler handler = new Handler() {
             @Override

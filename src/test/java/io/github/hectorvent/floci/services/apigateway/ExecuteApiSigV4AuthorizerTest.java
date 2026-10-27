@@ -14,6 +14,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
@@ -401,8 +403,8 @@ class ExecuteApiSigV4AuthorizerTest {
             for (String pair : rawQuery.split("&")) {
                 int equals = pair.indexOf('=');
                 queryParameters.add(equals >= 0 ? pair.substring(0, equals) : pair,
-                        equals >= 0 ? java.net.URLDecoder.decode(pair.substring(equals + 1),
-                                java.nio.charset.StandardCharsets.UTF_8) : "");
+                        equals >= 0 ? URLDecoder.decode(pair.substring(equals + 1),
+                                StandardCharsets.UTF_8) : "");
             }
         }
         when(uriInfo.getQueryParameters()).thenReturn(queryParameters);

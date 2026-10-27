@@ -87,7 +87,7 @@ class FirehoseTest {
     void putRecord() {
         PutRecordResponse response = firehose.putRecord(PutRecordRequest.builder()
                 .deliveryStreamName(STREAM_NAME)
-                .record(software.amazon.awssdk.services.firehose.model.Record.builder()
+                .record(Record.builder()
                         .data(SdkBytes.fromString("{\"event\":\"test\"}", StandardCharsets.UTF_8))
                         .build())
                 .build());
@@ -100,9 +100,9 @@ class FirehoseTest {
     @DisplayName("Put record batch")
     void putRecordBatch() {
         List<Record> records = List.of(
-                software.amazon.awssdk.services.firehose.model.Record.builder().data(SdkBytes.fromString("{\"i\":1}", StandardCharsets.UTF_8)).build(),
-                software.amazon.awssdk.services.firehose.model.Record.builder().data(SdkBytes.fromString("{\"i\":2}", StandardCharsets.UTF_8)).build(),
-                software.amazon.awssdk.services.firehose.model.Record.builder().data(SdkBytes.fromString("{\"i\":3}", StandardCharsets.UTF_8)).build()
+                Record.builder().data(SdkBytes.fromString("{\"i\":1}", StandardCharsets.UTF_8)).build(),
+                Record.builder().data(SdkBytes.fromString("{\"i\":2}", StandardCharsets.UTF_8)).build(),
+                Record.builder().data(SdkBytes.fromString("{\"i\":3}", StandardCharsets.UTF_8)).build()
         );
 
         PutRecordBatchResponse response = firehose.putRecordBatch(PutRecordBatchRequest.builder()

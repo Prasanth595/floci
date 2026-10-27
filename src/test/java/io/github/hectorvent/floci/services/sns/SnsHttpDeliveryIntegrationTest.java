@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static io.restassured.RestAssured.given;
@@ -34,7 +35,7 @@ class SnsHttpDeliveryIntegrationTest {
     private static final List<ReceivedRequest> receivedRequests = new CopyOnWriteArrayList<>();
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final Logger LOG =
-            java.util.logging.Logger.getLogger(SnsHttpDeliveryIntegrationTest.class.getName());
+            Logger.getLogger(SnsHttpDeliveryIntegrationTest.class.getName());
     record ReceivedRequest(String body, Map<String, List<String>> headers) {}
 
     @BeforeAll
@@ -68,7 +69,7 @@ class SnsHttpDeliveryIntegrationTest {
                 // Record even on failure so awaitRequests unblocks and the assertion
                 // reports the real state instead of timing out opaquely.
                 receivedRequests.add(received);
-                LOG.log(java.util.logging.Level.SEVERE,
+                LOG.log(Level.SEVERE,
                         "confirming-webhook: subscription confirmation failed", e);
                 exchange.sendResponseHeaders(500, 0);
             } finally {

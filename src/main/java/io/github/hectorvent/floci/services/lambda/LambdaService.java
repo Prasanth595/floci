@@ -51,6 +51,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -60,6 +61,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -2311,7 +2313,7 @@ public class LambdaService implements ResourceProvider {
         return functionStore.listVersions(region, functionName).stream()
                 .filter(v -> v.getVersion() != null && !"$LATEST".equals(v.getVersion()))
                 .filter(v -> v.getVersion().chars().allMatch(Character::isDigit))
-                .max(java.util.Comparator.comparingLong(v -> Long.parseLong(v.getVersion())));
+                .max(Comparator.comparingLong(v -> Long.parseLong(v.getVersion())));
     }
 
     /** Publishes an owned code snapshot; a failed copy must not reference mutable {@code $LATEST}. */
@@ -3451,7 +3453,7 @@ public class LambdaService implements ResourceProvider {
             if (!encoded.isEmpty()) {
                 encoded.append('/');
             }
-            encoded.append(java.net.URLEncoder.encode(segment, java.nio.charset.StandardCharsets.UTF_8)
+            encoded.append(URLEncoder.encode(segment, StandardCharsets.UTF_8)
                     .replace("+", "%20"));
         }
         return encoded.toString();
@@ -3808,7 +3810,7 @@ public class LambdaService implements ResourceProvider {
             String resourceArn = policyResourceArn(fn, ref.qualifier());
             List<Map<String, Object>> statements = fn.getPolicies().stream()
                     .filter(statement -> scopedTo(statement, resourceArn))
-                    .<Map<String, Object>>map(java.util.LinkedHashMap::new)
+                    .<Map<String, Object>>map(LinkedHashMap::new)
                     .toList();
             if (statements.isEmpty()) {
                 throw new AwsException("ResourceNotFoundException",

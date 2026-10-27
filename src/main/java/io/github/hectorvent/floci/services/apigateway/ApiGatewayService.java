@@ -1361,7 +1361,7 @@ public class ApiGatewayService implements ResourceProvider {
             if (column == null) {
                 continue;
             }
-            columns.putIfAbsent(column.trim().toLowerCase(java.util.Locale.ROOT), i);
+            columns.putIfAbsent(column.trim().toLowerCase(Locale.ROOT), i);
         }
         int nameIndex = columns.getOrDefault("name", -1);
         int keyIndex = columns.containsKey("key") ? columns.get("key") : columns.getOrDefault("value", -1);
@@ -3980,7 +3980,7 @@ public class ApiGatewayService implements ResourceProvider {
     private String importedAuthorizerType(Map<String, Object> authDef, String schemeName) {
         String type = importedAuthorizerString(authDef, "type", schemeName);
         if (type != null) {
-            String normalizedType = type.toLowerCase(java.util.Locale.ROOT);
+            String normalizedType = type.toLowerCase(Locale.ROOT);
             if ("token".equals(normalizedType)
                     || "request".equals(normalizedType)
                     || "cognito_user_pools".equals(normalizedType)) {

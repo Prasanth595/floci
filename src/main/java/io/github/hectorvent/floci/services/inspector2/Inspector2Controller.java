@@ -156,7 +156,7 @@ public class Inspector2Controller {
 
     private List<String> requestedAccounts(JsonNode accountIds) {
         if (accountIds == null || accountIds.isEmpty()) {
-            return java.util.List.of(requestContext.getAccountId());
+            return List.of(requestContext.getAccountId());
         }
         List<String> result = new ArrayList<>(accountIds.size());
         for (JsonNode accountId : accountIds) {

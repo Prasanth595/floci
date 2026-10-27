@@ -39,7 +39,9 @@ import io.github.hectorvent.floci.services.ssoadmin.model.TrustedTokenIssuer;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -48,7 +50,9 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -56,6 +60,7 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class SsoAdminService implements Resettable {
@@ -291,7 +296,7 @@ public class SsoAdminService implements Resettable {
     public List<RegionMetadata> listRegionsForInstance(SsoInstance instance) {
         List<RegionMetadata> result = new ArrayList<>();
         result.add(new RegionMetadata(instance.primaryRegion(), "ACTIVE",
-                java.time.Instant.ofEpochMilli(instance.createdDateEpochMillis()).toString(), true));
+                Instant.ofEpochMilli(instance.createdDateEpochMillis()).toString(), true));
         if (!instance.accountInstance()) {
             result.addAll(regions.scan(key -> true).stream()
                     .filter(region -> !instance.primaryRegion().equals(region.regionName()))
@@ -302,7 +307,7 @@ public class SsoAdminService implements Resettable {
     }
 
     public double regionAddedDateEpochSeconds(RegionMetadata region) {
-        return java.time.Instant.parse(region.addedDate()).toEpochMilli() / 1000.0d;
+        return Instant.parse(region.addedDate()).toEpochMilli() / 1000.0d;
     }
 
     public synchronized TrustedTokenIssuer createTrustedTokenIssuer(JsonNode request, String callerAccountId) {
@@ -583,10 +588,10 @@ public class SsoAdminService implements Resettable {
     private static boolean trustedTokenIssuerMatches(TrustedTokenIssuer issuer, String name, String issuerType,
                                                        OidcJwtIssuerConfiguration oidcConfiguration,
                                                        Map<String, String> tags) {
-        return java.util.Objects.equals(issuer.name(), name)
-                && java.util.Objects.equals(issuer.trustedTokenIssuerType(), issuerType)
-                && java.util.Objects.equals(issuer.oidcJwtConfiguration(), oidcConfiguration)
-                && java.util.Objects.equals(issuer.tags(), tags);
+        return Objects.equals(issuer.name(), name)
+                && Objects.equals(issuer.trustedTokenIssuerType(), issuerType)
+                && Objects.equals(issuer.oidcJwtConfiguration(), oidcConfiguration)
+                && Objects.equals(issuer.tags(), tags);
     }
 
     public synchronized InstanceAccessControlAttributeConfiguration createInstanceAccessControlAttributeConfiguration(JsonNode request) {
@@ -657,8 +662,8 @@ public class SsoAdminService implements Resettable {
         Optional<String> priorArn = instanceClientTokens.get(tokenKey);
         if (priorArn.isPresent()) {
             SsoInstance prior = findInstanceByArn(priorArn.get());
-            if (prior != null && java.util.Objects.equals(prior.name(), name)
-                    && java.util.Objects.equals(prior.tags(), tags)) {
+            if (prior != null && Objects.equals(prior.name(), name)
+                    && Objects.equals(prior.tags(), tags)) {
                 return prior;
             }
             throw new AwsException("IdempotentParameterMismatch",
@@ -781,7 +786,7 @@ public class SsoAdminService implements Resettable {
         }
         Set<String> instancePermissionSets = permissionSets.keys().stream()
                 .filter(permissionSetArn -> instanceArn.equals(instanceArnForPermissionSet(permissionSetArn)))
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
         for (String permissionSetArn : instancePermissionSets) {
             permissionSets.delete(permissionSetArn);
             resourceTagOverrides.delete(permissionSetArn);
@@ -1069,7 +1074,7 @@ public class SsoAdminService implements Resettable {
         if (requested != null && requested > 100) {
             throw validation("MaxResults must be between 1 and 100.");
         }
-        return Pagination.paginate(java.util.List.of(customApplicationProviderArn(region)), value -> value,
+        return Pagination.paginate(List.of(customApplicationProviderArn(region)), value -> value,
                 requested, text(request, "NextToken"), 50, 100, "ValidationException");
     }
 
@@ -1475,7 +1480,7 @@ public class SsoAdminService implements Resettable {
         if (regions.scan(key -> true).size() >= REGION_QUOTA - 1) {
             throw quota("The IAM Identity Center Region quota has been exceeded.");
         }
-        String addedDate = java.time.Instant.now().toString();
+        String addedDate = Instant.now().toString();
         RegionMetadata response = new RegionMetadata(regionName, "ADDING", addedDate, false);
         regions.put(regionName, new RegionMetadata(regionName, "ACTIVE", addedDate, false));
         return response;
@@ -1659,7 +1664,7 @@ public class SsoAdminService implements Resettable {
                         .thenComparing(CustomerManagedPolicyReference::path))
                 .toList();
         return Pagination.paginate(references,
-                reference -> reference.name().toLowerCase(java.util.Locale.ROOT) + "\n" + reference.path(),
+                reference -> reference.name().toLowerCase(Locale.ROOT) + "\n" + reference.path(),
                 optionalMaxResults(request), text(request, "NextToken"), 50, 100, "ValidationException");
     }
 
@@ -2206,7 +2211,7 @@ public class SsoAdminService implements Resettable {
     }
 
     private static void validateInlinePolicy(String policy) {
-        if (policy == null || policy.isEmpty() || policy.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > MAX_INLINE_POLICY_BYTES) {
+        if (policy == null || policy.isEmpty() || policy.getBytes(StandardCharsets.UTF_8).length > MAX_INLINE_POLICY_BYTES) {
             throw validation("InlinePolicy must be between 1 and 32768 bytes.");
         }
         long nonWhitespace = policy.chars().filter(ch -> !Character.isWhitespace(ch)).count();
@@ -2297,12 +2302,12 @@ public class SsoAdminService implements Resettable {
     private static boolean applicationMatches(SsoApplication application, String providerArn, String description,
                                               String name, ApplicationPortalOptions portalOptions, String status,
                                               Map<String, String> tags) {
-        return java.util.Objects.equals(application.applicationProviderArn(), providerArn)
-                && java.util.Objects.equals(application.description(), description)
-                && java.util.Objects.equals(application.name(), name)
-                && java.util.Objects.equals(application.portalOptions(), portalOptions)
-                && java.util.Objects.equals(application.status(), status)
-                && java.util.Objects.equals(application.tags(), tags);
+        return Objects.equals(application.applicationProviderArn(), providerArn)
+                && Objects.equals(application.description(), description)
+                && Objects.equals(application.name(), name)
+                && Objects.equals(application.portalOptions(), portalOptions)
+                && Objects.equals(application.status(), status)
+                && Objects.equals(application.tags(), tags);
     }
 
     private static List<AccessControlAttribute> parseAccessControlAttributes(JsonNode request) {
@@ -2459,7 +2464,7 @@ public class SsoAdminService implements Resettable {
     }
 
     private static String customerManagedPolicyKey(String name, String path) {
-        return name.toLowerCase(java.util.Locale.ROOT) + "\n" + path;
+        return name.toLowerCase(Locale.ROOT) + "\n" + path;
     }
 
 

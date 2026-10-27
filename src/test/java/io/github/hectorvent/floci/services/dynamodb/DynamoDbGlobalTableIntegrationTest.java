@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 
 import static io.github.hectorvent.floci.testing.DynamoDbRequests.assertEpochMillisBetween;
 import static io.github.hectorvent.floci.testing.DynamoDbRequests.decimalAt;
@@ -31,7 +32,7 @@ class DynamoDbGlobalTableIntegrationTest {
         return given()
             .header("X-Amz-Target", "DynamoDB_20120810." + target)
             .contentType("application/x-amz-json-1.0")
-            .body(body.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+            .body(body.getBytes(StandardCharsets.UTF_8))
         .when().post("/");
     }
 

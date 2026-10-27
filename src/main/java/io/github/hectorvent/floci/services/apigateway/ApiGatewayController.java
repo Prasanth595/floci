@@ -59,6 +59,7 @@ import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -2214,7 +2215,7 @@ public class ApiGatewayController {
                                   @PathParam("resourceArn") String resourceArn,
                                   @QueryParam("tagKeys") List<String> tagKeys) {
         v2Service.untagResource(resourceArn,
-                tagKeys != null ? tagKeys : java.util.Collections.emptyList());
+                tagKeys != null ? tagKeys : Collections.emptyList());
         return Response.noContent().build();
     }
 
@@ -2727,7 +2728,7 @@ public class ApiGatewayController {
         node.put("name", api.getName());
         node.put("protocolType", api.getProtocolType());
         node.put("apiEndpoint", api.getApiEndpoint());
-        node.put("createdDate", java.time.Instant.ofEpochMilli(api.getCreatedDate()).toString());
+        node.put("createdDate", Instant.ofEpochMilli(api.getCreatedDate()).toString());
         node.put("disableExecuteApiEndpoint", api.isDisableExecuteApiEndpoint());
         if (api.getRouteSelectionExpression() != null) node.put("routeSelectionExpression", api.getRouteSelectionExpression());
         if (api.getDescription() != null) node.put("description", api.getDescription());
@@ -2852,8 +2853,8 @@ public class ApiGatewayController {
         node.put("stageName", s.getStageName());
         if (s.getDeploymentId() != null) node.put("deploymentId", s.getDeploymentId());
         node.put("autoDeploy", s.isAutoDeploy());
-        node.put("createdDate", java.time.Instant.ofEpochMilli(s.getCreatedDate()).toString());
-        node.put("lastUpdatedDate", java.time.Instant.ofEpochMilli(s.getLastUpdatedDate()).toString());
+        node.put("createdDate", Instant.ofEpochMilli(s.getCreatedDate()).toString());
+        node.put("lastUpdatedDate", Instant.ofEpochMilli(s.getLastUpdatedDate()).toString());
         if (s.getStageVariables() != null) {
             ObjectNode stageVariables = node.putObject("stageVariables");
             s.getStageVariables().forEach(stageVariables::put);
@@ -2909,7 +2910,7 @@ public class ApiGatewayController {
         node.put("deploymentId", d.getDeploymentId());
         node.put("deploymentStatus", d.getDeploymentStatus());
         if (d.getDescription() != null) node.put("description", d.getDescription());
-        node.put("createdDate", java.time.Instant.ofEpochMilli(d.getCreatedDate()).toString());
+        node.put("createdDate", Instant.ofEpochMilli(d.getCreatedDate()).toString());
         return node;
     }
 

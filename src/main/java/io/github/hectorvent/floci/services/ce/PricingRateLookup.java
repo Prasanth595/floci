@@ -110,13 +110,13 @@ public class PricingRateLookup {
         if (!onDemand.isObject()) {
             return 0.0;
         }
-        Iterator<java.util.Map.Entry<String, JsonNode>> termIter = onDemand.fields();
+        Iterator<Map.Entry<String, JsonNode>> termIter = onDemand.fields();
         while (termIter.hasNext()) {
             JsonNode dimensions = termIter.next().getValue().path("priceDimensions");
             if (!dimensions.isObject()) {
                 continue;
             }
-            Iterator<java.util.Map.Entry<String, JsonNode>> dimIter = dimensions.fields();
+            Iterator<Map.Entry<String, JsonNode>> dimIter = dimensions.fields();
             while (dimIter.hasNext()) {
                 JsonNode dim = dimIter.next().getValue();
                 String usd = dim.path("pricePerUnit").path("USD").asText("0");

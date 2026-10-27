@@ -156,7 +156,7 @@ public class SmtpRelay {
             private volatile boolean shutdown = false;
             @Override public void execute(Runnable r) { r.run(); }
             @Override public void shutdown() { shutdown = true; }
-            @Override public List<Runnable> shutdownNow() { shutdown = true; return java.util.List.of(); }
+            @Override public List<Runnable> shutdownNow() { shutdown = true; return List.of(); }
             @Override public boolean isShutdown() { return shutdown; }
             @Override public boolean isTerminated() { return shutdown; }
             @Override public boolean awaitTermination(long t, TimeUnit u) { return true; }
@@ -471,7 +471,7 @@ public class SmtpRelay {
 
     private void send(MailMessage mail) throws Exception {
         mailClient.sendMail(mail).toCompletionStage().toCompletableFuture()
-                .get(RELAY_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+                .get(RELAY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
     private static void applyBounceAddress(MailMessage mail, String returnPath, String fallback) {

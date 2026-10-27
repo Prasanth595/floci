@@ -30,6 +30,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.mockito.Mockito;
 import org.mockito.stubbing.Answer;
 
 import java.time.Instant;
@@ -2087,7 +2088,7 @@ class RdsCfnProvisionerTest {
     void targetGroupDeleteIsIdempotentWhenProxyDeletionAlreadyRemovedIt() {
         String targetGroupArn =
                 "arn:aws:rds:us-east-1:000000000000:target-group:prx-tg-already-gone";
-        org.mockito.Mockito.doThrow(new AwsException("DBProxyTargetGroupNotFoundFault",
+        Mockito.doThrow(new AwsException("DBProxyTargetGroupNotFoundFault",
                 "target group not found", 404))
                 .when(rdsService).clearDbProxyTargetGroupByArn(targetGroupArn, "us-east-1");
 

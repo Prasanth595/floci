@@ -24,7 +24,7 @@ public enum AppSyncDirective {
         for (AppSyncDirective d : values()) {
             names.add(d.directiveName());
         }
-        KNOWN_NAMES = java.util.Set.copyOf(names);
+        KNOWN_NAMES = Set.copyOf(names);
     }
 
     private final String name;

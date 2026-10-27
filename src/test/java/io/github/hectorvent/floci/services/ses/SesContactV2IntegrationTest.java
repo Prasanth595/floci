@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -156,7 +157,7 @@ class SesContactV2IntegrationTest {
                 // TopicPreferences kept; AttributesData cleared (replace semantics).
                 .body("TopicPreferences", hasSize(1))
                 .body("TopicPreferences[0].TopicName", equalTo("weekly"))
-                .body("AttributesData", org.hamcrest.Matchers.nullValue());
+                .body("AttributesData", Matchers.nullValue());
     }
 
     @Test
@@ -185,8 +186,8 @@ class SesContactV2IntegrationTest {
                 .body("Contacts[0].TopicPreferences", hasSize(2))
                 .body("Contacts[0].LastUpdatedTimestamp", epochSecondsWithMillis())
                 // ListContacts is a lightweight projection: no AttributesData / CreatedTimestamp.
-                .body("Contacts[0].AttributesData", org.hamcrest.Matchers.nullValue())
-                .body("Contacts[0].CreatedTimestamp", org.hamcrest.Matchers.nullValue());
+                .body("Contacts[0].AttributesData", Matchers.nullValue())
+                .body("Contacts[0].CreatedTimestamp", Matchers.nullValue());
     }
 
     @Test

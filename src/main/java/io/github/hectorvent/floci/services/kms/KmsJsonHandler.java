@@ -21,6 +21,7 @@ import jakarta.ws.rs.core.Response;
 
 import java.util.*;
 import java.util.ArrayList;
+import java.util.List;
 
 import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownReservedTags;
 
@@ -618,7 +619,7 @@ public class KmsJsonHandler {
 
     private Response handleUntagResource(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        java.util.List<String> keys = new ArrayList<>();
+        List<String> keys = new ArrayList<>();
         request.path("TagKeys").forEach(k -> keys.add(k.asText()));
         service.untagResource(keyId, keys, region);
         return Response.ok().build();

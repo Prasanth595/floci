@@ -13,8 +13,12 @@ import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ses.SesClient;
+import software.amazon.awssdk.services.ses.model.ConfigurationSetAttribute;
+import software.amazon.awssdk.services.ses.model.DescribeConfigurationSetRequest;
 import software.amazon.awssdk.services.ses.model.DescribeConfigurationSetResponse;
 import software.amazon.awssdk.services.ses.model.EventDestination;
+import software.amazon.awssdk.services.ses.model.KinesisFirehoseDestination;
+import software.amazon.awssdk.services.ses.model.SNSDestination;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetEventDestinationRequest;
@@ -325,13 +329,13 @@ class SesConfigurationSetEventDestinationTest {
         sesV1.createConfigurationSetEventDestination(
                 software.amazon.awssdk.services.ses.model.CreateConfigurationSetEventDestinationRequest.builder()
                         .configurationSetName(v1CsName)
-                        .eventDestination(software.amazon.awssdk.services.ses.model.EventDestination.builder()
+                        .eventDestination(EventDestination.builder()
                                 .name(ED_NAME)
                                 .enabled(true)
                                 .matchingEventTypes(
                                         software.amazon.awssdk.services.ses.model.EventType.SEND,
                                         software.amazon.awssdk.services.ses.model.EventType.BOUNCE)
-                                .snsDestination(software.amazon.awssdk.services.ses.model.SNSDestination.builder()
+                                .snsDestination(SNSDestination.builder()
                                         .topicARN(TOPIC_ARN)
                                         .build())
                                 .build())
@@ -343,10 +347,10 @@ class SesConfigurationSetEventDestinationTest {
     void v1_describeConfigurationSet_withEventDestinationsAttribute_returnsRoundTrip() {
         DescribeConfigurationSetResponse resp =
                 sesV1.describeConfigurationSet(
-                        software.amazon.awssdk.services.ses.model.DescribeConfigurationSetRequest.builder()
+                        DescribeConfigurationSetRequest.builder()
                                 .configurationSetName(v1CsName)
                                 .configurationSetAttributeNames(
-                                        software.amazon.awssdk.services.ses.model.ConfigurationSetAttribute.EVENT_DESTINATIONS)
+                                        ConfigurationSetAttribute.EVENT_DESTINATIONS)
                                 .build());
         assertThat(resp.eventDestinations()).hasSize(1);
         EventDestination ed = resp.eventDestinations().get(0);
@@ -364,7 +368,7 @@ class SesConfigurationSetEventDestinationTest {
     void v1_describeConfigurationSet_withoutEventDestinationsAttribute_returnsEmptyList() {
         DescribeConfigurationSetResponse resp =
                 sesV1.describeConfigurationSet(
-                        software.amazon.awssdk.services.ses.model.DescribeConfigurationSetRequest.builder()
+                        DescribeConfigurationSetRequest.builder()
                                 .configurationSetName(v1CsName)
                                 .build());
         assertThat(resp.eventDestinations()).isEmpty();
@@ -376,11 +380,11 @@ class SesConfigurationSetEventDestinationTest {
         assertThatThrownBy(() -> sesV1.createConfigurationSetEventDestination(
                 software.amazon.awssdk.services.ses.model.CreateConfigurationSetEventDestinationRequest.builder()
                         .configurationSetName(v1CsName)
-                        .eventDestination(software.amazon.awssdk.services.ses.model.EventDestination.builder()
+                        .eventDestination(EventDestination.builder()
                                 .name(ED_NAME)
                                 .enabled(true)
                                 .matchingEventTypes(software.amazon.awssdk.services.ses.model.EventType.SEND)
-                                .snsDestination(software.amazon.awssdk.services.ses.model.SNSDestination.builder()
+                                .snsDestination(SNSDestination.builder()
                                         .topicARN(TOPIC_ARN)
                                         .build())
                                 .build())
@@ -396,11 +400,11 @@ class SesConfigurationSetEventDestinationTest {
         sesV1.updateConfigurationSetEventDestination(
                 software.amazon.awssdk.services.ses.model.UpdateConfigurationSetEventDestinationRequest.builder()
                         .configurationSetName(v1CsName)
-                        .eventDestination(software.amazon.awssdk.services.ses.model.EventDestination.builder()
+                        .eventDestination(EventDestination.builder()
                                 .name(ED_NAME)
                                 .enabled(false)
                                 .matchingEventTypes(software.amazon.awssdk.services.ses.model.EventType.COMPLAINT)
-                                .snsDestination(software.amazon.awssdk.services.ses.model.SNSDestination.builder()
+                                .snsDestination(SNSDestination.builder()
                                         .topicARN(TOPIC_ARN_2)
                                         .build())
                                 .build())
@@ -408,10 +412,10 @@ class SesConfigurationSetEventDestinationTest {
 
         DescribeConfigurationSetResponse resp =
                 sesV1.describeConfigurationSet(
-                        software.amazon.awssdk.services.ses.model.DescribeConfigurationSetRequest.builder()
+                        DescribeConfigurationSetRequest.builder()
                                 .configurationSetName(v1CsName)
                                 .configurationSetAttributeNames(
-                                        software.amazon.awssdk.services.ses.model.ConfigurationSetAttribute.EVENT_DESTINATIONS)
+                                        ConfigurationSetAttribute.EVENT_DESTINATIONS)
                                 .build());
         EventDestination ed = resp.eventDestinations().get(0);
         assertThat(ed.enabled()).isFalse();
@@ -426,11 +430,11 @@ class SesConfigurationSetEventDestinationTest {
         assertThatThrownBy(() -> sesV1.updateConfigurationSetEventDestination(
                 software.amazon.awssdk.services.ses.model.UpdateConfigurationSetEventDestinationRequest.builder()
                         .configurationSetName(v1CsName)
-                        .eventDestination(software.amazon.awssdk.services.ses.model.EventDestination.builder()
+                        .eventDestination(EventDestination.builder()
                                 .name("ed-ghost")
                                 .enabled(true)
                                 .matchingEventTypes(software.amazon.awssdk.services.ses.model.EventType.SEND)
-                                .snsDestination(software.amazon.awssdk.services.ses.model.SNSDestination.builder()
+                                .snsDestination(SNSDestination.builder()
                                         .topicARN(TOPIC_ARN)
                                         .build())
                                 .build())
@@ -444,12 +448,12 @@ class SesConfigurationSetEventDestinationTest {
         assertThatThrownBy(() -> sesV1.createConfigurationSetEventDestination(
                 software.amazon.awssdk.services.ses.model.CreateConfigurationSetEventDestinationRequest.builder()
                         .configurationSetName(v1CsName)
-                        .eventDestination(software.amazon.awssdk.services.ses.model.EventDestination.builder()
+                        .eventDestination(EventDestination.builder()
                                 .name("ed-firehose-bad")
                                 .enabled(true)
                                 .matchingEventTypes(software.amazon.awssdk.services.ses.model.EventType.SEND)
                                 .kinesisFirehoseDestination(
-                                        software.amazon.awssdk.services.ses.model.KinesisFirehoseDestination.builder()
+                                        KinesisFirehoseDestination.builder()
                                                 .iamRoleARN("arn:aws:iam::000000000000:role/ses-firehose")
                                                 .build())
                                 .build())
@@ -469,10 +473,10 @@ class SesConfigurationSetEventDestinationTest {
 
         DescribeConfigurationSetResponse resp =
                 sesV1.describeConfigurationSet(
-                        software.amazon.awssdk.services.ses.model.DescribeConfigurationSetRequest.builder()
+                        DescribeConfigurationSetRequest.builder()
                                 .configurationSetName(v1CsName)
                                 .configurationSetAttributeNames(
-                                        software.amazon.awssdk.services.ses.model.ConfigurationSetAttribute.EVENT_DESTINATIONS)
+                                        ConfigurationSetAttribute.EVENT_DESTINATIONS)
                                 .build());
         assertThat(resp.eventDestinations()).isEmpty();
     }

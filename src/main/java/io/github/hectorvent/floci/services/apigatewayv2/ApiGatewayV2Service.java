@@ -17,11 +17,14 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -519,7 +522,7 @@ public class ApiGatewayV2Service {
 
     /** Restores a route without treating any conflicting route as rollback-owned. */
     public void restoreRoute(String region, String apiId, Route route) {
-        restoreRoute(region, apiId, route, java.util.Set.of());
+        restoreRoute(region, apiId, route, Set.of());
     }
 
     /**
@@ -533,8 +536,8 @@ public class ApiGatewayV2Service {
         // A failed cleanup can leave a replacement route behind. Remove that conflicting
         // route only when the caller proves it belongs to that failed replacement.
         for (Route existing : getRoutes(region, apiId)) {
-            if (!java.util.Objects.equals(existing.getRouteId(), route.getRouteId())
-                    && java.util.Objects.equals(existing.getRouteKey(), route.getRouteKey())) {
+            if (!Objects.equals(existing.getRouteId(), route.getRouteId())
+                    && Objects.equals(existing.getRouteKey(), route.getRouteKey())) {
                 if (replaceableRouteIds.contains(existing.getRouteId())) {
                     routeStore.delete(routeKey(region, apiId, existing.getRouteId()));
                 } else {
@@ -590,7 +593,7 @@ public class ApiGatewayV2Service {
             return;
         }
         boolean duplicate = getRoutes(region, apiId).stream()
-                .anyMatch(existing -> !java.util.Objects.equals(existing.getRouteId(), currentRouteId)
+                .anyMatch(existing -> !Objects.equals(existing.getRouteId(), currentRouteId)
                         && requestedRouteKey.equals(existing.getRouteKey()));
         if (duplicate) {
             throw new AwsException("ConflictException",
@@ -612,7 +615,7 @@ public class ApiGatewayV2Service {
                     "authorizationScopes must be a list of strings", 400);
         }
         return list.stream()
-                .filter(java.util.Objects::nonNull)
+                .filter(Objects::nonNull)
                 .map(String::valueOf)
                 .toList();
     }
@@ -669,7 +672,7 @@ public class ApiGatewayV2Service {
         // Build regex from path template: {proxy+} -> .+, {param} -> [^/]+
         // Quote literal segments to avoid regex injection from path patterns
         StringBuilder regex = new StringBuilder("^");
-        Matcher m = java.util.regex.Pattern.compile("\\{([^}]*)}").matcher(pattern);
+        Matcher m = Pattern.compile("\\{([^}]*)}").matcher(pattern);
         int last = 0;
         while (m.find()) {
             regex.append(Pattern.quote(pattern.substring(last, m.start())));
@@ -1327,7 +1330,7 @@ public class ApiGatewayV2Service {
         } else {
             tags = getApi(target.region(), target.apiId()).getTags();
         }
-        return (tags != null) ? new HashMap<>(tags) : java.util.Collections.emptyMap();
+        return (tags != null) ? new HashMap<>(tags) : Collections.emptyMap();
     }
 
     // ──────────────────────────── Key helpers ────────────────────────────

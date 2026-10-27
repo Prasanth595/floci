@@ -2616,7 +2616,7 @@ public class NativeDynamoDbJsonHandler {
      * GovCloud or China table ARN.
      */
     private static final Pattern DYNAMODB_TABLE_ARN_PATTERN =
-            java.util.regex.Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX
+            Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX
                     + ":dynamodb:[a-z0-9-]+:\\d{12}:table/[a-zA-Z0-9._-]+$");
 
     private static boolean isValidDynamoDbTableArn(String arn) {

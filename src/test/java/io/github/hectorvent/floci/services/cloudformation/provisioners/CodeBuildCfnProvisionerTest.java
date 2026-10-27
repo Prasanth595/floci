@@ -100,7 +100,7 @@ class CodeBuildCfnProvisionerTest {
         // so a plain instanceof check silently drops the project and falls back to the guessed ARN.
         Map<String, Object> project = new HashMap<>();
         project.put("arn", "arn:aws:codebuild:us-east-1:000000000000:project/from-handler");
-        Map<String, Object> entity = java.util.Map.of("project", project);
+        Map<String, Object> entity = Map.of("project", project);
         when(handler.handle(eq("CreateProject"), any(), eq("us-east-1"), eq("000000000000")))
                 .thenReturn(Response.ok(entity).build());
 

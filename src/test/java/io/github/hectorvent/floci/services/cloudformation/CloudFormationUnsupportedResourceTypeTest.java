@@ -202,7 +202,7 @@ class CloudFormationUnsupportedResourceTypeTest {
     private <T> T whileCapturingProvisionerLogs(List<LogRecord> collected,
                                                 Supplier<T> action) {
         Logger logger =
-                java.util.logging.Logger.getLogger(CfnResourceDispatcher.class.getName());
+                Logger.getLogger(CfnResourceDispatcher.class.getName());
         Level original = logger.getLevel();
         Handler handler = new Handler() {
             @Override

@@ -32,6 +32,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
 
@@ -367,7 +368,7 @@ public class AwsJsonCborController {
             return false;
         }
         for (String header : contentEncodingHeaders) {
-            if (header != null && header.toLowerCase(java.util.Locale.ROOT).contains("gzip")) {
+            if (header != null && header.toLowerCase(Locale.ROOT).contains("gzip")) {
                 return true;
             }
         }

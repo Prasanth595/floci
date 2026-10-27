@@ -25,6 +25,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -253,9 +255,9 @@ public class LambdaNetworkConnectorsController {
     }
 
     private static String iso(Instant when) {
-        return java.time.format.DateTimeFormatter.ISO_INSTANT
-                .format((when == null ? java.time.Instant.now() : when)
-                        .truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
+        return DateTimeFormatter.ISO_INSTANT
+                .format((when == null ? Instant.now() : when)
+                        .truncatedTo(ChronoUnit.SECONDS));
     }
 
     private JsonNode parse(String body) {

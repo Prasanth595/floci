@@ -128,7 +128,7 @@ public class MskService implements ResourceProvider {
 
         String accountId = regionResolver.getAccountId();
         String clusterArn = AwsArnUtils.Arn.of("kafka", regionResolver.getRegion(), accountId,
-                "cluster/" + clusterName + "/" + java.util.UUID.randomUUID()).toString();
+                "cluster/" + clusterName + "/" + UUID.randomUUID()).toString();
 
         String kafkaVersion = request.getKafkaVersion();
         String resolvedKafkaVersion = (kafkaVersion == null || kafkaVersion.isBlank()) ? DEFAULT_KAFKA_VERSION : kafkaVersion;

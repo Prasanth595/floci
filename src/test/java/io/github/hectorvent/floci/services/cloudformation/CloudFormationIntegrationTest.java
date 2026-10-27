@@ -11,6 +11,7 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -8105,7 +8107,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("clusters", org.hamcrest.Matchers.empty());
+            .body("clusters", Matchers.empty());
 
         // Task definition is deregistered (INACTIVE)
         given()
@@ -10910,7 +10912,7 @@ class CloudFormationIntegrationTest {
                 .body(containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
         }
 
-        for (String stateMachineName : java.util.List.of(missingName, multipleName)) {
+        for (String stateMachineName : List.of(missingName, multipleName)) {
             given()
                 .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
@@ -10923,7 +10925,7 @@ class CloudFormationIntegrationTest {
                 .body(containsString("StateMachineDoesNotExist"));
         }
 
-        for (String stack : java.util.List.of(missingStack, multipleStack)) {
+        for (String stack : List.of(missingStack, multipleStack)) {
             given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DeleteStack")

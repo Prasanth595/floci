@@ -584,7 +584,7 @@ class KinesisServiceTest {
             assertEquals(closedParent.getHashKeyRange().startingHashKey(), first.getHashKeyRange().startingHashKey());
             assertEquals(closedParent.getHashKeyRange().endingHashKey(), second.getHashKeyRange().endingHashKey());
             assertEquals(
-                    new BigInteger(first.getHashKeyRange().endingHashKey()).add(java.math.BigInteger.ONE).toString(),
+                    new BigInteger(first.getHashKeyRange().endingHashKey()).add(BigInteger.ONE).toString(),
                     second.getHashKeyRange().startingHashKey(),
                     "children must tile the parent's range with no gap or overlap");
         }
@@ -732,7 +732,7 @@ class KinesisServiceTest {
 
         // Hand-crafted 5-part iterator in the pre-bump format.
         String raw = "my-stream|shardId-000000000000|TRIM_HORIZON||0";
-        String legacyIterator = java.util.Base64.getEncoder()
+        String legacyIterator = Base64.getEncoder()
                 .encodeToString(raw.getBytes(StandardCharsets.UTF_8));
 
         Map<String, Object> result = kinesisService.getRecords(legacyIterator, null, REGION);

@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.hamcrest.Matcher;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -29,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class WebSocketConnectionLifecycleTest {
 
-    @io.quarkus.test.common.http.TestHTTPResource("/")
+    @TestHTTPResource("/")
     URI baseUri;
 
     private static String wsApiId;
@@ -531,8 +533,8 @@ class WebSocketConnectionLifecycleTest {
         @SuppressWarnings("unchecked")
         Matcher<Integer>[] matchers = new Matcher[values.length];
         for (int i = 0; i < values.length; i++) {
-            matchers[i] = org.hamcrest.Matchers.equalTo(values[i]);
+            matchers[i] = Matchers.equalTo(values[i]);
         }
-        return org.hamcrest.Matchers.anyOf(matchers);
+        return Matchers.anyOf(matchers);
     }
 }

@@ -173,7 +173,7 @@ class CloudFrontOriginHttpClientTest {
 
         try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
                 resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
-            HttpRequest request = HttpRequest.newBuilder(java.net.URI.create(
+            HttpRequest request = HttpRequest.newBuilder(URI.create(
                             "http://origin.invalid:" + server.getAddress().getPort() + "/"))
                     .timeout(Duration.ofSeconds(5))
                     .header("X-Origin-Verify", "viewer-value")
@@ -208,7 +208,7 @@ class CloudFrontOriginHttpClientTest {
         byte[] payload = "{\"a\":1}".getBytes(StandardCharsets.UTF_8);
         try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
                 resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
-            HttpRequest request = HttpRequest.newBuilder(java.net.URI.create(
+            HttpRequest request = HttpRequest.newBuilder(URI.create(
                             "http://origin.invalid:" + server.getAddress().getPort() + "/items"))
                     .timeout(Duration.ofSeconds(5))
                     .header("Content-Type", "application/json")
@@ -913,7 +913,7 @@ class CloudFrontOriginHttpClientTest {
     }
 
     private static HttpRequest request(String uri) {
-        return HttpRequest.newBuilder(java.net.URI.create(uri))
+        return HttpRequest.newBuilder(URI.create(uri))
                 .timeout(Duration.ofSeconds(5))
                 .GET()
                 .build();

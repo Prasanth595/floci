@@ -25,9 +25,11 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PublicKey;
 import java.security.SecureRandom;
+import java.security.Security;
 import java.security.cert.X509Certificate;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -57,7 +59,7 @@ public class CloudHsmV2Test {
 
         // 2. Initialize Cluster
         DescribeClustersResponse initDescribe = client.describeClusters(r -> r
-                .filters(java.util.Map.of("clusterIds", List.of(clusterId))));
+                .filters(Map.of("clusterIds", List.of(clusterId))));
         String csr = initDescribe.clusters().get(0).certificates().clusterCsr();
         String[] certs;
         try { certs = generateCerts(csr); } catch (Exception e) { throw new RuntimeException(e); }
@@ -87,14 +89,14 @@ public class CloudHsmV2Test {
 
         // 4. Describe Clusters
         DescribeClustersResponse descClusters = client.describeClusters(r -> r
-                .filters(java.util.Map.of("clusterIds", List.of(clusterId)))
+                .filters(Map.of("clusterIds", List.of(clusterId)))
         );
         assertThat(descClusters.clusters()).hasSize(1);
         assertThat(descClusters.clusters().get(0).stateAsString()).isEqualTo("ACTIVE");
 
         // 5. Describe Backups (auto-created on CreateHsm/CreateCluster)
         DescribeBackupsResponse descBackups = client.describeBackups(r -> r
-                .filters(java.util.Map.of("clusterIds", List.of(clusterId)))
+                .filters(Map.of("clusterIds", List.of(clusterId)))
         );
         assertThat(descBackups.backups()).isNotEmpty();
         String backupId = descBackups.backups().get(0).backupId();
@@ -127,7 +129,7 @@ public class CloudHsmV2Test {
         );
         String clusterId = createClusterResponse.cluster().clusterId();
         DescribeClustersResponse initDescribe = client.describeClusters(r -> r
-                .filters(java.util.Map.of("clusterIds", List.of(clusterId))));
+                .filters(Map.of("clusterIds", List.of(clusterId))));
         String csr = initDescribe.clusters().get(0).certificates().clusterCsr();
         String[] certs;
         try { certs = generateCerts(csr); } catch (Exception e) { throw new RuntimeException(e); }
@@ -155,15 +157,15 @@ public class CloudHsmV2Test {
     }
 
     private String[] generateCerts(String csrPem) throws Exception {
-        java.security.Security.addProvider(new BouncyCastleProvider());
-        KeyPairGenerator keyGen = java.security.KeyPairGenerator.getInstance("RSA", "BC");
+        Security.addProvider(new BouncyCastleProvider());
+        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA", "BC");
         keyGen.initialize(2048, new SecureRandom());
         KeyPair caKeyPair = keyGen.generateKeyPair();
         X500Name caName = new X500Name("CN=Floci Test CA");
         long now = System.currentTimeMillis();
         Date startDate = new Date(now);
         Date endDate = new Date(now + 365L * 24 * 3600 * 1000);
-        BigInteger serial = java.math.BigInteger.valueOf(now);
+        BigInteger serial = BigInteger.valueOf(now);
         X509v3CertificateBuilder caBuilder = new JcaX509v3CertificateBuilder(
                 caName, serial, startDate, endDate, caName, caKeyPair.getPublic());
         ContentSigner caSigner = new JcaContentSignerBuilder("SHA256WithRSA")
@@ -180,7 +182,7 @@ public class CloudHsmV2Test {
         }
         PublicKey csrPublicKey = new JcaPEMKeyConverter().setProvider("BC").getPublicKey(csr.getSubjectPublicKeyInfo());
         X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
-                caName, serial.add(java.math.BigInteger.ONE), startDate, endDate, csr.getSubject(), csrPublicKey);
+                caName, serial.add(BigInteger.ONE), startDate, endDate, csr.getSubject(), csrPublicKey);
         X509CertificateHolder certHolder = certBuilder.build(caSigner);
         StringWriter certSw = new StringWriter();
         try (JcaPEMWriter pw = new JcaPEMWriter(certSw)) {

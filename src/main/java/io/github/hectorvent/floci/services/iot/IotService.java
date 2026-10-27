@@ -256,7 +256,7 @@ public class IotService {
         Thing existing = thingStore.get(key).orElse(null);
         if (existing != null) {
             if (existing.getAttributes().equals(attributes)
-                    && java.util.Objects.equals(existing.getThingTypeName(), blankToNull(thingTypeName))) {
+                    && Objects.equals(existing.getThingTypeName(), blankToNull(thingTypeName))) {
                 return existing;
             }
             throw new AwsException("ResourceAlreadyExistsException", "Thing already exists: " + thingName, 409);
@@ -1253,7 +1253,7 @@ public class IotService {
         String key = thingTypeKey(region, thingTypeName);
         IotThingType existing = thingTypeStore.get(key).orElse(null);
         if (existing != null) {
-            if (java.util.Objects.equals(existing.getDescription(), properties.path("thingTypeDescription").asText(null))
+            if (Objects.equals(existing.getDescription(), properties.path("thingTypeDescription").asText(null))
                     && existing.getSearchableAttributes().equals(stringList(properties.path("searchableAttributes")))) {
                 return existing;
             }
@@ -1307,7 +1307,7 @@ public class IotService {
         String key = thingGroupKey(region, thingGroupName);
         IotThingGroup existing = thingGroupStore.get(key).orElse(null);
         if (existing != null) {
-            if (java.util.Objects.equals(existing.getDescription(), properties.path("thingGroupDescription").asText(null))
+            if (Objects.equals(existing.getDescription(), properties.path("thingGroupDescription").asText(null))
                     && existing.getAttributes().equals(parseAttributePayload(properties.path("attributePayload")))) {
                 return existing;
             }

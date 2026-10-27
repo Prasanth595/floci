@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -2013,7 +2014,7 @@ class SamTransformIntegrationTest {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             try (ZipOutputStream zos = new ZipOutputStream(baos)) {
                 zos.putNextEntry(new ZipEntry("index.js"));
-                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(StandardCharsets.UTF_8));
                 zos.closeEntry();
             }
             return baos.toByteArray();
@@ -2025,7 +2026,7 @@ class SamTransformIntegrationTest {
     private static void waitForStackStatus(String stackName, String status) {
         String expected = "<StackStatus>" + status + "</StackStatus>";
         String body = "";
-        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(5).toNanos();
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
         while (System.nanoTime() < deadline) {
             body = given()
                 .contentType("application/x-www-form-urlencoded")

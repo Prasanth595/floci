@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.securityhub.model.SecurityHubState;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -248,7 +249,7 @@ public class SecurityHubService implements Resettable {
         validateTags(request.get("Tags"));
         String id = UUID.randomUUID().toString();
         ObjectNode stored = (ObjectNode) request.deepCopy();
-        String now = java.time.Instant.now().toString();
+        String now = Instant.now().toString();
         stored.put("CreatedAt", now);
         stored.put("UpdatedAt", now);
         state.getPolicies().put(id, stored);
@@ -293,7 +294,7 @@ public class SecurityHubService implements Resettable {
             validateConfigurationPolicy(request.get("ConfigurationPolicy"));
             merged.set("ConfigurationPolicy", request.get("ConfigurationPolicy").deepCopy());
         }
-        merged.put("UpdatedAt", java.time.Instant.now().toString());
+        merged.put("UpdatedAt", Instant.now().toString());
         state.getPolicies().put(id, merged);
         save(region, state);
         return merged;
@@ -339,7 +340,7 @@ public class SecurityHubService implements Resettable {
                 throw notFound("The configuration policy association was not found.");
             }
             association.setStatus("SUCCESS");
-            association.setUpdatedAt(java.time.Instant.now().toString());
+            association.setUpdatedAt(Instant.now().toString());
             applyPolicyToAccountTarget(region, state, association);
             save(region, state);
         }
@@ -359,7 +360,7 @@ public class SecurityHubService implements Resettable {
             throw conflict("The configuration policy association is already being removed.");
         }
         association.setStatus("PENDING");
-        association.setUpdatedAt(java.time.Instant.now().toString());
+        association.setUpdatedAt(Instant.now().toString());
         association.setPendingPollsRemaining(1);
         association.setDisassociating(true);
         save(region, state);

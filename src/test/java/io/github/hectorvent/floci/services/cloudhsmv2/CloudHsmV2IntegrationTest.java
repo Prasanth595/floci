@@ -27,6 +27,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PublicKey;
 import java.security.SecureRandom;
+import java.security.Security;
 import java.util.Date;
 
 import static io.restassured.RestAssured.given;
@@ -969,15 +970,15 @@ class CloudHsmV2IntegrationTest {
     }
 
     private String[] generateCerts(String csrPem) throws Exception {
-        java.security.Security.addProvider(new BouncyCastleProvider());
-        KeyPairGenerator keyGen = java.security.KeyPairGenerator.getInstance("RSA", "BC");
+        Security.addProvider(new BouncyCastleProvider());
+        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA", "BC");
         keyGen.initialize(2048, new SecureRandom());
         KeyPair caKeyPair = keyGen.generateKeyPair();
         X500Name caName = new X500Name("CN=Floci Test CA");
         long now = System.currentTimeMillis();
         Date startDate = new Date(now);
         Date endDate = new Date(now + 365L * 24 * 3600 * 1000);
-        BigInteger serial = java.math.BigInteger.valueOf(now);
+        BigInteger serial = BigInteger.valueOf(now);
         X509v3CertificateBuilder caBuilder = new JcaX509v3CertificateBuilder(
                 caName, serial, startDate, endDate, caName, caKeyPair.getPublic());
         ContentSigner caSigner = new JcaContentSignerBuilder("SHA256WithRSA")
@@ -994,7 +995,7 @@ class CloudHsmV2IntegrationTest {
         }
         PublicKey csrPublicKey = new JcaPEMKeyConverter().setProvider("BC").getPublicKey(csr.getSubjectPublicKeyInfo());
         X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
-                caName, serial.add(java.math.BigInteger.ONE), startDate, endDate, csr.getSubject(), csrPublicKey);
+                caName, serial.add(BigInteger.ONE), startDate, endDate, csr.getSubject(), csrPublicKey);
         X509CertificateHolder certHolder = certBuilder.build(caSigner);
         StringWriter certSw = new StringWriter();
         try (JcaPEMWriter pw = new JcaPEMWriter(certSw)) {

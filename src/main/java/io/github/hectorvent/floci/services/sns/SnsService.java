@@ -64,6 +64,7 @@ import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -147,7 +148,7 @@ public class SnsService implements Resettable, ResourceProvider {
     private static final Set<String> SUPPORTED_PUSH_PLATFORMS = Set.of(
             "APNS", "APNS_SANDBOX", "GCM", "FCM");
     private static final Pattern PLATFORM_APP_NAME_PATTERN =
-            java.util.regex.Pattern.compile("[a-zA-Z0-9_.\\-]{1,256}");
+            Pattern.compile("[a-zA-Z0-9_.\\-]{1,256}");
 
     /**
      * Operator names that may not appear as a field name inside a {@code $or} array; their
@@ -1458,7 +1459,7 @@ public class SnsService implements Resettable, ResourceProvider {
     }
 
     private static boolean isExpiredSentinelToken(String token) {
-        return token != null && token.toUpperCase(java.util.Locale.ROOT).contains("EXPIRED");
+        return token != null && token.toUpperCase(Locale.ROOT).contains("EXPIRED");
     }
 
     private static boolean isEndpointArn(String arn) {

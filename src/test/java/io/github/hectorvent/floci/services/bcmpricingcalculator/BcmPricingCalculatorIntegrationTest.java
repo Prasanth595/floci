@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.bcmpricingcalculator;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -68,7 +69,7 @@ class BcmPricingCalculatorIntegrationTest {
                 .body(body).when().post("/").then().statusCode(200).extract().path("id");
         String second = given().contentType(CONTENT_TYPE).header("X-Amz-Target", TARGET + "CreateWorkloadEstimate")
                 .body(body).when().post("/").then().statusCode(200).extract().path("id");
-        org.junit.jupiter.api.Assertions.assertEquals(first, second);
+        Assertions.assertEquals(first, second);
     }
     @Test
     void tokenConflictAndIdempotentDeleteMatchAwsContract() {
@@ -109,12 +110,12 @@ class BcmPricingCalculatorIntegrationTest {
             tags.put("tag" + i, "value");
         }
         given().contentType(CONTENT_TYPE).header("X-Amz-Target", TARGET + "CreateWorkloadEstimate")
-                .body(java.util.Map.of("name", "two-hundred-tags", "tags", tags))
+                .body(Map.of("name", "two-hundred-tags", "tags", tags))
             .when().post("/").then().statusCode(200);
 
         tags.put("tag200", "value");
         given().contentType(CONTENT_TYPE).header("X-Amz-Target", TARGET + "CreateWorkloadEstimate")
-                .body(java.util.Map.of("name", "too-many-tags", "tags", tags))
+                .body(Map.of("name", "too-many-tags", "tags", tags))
             .when().post("/").then().statusCode(400)
                 .body("__type", containsString("ValidationException"));
     }

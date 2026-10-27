@@ -44,7 +44,7 @@ public class CurService {
     private static final int MAX_REPORTS_PER_ACCOUNT = 5;
     /** AWS allows the report name to contain alphanumerics, hyphens, and underscores. */
     private static final Pattern REPORT_NAME_PATTERN =
-            java.util.regex.Pattern.compile("[A-Za-z0-9_-]+");
+            Pattern.compile("[A-Za-z0-9_-]+");
 
     private static final Set<String> ALLOWED_TIME_UNITS = Set.of("HOURLY", "DAILY", "MONTHLY");
     /**

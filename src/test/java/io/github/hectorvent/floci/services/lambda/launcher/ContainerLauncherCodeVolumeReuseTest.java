@@ -20,7 +20,9 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -309,7 +311,7 @@ class ContainerLauncherCodeVolumeReuseTest {
 
         assertEquals("keep", Files.readString(symlinkTarget),
                 "writing a completion marker must not follow and truncate a pre-existing symlink");
-        assertTrue(Files.isRegularFile(marker, java.nio.file.LinkOption.NOFOLLOW_LINKS),
+        assertTrue(Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS),
                 "successful population should replace the symlink with a real marker file");
         assertFalse(Files.isSymbolicLink(marker));
     }
@@ -327,7 +329,7 @@ class ContainerLauncherCodeVolumeReuseTest {
                     return copyCommand;
                 });
         doAnswer(invocation -> {
-            capturedInput[0].transferTo(java.io.OutputStream.nullOutputStream());
+            capturedInput[0].transferTo(OutputStream.nullOutputStream());
             return null;
         }).when(copyCommand).exec();
 

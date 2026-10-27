@@ -15,9 +15,14 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -297,7 +302,7 @@ public class PricingService {
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Url", "https://pricing-snapshot.floci.local/"
-                + java.net.URLEncoder.encode(priceListArn, java.nio.charset.StandardCharsets.UTF_8)
+                + URLEncoder.encode(priceListArn, StandardCharsets.UTF_8)
                 + "/" + fileFormat.toLowerCase());
         return response;
     }
@@ -417,7 +422,7 @@ public class PricingService {
         JsonNode effective = entry.path("EffectiveDate");
         if (!effective.isMissingNode() && !effective.isNull() && !effective.asText().isEmpty()) {
             try {
-                return java.time.OffsetDateTime.parse(effective.asText()).toInstant();
+                return OffsetDateTime.parse(effective.asText()).toInstant();
             } catch (DateTimeParseException ignored) {
                 try {
                     return Instant.parse(effective.asText());
@@ -431,8 +436,8 @@ public class PricingService {
         if (m.find()) {
             String ts = m.group(1);
             try {
-                return java.time.LocalDateTime.parse(ts, ARN_TIMESTAMP_FMT)
-                        .toInstant(java.time.ZoneOffset.UTC);
+                return LocalDateTime.parse(ts, ARN_TIMESTAMP_FMT)
+                        .toInstant(ZoneOffset.UTC);
             } catch (DateTimeParseException ignored) {
                 // fall through
             }
@@ -441,11 +446,11 @@ public class PricingService {
     }
 
     private static final Pattern SAFE_PATH_SEGMENT =
-            java.util.regex.Pattern.compile("[A-Za-z0-9._-]+");
+            Pattern.compile("[A-Za-z0-9._-]+");
     private static final Pattern ARN_TIMESTAMP =
-            java.util.regex.Pattern.compile("/(\\d{14})(?:/|$)");
+            Pattern.compile("/(\\d{14})(?:/|$)");
     private static final DateTimeFormatter ARN_TIMESTAMP_FMT =
-            java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+            DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
     record ServiceEntry(String serviceCode, List<String> attributeNames) {
     }

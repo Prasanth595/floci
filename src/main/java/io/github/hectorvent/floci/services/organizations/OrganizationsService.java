@@ -35,6 +35,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -676,7 +677,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
 
     public Optional<OrganizationAccount> findAccountForPortal(String accountId) {
         if (accountId == null || !ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
         return accounts.scanAllAccounts().stream()
                 .filter(account -> accountId.equals(account.getId()))
@@ -1882,7 +1883,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         handshake.setExpirationTimestamp(now.plus(HANDSHAKE_TTL_DAYS, ChronoUnit.DAYS));
         handshake.setOrganizationId(organization.getId());
         handshake.setArn(arn(organization.getMasterAccountId(),
-                "handshake/" + organization.getId() + "/" + action.toLowerCase(java.util.Locale.ROOT)
+                "handshake/" + organization.getId() + "/" + action.toLowerCase(Locale.ROOT)
                         + "/" + handshake.getId()));
         return handshake;
     }
@@ -2008,7 +2009,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
 
     private String policyArn(Organization organization, String policyId, String type) {
         return arn(organization.getMasterAccountId(),
-                "policy/" + organization.getId() + "/" + type.toLowerCase(java.util.Locale.ROOT) + "/" + policyId);
+                "policy/" + organization.getId() + "/" + type.toLowerCase(Locale.ROOT) + "/" + policyId);
     }
 
     /** Organizations ARNs carry no region; they take the request's partition. */

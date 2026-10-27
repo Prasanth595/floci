@@ -5,8 +5,10 @@ import io.smallrye.config.WithDefault;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -56,16 +58,16 @@ class RuntimeApiPortPoolDefaultTest {
 
     /** {@code runtimeApiBasePort} -> {@code runtime-api-base-port}. */
     private static String kebab(String method) {
-        return method.replaceAll("([a-z0-9])([A-Z])", "$1-$2").toLowerCase(java.util.Locale.ROOT);
+        return method.replaceAll("([a-z0-9])([A-Z])", "$1-$2").toLowerCase(Locale.ROOT);
     }
 
     /** The value under {@code floci.services.lambda.<key>} in application.yml, or null. */
     private static Integer yamlValue(String key) throws Exception {
-        Path yml = java.nio.file.Path.of("src/main/resources/application.yml");
-        assertTrue(java.nio.file.Files.exists(yml), "application.yml not found at " + yml.toAbsolutePath());
+        Path yml = Path.of("src/main/resources/application.yml");
+        assertTrue(Files.exists(yml), "application.yml not found at " + yml.toAbsolutePath());
         Pattern p =
-                java.util.regex.Pattern.compile("^\\s*" + java.util.regex.Pattern.quote(key) + ":\\s*(\\d+)\\s*$");
-        for (String line : java.nio.file.Files.readAllLines(yml)) {
+                Pattern.compile("^\\s*" + Pattern.quote(key) + ":\\s*(\\d+)\\s*$");
+        for (String line : Files.readAllLines(yml)) {
             Matcher m = p.matcher(line);
             if (m.matches()) {
                 return Integer.valueOf(m.group(1));

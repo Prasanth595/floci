@@ -1196,7 +1196,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     private static void addTarEntry(
             TarArchiveOutputStream tar,
             String name, String content) throws IOException {
-        byte[] bytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
         TarArchiveEntry entry =
                 new TarArchiveEntry(name);
         entry.setSize(bytes.length);

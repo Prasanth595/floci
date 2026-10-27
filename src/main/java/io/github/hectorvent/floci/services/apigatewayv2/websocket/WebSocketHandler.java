@@ -29,6 +29,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -472,7 +473,7 @@ public class WebSocketHandler {
         connectionManager.updateLastActiveAt(connectionId);
 
         // Base64-encode the binary data for the proxy event body
-        String base64Body = java.util.Base64.getEncoder().encodeToString(data);
+        String base64Body = Base64.getEncoder().encodeToString(data);
 
         // Route using the base64 body (route selection won't match JSON fields in binary messages,
         // so it will fall through to $default)
@@ -799,9 +800,9 @@ public class WebSocketHandler {
         @Override
         public List<String> getRequestHeader(String name) {
             if ("Authorization".equalsIgnoreCase(name) && authorizationHeader != null) {
-                return java.util.List.of(authorizationHeader);
+                return List.of(authorizationHeader);
             }
-            return java.util.Collections.emptyList();
+            return Collections.emptyList();
         }
 
         @Override
@@ -811,12 +812,12 @@ public class WebSocketHandler {
 
         @Override
         public List<MediaType> getAcceptableMediaTypes() {
-            return java.util.Collections.emptyList();
+            return Collections.emptyList();
         }
 
         @Override
         public List<Locale> getAcceptableLanguages() {
-            return java.util.Collections.emptyList();
+            return Collections.emptyList();
         }
 
         @Override
@@ -831,7 +832,7 @@ public class WebSocketHandler {
 
         @Override
         public Map<String, Cookie> getCookies() {
-            return java.util.Collections.emptyMap();
+            return Collections.emptyMap();
         }
 
         @Override

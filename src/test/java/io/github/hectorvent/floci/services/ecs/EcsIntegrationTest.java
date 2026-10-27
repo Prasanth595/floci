@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecs;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -234,7 +235,7 @@ class EcsIntegrationTest {
                 .body("taskDefinition.family", equalTo("ec2-fallback-family"))
                 .body("taskDefinition.compatibilities", hasItem("EC2"))
                 // requiresCompatibilities shouldn't exist or should be empty
-                .body("taskDefinition.requiresCompatibilities", org.hamcrest.Matchers.nullValue());
+                .body("taskDefinition.requiresCompatibilities", Matchers.nullValue());
     }
 
     @Test

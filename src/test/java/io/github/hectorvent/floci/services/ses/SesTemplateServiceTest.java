@@ -275,7 +275,7 @@ class SesTemplateServiceTest {
 
     @Test
     void buildTestRenderMime_asciiBody_uses7bit() {
-        ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("Hello", "Hi there", "<p>Hi</p>", date, "BOUND");
         assertTrue(mime.contains("Subject: Hello\r\n"));
         assertTrue(mime.contains("Content-Type: multipart/alternative; boundary=\"BOUND\""));
@@ -286,7 +286,7 @@ class SesTemplateServiceTest {
 
     @Test
     void buildTestRenderMime_utf8Body_uses8bit() {
-        ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("件名", "こんにちは", "<p>こんにちは</p>", date, "BOUND");
         assertTrue(mime.contains("Subject: 件名\r\n"));
         assertTrue(mime.contains("Content-Transfer-Encoding: 8bit"));
@@ -295,7 +295,7 @@ class SesTemplateServiceTest {
 
     @Test
     void buildTestRenderMime_subjectStripsCRLF() {
-        ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("Multi\r\nLine", "x", "x", date, "BOUND");
         // CR and LF are both C0 controls and are replaced with spaces.
         assertTrue(mime.contains("Subject: Multi  Line\r\n"));
@@ -356,7 +356,7 @@ class SesTemplateServiceTest {
 
     @Test
     void buildTestRenderMime_bodyWithBareLf_normalizedToCrlf() {
-        ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("S", "line1\nline2", "<p>x\ny</p>", date, "BOUND");
         assertTrue(mime.contains("line1\r\nline2"));
         assertTrue(mime.contains("x\r\ny"));
@@ -365,7 +365,7 @@ class SesTemplateServiceTest {
 
     @Test
     void buildTestRenderMime_bodyEndingWithNewline_noExtraBlankLine() {
-        ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("S", "hello\n", "<p>hi</p>\n", date, "BOUND");
         assertFalse(mime.contains("hello\r\n\r\n--BOUND"));
         assertTrue(mime.contains("hello\r\n--BOUND"));
@@ -375,7 +375,7 @@ class SesTemplateServiceTest {
 
     @Test
     void buildTestRenderMime_bodyWithoutTrailingNewline_addsCrlfBeforeBoundary() {
-        ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("S", "hello", "<p>hi</p>", date, "BOUND");
         assertTrue(mime.contains("hello\r\n--BOUND"));
         assertTrue(mime.contains("</p>\r\n--BOUND"));
@@ -405,7 +405,7 @@ class SesTemplateServiceTest {
 
     @Test
     void buildTestRenderMime_subjectWithControlChars_replacedWithSpace() {
-        ZonedDateTime date = java.time.ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime(
                 "Hello\u0001World", "x", "x", date, "BOUND");
         assertTrue(mime.contains("Subject: Hello World\r\n"));

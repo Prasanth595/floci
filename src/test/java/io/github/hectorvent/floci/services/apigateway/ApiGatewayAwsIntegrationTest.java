@@ -8,6 +8,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import io.restassured.response.Response;
 import org.hamcrest.Matcher;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.*;
 
 import java.util.Map;
@@ -1255,8 +1256,8 @@ class ApiGatewayAwsIntegrationTest {
     private static Matcher<Integer> anyOf(int... values) {
         Matcher<Integer>[] matchers = new Matcher[values.length];
         for (int i = 0; i < values.length; i++) {
-            matchers[i] = org.hamcrest.Matchers.equalTo(values[i]);
+            matchers[i] = Matchers.equalTo(values[i]);
         }
-        return org.hamcrest.Matchers.anyOf(matchers);
+        return Matchers.anyOf(matchers);
     }
 }

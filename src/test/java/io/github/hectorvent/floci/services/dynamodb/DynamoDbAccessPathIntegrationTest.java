@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -660,7 +661,7 @@ class DynamoDbAccessPathIntegrationTest {
             scanPages++;
         } while (scanToken != null && scanPages < 10);
 
-        org.junit.jupiter.api.Assertions.assertEquals(Set.of("partiql-page-1", "partiql-page-2"), scannedPks);
+        Assertions.assertEquals(Set.of("partiql-page-1", "partiql-page-2"), scannedPks);
 
         // Query branch (partition-key equality): same pagination contract.
         String queryToken = request("DynamoDB_20120810.ExecuteStatement", """

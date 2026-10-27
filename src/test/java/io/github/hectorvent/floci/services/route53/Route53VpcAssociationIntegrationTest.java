@@ -7,9 +7,11 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -358,7 +360,7 @@ class Route53VpcAssociationIntegrationTest {
             zoneIds.add(createPrivateZone("tiebreak.internal.", "vpc-tiebreak-" + i, shared));
         }
         List<String> expectedOrder = new ArrayList<>(zoneIds);
-        java.util.Collections.sort(expectedOrder);
+        Collections.sort(expectedOrder);
 
         List<String> walked = new ArrayList<>();
         String token = null;
@@ -460,7 +462,7 @@ class Route53VpcAssociationIntegrationTest {
                 .body(vpcRequest("DeleteVPCAssociationAuthorizationRequest", spokeVpc, ""))
                 .post("/2013-04-01/hostedzone/" + zoneId + "/deauthorizevpcassociation")
                 .then().statusCode(200)
-                .body(org.hamcrest.Matchers.emptyOrNullString());
+                .body(Matchers.emptyOrNullString());
 
         given().header("Authorization", route53Auth(VPC_ACCOUNT))
                 .get("/2013-04-01/hostedzonesbyvpc?vpcid=" + spokeVpc + "&vpcregion=us-east-1")

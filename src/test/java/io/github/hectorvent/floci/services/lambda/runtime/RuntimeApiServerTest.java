@@ -20,7 +20,9 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -55,7 +57,7 @@ class RuntimeApiServerTest {
         server = new RuntimeApiServer(vertx, port);
         server.start().get(5, TimeUnit.SECONDS);
         httpClient = HttpClient.newBuilder()
-                .connectTimeout(java.time.Duration.ofSeconds(5))
+                .connectTimeout(Duration.ofSeconds(5))
                 .build();
         scheduler = Executors.newSingleThreadScheduledExecutor();
     }
@@ -913,7 +915,7 @@ class RuntimeApiServerTest {
         // request-line get through, proving the listener is up.
         HttpRequest probe = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
-                .timeout(java.time.Duration.ofMillis(500))
+                .timeout(Duration.ofMillis(500))
                 .GET()
                 .build();
         CompletableFuture<HttpResponse<String>> probeFuture =
@@ -1732,7 +1734,7 @@ class RuntimeApiServerTest {
 
         HttpResponse<String> next = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
-                        .timeout(java.time.Duration.ofSeconds(5))
+                        .timeout(Duration.ofSeconds(5))
                         .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(204, next.statusCode(),
@@ -1913,7 +1915,7 @@ class RuntimeApiServerTest {
         HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
                         .header("Lambda-Extension-Identifier", survivorId)
-                        .timeout(java.time.Duration.ofSeconds(5))
+                        .timeout(Duration.ofSeconds(5))
                         .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -1985,7 +1987,7 @@ class RuntimeApiServerTest {
             // A fresh client per iteration — the port may be reused from an earlier iteration, and
             // a shared client's connection pool could otherwise hand back a stale pooled
             // connection to that iteration's now-closed server.
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
             int freshPort = findFreePort();
             RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
             freshServer.start().get(5, TimeUnit.SECONDS);
@@ -2051,7 +2053,7 @@ class RuntimeApiServerTest {
     @Timeout(60)
     void enqueueRacedAgainstStop_alwaysCompletesResultFuture() throws Exception {
         int iterations = 500;
-        ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
+        ThreadLocalRandom random = ThreadLocalRandom.current();
 
         for (int i = 0; i < iterations; i++) {
             int freshPort = findFreePort();
@@ -2097,7 +2099,7 @@ class RuntimeApiServerTest {
         int iterations = 300;
 
         for (int i = 0; i < iterations; i++) {
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
             int freshPort = findFreePort();
             RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
             freshServer.start().get(5, TimeUnit.SECONDS);
@@ -2146,7 +2148,7 @@ class RuntimeApiServerTest {
         int iterations = 300;
 
         for (int i = 0; i < iterations; i++) {
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
             int freshPort = findFreePort();
             RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
             freshServer.start().get(5, TimeUnit.SECONDS);
@@ -2227,7 +2229,7 @@ class RuntimeApiServerTest {
 
     private String registerExtensionOn(HttpClient client, int targetPort, String name, String... events)
             throws Exception {
-        String eventsJson = String.join(",", java.util.Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
+        String eventsJson = String.join(",", Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
         HttpResponse<String> response = client.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + targetPort + "/2020-01-01/extension/register"))
                         .header("Lambda-Extension-Name", name)
@@ -2276,7 +2278,7 @@ class RuntimeApiServerTest {
     }
 
     private String registerExtension(String name, String... events) throws Exception {
-        String eventsJson = String.join(",", java.util.Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
+        String eventsJson = String.join(",", Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
         HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
                         .header("Lambda-Extension-Name", name)

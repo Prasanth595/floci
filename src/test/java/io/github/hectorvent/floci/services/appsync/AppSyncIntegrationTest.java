@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -37,7 +38,7 @@ class AppSyncIntegrationTest {
     private static String apiId;
     private static String keyId;
 
-    @jakarta.inject.Inject
+    @Inject
     StorageBackend<String, SchemaCreationStatus> schemaStatusStore;
 
     @BeforeAll
@@ -99,7 +100,7 @@ class AppSyncIntegrationTest {
         assertThat(detailsJson, notNullValue());
         try {
             return new ObjectMapper()
-                    .readValue(detailsJson, java.util.Map.class);
+                    .readValue(detailsJson, Map.class);
         } catch (JsonProcessingException e) {
             throw new RuntimeException(e);
         }

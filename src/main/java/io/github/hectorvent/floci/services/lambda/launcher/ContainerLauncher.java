@@ -40,6 +40,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
@@ -50,9 +51,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -86,7 +89,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     static final String DEFAULT_NAME_PREFIX = ContainerStorageHelper.NAME_PREFIX;
     /** A prefix must be a legal Docker name on its own: names must start alphanumeric. */
     private static final Pattern SAFE_NAME_PREFIX =
-            java.util.regex.Pattern.compile("^[A-Za-z0-9][A-Za-z0-9_.-]*$");
+            Pattern.compile("^[A-Za-z0-9][A-Za-z0-9_.-]*$");
 
     /**
      * The base name prefix for Lambda containers and code volumes:
@@ -231,7 +234,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         String runtimeApiEndpoint = hostAddress + ":" + runtimeApiServer.getPort();
 
         // Give the container a human-readable name (needed for log stream name below)
-        String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         String containerName = ContainerStorageHelper.prefixedDockerName(config,
                 resolveContainerNamePrefix(config), fn.getFunctionName() + "-" + shortId);
 
@@ -763,7 +766,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     // ensureCodeVolume re-checks lifecycleManager.volumeExists() rather than trusting this alone.
     private static final String CODE_VOLUME_MARKER_DIR = "lambda-codevol-markers";
     private static final String NAMESPACE_LABEL = "floci_namespace";
-    private final Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> populatedCodeVolumes = ConcurrentHashMap.newKeySet();
     // Deliberately never pruned: removing an entry while a caller elsewhere still held a reference
     // to its lock object let a third caller's computeIfAbsent create a replacement lock for the same
     // volume name, so the waiter (once granted the old lock) and the new caller (holding the new
@@ -821,7 +824,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      *  instead of waiting out a real 60s window (restore it in a finally). */
     static long VOLUME_CLEANUP_GRACE_MS = 60_000L;
     private final ScheduledExecutorService volumeCleanupScheduler =
-            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+            Executors.newSingleThreadScheduledExecutor(
                     r -> { Thread t = new Thread(r, "floci-code-volume-cleanup"); t.setDaemon(true); return t; });
 
     /**
@@ -998,15 +1001,15 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     void populateCodeVolume(String volName, LambdaFunction fn, String image) {
         lifecycleManager.ensureVolume(volName);
-        String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
         // tar-copy the code into it, then discard it — the data persists in the volume.
         ContainerBuilder.Builder helperBuilder = containerBuilder.newContainer(image)
                 .withName(ContainerStorageHelper.prefixedDockerName(config, resolveContainerNamePrefix(config),
                         "codevol-" + fn.getFunctionName() + "-" + shortId))
-                .withEnv(java.util.List.of())
-                .withEntrypoint(java.util.List.of("sleep"))
-                .withCmd(java.util.List.of("3600"))
+                .withEnv(List.of())
+                .withEntrypoint(List.of("sleep"))
+                .withCmd(List.of("3600"))
                 .withNamedVolume(volName, TASK_DIR, false);
         ContainerSpec helperSpec = helperBuilder.build();
         // Gate the heavy work (helper create + ~90MB tar copy) so a burst of first-time populates
@@ -1047,7 +1050,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private boolean reusePersistedCodeVolumeOrRemoveStaleMarker(String volName) {
         synchronized (codeVolumeMarkerIoLock) {
             Path marker = codeVolumeMarkerPath(volName);
-            if (!Files.isRegularFile(marker, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            if (!Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS)) {
                 return false;
             }
             Optional<Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
@@ -1113,7 +1116,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // process's live markers.
         String markerPrefix = codeVolumeNamePrefix(config);
         try (Stream<Path> markers = Files.list(markerDir)) {
-            markers.filter(path -> Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+            markers.filter(path -> Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
                     .filter(path -> path.getFileName().toString().startsWith(markerPrefix))
                     .filter(path -> !volumeNames.get().contains(path.getFileName().toString()))
                     .forEach(path -> {

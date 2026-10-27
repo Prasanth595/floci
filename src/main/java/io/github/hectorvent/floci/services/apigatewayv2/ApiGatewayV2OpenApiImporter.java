@@ -27,6 +27,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
 
 /**
  * OpenAPI import for HTTP APIs (ImportApi / ReimportApi).
@@ -216,7 +217,7 @@ public class ApiGatewayV2OpenApiImporter {
                 String names = security.stream()
                         .flatMap(requirement -> requirement.keySet().stream())
                         .distinct()
-                        .collect(java.util.stream.Collectors.joining(", "));
+                        .collect(Collectors.joining(", "));
                 reported.add("Security requirement (" + names + ") on " + routeKey
                         + " does not resolve to a supported authorizer; the route is imported as NONE"
                         + " and will accept unauthenticated requests");

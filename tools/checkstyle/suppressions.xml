@@ -15,13 +15,22 @@
     <suppress id="NoVar" files="/services/s3/S3Controller\.java$"/>
     <suppress id="NoVar" files="/services/s3/S3Service\.java$"/>
     <!-- Files that still use unnecessary fully qualified type names. Remove an entry once its file is clean. -->
+    <suppress id="NoFqcn" files="/core/common/docker/ContainerLifecycleManager\.java$"/>
+    <suppress id="NoFqcn" files="/services/apigateway/ApiGatewayApiKeyRequiredIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/apigateway/ApiGatewayExecuteController\.java$"/>
+    <suppress id="NoFqcn" files="/services/apigateway/ProxyEventPathParametersTest\.java$"/>
     <suppress id="NoFqcn" files="/services/autoscaling/AutoScalingReconciler\.java$"/>
     <suppress id="NoFqcn" files="/services/backup/BackupController\.java$"/>
+    <suppress id="NoFqcn" files="/services/cloudformation/CloudFormationService\.java$"/>
+    <suppress id="NoFqcn" files="/services/cloudformation/CloudFormationTemplateEngineTest\.java$"/>
+    <suppress id="NoFqcn" files="/services/cloudformation/provisioners/Ec2NetworkCfnProvisionerTest\.java$"/>
+    <suppress id="NoFqcn" files="/services/cloudformation/provisioners/Ec2NetworkCfnProvisioner\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudfront/CloudFrontServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudfront/CloudFrontService\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudfront/CloudFrontServingController\.java$"/>
+    <suppress id="NoFqcn" files="/services/cloudtrail/CloudTrailService\.java$"/>
     <suppress id="NoFqcn" files="/services/codedeploy/CodeDeployService\.java$"/>
+    <suppress id="NoFqcn" files="/services/dynamodb/backend/DynamoDbFacadeTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ec2/Ec2ContainerManagerTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ec2/Ec2IntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ec2/Ec2QueryHandler\.java$"/>
@@ -31,9 +40,12 @@
     <suppress id="NoFqcn" files="/services/ecr/EcrService\.java$"/>
     <suppress id="NoFqcn" files="/services/ecr/registry/EcrRegistryDataPlane\.java$"/>
     <suppress id="NoFqcn" files="/services/eks/EksClusterManager\.java$"/>
+    <suppress id="NoFqcn" files="/services/elasticache/proxy/AbstractRedisAuthProxyRelayTest\.java$"/>
     <suppress id="NoFqcn" files="/services/elb/ElbClassicService\.java$"/>
+    <suppress id="NoFqcn" files="/services/firehose/FirehoseServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/firehose/FirehoseService\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/IamServiceTest\.java$"/>
+    <suppress id="NoFqcn" files="/services/iam/ResourceArnBuilder\.java$"/>
     <suppress id="NoFqcn" files="/services/kinesis/KinesisJsonHandlerTest\.java$"/>
     <suppress id="NoFqcn" files="/services/kinesis/KinesisJsonHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/kinesis/KinesisService\.java$"/>

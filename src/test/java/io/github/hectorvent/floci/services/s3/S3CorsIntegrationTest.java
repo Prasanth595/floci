@@ -2,10 +2,13 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+
+import java.util.Arrays;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -632,11 +635,11 @@ class S3CorsIntegrationTest {
 
         // Vary may be a single comma-separated string or multiple header lines;
         // either way "Origin" should appear exactly once.
-        long count = java.util.Arrays.stream(vary.split(","))
+        long count = Arrays.stream(vary.split(","))
                 .map(String::trim)
                 .filter("Origin"::equalsIgnoreCase)
                 .count();
-        org.junit.jupiter.api.Assertions.assertEquals(1, count,
+        Assertions.assertEquals(1, count,
                 "Vary: Origin should appear exactly once, got: " + vary);
     }
 
@@ -653,7 +656,7 @@ class S3CorsIntegrationTest {
 
         // getHeaders() returns all values including duplicates
         long count = resp.headers().getList("Access-Control-Allow-Origin").stream().count();
-        org.junit.jupiter.api.Assertions.assertEquals(1, count,
+        Assertions.assertEquals(1, count,
                 "Access-Control-Allow-Origin must appear exactly once");
     }
 

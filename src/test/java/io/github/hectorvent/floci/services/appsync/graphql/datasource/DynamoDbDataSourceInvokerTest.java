@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -48,7 +49,7 @@ class DynamoDbDataSourceInvokerTest {
 
     private JsonNode captureRequest(String action) throws Exception {
         ArgumentCaptor<JsonNode> captor = ArgumentCaptor.forClass(JsonNode.class);
-        org.mockito.Mockito.verify(handler).handle(eq(action), captor.capture(), anyString());
+        Mockito.verify(handler).handle(eq(action), captor.capture(), anyString());
         return captor.getValue();
     }
 
@@ -188,7 +189,7 @@ class DynamoDbDataSourceInvokerTest {
                 """), "eu-west-1");
         String nextToken = (String) first.get("nextToken");
 
-        org.mockito.Mockito.reset(handler);
+        Mockito.reset(handler);
         answers("{\"Items\": []}");
         invoker.invoke(dataSource(), request("""
                 {"operation": "Scan", "nextToken": "%s"}

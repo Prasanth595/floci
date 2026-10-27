@@ -91,7 +91,7 @@ class ResolverCallbackResourceTest {
         resource.resolve("Bearer " + session.token(), body(invocation("0", "Query", "getMessages")));
 
         ArgumentCaptor<ResolverInvocation> captor =
-                org.mockito.ArgumentCaptor.forClass(ResolverInvocation.class);
+                ArgumentCaptor.forClass(ResolverInvocation.class);
         verify(executor).execute(eq(resolver), captor.capture());
         ResolverInvocation invocation = captor.getValue();
         assertEquals(API_ID, invocation.apiId());
@@ -122,7 +122,7 @@ class ResolverCallbackResourceTest {
         // on the null, which answered 500 and failed every field in the batch, not just this one.
         assertEquals("ok", results.get(0).get("data"));
         ArgumentCaptor<ResolverInvocation> captor =
-                org.mockito.ArgumentCaptor.forClass(ResolverInvocation.class);
+                ArgumentCaptor.forClass(ResolverInvocation.class);
         verify(executor).execute(eq(resolver), captor.capture());
         assertTrue(captor.getValue().arguments().containsKey("nextToken"));
         assertNull(captor.getValue().arguments().get("nextToken"));

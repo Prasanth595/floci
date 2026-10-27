@@ -190,7 +190,7 @@ class SesTenantSendV2IntegrationTest {
         SesDomainIdentityTestHelper.createVerified("floci-raw.example.com", AUTH);
         String mime = "From: probe@floci-raw.example.com\r\nTo: success@simulator.amazonses.com\r\n"
                 + "Subject: s\r\n\r\nbody";
-        String data = java.util.Base64.getEncoder().encodeToString(mime.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String data = Base64.getEncoder().encodeToString(mime.getBytes(StandardCharsets.UTF_8));
         // FromEmailAddress omitted: the sender comes from the MIME From header, and that identity
         // is not associated with the tenant.
         v2().body("{\"TenantName\":\"" + TENANT + "\","

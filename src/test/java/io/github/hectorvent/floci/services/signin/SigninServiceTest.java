@@ -18,6 +18,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -304,7 +307,7 @@ class SigninServiceTest {
         CountDownLatch ready = new CountDownLatch(callers);
         CountDownLatch start = new CountDownLatch(1);
         try {
-            List<Future<TokenResult>> futures = java.util.stream.IntStream.range(0, callers)
+            List<Future<TokenResult>> futures = IntStream.range(0, callers)
                     .mapToObj(ignored -> executor.submit(() -> {
                         ready.countDown();
                         start.await();
@@ -542,9 +545,9 @@ class SigninServiceTest {
 
     private static Map<String, String> query(String redirect) {
         String query = redirect.substring(redirect.indexOf('?') + 1);
-        return java.util.Arrays.stream(query.split("&"))
+        return Arrays.stream(query.split("&"))
                 .map(pair -> pair.split("=", 2))
-                .collect(java.util.stream.Collectors.toMap(
+                .collect(Collectors.toMap(
                         parts -> URLDecoder.decode(parts[0], StandardCharsets.UTF_8),
                         parts -> URLDecoder.decode(parts[1], StandardCharsets.UTF_8)));
     }

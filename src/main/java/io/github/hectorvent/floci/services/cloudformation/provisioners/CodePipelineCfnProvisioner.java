@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -144,7 +145,7 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
                 Iterable<String> candidateStages;
                 if (previouslyManaged != null) {
                     candidateStages = previouslyManaged.isBlank()
-                            ? java.util.List.of() : java.util.Arrays.asList(previouslyManaged.split(","));
+                            ? List.of() : Arrays.asList(previouslyManaged.split(","));
                 } else {
                     // A resource stored before DISABLED_STAGES_ATTR existed has no record of what it
                     // previously disabled. Fall back to reconciling every declared stage rather than

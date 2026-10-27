@@ -1031,7 +1031,7 @@ public class SesService {
             return false;
         }
         try {
-            URI uri = java.net.URI.create(url);
+            URI uri = URI.create(url);
             String scheme = uri.getScheme();
             return uri.getHost() != null
                     && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));

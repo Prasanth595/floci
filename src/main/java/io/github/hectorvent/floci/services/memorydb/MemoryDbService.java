@@ -28,6 +28,7 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -59,7 +60,7 @@ public class MemoryDbService {
     // Per the MemoryDB API: a user name must start with a letter and contain only
     // letters, digits and hyphens.
     private static final Pattern USER_NAME_PATTERN =
-            java.util.regex.Pattern.compile("[a-zA-Z][a-zA-Z0-9\\-]*");
+            Pattern.compile("[a-zA-Z][a-zA-Z0-9\\-]*");
 
     private final StorageBackend<String, Cluster> clusters;
     private final StorageBackend<String, User> users;
@@ -270,8 +271,8 @@ public class MemoryDbService {
             return resourceGet(users, filterName, region)
                     .map(List::of)
                     .or(() -> DEFAULT_USER.equals(filterName)
-                            ? java.util.Optional.of(List.of(builtinDefaultUser(region)))
-                            : java.util.Optional.empty())
+                            ? Optional.of(List.of(builtinDefaultUser(region)))
+                            : Optional.empty())
                     .orElseThrow(() -> new AwsException("UserNotFoundFault", "User not found.", 404));
         }
         migrateLegacyUsers(region);
@@ -345,8 +346,8 @@ public class MemoryDbService {
             return resourceGet(acls, filterName, region)
                     .map(List::of)
                     .or(() -> DEFAULT_ACL.equals(filterName)
-                            ? java.util.Optional.of(List.of(builtinOpenAccessAcl(region)))
-                            : java.util.Optional.empty())
+                            ? Optional.of(List.of(builtinOpenAccessAcl(region)))
+                            : Optional.empty())
                     .orElseThrow(() -> new AwsException("ACLNotFoundFault", "ACL not found.", 404));
         }
         migrateLegacyAcls(region);
@@ -479,7 +480,7 @@ public class MemoryDbService {
         }
         return acl.getUserNames().stream()
                 .map(name -> resolveUser(name, region))
-                .filter(java.util.Objects::nonNull)
+                .filter(Objects::nonNull)
                 .anyMatch(u -> u.getAuthMode() != AuthMode.NO_PASSWORD);
     }
 
@@ -633,8 +634,8 @@ public class MemoryDbService {
     private String identityName(String accountId, String region, String name) {
         String defaultAccount = regionResolver.getDefaultAccountId();
         String defaultRegion = regionResolver.getDefaultRegion();
-        if ((defaultAccount == null || java.util.Objects.equals(defaultAccount, accountId))
-                && (defaultRegion == null || java.util.Objects.equals(defaultRegion, region))) {
+        if ((defaultAccount == null || Objects.equals(defaultAccount, accountId))
+                && (defaultRegion == null || Objects.equals(defaultRegion, region))) {
             return name;
         }
         return accountId + "-" + region + "-" + name;
@@ -643,9 +644,9 @@ public class MemoryDbService {
     private <V> Optional<V> legacyGet(StorageBackend<String, V> store, String name, String region) {
         String defaultAccount = regionResolver.getDefaultAccountId();
         String defaultRegion = regionResolver.getDefaultRegion();
-        if ((defaultAccount != null && !java.util.Objects.equals(defaultAccount, regionResolver.getAccountId()))
-                || (defaultRegion != null && !java.util.Objects.equals(defaultRegion, region))) {
-            return java.util.Optional.empty();
+        if ((defaultAccount != null && !Objects.equals(defaultAccount, regionResolver.getAccountId()))
+                || (defaultRegion != null && !Objects.equals(defaultRegion, region))) {
+            return Optional.empty();
         }
         return store.get(name);
     }
@@ -725,8 +726,8 @@ public class MemoryDbService {
     private boolean isDefaultOwner(String region) {
         String defaultAccount = regionResolver.getDefaultAccountId();
         String defaultRegion = regionResolver.getDefaultRegion();
-        return (defaultAccount == null || java.util.Objects.equals(defaultAccount, regionResolver.getAccountId()))
-                && (defaultRegion == null || java.util.Objects.equals(defaultRegion, region));
+        return (defaultAccount == null || Objects.equals(defaultAccount, regionResolver.getAccountId()))
+                && (defaultRegion == null || Objects.equals(defaultRegion, region));
     }
 
     private void setOwner(Object resource, String region) {

@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.Objects;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
@@ -478,7 +479,7 @@ public class GlueSchemaRegistryService {
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
                         "Schema version not found: " + schemaVersionId, 400));
 
-        Map<String, MetadataInfo> metadata = metadataStore.get(schemaVersionId).orElseGet(java.util.LinkedHashMap::new);
+        Map<String, MetadataInfo> metadata = metadataStore.get(schemaVersionId).orElseGet(LinkedHashMap::new);
         MetadataInfo info = metadata.get(key);
         Instant now = Instant.now();
         if (info == null) {
@@ -777,7 +778,7 @@ public class GlueSchemaRegistryService {
     }
 
     private static String simpleUnifiedDiff(String labelA, String a, String labelB, String b) {
-        if (java.util.Objects.equals(a, b)) {
+        if (Objects.equals(a, b)) {
             return "";
         }
         StringBuilder sb = new StringBuilder();

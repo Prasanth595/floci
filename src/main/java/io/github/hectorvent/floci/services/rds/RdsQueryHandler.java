@@ -744,7 +744,7 @@ public class RdsQueryHandler {
             return null;
         }
         try {
-            return java.time.Instant.parse(value);
+            return Instant.parse(value);
         } catch (DateTimeParseException e) {
             throw new AwsException("InvalidParameterValue", "Invalid timestamp.", 400);
         }
@@ -3539,7 +3539,7 @@ public class RdsQueryHandler {
      * answers an empty list for a known engine it holds nothing of — including ones Floci cannot
      * create.
      */
-    private static final Set<String> KNOWN_ENGINES = java.util.Set.of(
+    private static final Set<String> KNOWN_ENGINES = Set.of(
             "aurora", "aurora-mysql", "aurora-postgresql", "mysql", "mariadb", "postgres",
             "custom-oracle-ee", "custom-oracle-ee-cdb", "custom-oracle-se2", "custom-oracle-se2-cdb",
             "custom-sqlserver-dev", "custom-sqlserver-ee", "custom-sqlserver-se", "custom-sqlserver-web",

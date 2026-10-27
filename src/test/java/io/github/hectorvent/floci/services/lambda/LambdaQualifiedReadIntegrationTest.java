@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda;
 
 import io.quarkus.test.junit.QuarkusTest;
 import org.hamcrest.Matcher;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -50,7 +51,7 @@ class LambdaQualifiedReadIntegrationTest {
     }
 
     private static Matcher<Integer> anyOf200Or201() {
-        return org.hamcrest.Matchers.anyOf(equalTo(200), equalTo(201));
+        return Matchers.anyOf(equalTo(200), equalTo(201));
     }
 
     @Test
@@ -144,7 +145,7 @@ class LambdaQualifiedReadIntegrationTest {
                  "RoutingConfig": {"AdditionalVersionWeights": {"2": 0.5}}}
                 """)
         .when().post("/2015-03-31/functions/" + fn + "/aliases")
-        .then().statusCode(org.hamcrest.Matchers.anyOf(equalTo(200), equalTo(201)));
+        .then().statusCode(Matchers.anyOf(equalTo(200), equalTo(201)));
 
         // Repeat enough that a random pick would almost certainly show version 2 at least once.
         for (int i = 0; i < 20; i++) {

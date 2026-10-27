@@ -579,7 +579,7 @@ class IotIntegrationTest {
         String csrArn = given()
             .contentType("application/json")
             .queryParam("setAsActive", false)
-            .body(java.util.Map.of("certificateSigningRequest", csrPem()))
+            .body(Map.of("certificateSigningRequest", csrPem()))
         .when()
             .post("/certificates")
         .then()
@@ -1087,7 +1087,7 @@ class IotIntegrationTest {
 
 
     private static String csrPem() throws Exception {
-        KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("RSA");
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
         kpg.initialize(2048);
         KeyPair kp = kpg.generateKeyPair();
         PKCS10CertificationRequest csr = new JcaPKCS10CertificationRequestBuilder(

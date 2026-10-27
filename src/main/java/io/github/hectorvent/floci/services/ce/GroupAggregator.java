@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -138,7 +139,7 @@ final class GroupAggregator {
 
     static String formatAmount(double amount) {
         // AWS returns amounts as decimal strings.
-        return String.format(java.util.Locale.ROOT, "%.10f", amount);
+        return String.format(Locale.ROOT, "%.10f", amount);
     }
 
     record GroupBy(String type, String key) {}

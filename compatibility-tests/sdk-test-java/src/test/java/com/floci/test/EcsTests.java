@@ -290,8 +290,8 @@ class EcsTests {
     void tagResource() {
         ecs.tagResource(TagResourceRequest.builder()
                 .resourceArn(cluster.clusterArn())
-                .tags(software.amazon.awssdk.services.ecs.model.Tag.builder().key("env").value("test").build(),
-                      software.amazon.awssdk.services.ecs.model.Tag.builder().key("team").value("sdk").build())
+                .tags(Tag.builder().key("env").value("test").build(),
+                      Tag.builder().key("team").value("sdk").build())
                 .build());
     }
 

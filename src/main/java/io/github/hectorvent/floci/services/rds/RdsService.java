@@ -94,6 +94,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Core RDS business logic — DB instances, clusters, and parameter groups.
@@ -705,7 +706,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                           Boolean publiclyAccessible, Integer requestedPort,
                                           Boolean deletionProtection) {
         String effectiveRegion = effectiveRegion(region);
-        String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
+        String dbiResourceId = "db-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
         String dbInstanceArn = regionResolver.buildArn("rds", effectiveRegion, "db:" + id);
         if (findInstanceForScope(currentAccountId(), effectiveRegion, id) != null
@@ -2913,7 +2914,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private static String generatedMasterPassword() {
-        return "floci-" + java.util.UUID.randomUUID().toString().replace("-", "");
+        return "floci-" + UUID.randomUUID().toString().replace("-", "");
     }
 
     public DbInstance getDbInstance(String id) {
@@ -3020,7 +3021,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 .filter(event -> sourceIdentifier == null || sourceIdentifier.equals(event.sourceIdentifier()))
                 .filter(event -> sourceType == null || sourceType.equals(event.sourceType()))
                 .filter(event -> !event.date().isBefore(effectiveStart) && !event.date().isAfter(effectiveEnd))
-                .sorted(java.util.Comparator.comparing(RdsEvent::date))
+                .sorted(Comparator.comparing(RdsEvent::date))
                 .toList();
     }
 
@@ -4575,7 +4576,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                         boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                         String engineMode, boolean storageEncrypted, Integer requestedPort) {
         String effectiveRegion = effectiveRegion(region);
-        String clusterResourceId = "cluster-" + java.util.UUID.randomUUID().toString()
+        String clusterResourceId = "cluster-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
         String clusterArn = regionResolver.buildArn("rds", effectiveRegion, "cluster:" + id);
         if (findClusterForScope(currentAccountId(), effectiveRegion, id) != null
@@ -5269,7 +5270,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         GlobalCluster global = new GlobalCluster();
         global.setGlobalClusterIdentifier(id.toLowerCase(Locale.ROOT));
-        global.setGlobalClusterResourceId("cluster-" + java.util.UUID.randomUUID().toString()
+        global.setGlobalClusterResourceId("cluster-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase());
         global.setGlobalClusterArn(globalClusterArn(regionResolver.getPartition(), accountId, global.getGlobalClusterIdentifier()));
         global.setStatus("available");
@@ -8579,7 +8580,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private String randomResourceSuffix() {
-        return java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 17);
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 17);
     }
 
     /** The preferred listener port, used when no other proxy has reserved it. */
@@ -9995,7 +9996,7 @@ public class RdsService implements Resettable, ResourceProvider {
         Set<String> resolvedIds = resolvedSubnets.stream()
                 .map(Subnet::getSubnetId)
                 .filter(Objects::nonNull)
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
         if (!resolvedIds.equals(requestedIds)) {
             throw new AwsException("InvalidSubnet",
                     "One or more VpcSubnetIds do not exist in region " + region + ".", 400);
@@ -10004,7 +10005,7 @@ public class RdsService implements Resettable, ResourceProvider {
         Set<String> vpcIds = resolvedSubnets.stream()
                 .map(Subnet::getVpcId)
                 .filter(id -> id != null && !id.isBlank())
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
         if (vpcIds.size() != 1) {
             throw new AwsException("InvalidSubnet",
                     "VpcSubnetIds must belong to one VPC.", 400);
@@ -10060,7 +10061,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (resolvedSubnets.size() != subnetIds.size()) {
             Set<String> found = resolvedSubnets.stream()
                     .map(Subnet::getSubnetId)
-                    .collect(java.util.stream.Collectors.toSet());
+                    .collect(Collectors.toSet());
             List<String> missing = subnetIds.stream()
                     .filter(id -> !found.contains(id))
                     .distinct()

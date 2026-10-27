@@ -36,6 +36,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -616,7 +617,7 @@ class RdsQueryHandlerTest {
     @Test
     void describeDbInstances_defaultParameterGroupNameUsesHyphenAndMajorOnlyForAuroraPostgresql() {
         DbInstance instance = makeInstance("aurora-pg");
-        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        instance.setEngine(DatabaseEngine.POSTGRES);
         instance.setEngineIdentifier("aurora-postgresql");
         instance.setEngineVersion("16.3");
         when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
@@ -632,7 +633,7 @@ class RdsQueryHandlerTest {
     @Test
     void describeDbInstances_defaultParameterGroupNameUsesMajorMinorForAuroraMysql() {
         DbInstance instance = makeInstance("aurora-my");
-        instance.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.MYSQL);
+        instance.setEngine(DatabaseEngine.MYSQL);
         instance.setEngineIdentifier("aurora-mysql");
         instance.setEngineVersion("8.0.36");
         when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
@@ -691,7 +692,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void describeDbInstances_directIdentifierTakesPriorityOverFilters() {
-        when(service.listDbInstances(any(), org.mockito.ArgumentMatchers.isNull()))
+        when(service.listDbInstances(any(), ArgumentMatchers.isNull()))
                 .thenReturn(List.of());
 
         MultivaluedMap<String, String> p = params();
@@ -1577,7 +1578,7 @@ class RdsQueryHandlerTest {
         DbSnapshot snapshot = new DbSnapshot();
         snapshot.setDbSnapshotIdentifier("mysnap");
         snapshot.setDbInstanceIdentifier("mydb");
-        snapshot.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        snapshot.setEngine(DatabaseEngine.POSTGRES);
         snapshot.setSnapshotType("manual");
         snapshot.setSourceDbSnapshotIdentifier(
                 "arn:aws:rds:us-east-1:123456789012:snapshot:source");
@@ -2359,7 +2360,7 @@ class RdsQueryHandlerTest {
         DbSnapshot snapshot = new DbSnapshot();
         snapshot.setDbSnapshotIdentifier("mysnap");
         snapshot.setDbInstanceIdentifier("mydb");
-        snapshot.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        snapshot.setEngine(DatabaseEngine.POSTGRES);
         snapshot.setTags(Map.of("owner", "platform"));
         when(service.createDbSnapshot(eq("mysnap"), eq("mydb"), eq(Map.of("owner", "platform")), isNull()))
                 .thenReturn(snapshot);
@@ -3263,7 +3264,7 @@ class RdsQueryHandlerTest {
         DbInstance i = new DbInstance();
         i.setDbInstanceIdentifier(id);
         i.setStatus(DbInstanceStatus.AVAILABLE);
-        i.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        i.setEngine(DatabaseEngine.POSTGRES);
         i.setEngineVersion("15");
         i.setMasterUsername("admin");
         i.setDbInstanceClass("db.t3.micro");
@@ -3297,7 +3298,7 @@ class RdsQueryHandlerTest {
         DbCluster c = new DbCluster();
         c.setDbClusterIdentifier(id);
         c.setStatus(DbInstanceStatus.AVAILABLE);
-        c.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        c.setEngine(DatabaseEngine.POSTGRES);
         c.setEngineVersion("15");
         c.setMasterUsername("admin");
         return c;

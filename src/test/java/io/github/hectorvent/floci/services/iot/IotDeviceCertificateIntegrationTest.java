@@ -7,12 +7,14 @@ import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import jakarta.inject.Inject;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import javax.security.auth.x500.X500Principal;
@@ -23,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
+import java.security.Security;
 import java.security.Signature;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -48,13 +51,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class IotDeviceCertificateIntegrationTest {
 
-    @jakarta.inject.Inject
+    @Inject
     IotService iotService;
 
-    @org.junit.jupiter.api.BeforeAll
+    @BeforeAll
     static void bouncyCastle() {
-        if (java.security.Security.getProvider(org.bouncycastle.jce.provider.BouncyCastleProvider.PROVIDER_NAME) == null) {
-            java.security.Security.addProvider(new BouncyCastleProvider());
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
         }
     }
 
@@ -82,7 +85,7 @@ class IotDeviceCertificateIntegrationTest {
         assertEquals(2048, ((RSAPublicKey) cert.getPublicKey()).getModulus().bitLength());
         assertEquals(expectedNotAfter(ca), cert.getNotAfter().toInstant(),
                 "AWS IoT-issued certificates all expire at the end of 2049, never past the CA");
-        assertTrue(!cert.getNotBefore().toInstant().isAfter(java.time.Instant.now()), "valid from issue time");
+        assertTrue(!cert.getNotBefore().toInstant().isAfter(Instant.now()), "valid from issue time");
 
         String expectedId = Digests.sha256Hex(cert.getEncoded());
         assertEquals(expectedId, body.getString("certificateId"), "AWS certificateId is sha256(DER), lowercase hex");
@@ -358,7 +361,7 @@ class IotDeviceCertificateIntegrationTest {
 
     /** AWS's fixed 2049 expiry, capped at the CA's own: a CA created before this change lives ten years. */
     private static Instant expectedNotAfter(X509Certificate ca) {
-        Instant aws = java.time.Instant.parse("2049-12-31T23:59:59Z");
+        Instant aws = Instant.parse("2049-12-31T23:59:59Z");
         Instant caNotAfter = ca.getNotAfter().toInstant();
         return caNotAfter.isBefore(aws) ? caNotAfter : aws;
     }

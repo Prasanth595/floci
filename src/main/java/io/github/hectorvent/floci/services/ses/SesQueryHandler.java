@@ -37,6 +37,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -335,7 +336,7 @@ public class SesQueryHandler {
                .elem("Bounces", "0")
                .elem("Complaints", "0")
                .elem("Rejects", "0")
-               .elem("Timestamp", java.time.Instant.now().toString())
+               .elem("Timestamp", Instant.now().toString())
                .end("member");
         }
         xml.end("SendDataPoints");
@@ -1204,7 +1205,7 @@ public class SesQueryHandler {
             int index = member.getKey();
             int skip = index - Math.max(previous, 1);
             if (skip > MAX_RULE_NAMES_INDEX_SKIP) {
-                throw new AwsException("MalformedInput", String.format(java.util.Locale.ROOT,
+                throw new AwsException("MalformedInput", String.format(Locale.ROOT,
                         "Excessively sparse input would skip %,d list elements", skip), 400);
             }
             while (names.size() < index - 1) {
@@ -1460,17 +1461,17 @@ public class SesQueryHandler {
      * in both directions.
      */
     private static final Map<String, String> V1_EVENT_TYPE_TO_INTERNAL =
-            java.util.Map.ofEntries(
-                    java.util.Map.entry("send", "SEND"),
-                    java.util.Map.entry("reject", "REJECT"),
-                    java.util.Map.entry("bounce", "BOUNCE"),
-                    java.util.Map.entry("complaint", "COMPLAINT"),
-                    java.util.Map.entry("delivery", "DELIVERY"),
-                    java.util.Map.entry("open", "OPEN"),
-                    java.util.Map.entry("click", "CLICK"),
-                    java.util.Map.entry("renderingFailure", "RENDERING_FAILURE"),
-                    java.util.Map.entry("deliveryDelay", "DELIVERY_DELAY"),
-                    java.util.Map.entry("subscription", "SUBSCRIPTION"));
+            Map.ofEntries(
+                    Map.entry("send", "SEND"),
+                    Map.entry("reject", "REJECT"),
+                    Map.entry("bounce", "BOUNCE"),
+                    Map.entry("complaint", "COMPLAINT"),
+                    Map.entry("delivery", "DELIVERY"),
+                    Map.entry("open", "OPEN"),
+                    Map.entry("click", "CLICK"),
+                    Map.entry("renderingFailure", "RENDERING_FAILURE"),
+                    Map.entry("deliveryDelay", "DELIVERY_DELAY"),
+                    Map.entry("subscription", "SUBSCRIPTION"));
 
     private static final Map<String, String> INTERNAL_EVENT_TYPE_TO_V1;
     static {
@@ -1478,7 +1479,7 @@ public class SesQueryHandler {
         for (Map.Entry<String, String> e : V1_EVENT_TYPE_TO_INTERNAL.entrySet()) {
             reverse.put(e.getValue(), e.getKey());
         }
-        INTERNAL_EVENT_TYPE_TO_V1 = java.util.Map.copyOf(reverse);
+        INTERNAL_EVENT_TYPE_TO_V1 = Map.copyOf(reverse);
     }
 
     /**

@@ -21,6 +21,7 @@ import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -546,7 +547,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
 
         given().when().get("/execute-api/" + apiId + "/test/thing")
                 .then().statusCode(200)
-                .body("tls", org.hamcrest.Matchers.equalTo("ok"));
+                .body("tls", Matchers.equalTo("ok"));
     }
 
     @Test
@@ -587,7 +588,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
         // correct, so it has to be accepted.
         given().when().get("/execute-api/" + apiId + "/test/thing")
                 .then().statusCode(200)
-                .body("tls", org.hamcrest.Matchers.equalTo("ok"));
+                .body("tls", Matchers.equalTo("ok"));
     }
 
     @Test
@@ -644,7 +645,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
         // than by the constraint it names.
         given().when().get("/execute-api/" + apiId + "/test/thing")
                 .then().statusCode(200)
-                .body("tls", org.hamcrest.Matchers.equalTo("ok"));
+                .body("tls", Matchers.equalTo("ok"));
     }
 
     @Test

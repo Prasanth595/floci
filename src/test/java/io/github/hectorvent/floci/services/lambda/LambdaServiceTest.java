@@ -43,6 +43,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
@@ -917,7 +918,7 @@ class LambdaServiceTest {
 
         // Defaults: regionLimit=1000, unreservedMin=100. Each Put asks for
         // 500; together they would leave 0 unreserved.
-        ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
         CountDownLatch start = new CountDownLatch(1);
         try {
             Future<Throwable> fA = pool.submit(() -> {
@@ -1368,7 +1369,7 @@ class LambdaServiceTest {
         service.createFunction(REGION, baseRequest("race-fn"));
 
         int iterations = 50;
-        ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             for (int i = 0; i < iterations; i++) {
                 int a = 100 + i;
@@ -1472,7 +1473,7 @@ class LambdaServiceTest {
         List<Map<String, Object>> statements = (List<Map<String, Object>>) policy.get("Statement");
         Set<String> actualStatementIds = statements.stream()
                 .map(statement -> (String) statement.get("Sid"))
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
 
         assertEquals(expectedStatementIds, actualStatementIds);
     }
@@ -1505,17 +1506,17 @@ class LambdaServiceTest {
         });
         try {
             holder.start();
-            assertTrue(acquired.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(acquired.await(2, TimeUnit.SECONDS));
 
             Future<LambdaFunction> publishFuture = pool.submit(
                     () -> service.publishVersion(REGION, "lock-race-fn", null));
-            assertThrows(java.util.concurrent.TimeoutException.class,
-                    () -> publishFuture.get(200, java.util.concurrent.TimeUnit.MILLISECONDS),
+            assertThrows(TimeoutException.class,
+                    () -> publishFuture.get(200, TimeUnit.MILLISECONDS),
                     "publishVersion must block while another operation holds this function's lock");
 
             release.countDown();
             holder.join();
-            assertNotNull(publishFuture.get(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertNotNull(publishFuture.get(2, TimeUnit.SECONDS));
         } finally {
             release.countDown();
             pool.shutdownNow();
@@ -2799,16 +2800,16 @@ class LambdaServiceTest {
         });
         try {
             holder.start();
-            assertTrue(acquired.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(acquired.await(2, TimeUnit.SECONDS));
 
             Future<LambdaFunction> updateFuture = pool.submit(() -> updater.apply(service, functionName));
-            assertThrows(java.util.concurrent.TimeoutException.class,
-                    () -> updateFuture.get(200, java.util.concurrent.TimeUnit.MILLISECONDS),
+            assertThrows(TimeoutException.class,
+                    () -> updateFuture.get(200, TimeUnit.MILLISECONDS),
                     "the updater must block while another operation holds this function's lock");
 
             release.countDown();
             holder.join();
-            assertNotNull(updateFuture.get(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertNotNull(updateFuture.get(5, TimeUnit.SECONDS));
         } finally {
             release.countDown();
             pool.shutdownNow();

@@ -169,7 +169,7 @@ final class SAMLAssertionVerifier {
             if (roles.isEmpty()) {
                 throw invalid("role pair missing");
             }
-            String nameQualifier = java.util.Base64.getEncoder().encodeToString(
+            String nameQualifier = Base64.getEncoder().encodeToString(
                     Digests.sha1((issuer + provider.getArn()).getBytes(StandardCharsets.UTF_8)));
             return new Verified(issuer, name, subjectType, nameQualifier, notOnOrAfter, roles);
         } catch (InvalidAssertionException e) {

@@ -1331,7 +1331,7 @@ class CognitoLambdaTriggersTest {
         seedUser(pool, "alice", "Perm1234!");
         UserPoolClient client = createClient(pool);
 
-        ArgumentCaptor<byte[]> payloadCap = org.mockito.ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
                 .thenReturn(ok(Map.of()));
 

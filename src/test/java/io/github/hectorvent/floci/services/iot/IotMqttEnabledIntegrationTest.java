@@ -18,6 +18,7 @@ import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.eclipse.paho.mqttv5.client.IMqttToken;
+import org.eclipse.paho.mqttv5.client.MqttClientException;
 import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
 import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
 import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
@@ -327,7 +328,7 @@ class IotMqttEnabledIntegrationTest {
             org.eclipse.paho.mqttv5.common.MqttException thrown = assertThrows(
                     org.eclipse.paho.mqttv5.common.MqttException.class,
                     () -> publisher.publish(topic, randomPayload(AWS_MAX_PAYLOAD), 1, awsMaximumProperties(16 * 1024)));
-            assertEquals(org.eclipse.paho.mqttv5.client.MqttClientException.REASON_CODE_CONNECTION_LOST, thrown.getReasonCode());
+            assertEquals(MqttClientException.REASON_CODE_CONNECTION_LOST, thrown.getReasonCode());
         }
     }
 
@@ -335,7 +336,7 @@ class IotMqttEnabledIntegrationTest {
     private static MqttProperties awsMaximumProperties(int userPropertiesSize) {
         MqttProperties properties = new MqttProperties();
         properties.setCorrelationData(randomPayload(8 * 1024));
-        properties.setUserProperties(java.util.List.of(
+        properties.setUserProperties(List.of(
                 new UserProperty("k", "v".repeat(userPropertiesSize - 1))));
         return properties;
     }

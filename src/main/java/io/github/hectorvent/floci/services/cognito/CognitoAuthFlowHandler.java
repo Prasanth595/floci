@@ -775,9 +775,9 @@ final class CognitoAuthFlowHandler {
         }
         String expected;
         try {
-            Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] sig = mac.doFinal((username + client.getClientId()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] sig = mac.doFinal((username + client.getClientId()).getBytes(StandardCharsets.UTF_8));
             expected = Base64.getEncoder().encodeToString(sig);
         } catch (Exception e) {
             throw new AwsException("InternalErrorException", "SECRET_HASH computation failed", 500);

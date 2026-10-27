@@ -2,12 +2,15 @@ package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.core.common.Digests;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.ByteArrayOutputStream;
+import java.net.URI;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Random;
@@ -590,7 +593,7 @@ class LambdaIntegrationTest {
             .extract().path("CodeSha256");
 
         // Follow Code.Location against the same test server via its path.
-        String path = java.net.URI.create(location).getRawPath();
+        String path = URI.create(location).getRawPath();
         byte[] pkg = given()
             .when()
             .get(path)
@@ -599,13 +602,13 @@ class LambdaIntegrationTest {
             .extract().asByteArray();
 
         // Valid zip → local file header magic "PK\003\004".
-        org.junit.jupiter.api.Assertions.assertTrue(pkg.length > 0, "package must not be empty");
-        org.junit.jupiter.api.Assertions.assertEquals('P', pkg[0]);
-        org.junit.jupiter.api.Assertions.assertEquals('K', pkg[1]);
+        Assertions.assertTrue(pkg.length > 0, "package must not be empty");
+        Assertions.assertEquals('P', pkg[0]);
+        Assertions.assertEquals('K', pkg[1]);
 
         // Byte-exact: downloaded package hashes to the stored CodeSha256.
         String downloadedSha256 = Base64.getEncoder().encodeToString(Digests.sha256(pkg));
-        org.junit.jupiter.api.Assertions.assertEquals(expectedSha256, downloadedSha256,
+        Assertions.assertEquals(expectedSha256, downloadedSha256,
                 "downloaded package must be byte-identical to the uploaded zip");
 
         // Redeploy overwrites in place (stable key), no stale package accumulates.
@@ -623,7 +626,7 @@ class LambdaIntegrationTest {
         .then()
             .statusCode(200);
         byte[] pkg2 = given().when().get(path).then().statusCode(200).extract().asByteArray();
-        org.junit.jupiter.api.Assertions.assertFalse(java.util.Arrays.equals(pkg, pkg2),
+        Assertions.assertFalse(Arrays.equals(pkg, pkg2),
                 "redeploy must replace the stored package");
 
         // Deleting the function removes the stored package (Code.Location 404s).
