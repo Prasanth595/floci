@@ -5,18 +5,20 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -31,39 +33,26 @@ class Ec2DefaultResourcesSeedTest {
 
     @Test
     void aConcurrentFirstCallSeesTheWholeDefaultNetwork() throws Exception {
-        CountDownLatch seeding = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        // Holds the first call in the middle of seeding, before any default subnet is stored.
-        InMemoryStorage<String, Subnet> subnets = new InMemoryStorage<>() {
-            @Override
-            public void put(String key, Subnet value) {
-                seeding.countDown();
-                try {
-                    release.await();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                super.put(key, value);
-            }
-        };
+        ParkingStore<Subnet> subnets = new ParkingStore<>();
         Ec2Service service = newService(subnets);
+        // Holds the first call in the middle of seeding, before any default subnet is stored.
+        subnets.parkNextWrite();
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             Future<?> first = pool.submit(() -> service.ensureDefaultResources(REGION));
-            assertTrue(seeding.await(10, TimeUnit.SECONDS), "the first call starts seeding");
-            Future<Integer> second = pool.submit(() -> service.describeSubnets(REGION, List.of(), Map.of()).size());
-            Integer early = null;
-            try {
-                early = second.get(2, TimeUnit.SECONDS);
-            } catch (TimeoutException waiting) {
-                // The second call waits for the first one to finish seeding.
-            }
-            release.countDown();
-            first.get(10, TimeUnit.SECONDS);
-            int seen = early != null ? early : second.get(10, TimeUnit.SECONDS);
-            assertEquals(3, seen, "the second call sees the three default subnets");
+            assertTrue(subnets.awaitParked(), "the first call must reach its first subnet write");
+            AtomicReference<Thread> secondThread = new AtomicReference<>();
+            Future<Integer> second = pool.submit(() -> {
+                secondThread.set(Thread.currentThread());
+                return service.describeSubnets(REGION, List.of(), Map.of()).size();
+            });
+            awaitBlockedOrDone(secondThread, second);
+            assertFalse(second.isDone(), "the second call read the default network while it was still being seeded");
+
+            subnets.release();
+            first.get(2, TimeUnit.SECONDS);
+            assertEquals(3, second.get(2, TimeUnit.SECONDS), "the second call sees the three default subnets");
         } finally {
-            release.countDown();
             pool.shutdownNow();
         }
     }
