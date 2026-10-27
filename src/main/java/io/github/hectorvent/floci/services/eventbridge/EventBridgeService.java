@@ -1669,6 +1669,22 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         });
     }
 
+    public PaginatedResult<Connection> listConnections(String namePrefix, ConnectionState state, Integer limit,
+                                                       String nextToken, String region) {
+        if (limit != null && (limit < 1 || limit > MAX_LIST_LIMIT)) {
+            throw limitOutOfRange(limit.toString(), limit < 1);
+        }
+        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 2048)) {
+            throw new AwsException("ValidationException", "NextToken must contain 1 to 2048 characters.", 400);
+        }
+        String effectivePrefix = namePrefix == null || namePrefix.isBlank() ? "" : namePrefix;
+        String scope = "events:ListConnections:" + regionResolver.getAccountId() + ":" + region
+                + ":" + effectivePrefix + ":" + (state == null ? "" : state.name());
+        return Pagination.paginate(listConnections(namePrefix, state, region), Connection::getName,
+                limit == null ? MAX_LIST_LIMIT : limit, nextToken, scope,
+                token -> new AwsException("InvalidToken", "Invalid NextToken.", 400));
+    }
+
     private static void validateConnectionName(String name) {
         if (name == null || name.isBlank()) {
             throw new AwsException("ValidationException", "Connection name is required.", 400);
