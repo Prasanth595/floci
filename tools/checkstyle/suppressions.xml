@@ -61,7 +61,6 @@
     <suppress id="NoFqcn" files="/core/common/docker/DockerHostResolver\.java$"/>
     <suppress id="NoFqcn" files="/core/common/port/RuntimeApiPortPoolDefaultTest\.java$"/>
     <suppress id="NoFqcn" files="/lifecycle/EmulatorInfoControllerIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/lifecycle/EmulatorLifecycleTest\.java$"/>
     <suppress id="NoFqcn" files="/services/account/AccountAlternateContactIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/amazonmq/container/RabbitMqManager\.java$"/>
     <suppress id="NoFqcn" files="/services/apigateway/ApiGatewayAwsIntegrationTest\.java$"/>
@@ -279,7 +278,6 @@
     <suppress id="NoFqcn" files="/services/kms/KmsJsonHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/kms/KmsServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/kms/KmsService\.java$"/>
-    <suppress id="NoFqcn" files="/services/lakeformation/LakeFormationResourceRaceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/lakeformation/LakeFormationService\.java$"/>
     <suppress id="NoFqcn" files="/services/lakeformation/MemoryLakeFormationStorage\.java$"/>
     <suppress id="NoFqcn" files="/services/lambda/ApiGatewayController\.java$"/>
@@ -332,7 +330,6 @@
     <suppress id="NoFqcn" files="/services/route53/Route53Service\.java$"/>
     <suppress id="NoFqcn" files="/services/route53/Route53VpcAssociationIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/route53/Route53VpcAssociationTransientErrorIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/route53resolver/Route53ResolverJsonHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/s3/S3Controller\.java$"/>
     <suppress id="NoFqcn" files="/services/s3/S3CopyObjectSourcePermissionIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/s3/S3CorsIntegrationTest\.java$"/>
@@ -380,17 +377,14 @@
     <suppress id="NoFqcn" files="/services/signin/SigninServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/sns/SnsHttpDeliveryIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/sns/SnsQueryHandler\.java$"/>
-    <suppress id="NoFqcn" files="/services/sns/SnsServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/sns/SnsService\.java$"/>
     <suppress id="NoFqcn" files="/services/ssm/SsmIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ssoadmin/SsoAdminAssignmentsIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/ssoadmin/SsoAdminJsonHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/ssoadmin/SsoAdminService\.java$"/>
     <suppress id="NoFqcn" files="/services/ssoadmin/model/PermissionSet\.java$"/>
     <suppress id="NoFqcn" files="/services/ssooidc/SsoOidcIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ssooidc/SsoOidcServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/stepfunctions/AslExecutorIntrinsicContextTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/stepfunctions/AslExecutor\.java$"/>
     <suppress id="NoFqcn" files="/services/stepfunctions/MapIterationSchedulerTest\.java$"/>
     <suppress id="NoFqcn" files="/services/stepfunctions/StepFunctionsJsonHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/stepfunctions/StepFunctionsServicePersistenceTest\.java$"/>
@@ -401,9 +395,7 @@
     <suppress id="NoFqcn" files="/services/transcribe/TranscribeServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/transfer/TransferServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/verifiedpermissions/VerifiedPermissionsIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/verifiedpermissions/VerifiedPermissionsJsonHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/verifiedpermissions/VerifiedPermissionsOidcSignatureVerifier\.java$"/>
-    <suppress id="NoFqcn" files="/services/verifiedpermissions/VerifiedPermissionsService\.java$"/>
     <suppress id="NoFqcn" files="/services/verifiedpermissions/VerifiedPermissionsTokenService\.java$"/>
     <suppress id="NoFqcn" files="/tools/ami/AmiImageTool\.java$"/>
 </suppressions>
