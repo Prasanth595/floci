@@ -224,9 +224,15 @@ public class SageMakerService {
     }
 
     public ObjectNode listEndpointConfigs(JsonNode request, String region) {
+        String sortBy = sortBy(request, "CreationTime", "Name", "CreationTime");
+        String sortOrder = sortOrder(request, "Descending");
+        Comparator<EndpointConfigResource> comparator = endpointConfigComparator(sortBy, sortOrder);
         List<EndpointConfigResource> configs = endpointConfigStore.scan(k -> k.startsWith(region + "::")).stream()
-                .sorted(Comparator.comparing(c -> c.endpointConfigName)).toList();
-        return paginate(configs, request, c -> c.endpointConfigName, (c, n) -> {
+                .sorted(comparator).toList();
+        return paginate(configs, request, sortBy, sortOrder,
+                new CursorScope("ListEndpointConfigs", region, "", ""),
+                c -> endpointConfigCursor(c, sortBy, sortOrder),
+                c -> endpointConfigAnchor(c, sortBy), comparator, (c, n) -> {
             n.put("EndpointConfigName", c.endpointConfigName);
             n.put("EndpointConfigArn", c.endpointConfigArn);
             n.put("CreationTime", epoch(c.creationTime));
@@ -310,9 +316,16 @@ public class SageMakerService {
     }
 
     public ObjectNode listEndpoints(JsonNode request, String region) {
+        String sortBy = sortBy(request, "CreationTime", "Name", "CreationTime", "Status");
+        String sortOrder = sortOrder(request, "Descending");
+        Comparator<EndpointResource> comparator = endpointComparator(sortBy, sortOrder);
         List<EndpointResource> endpoints = endpointStore.scan(k -> k.startsWith(region + "::")).stream()
-                .sorted(Comparator.comparing(e -> e.endpointName)).toList();
-        return paginate(endpoints, request, e -> e.endpointName, (e, n) -> {
+                .map(SageMakerService::endpointListSnapshot)
+                .sorted(comparator).toList();
+        return paginate(endpoints, request, sortBy, sortOrder,
+                new CursorScope("ListEndpoints", region, "", ""),
+                e -> endpointCursor(e, sortBy, sortOrder),
+                e -> endpointAnchor(e, sortBy), comparator, (e, n) -> {
             n.put("EndpointName", e.endpointName);
             n.put("EndpointArn", e.endpointArn);
             n.put("EndpointStatus", e.endpointStatus);
@@ -394,8 +407,12 @@ public class SageMakerService {
     }
 
     public ObjectNode listTrainingJobs(JsonNode request, String region) {
+        String sortBy = sortBy(request, "CreationTime", "Name", "CreationTime", "Status");
+        String sortOrder = sortOrder(request, "Ascending");
+        Comparator<TrainingJobResource> comparator = trainingJobComparator(sortBy, sortOrder);
         List<TrainingJobResource> jobs = trainingJobStore.scan(k -> k.startsWith(region + "::")).stream()
-                .sorted(Comparator.comparing(j -> j.trainingJobName)).toList();
+                .map(SageMakerService::trainingJobListSnapshot)
+                .sorted(comparator).toList();
         String nameContains = text(request, "NameContains");
         if (nameContains != null && !nameContains.isBlank()) {
             jobs = jobs.stream().filter(j -> j.trainingJobName.contains(nameContains)).toList();
@@ -404,7 +421,12 @@ public class SageMakerService {
         if (statusEquals != null && !statusEquals.isBlank()) {
             jobs = jobs.stream().filter(j -> statusEquals.equals(j.trainingJobStatus)).toList();
         }
-        return paginate(jobs, request, j -> j.trainingJobName, (j, n) -> {
+        return paginate(jobs, request, sortBy, sortOrder,
+                new CursorScope("ListTrainingJobs", region,
+                        nameContains == null || nameContains.isBlank() ? "" : nameContains,
+                        statusEquals == null || statusEquals.isBlank() ? "" : statusEquals),
+                j -> trainingJobCursor(j, sortBy, sortOrder),
+                j -> trainingJobAnchor(j, sortBy), comparator, (j, n) -> {
             n.put("TrainingJobName", j.trainingJobName);
             n.put("TrainingJobArn", j.trainingJobArn);
             n.put("TrainingJobStatus", j.trainingJobStatus);
@@ -626,16 +648,204 @@ public class SageMakerService {
         return arr;
     }
 
-    /** Applies name-ascending pagination for the existing endpoint and training-job lists. */
-    private <T> ObjectNode paginate(List<T> sorted, JsonNode request, Function<T, String> nameOf,
+    private <T> ObjectNode paginate(List<T> sorted, JsonNode request, String sortBy, String sortOrder,
+                                    CursorScope scope,
+                                    Function<T, SortCursor> cursorOf,
+                                    Function<SortCursor, T> anchorOf, Comparator<T> comparator,
                                     BiConsumer<T, ObjectNode> render, String itemsField) {
         int max = maxResults(request);
         String nextToken = text(request, "NextToken");
         List<T> remaining = sorted;
         if (nextToken != null && !nextToken.isBlank()) {
-            remaining = remaining.stream().dropWhile(v -> nameOf.apply(v).compareTo(nextToken) <= 0).toList();
+            SortCursor cursor = decodeCursor(nextToken, sortBy, sortOrder, scope);
+            T anchor = anchorOf.apply(cursor);
+            remaining = remaining.stream().dropWhile(v -> comparator.compare(v, anchor) <= 0).toList();
         }
-        return page(remaining, max, render, itemsField, nameOf);
+        return page(remaining, max, render, itemsField, value -> encodeCursor(cursorOf.apply(value), scope));
+    }
+
+    private static String sortBy(JsonNode request, String defaultValue, String... allowed) {
+        String value = text(request, "SortBy");
+        String selected = value == null ? defaultValue : value;
+        if (!List.of(allowed).contains(selected)) {
+            throw SmithyValidationErrors.validationException(List.of(
+                    SmithyValidationErrors.notInEnum(selected, "sortBy", List.of(allowed))));
+        }
+        return selected;
+    }
+
+    private static String sortOrder(JsonNode request, String defaultValue) {
+        String value = text(request, "SortOrder");
+        String selected = value == null ? defaultValue : value;
+        if (!selected.equals("Ascending") && !selected.equals("Descending")) {
+            throw SmithyValidationErrors.validationException(List.of(
+                    SmithyValidationErrors.notInEnum(selected, "sortOrder", List.of("Ascending", "Descending"))));
+        }
+        return selected;
+    }
+
+    private static Comparator<EndpointConfigResource> endpointConfigComparator(String sortBy, String sortOrder) {
+        Comparator<EndpointConfigResource> comparator = switch (sortBy) {
+            case "Name" -> Comparator.comparing(c -> c.endpointConfigName);
+            case "CreationTime" -> Comparator.comparingLong((EndpointConfigResource c) -> c.creationTime)
+                    .thenComparing(c -> c.endpointConfigName);
+            default -> throw new IllegalStateException("Unexpected endpoint config sort key: " + sortBy);
+        };
+        return "Descending".equals(sortOrder) ? comparator.reversed() : comparator;
+    }
+
+    private static EndpointResource endpointListSnapshot(EndpointResource endpoint) {
+        EndpointResource snapshot = new EndpointResource();
+        snapshot.endpointName = endpoint.endpointName;
+        snapshot.endpointArn = endpoint.endpointArn;
+        snapshot.endpointStatus = endpoint.endpointStatus;
+        snapshot.creationTime = endpoint.creationTime;
+        snapshot.lastModifiedTime = endpoint.lastModifiedTime;
+        return snapshot;
+    }
+
+    private static TrainingJobResource trainingJobListSnapshot(TrainingJobResource job) {
+        TrainingJobResource snapshot = new TrainingJobResource();
+        snapshot.trainingJobName = job.trainingJobName;
+        snapshot.trainingJobArn = job.trainingJobArn;
+        snapshot.trainingJobStatus = job.trainingJobStatus;
+        snapshot.creationTime = job.creationTime;
+        return snapshot;
+    }
+
+    private static Comparator<EndpointResource> endpointComparator(String sortBy, String sortOrder) {
+        Comparator<EndpointResource> comparator = switch (sortBy) {
+            case "Name" -> Comparator.comparing(e -> e.endpointName);
+            case "CreationTime" -> Comparator.comparingLong((EndpointResource e) -> e.creationTime)
+                    .thenComparing(e -> e.endpointName);
+            case "Status" -> Comparator.comparing((EndpointResource e) -> e.endpointStatus)
+                    .thenComparing(e -> e.endpointName);
+            default -> throw new IllegalStateException("Unexpected endpoint sort key: " + sortBy);
+        };
+        return "Descending".equals(sortOrder) ? comparator.reversed() : comparator;
+    }
+
+    private static Comparator<TrainingJobResource> trainingJobComparator(String sortBy, String sortOrder) {
+        Comparator<TrainingJobResource> comparator = switch (sortBy) {
+            case "Name" -> Comparator.comparing(j -> j.trainingJobName);
+            case "CreationTime" -> Comparator.comparingLong((TrainingJobResource j) -> j.creationTime)
+                    .thenComparing(j -> j.trainingJobName);
+            case "Status" -> Comparator.comparing((TrainingJobResource j) -> j.trainingJobStatus)
+                    .thenComparing(j -> j.trainingJobName);
+            default -> throw new IllegalStateException("Unexpected training job sort key: " + sortBy);
+        };
+        return "Descending".equals(sortOrder) ? comparator.reversed() : comparator;
+    }
+
+    private static SortCursor endpointConfigCursor(EndpointConfigResource config, String sortBy, String sortOrder) {
+        String value = "Name".equals(sortBy) ? config.endpointConfigName : Long.toString(config.creationTime);
+        return new SortCursor(sortBy, sortOrder, value, config.endpointConfigName);
+    }
+
+    private static EndpointConfigResource endpointConfigAnchor(SortCursor cursor, String sortBy) {
+        EndpointConfigResource anchor = new EndpointConfigResource();
+        anchor.endpointConfigName = cursor.name();
+        if ("CreationTime".equals(sortBy)) {
+            anchor.creationTime = parseCursorTime(cursor.value());
+        }
+        return anchor;
+    }
+
+    private static SortCursor endpointCursor(EndpointResource endpoint, String sortBy, String sortOrder) {
+        String value = switch (sortBy) {
+            case "Name" -> endpoint.endpointName;
+            case "CreationTime" -> Long.toString(endpoint.creationTime);
+            case "Status" -> endpoint.endpointStatus;
+            default -> throw new IllegalStateException("Unexpected endpoint sort key: " + sortBy);
+        };
+        return new SortCursor(sortBy, sortOrder, value, endpoint.endpointName);
+    }
+
+    private static EndpointResource endpointAnchor(SortCursor cursor, String sortBy) {
+        EndpointResource anchor = new EndpointResource();
+        anchor.endpointName = cursor.name();
+        if ("CreationTime".equals(sortBy)) {
+            anchor.creationTime = parseCursorTime(cursor.value());
+        } else if ("Status".equals(sortBy)) {
+            anchor.endpointStatus = cursor.value();
+        }
+        return anchor;
+    }
+
+    private static SortCursor trainingJobCursor(TrainingJobResource job, String sortBy, String sortOrder) {
+        String value = switch (sortBy) {
+            case "Name" -> job.trainingJobName;
+            case "CreationTime" -> Long.toString(job.creationTime);
+            case "Status" -> job.trainingJobStatus;
+            default -> throw new IllegalStateException("Unexpected training job sort key: " + sortBy);
+        };
+        return new SortCursor(sortBy, sortOrder, value, job.trainingJobName);
+    }
+
+    private static TrainingJobResource trainingJobAnchor(SortCursor cursor, String sortBy) {
+        TrainingJobResource anchor = new TrainingJobResource();
+        anchor.trainingJobName = cursor.name();
+        if ("CreationTime".equals(sortBy)) {
+            anchor.creationTime = parseCursorTime(cursor.value());
+        } else if ("Status".equals(sortBy)) {
+            anchor.trainingJobStatus = cursor.value();
+        }
+        return anchor;
+    }
+
+    private static long parseCursorTime(String value) {
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            throw validation("Invalid NextToken.");
+        }
+    }
+
+    private static String encodeCursor(SortCursor cursor, CursorScope scope) {
+        if ("Name".equals(cursor.sortBy())) {
+            return cursor.value();
+        }
+        ObjectNode token = STATIC_MAPPER.createObjectNode();
+        token.put("version", 1);
+        token.put("operation", scope.operation());
+        token.put("region", scope.region());
+        token.put("sortBy", cursor.sortBy());
+        token.put("sortOrder", cursor.sortOrder());
+        token.put("nameContains", scope.nameContains());
+        token.put("statusEquals", scope.statusEquals());
+        token.put("value", cursor.value());
+        token.put("name", cursor.name());
+        return Base64Url.encode(token.toString());
+    }
+
+    private static SortCursor decodeCursor(String token, String sortBy, String sortOrder, CursorScope scope) {
+        if ("Name".equals(sortBy)) {
+            return new SortCursor(sortBy, sortOrder, token, token);
+        }
+        try {
+            JsonNode cursor = STATIC_MAPPER.readTree(Base64Url.decode(token));
+            if (cursor == null || cursor.path("version").asInt() != 1
+                    || !scope.operation().equals(cursor.path("operation").asText(null))
+                    || !scope.region().equals(cursor.path("region").asText(null))
+                    || !sortBy.equals(cursor.path("sortBy").asText(null))
+                    || !sortOrder.equals(cursor.path("sortOrder").asText(null))
+                    || !scope.nameContains().equals(cursor.path("nameContains").asText(null))
+                    || !scope.statusEquals().equals(cursor.path("statusEquals").asText(null))
+                    || !cursor.path("value").isTextual()
+                    || !cursor.path("name").isTextual()
+                    || cursor.path("name").asText().isBlank()) {
+                throw validation("Invalid NextToken.");
+            }
+            return new SortCursor(sortBy, sortOrder, cursor.path("value").asText(), cursor.path("name").asText());
+        } catch (IllegalArgumentException | JsonProcessingException e) {
+            throw validation("Invalid NextToken.");
+        }
+    }
+
+    private record SortCursor(String sortBy, String sortOrder, String value, String name) {
+    }
+
+    private record CursorScope(String operation, String region, String nameContains, String statusEquals) {
     }
 
     private ObjectNode paginateModels(List<ModelResource> sorted, JsonNode request,
