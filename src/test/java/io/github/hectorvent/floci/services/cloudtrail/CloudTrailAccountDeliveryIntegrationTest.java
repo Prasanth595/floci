@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -111,8 +112,70 @@ class CloudTrailAccountDeliveryIntegrationTest {
         }
     }
 
+    @Test
+    void deletingTrailByArnPreservesSameNamedTrailInAnotherHomeRegion() throws Exception {
+        String retainedRegion = "us-west-2";
+        String name = "region-events-" + UUID.randomUUID();
+        Map<String, String> buckets = Map.of(REGION, name + "-deleted", retainedRegion, name + "-retained");
+        try {
+            buckets.forEach((region, bucket) -> RequestScopes.runAs(FIRST_ACCOUNT, region, () -> {
+                s3.createBucket(bucket, region);
+                trails.createTrail(region, name, bucket, null, null, false, false, false, false);
+                trails.putEventSelectors(region, name, List.of(new EventSelector("All", false,
+                        List.of(new DataResource("AWS::S3::Object", List.of("arn:aws:s3:::source/"))), List.of())));
+                trails.startLogging(region, name);
+                trails.emitS3DataEvent(event(region));
+                assertEquals(1, trails.pendingRecordCount(new CloudTrailService.TrailKey(region, name, region)));
+            }));
+            String deletedArn = RequestScopes.callAs(FIRST_ACCOUNT, REGION,
+                    () -> trails.getTrail(REGION, name).trailArn());
+            RequestScopes.runAs(FIRST_ACCOUNT, retainedRegion, () -> {
+                trails.deleteTrail(retainedRegion, deletedArn);
+                assertEquals(0, trails.pendingRecordCount(new CloudTrailService.TrailKey(REGION, name, REGION)));
+                assertEquals(1, trails.pendingRecordCount(new CloudTrailService.TrailKey(retainedRegion, name, retainedRegion)),
+                        "deleting by ARN must preserve the same account's other home-region buffer");
+            });
+
+            try (ExecutorService worker = Executors.newSingleThreadExecutor()) {
+                worker.submit(writer::flushNow).get(10, TimeUnit.SECONDS);
+            }
+
+            RequestScopes.runAs(FIRST_ACCOUNT, REGION, () -> assertTrue(
+                    s3.listObjects(buckets.get(REGION), null, null, 100).isEmpty()));
+            List<S3Object> objects = RequestScopes.callAs(FIRST_ACCOUNT, retainedRegion,
+                    () -> s3.listObjects(buckets.get(retainedRegion), null, null, 100));
+            assertEquals(1, objects.size(), "the surviving home-region trail must receive its log");
+            assertTrue(objects.getFirst().getKey().startsWith("AWSLogs/" + FIRST_ACCOUNT + "/CloudTrail/" + retainedRegion + "/"));
+            byte[] content = RequestScopes.callAs(FIRST_ACCOUNT, retainedRegion,
+                    () -> s3.getObject(buckets.get(retainedRegion), objects.getFirst().getKey()).getData());
+            try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(content))) {
+                JsonNode records = mapper.readTree(gzip).path("Records");
+                assertEquals(1, records.size());
+                assertEquals(FIRST_ACCOUNT, records.get(0).path("recipientAccountId").asText());
+                assertEquals(retainedRegion, records.get(0).path("awsRegion").asText());
+                assertEquals("PutObject", records.get(0).path("eventName").asText());
+            }
+            RequestScopes.runAs(FIRST_ACCOUNT, retainedRegion, () -> assertEquals(0,
+                    trails.pendingRecordCount(new CloudTrailService.TrailKey(retainedRegion, name, retainedRegion))));
+        } finally {
+            buckets.forEach((region, bucket) -> RequestScopes.runAs(FIRST_ACCOUNT, region, () -> {
+                if (trails.getTrail(region, name) != null) {
+                    trails.deleteTrail(region, name);
+                }
+                for (S3Object object : s3.listObjects(bucket, null, null, 100)) {
+                    s3.deleteObject(bucket, object.getKey());
+                }
+                s3.deleteBucket(bucket);
+            }));
+        }
+    }
+
     private CloudTrailService.S3EventInput event() {
+        return event(REGION);
+    }
+
+    private CloudTrailService.S3EventInput event(String region) {
         return CloudTrailService.S3EventInput.builder()
-                .region(REGION).eventName("PutObject").bucketName("source").key("example.txt").build();
+                .region(region).eventName("PutObject").bucketName("source").key("example.txt").build();
     }
 }

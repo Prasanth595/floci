@@ -638,7 +638,7 @@ public class CloudTrailService {
             if (!sameRegion && !trail.isMultiRegionTrail()) {
                 continue;
             }
-            if (!AwsRegions.partitionFor(region).equals(AwsRegions.partitionFor(trail.homeRegion()))) {
+            if (!regionResolver.partitionForRegion(region).equals(regionResolver.partitionForRegion(trail.homeRegion()))) {
                 continue;
             }
             if (!entry.logging()) {

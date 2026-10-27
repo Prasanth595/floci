@@ -179,27 +179,29 @@ class CloudTrailSelectorMatchingTest {
         assertFalse(CloudTrailService.isReadOnlyEvent("RestoreObject"));
     }
 
-    // --- a ReadOnly trail ---
+    // --- trail matching ---
 
     @ParameterizedTest
     @CsvSource({
-            "us-east-1,us-east-1,false,true",
-            "us-east-1,eu-west-1,false,false",
-            "us-east-1,eu-west-1,true,true",
-            "us-east-1,cn-north-1,true,false",
-            "us-east-1,us-gov-west-1,true,false",
-            "cn-north-1,cn-northwest-1,true,true",
-            "cn-north-1,us-east-1,true,false",
-            "us-gov-west-1,us-gov-east-1,true,true",
-            "us-gov-west-1,us-east-1,true,false"
+            "us-east-1,us-east-1,us-east-1,false,true",
+            "us-east-1,us-east-1,eu-west-1,false,false",
+            "us-east-1,us-east-1,eu-west-1,true,true",
+            "us-east-1,us-east-1,cn-north-1,true,false",
+            "us-east-1,us-east-1,us-gov-west-1,true,false",
+            "cn-north-1,cn-north-1,cn-northwest-1,true,true",
+            "cn-north-1,cn-north-1,us-east-1,true,false",
+            "us-gov-west-1,us-gov-west-1,us-gov-east-1,true,true",
+            "us-gov-west-1,us-gov-west-1,us-east-1,true,false",
+            "cn-north-1,cn-north-1,xx-nowhere-9,true,true",
+            "cn-north-1,xx-nowhere-9,cn-northwest-1,true,true",
+            "cn-north-1,xx-nowhere-9,us-east-1,true,false",
+            "us-gov-west-1,us-gov-west-1,xx-nowhere-9,true,true",
+            "us-gov-west-1,xx-nowhere-9,us-gov-east-1,true,true",
+            "us-gov-west-1,xx-nowhere-9,cn-north-1,true,false"
     })
-    void multiRegionTrailsMatchOnlyWithinTheirPartition(String homeRegion, String eventRegion,
+    void multiRegionTrailsMatchOnlyWithinTheirPartition(String defaultRegion, String homeRegion, String eventRegion,
                                                        boolean multiRegion, boolean expected) {
-        StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any()))
-                .thenReturn(AccountAwareStorageBackend.inMemory(ACCOUNT));
-        CloudTrailService service = new CloudTrailService(storageFactory, new RegionResolver(homeRegion, ACCOUNT),
-                mock(IamService.class), new ObjectMapper());
+        CloudTrailService service = cloudTrailService(defaultRegion);
         service.createTrail(homeRegion, "partition-trail", "trail-logs", null, null,
                 false, multiRegion, false, false);
         service.putEventSelectors(homeRegion, "partition-trail", List.of(new EventSelector("All", false,
@@ -213,17 +215,15 @@ class CloudTrailSelectorMatchingTest {
                 new CloudTrailService.TrailKey(homeRegion, "partition-trail", eventRegion)));
     }
 
+    // --- a ReadOnly trail ---
+
     /**
      * A denial is recorded under the name of the operation refused, so a read IAM denies reaches a
      * ReadOnly trail and is marked read-only, while a denied write stays out of it.
      */
     @Test
     void readOnlyTrail_keepsDeniedReadsAsReadOnly_andLeavesOutDeniedWrites() {
-        StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory(ACCOUNT));
-        CloudTrailService service = new CloudTrailService(storageFactory, new RegionResolver(REGION, ACCOUNT),
-                mock(IamService.class), new ObjectMapper());
+        CloudTrailService service = cloudTrailService(REGION);
         service.createTrail(REGION, "reads", "trail-logs", null, null, true, false, false, false);
         service.putEventSelectors(REGION, "reads", List.of(new EventSelector("ReadOnly", false,
                 List.of(new DataResource("AWS::S3::Object", List.of("arn:aws:s3:::source/"))), null)));
@@ -261,5 +261,13 @@ class CloudTrailSelectorMatchingTest {
         // Defensive — buildS3Record uses this for the "readOnly" field, which
         // should default to safe-no-write semantics if the eventName is missing.
         assertTrue(CloudTrailService.isReadOnlyEvent(null));
+    }
+
+    private CloudTrailService cloudTrailService(String defaultRegion) {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenReturn(AccountAwareStorageBackend.inMemory(ACCOUNT));
+        return new CloudTrailService(storageFactory, new RegionResolver(defaultRegion, ACCOUNT),
+                mock(IamService.class), new ObjectMapper());
     }
 }
