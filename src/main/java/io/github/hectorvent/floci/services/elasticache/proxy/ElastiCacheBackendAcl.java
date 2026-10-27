@@ -45,7 +45,8 @@ final class ElastiCacheBackendAcl {
         // Authentication rules are owned by the proxy. A supplied nopass or password token
         // must never make an alternate backend identity publicly accessible.
         rules.addAll(List.of("resetpass", ">" + password, "-acl", "-config", "-debug", "-module",
-                "-replicaof", "-slaveof", "-shutdown", "-monitor", "-slowlog", "-sync", "-psync"));
+                "-replicaof", "-slaveof", "-shutdown", "-monitor", "-slowlog", "-sync", "-psync",
+                "-save", "-bgsave", "-bgrewriteaof", "-migrate"));
         command(backend, rules);
         command(backend, List.of("AUTH", backendName, password));
         backend.setSoTimeout(0);

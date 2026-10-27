@@ -47,8 +47,9 @@ Backend passwords are generated in memory separately from frontend passwords and
 tokens. Even `+@all` users cannot manage ACLs or backend configuration, load modules,
 reconfigure replication, shut down the engine, or observe administrative commands through
 `MONITOR` or `SLOWLOG`. `SYNC` and `PSYNC` are also denied: replication streams can expose
-keys outside a user's permitted key patterns. These restrictions protect private backend
-credentials and key boundaries. AWS also lists both replication commands among its
+keys outside a user's permitted key patterns. `SAVE`, `BGSAVE`, `BGREWRITEAOF`, and `MIGRATE`
+are denied as well, preventing backend persistence operations and outbound key migrations.
+These restrictions protect private backend credentials and key boundaries. AWS lists these among its
 [restricted cache commands](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html).
 
 Access-string changes are installed on the next successful authentication; reconnect to
