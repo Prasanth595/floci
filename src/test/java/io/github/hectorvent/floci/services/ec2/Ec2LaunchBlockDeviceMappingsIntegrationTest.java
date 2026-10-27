@@ -137,6 +137,23 @@ class Ec2LaunchBlockDeviceMappingsIntegrationTest {
     }
 
     @Test
+    void aRootEntryNamingOnlyASnapshotTakesTheSnapshotsSizeWhenTheAmiMapsNoRoot() {
+        String account = account();
+        registerImage(account); // records the 16 GiB snapshot
+        String image = ec2(account, "RegisterImage", "Name", "no-root-mapping-" + account,
+                "RootDeviceName", "/dev/xvda")
+                .getString("RegisterImageResponse.imageId");
+
+        String instance = launch(account, image,
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.SnapshotId", SNAPSHOT);
+
+        volume(account, deviceVolume(account, instance, "/dev/xvda"))
+                .body("DescribeVolumesResponse.volumeSet.item.size", equalTo("16"))
+                .body("DescribeVolumesResponse.volumeSet.item.snapshotId", equalTo(SNAPSHOT));
+    }
+
+    @Test
     void aLaunchTemplateDeviceKeepsItsSettingsUnderARequestEntryThatChangesItsType() {
         String account = account();
         String template = ec2(account, "CreateLaunchTemplate",

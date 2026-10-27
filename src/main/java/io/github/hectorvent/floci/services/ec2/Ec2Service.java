@@ -8695,8 +8695,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         if (amiMappings.stream().noneMatch(m -> rootDeviceName.equals(m.getDeviceName()))) {
             // A catalog AMI need not map its root device; it then gets the default root volume.
+            // Its size is left unset until the launch's entries are merged, so a root entry
+            // naming only a snapshot takes the snapshot's size.
             LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
-            ebs.setVolumeSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
             LaunchTemplateData.BlockDeviceMapping root = new LaunchTemplateData.BlockDeviceMapping();
             root.setDeviceName(rootDeviceName);
             root.setEbs(ebs);
@@ -8731,9 +8732,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .orElseThrow(() -> new AwsException("InvalidSnapshot.NotFound",
                             "The snapshot '" + snapshotId + "' does not exist.", 400));
             Integer snapshotSize = snapshot == null ? null : snapshot.getVolumeSize();
-            // With neither a size nor a sized snapshot, 0 leaves the size to CreateVolume's default.
+            // With neither a size nor a sized snapshot, the root gets the default root size and
+            // any other device 0, which leaves the size to CreateVolume's default.
             int size = ebs.getVolumeSize() != null ? ebs.getVolumeSize()
-                    : snapshotSize != null ? snapshotSize : 0;
+                    : snapshotSize != null ? snapshotSize : root ? DEFAULT_ROOT_VOLUME_SIZE_GIB : 0;
             if (snapshotSize != null && size < snapshotSize) {
                 throw new AwsException("InvalidBlockDeviceMapping", "Volume of size " + size
                         + "GB is smaller than snapshot '" + snapshotId + "', expect size>= " + snapshotSize + "GB", 400);
