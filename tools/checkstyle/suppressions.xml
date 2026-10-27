@@ -84,7 +84,6 @@
     <suppress id="NoFqcn" files="/services/apigatewayv2/websocket/WebSocketHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/applicationautoscaling/ApplicationAutoScalingIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/applicationautoscaling/ApplicationAutoScalingJsonHandler\.java$"/>
-    <suppress id="NoFqcn" files="/services/appsync/AppSyncExecutionIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/appsync/AppSyncIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/appsync/AppSyncJsResolverDockerIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/appsync/AppSyncService\.java$"/>
@@ -118,7 +117,6 @@
     <suppress id="NoFqcn" files="/services/cloudformation/CloudFormationCognitoUserPoolGroupIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudformation/CloudFormationIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudformation/CloudFormationLambdaLegacyNameModeTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/cloudformation/CloudFormationManagedPolicyUpdateIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudformation/CloudFormationResourceConditionIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudformation/CloudFormationS3BucketPropertiesIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudformation/CloudFormationUnsupportedResourceTypeTest\.java$"/>
@@ -150,7 +148,6 @@
     <suppress id="NoFqcn" files="/services/cloudfront/CloudFrontServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudfront/CloudFrontService\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudfront/CloudFrontServingController\.java$"/>
-    <suppress id="NoFqcn" files="/services/cloudfront/CloudFrontSignedUrlServingTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudhsmv2/CloudHsmV2IntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudhsmv2/CloudHsmV2Service\.java$"/>
     <suppress id="NoFqcn" files="/services/cloudtrail/CloudTrailAdvancedSelectorsIntegrationTest\.java$"/>
@@ -175,7 +172,6 @@
     <suppress id="NoFqcn" files="/services/configservice/ConfigServiceJsonHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/controltower/ControlTowerControlControllerIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/controltower/ControlTowerControlService\.java$"/>
-    <suppress id="NoFqcn" files="/services/cur/CurDailyEmissionAccountIsolationIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/cur/CurEmissionScheduler\.java$"/>
     <suppress id="NoFqcn" files="/services/cur/CurService\.java$"/>
     <suppress id="NoFqcn" files="/services/cur/FocusRowProjectorTest\.java$"/>
@@ -184,7 +180,6 @@
     <suppress id="NoFqcn" files="/services/detective/DetectiveController\.java$"/>
     <suppress id="NoFqcn" files="/services/detective/DetectiveIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/detective/DetectiveService\.java$"/>
-    <suppress id="NoFqcn" files="/services/docdb/DocDbLegacyMigrationRaceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/docdb/DocDbQueryHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/docdb/DocDbService\.java$"/>
     <suppress id="NoFqcn" files="/services/docdb/PausingStorageBackend\.java$"/>
@@ -198,7 +193,6 @@
     <suppress id="NoFqcn" files="/services/ec2/Ec2ContainerManagerTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ec2/Ec2DuplicateRouteTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ec2/Ec2IntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/ec2/Ec2IpamServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ec2/Ec2Ipv6RouteTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ec2/Ec2KeyMaterial\.java$"/>
     <suppress id="NoFqcn" files="/services/ec2/Ec2NatGatewayAddressIntegrationTest\.java$"/>
@@ -218,10 +212,8 @@
     <suppress id="NoFqcn" files="/services/ecs/EcsCreateClusterSettingsIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ecs/EcsDescribeServicesIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ecs/EcsIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/ecs/container/EcsContainerManagerSecurityGroupTest\.java$"/>
     <suppress id="NoFqcn" files="/services/ecs/container/EcsCredentialsProxyTest\.java$"/>
     <suppress id="NoFqcn" files="/services/eks/EksClusterManager\.java$"/>
-    <suppress id="NoFqcn" files="/services/eks/EksIrsaDockerIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/elasticache/ElastiCacheServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/elb/ElbClassicService\.java$"/>
     <suppress id="NoFqcn" files="/services/elbv2/ElbV2DataPlane\.java$"/>
@@ -231,14 +223,12 @@
     <suppress id="NoFqcn" files="/services/eventbridge/EventBridgeService\.java$"/>
     <suppress id="NoFqcn" files="/services/eventbridge/ReplayDispatcherTest\.java$"/>
     <suppress id="NoFqcn" files="/services/firehose/FirehoseCompressionDecoder\.java$"/>
-    <suppress id="NoFqcn" files="/services/firehose/FirehoseDataFormatConversionTest\.java$"/>
     <suppress id="NoFqcn" files="/services/firehose/FirehoseJsonHandler\.java$"/>
     <suppress id="NoFqcn" files="/services/firehose/FirehoseService\.java$"/>
     <suppress id="NoFqcn" files="/services/firehose/S3DestinationValidatorTest\.java$"/>
     <suppress id="NoFqcn" files="/services/fis/FisIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/floci/ui/FlociUiManagerTest\.java$"/>
     <suppress id="NoFqcn" files="/services/floci/ui/FlociUiManager\.java$"/>
-    <suppress id="NoFqcn" files="/services/glue/GlueJsonHandlerTest\.java$"/>
     <suppress id="NoFqcn" files="/services/glue/GlueService\.java$"/>
     <suppress id="NoFqcn" files="/services/glue/schemaregistry/GlueSchemaRegistryServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/glue/schemaregistry/GlueSchemaRegistryService\.java$"/>
@@ -246,12 +236,10 @@
     <suppress id="NoFqcn" files="/services/iam/AssumeRoleWithSamlValidationIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/CredentialReportIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/GetAccountAuthorizationDetailsIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/iam/IamConcurrencyTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/IamResourceTagsInResponseTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/IamRolePolicyConcurrencyTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/IamServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/InstanceProfileTagsIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/iam/LambdaExecutionRoleIamEnforcementIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/SAMLAssertionVerifier\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/SAMLXml\.java$"/>
     <suppress id="NoFqcn" files="/services/iam/StsWebIdentityEnforcementIntegrationTest\.java$"/>
@@ -267,7 +255,6 @@
     <suppress id="NoFqcn" files="/services/iot/IotMqttMutualTlsIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iot/IotMqttTlsIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iot/IotMqttWebSocketContractIntegrationTest\.java$"/>
-    <suppress id="NoFqcn" files="/services/iot/IotServiceTest\.java$"/>
     <suppress id="NoFqcn" files="/services/iot/IotService\.java$"/>
     <suppress id="NoFqcn" files="/services/kinesis/KinesisIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/services/kinesis/KinesisJsonHandlerTest\.java$"/>
