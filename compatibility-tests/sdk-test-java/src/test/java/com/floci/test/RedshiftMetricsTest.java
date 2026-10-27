@@ -34,12 +34,12 @@ class RedshiftMetricsTest {
             try {
                 List<Datapoint> health = awaitDatapoints(cloudWatch, "HealthStatus", dimension);
                 assertThat(health).isNotEmpty();
-                assertThat(health.getFirst().sum()).isEqualTo(1.0);
-                assertThat(health.getFirst().unitAsString()).isEqualTo("Count");
+                assertThat(health.get(0).sum()).isEqualTo(1.0);
+                assertThat(health.get(0).unitAsString()).isEqualTo("Count");
 
                 List<Datapoint> connections = awaitDatapoints(cloudWatch, "DatabaseConnections", dimension);
                 assertThat(connections).isNotEmpty();
-                assertThat(connections.getFirst().sum()).isGreaterThanOrEqualTo(0.0);
+                assertThat(connections.get(0).sum()).isGreaterThanOrEqualTo(0.0);
             } finally {
                 redshift.deleteCluster(request -> request.clusterIdentifier(clusterId)
                         .skipFinalClusterSnapshot(true));
