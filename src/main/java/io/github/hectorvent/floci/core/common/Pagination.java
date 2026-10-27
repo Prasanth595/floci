@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
 import java.util.function.Function;
@@ -73,6 +75,24 @@ public final class Pagination {
         String prefix = namespace + ":";
         return slice(all, cursorOf, limit, decodeCursor(nextToken, prefix, invalidToken),
                 prefix, Pagination::encodeToken);
+    }
+
+    /** Paginates namespaced cursors that are invalid after the supplied lifetime. */
+    public static <T> PaginatedResult<T> paginateExpiring(List<T> all, Function<T, String> cursorOf,
+                                                           int limit, String nextToken, String namespace,
+                                                           Clock clock, Duration lifetime, SignedMarkers markers,
+                                                           Function<String, AwsException> invalidToken) {
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was " + limit);
+        }
+        if (lifetime.isNegative()) {
+            throw new IllegalArgumentException("lifetime must not be negative, was " + lifetime);
+        }
+        String prefix = namespace + ":";
+        long nowMillis = clock.millis();
+        String after = decodeExpiringCursor(nextToken, prefix, nowMillis, lifetime.toMillis(), markers, invalidToken);
+        String tokenPrefix = prefix + nowMillis + ":";
+        return slice(all, cursorOf, limit, after, tokenPrefix, markers::issue);
     }
 
     /** Paginates with instance-signed markers, optionally scoped by a prefix within the signed cursor. */
@@ -195,6 +215,47 @@ public final class Pagination {
             throw invalidToken.apply(token);
         }
         return decoded.substring(prefix.length());
+    }
+
+    private static String decodeExpiringCursor(String token, String prefix, long nowMillis,
+                                               long lifetimeMillis, SignedMarkers markers,
+                                               Function<String, AwsException> invalidToken) {
+        if (token == null || token.isEmpty()) {
+            return null;
+        }
+        String decoded = markers.cursorOf(token);
+        if (decoded == null || !decoded.startsWith(prefix)) {
+            throw invalidToken.apply(token);
+        }
+        String issuedAndCursor = decoded.substring(prefix.length());
+        int separator = issuedAndCursor.indexOf(':');
+        if (separator <= 0 || separator == issuedAndCursor.length() - 1) {
+            throw invalidToken.apply(token);
+        }
+        String issuedText = issuedAndCursor.substring(0, separator);
+        if (!isDecimal(issuedText)) {
+            throw invalidToken.apply(token);
+        }
+        long issuedMillis;
+        try {
+            issuedMillis = Long.parseLong(issuedText);
+        } catch (NumberFormatException e) {
+            throw invalidToken.apply(token);
+        }
+        long ageMillis;
+        try {
+            ageMillis = Math.subtractExact(nowMillis, issuedMillis);
+        } catch (ArithmeticException e) {
+            throw invalidToken.apply(token);
+        }
+        if (issuedMillis > nowMillis || ageMillis > lifetimeMillis) {
+            throw invalidToken.apply(token);
+        }
+        return issuedAndCursor.substring(separator + 1);
+    }
+
+    private static boolean isDecimal(String value) {
+        return value.chars().allMatch(character -> character >= '0' && character <= '9');
     }
 
     private static String decodeToken(String token) {
