@@ -6,8 +6,10 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsS
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -29,15 +31,22 @@ class RedshiftMetricsIntegrationTest {
     RedshiftService redshift;
 
     @Inject
-    RedshiftMetricsPublisher publisher;
+    Instance<RedshiftMetricCollector> collectors;
 
     @Inject
     CloudWatchMetricsService cloudWatch;
 
+    private RedshiftMetricsPublisher publisher;
     private String clusterId;
+
+    @BeforeEach
+    void setUp() {
+        publisher = new RedshiftMetricsPublisher(redshift, cloudWatch, collectors, true);
+    }
 
     @AfterEach
     void cleanUp() {
+        publisher.onStop(null);
         if (clusterId != null) {
             redshift.deleteCluster(clusterId);
             clusterId = null;
